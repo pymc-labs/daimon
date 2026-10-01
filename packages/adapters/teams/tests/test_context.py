@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 from xml.sax.saxutils import quoteattr
 
@@ -9,12 +10,14 @@ from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.context import (
     channel_block,
     channel_media,
+    classifier_window,
     delta_block,
     html_to_text,
     render_user_message,
     thread_block,
 )
 from daimon.adapters.teams.graph import GraphMessage, GraphPage
+from daimon.core.thread_participation import ClassifierMessage
 
 from .conftest import make_inbound
 
@@ -152,3 +155,43 @@ def test_render_user_message_without_history_has_no_envelope() -> None:
     )
     assert "thread_history" not in message
     assert 'is_admin="true">hi &lt;b&gt;</user_query>' in message
+
+
+def test_a_channel_turn_names_its_thread_and_channel() -> None:
+    """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
+    inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
+    message = render_user_message(
+        "<controls/>", inbound, is_admin=False, keys="", prefix="", history=None
+    )
+    assert (
+        '<thread platform="teams" id="19:c@thread.tacv2;messageid=1" role="current_thread"/>'
+        in (message)
+    )
+    assert 'role="parent_channel"' in message
+    assert "unprompted" not in message, "a mention is not unprompted"
+
+
+def test_an_unprompted_turn_is_marked_on_the_user_query() -> None:
+    inbound = dataclasses.replace(make_inbound("any update?", kind="channel"), unprompted=True)
+    message = render_user_message(
+        "<controls/>", inbound, is_admin=False, keys="", prefix="", history=None
+    )
+    assert 'is_admin="false" unprompted="true">any update?</user_query>' in message
+
+
+def test_classifier_window_is_the_newest_readable_messages_before_the_burst() -> None:
+    messages = [
+        _msg("105", "<p>burst</p>"),
+        _bot("104", "<p>Releases ship Thursdays.</p>"),
+        _bot("103", "<p>deploy done</p>", app_id="other"),
+        _msg("102", "<p>gone</p>", deletedDateTime="2026-01-01T00:00:00Z"),
+        _msg("101", "<p>first</p>"),
+        _msg("100", "<p>root</p>"),
+        _bot("99", ""),  # a card: no text
+    ]
+    window = classifier_window(messages, exclude_ids=frozenset({"105"}), limit=3, bot_app_id=BOT)
+    assert window == [
+        ClassifierMessage(author_name="Ada", content="first", is_bot=False),
+        ClassifierMessage(author_name="daimon", content="deploy done", is_bot=False),
+        ClassifierMessage(author_name="daimon", content="Releases ship Thursdays.", is_bot=True),
+    ], "oldest first, burst and deleted posts left out, only this bot counts as the bot"

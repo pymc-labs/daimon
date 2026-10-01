@@ -4,7 +4,8 @@ Mirrors `SlackApp`. One turn per conversation thread at a time; messages that
 arrive meanwhile queue silently (Teams bots cannot react) and run after it as
 one turn per author. A per-tenant cap sheds load, and no turn starts until the
 boot sweep has retired the previous process's turns. A wake poller opens chats
-with due handoffs and timers.
+with due handoffs and timers. Unmentioned thread replies go to organic thread
+participation (`participation.py`), whose turns run here, silently on failure.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from daimon.adapters.teams.lifecycle import (
     TimedSender,
 )
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
+from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
@@ -68,6 +70,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -82,6 +85,7 @@ from daimon.core.stores.turn_card_intents import (
     retire_turn_card_intent,
 )
 from daimon.core.teams_threads import conversation_of
+from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
@@ -255,6 +259,8 @@ class TeamsApp:
         # Dispatches that found their chat busy, by thread key: the service URL to
         # use and whether the cap holds them back (only wakes; a saved input wins).
         self._deferred_dispatch: dict[str, tuple[uuid.UUID, str | None, bool]] = {}
+        # Built on first use: the classifier names the bot as the activity's recipient does.
+        self._participation: TeamsParticipation | None = None
         self.draining = False
 
     @property
@@ -342,6 +348,8 @@ class TeamsApp:
         sweep edits its card to interrupted.
         """
         self.draining = True
+        if self._participation is not None:
+            self._participation.cancel_all()
         if self._wake_poller is not None:
             # Dispatches it spawned drain with the turns; due rows wait for the next boot.
             self._wake_poller.cancel()
@@ -401,9 +409,88 @@ class TeamsApp:
                         reason=type(exc).__name__,
                     )
             return
+        if parsed.unprompted:
+            if self.runtime.settings.thread_participation.mode is ParticipationMode.DISABLED:
+                log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
+                return
+            self.spawn(self._observe(parsed), name="teams.participation")
+            return
+        if parsed.kind == "channel" and self._participation is not None:
+            # A mention supersedes the thread's waiting batch; its turn replays those replies.
+            self._participation.cancel(parsed.conversation_id)
         self.spawn(self._handle(parsed), name="teams.turn")
 
+    def _participation_for(self, inbound: TeamsInbound) -> TeamsParticipation:
+        if self._participation is None:
+            settings = self.runtime.settings
+            gates = ParticipationGates(
+                platform="teams",
+                settings=settings.thread_participation,
+                sessionmaker=self.runtime.sessionmaker,
+                anthropic=self.runtime.anthropic,
+                bot_display_name=inbound.bot_name or "daimon",
+                billing_config=self.runtime.billing_config,
+                markup=settings.billing.markup,
+            )
+            self._participation = TeamsParticipation(
+                gates=gates,
+                settings=settings.thread_participation,
+                reader=self._reader,
+                spawn=self.spawn,
+                fire=self._participate,
+                is_busy=lambda key: self.draining or key in self._processing,
+            )
+        return self._participation
+
+    async def _observe(self, inbound: TeamsInbound) -> None:
+        """An unmentioned thread reply: one cascade read, then maybe a batch."""
+
+        async def may_follow() -> bool:
+            # Only a followed thread pays these reads; a protected one is never judged.
+            if not await self._may_post(inbound.channel_id, inbound.thread_id):
+                return False
+            live = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
+            return live is not None
+
+        await self._participation_for(inbound).observe(inbound, self._tenant_id, is_live=may_follow)
+
+    async def _participate(self, trigger: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """The classifier said reply: run one turn as the burst's author, silently shed.
+
+        Admission, billing and the turn itself are a mention's; only every
+        notice is withheld (`_say`, the unprompted lifecycle).
+        """
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)
+        key = trigger.conversation_id
+        cap = await self._turn_cap(tenant_id)
+        if self.draining or key in self._processing:
+            return  # a mention landed while the classifier was deciding
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=trigger.channel_id,
+                thread_id=trigger.thread_id,
+            )
+            log.info(
+                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+            )
+            return
+        self._last_message_at[key] = datetime.now(UTC)
+        async with self._holding(key, tenant_id):
+            # Written on admission, not on answer: a turn that ends silent still spent.
+            if self._participation is not None:
+                await self._participation.record(trigger, tenant_id)
+            await self._run_turns(key, tenant_id, [trigger])
+
     async def _say(self, inbound: TeamsInbound, text: str) -> None:
+        if inbound.unprompted:
+            # Nobody asked: a refusal or notice per quiet burst would spam the thread.
+            log.info("teams.notice.withheld", reason="unprompted")
+            return
         await self._sender.send(
             inbound.conversation_id,
             MessageActivityInput(text=text),
@@ -604,17 +691,21 @@ class TeamsApp:
                 asking_ma_agent_id=await self._asking_agent_id(continuation, tenant_id),
             )
 
-        # Committed before the post so a lost response still leaves a record.
-        async with self.runtime.sessionmaker.begin() as session:
-            intent = await create_turn_card_intent(
-                session,
-                tenant_id=tenant_id,
-                platform="teams",
-                thread_id=inbound.conversation_id,
-                turn_token=uuid.uuid4(),
-                channel_id=inbound.conversation_id,
-            )
-        cancel_key = intent.id.hex
+        # Committed before the post so a lost response still leaves a record. An
+        # unprompted turn posts no card up front, so there is none to sweep.
+        intent_id: uuid.UUID | None = None
+        if not inbound.unprompted:
+            async with self.runtime.sessionmaker.begin() as session:
+                intent = await create_turn_card_intent(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    thread_id=inbound.conversation_id,
+                    turn_token=uuid.uuid4(),
+                    channel_id=inbound.conversation_id,
+                )
+            intent_id = intent.id
+        cancel_key = (intent_id or uuid.uuid4()).hex
         # Every attempt's lifecycle; dead-session recovery adds one, the last is current.
         holder: list[TeamsTurnLifecycle] = []
 
@@ -628,6 +719,7 @@ class TeamsApp:
                 adopt_message_id=adopt,
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                unprompted=inbound.unprompted,
             )
             holder.append(attempt)
             return attempt
@@ -640,12 +732,13 @@ class TeamsApp:
             await lifecycle.post_initial()
             try:
                 # A gate: no untracked turn runs behind a visible card.
-                async with self.runtime.sessionmaker.begin() as session:
-                    recorded = await record_turn_card_message(
-                        session, id=intent.id, message_id=lifecycle.message_id or ""
-                    )
-                if not recorded:
-                    raise DaimonError("Teams card intent could not record its message id")
+                if intent_id is not None:
+                    async with self.runtime.sessionmaker.begin() as session:
+                        recorded = await record_turn_card_message(
+                            session, id=intent_id, message_id=lifecycle.message_id or ""
+                        )
+                    if not recorded:
+                        raise DaimonError("Teams card intent could not record its message id")
                 await self._bind_and_run(
                     inbound,
                     tenant_id,
@@ -676,7 +769,7 @@ class TeamsApp:
             task = asyncio.current_task()
             # A closed card shows its outcome; the sweep must never overwrite it.
             if closed or task is None or task.cancelling() == 0:
-                await asyncio.shield(self._settle(intent.id, lifecycle.message_id, closed, markers))
+                await asyncio.shield(self._settle(intent_id, lifecycle.message_id, closed, markers))
 
     async def _refusal(
         self, error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch, name: str
@@ -734,7 +827,8 @@ class TeamsApp:
         skip = frozenset(filter(None, (inbound.activity_id, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
         history = await self._history(inbound, watermark=watermark, skip_ids=skip)
-        if bare and history is None:
+        # An unprompted turn without its thread has nothing to answer: it stays silent.
+        if (bare or inbound.unprompted) and history is None:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
@@ -1033,7 +1127,7 @@ class TeamsApp:
 
     async def _settle(
         self,
-        intent_id: uuid.UUID,
+        intent_id: uuid.UUID | None,
         message_id: str | None,
         closed: bool,
         markers: set[uuid.UUID],
@@ -1046,7 +1140,7 @@ class TeamsApp:
         """
         try:
             async with self.runtime.sessionmaker.begin() as session:
-                if closed:
+                if closed and intent_id is not None:
                     await retire_turn_card_intent(
                         session, id=intent_id, expected_message_id=message_id
                     )

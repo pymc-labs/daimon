@@ -19,6 +19,11 @@ Discord and Slack only, so the card shows no channel budget either. So are
 channel admins: only the listed admins administer a Teams channel. A Teams
 answer carries no usage line (agent, time, tokens, cost, balance) where the
 finished Discord or Slack card has one; spend is on the `billing` card.
+Thread participation shares Discord's gates
+(`test_thread_participation_platforms.py`) but needs Graph, so without the
+consent a followed thread stays mention-only; and where Discord's unprompted
+card appears once there is output, Teams posts only the answer, so there is
+no running card or Cancel button.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -58,6 +63,7 @@ from daimon.adapters.teams.attachments import (
 from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.billing_panel import BillingPanelState
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import ChannelBudgetStatus
@@ -65,9 +71,10 @@ from daimon.core.config import TeamsSettings
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow, Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
+from daimon.core.turn.state import TextBlock, TurnState
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from microsoft_teams.api import MessageActivity
+from microsoft_teams.api import MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.api.activities.install_update import UninstalledActivity
 from pydantic import SecretStr
 
@@ -300,3 +307,28 @@ def test_a_teams_answer_carries_no_usage_line() -> None:
     assert message.channel_data is not None and message.channel_data.feedback_loop is not None, (
         "the last part still asks for feedback"
     )
+
+
+async def test_an_unprompted_teams_turn_shows_no_running_card() -> None:
+    sent: list[MessageActivityInput] = []
+
+    class _Sender:
+        async def send(
+            self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+        ) -> SentActivity:
+            sent.append(activity)
+            return SentActivity(id=f"m-{len(sent)}", activity_params=activity)
+
+    lifecycle = TeamsTurnLifecycle(
+        sender=_Sender(),
+        conversation_id="19:a@thread.tacv2;messageid=1",
+        service_url=None,
+        cancel_key="k",
+        clock=lambda: 0.0,
+        unprompted=True,
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_render(TurnState(content=[TextBlock(kind="text", text="draft")]))
+    assert sent == [], "no card while it runs, so no Cancel button"
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
+    assert [a.text for a in sent] == ["Done."], "only the answer is posted"

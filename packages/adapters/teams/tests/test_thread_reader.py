@@ -5,8 +5,9 @@ from __future__ import annotations
 import dataclasses
 
 import httpx
+import pytest
 import structlog
-from daimon.adapters.teams.graph import GraphClient, TeamGroups
+from daimon.adapters.teams.graph import GraphClient, GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.thread_reader import ThreadReader, root_id
 
@@ -97,3 +98,30 @@ async def test_a_refused_read_logs_one_warning_without_content_and_returns_none(
             "reason": "http error",
         }
     ]
+
+
+async def test_the_classifier_window_reads_the_replies_and_the_root() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/replies"):
+            return httpx.Response(200, json={"value": [_message("1700000000003")]})
+        return httpx.Response(200, json=_message(ROOT))
+
+    window = await _reader(httpx.MockTransport(handler)).read_window(
+        _inbound("1700000000003"), exclude_ids=frozenset({"1700000000003"}), limit=10
+    )
+    base = f"/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages/{ROOT}"
+    assert paths == [f"{base}/replies", base], "a short thread includes its root post"
+    assert [m.content for m in window] == [f"m{ROOT}"], "the burst itself is not the window"
+
+
+async def test_an_unreadable_classifier_window_raises_for_the_caller_to_stay_silent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    with pytest.raises(GraphUnavailable):
+        await _reader(httpx.MockTransport(handler)).read_window(
+            _inbound("1700000000003"), exclude_ids=frozenset(), limit=10
+        )

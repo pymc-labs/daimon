@@ -13,6 +13,8 @@ slash command they have to go find.
 Deliberately NOT tagged ``admin``: thread scope is a member action, and the
 tool would be invisible to the very callers who ask for it. Channel and
 workspace scope are admin-only, enforced inside the impl instead.
+
+Discord and Teams follow threads; Slack callers are refused before any read.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
+from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
 from daimon.core.stores.thread_participation import (
     ParticipationModes,
     clear_participation_mode,
@@ -46,10 +49,11 @@ from daimon.core.thread_participation import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-_PLATFORM: Final = "discord"
+_PLATFORMS: Final = frozenset({"discord", "teams"})
 
 _WRONG_PLATFORM = (
-    "Following threads is only available on Discord right now, so there is nothing to turn on here."
+    "Following threads is only available on Discord and Teams right now, so there is "
+    "nothing to turn on here."
 )
 _DEPLOYMENT_DISABLED = (
     "Participation is disabled for this deployment and cannot be turned on. "
@@ -104,11 +108,22 @@ class ThreadParticipationStatus:
     (not) replying here" is answerable without re-deriving the cascade."""
 
 
-def _deployment_mode(runtime: McpRuntime) -> ParticipationMode:
-    """The deployment tier. Without a Discord settings block there is no bot to follow anything."""
-    if runtime.settings.discord is None:
+def _deployment_mode(runtime: McpRuntime, platform: str | None) -> ParticipationMode:
+    """The deployment tier. Without the platform's settings block there is no bot to follow."""
+    settings = runtime.settings
+    configured = settings.teams if platform == "teams" else settings.discord
+    if configured is None:
         return ParticipationMode.DISABLED
-    return runtime.settings.thread_participation.mode
+    return settings.thread_participation.mode
+
+
+async def _verify_scope(
+    runtime: McpRuntime, auth: AuthIdentity, scope: ParticipationScope, scope_id: str | None
+) -> str | None:
+    """The caller can see what they named; the thread's real parent for thread scope."""
+    if auth.platform == "teams":
+        return await verify_teams_participation_scope(runtime, auth, scope, scope_id)
+    return await verify_participation_scope(runtime, auth, scope, scope_id)
 
 
 def _target_scope(
@@ -150,10 +165,10 @@ async def _set_thread_participation_impl(
     channel_id: str | None,
 ) -> ThreadParticipationResult:
     """Validate every refusal BEFORE any write: a refused call must leave no row behind."""
-    if auth.platform != _PLATFORM:
+    if auth.platform not in _PLATFORMS:
         raise ToolError(_WRONG_PLATFORM)
 
-    deployment = _deployment_mode(runtime)
+    deployment = _deployment_mode(runtime, auth.platform)
     if deployment is ParticipationMode.DISABLED:
         raise ToolError(_DEPLOYMENT_DISABLED)
 
@@ -162,7 +177,7 @@ async def _set_thread_participation_impl(
         _require_admin(auth)
     if scope is ParticipationScope.THREAD and mode == "disabled":
         raise ToolError(_DISABLED_NEEDS_A_WIDER_SCOPE)
-    parent_id = await verify_participation_scope(runtime, auth, scope, scope_id)
+    parent_id = await _verify_scope(runtime, auth, scope, scope_id)
     if parent_id is not None:
         channel_id = parent_id
 
@@ -234,11 +249,11 @@ async def _get_thread_participation_impl(
     thread_id: str | None,
     channel_id: str | None,
 ) -> ThreadParticipationStatus:
-    if auth.platform != _PLATFORM:
+    if auth.platform not in _PLATFORMS:
         raise ToolError(_WRONG_PLATFORM)
-    deployment = _deployment_mode(runtime)
+    deployment = _deployment_mode(runtime, auth.platform)
     scope, scope_id = _target_scope(thread_id, channel_id)
-    parent_id = await verify_participation_scope(runtime, auth, scope, scope_id)
+    parent_id = await _verify_scope(runtime, auth, scope, scope_id)
     if parent_id is not None:
         channel_id = parent_id
     async with runtime.session_factory() as session:
@@ -280,8 +295,8 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Channel and workspace scope need
-        Manage Server.
+        channel; neither for the workspace. Channel and workspace scope need an
+        admin (Manage Server on Discord, a listed admin on Teams).
 
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),
@@ -303,8 +318,8 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Reading needs no Manage Server;
-        changing channel or workspace scope does.
+        channel; neither for the workspace. Reading needs no admin; changing
+        channel or workspace scope does.
 
         Reports every tier (deployment, workspace, channel, thread) plus the
         winner. Read the returned ``explanation`` back to the user.

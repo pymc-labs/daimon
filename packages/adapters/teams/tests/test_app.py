@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from types import SimpleNamespace
 from typing import Any, get_args
@@ -14,6 +15,7 @@ import structlog
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
+from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -33,10 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     SERVICE_URL,
+    THREAD_ID,
     FakeSender,
     bot_token,
     build_teams_runtime,
@@ -230,12 +234,14 @@ def _message(payload: dict[str, object], reply: AsyncMock) -> Any:
     )
 
 
-async def test_a_channel_message_without_a_mention_is_dropped_with_a_log(
+async def test_a_root_post_without_a_mention_is_dropped_with_a_log(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Organic participation screens thread replies only: a new post stays mention-only."""
     teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    root = make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID)
     with structlog.testing.capture_logs() as logs:
-        await teams.handle_message(_message(make_channel_activity(mention_bot=False), reply))
+        await teams.handle_message(_message(root, reply))
     reply.assert_not_awaited()
     assert {
         "event": "teams.message.ignored",
@@ -355,3 +361,43 @@ async def test_a_denied_turn_says_why_without_a_card(
         await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+def _unprompted_reply() -> TeamsInbound:
+    inbound = make_inbound("is the release on?", conversation=THREAD_ID, kind="channel")
+    return dataclasses.replace(inbound, channel_id=CHANNEL_ID, unprompted=True)
+
+
+_THREAD = HistoryBlock(tag="thread", lines=('<message author="Grace">ship Thursday?</message>',))
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_unprompted_turn_posts_only_its_answer(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+
+    with (
+        patch.object(TeamsApp, "_history", AsyncMock(return_value=_THREAD)),
+        patched_turns("Thursday, per the release notes.") as turns,
+    ):
+        await teams._participate(_unprompted_reply(), TENANT)
+
+    assert [a.text for a in sender.activities] == ["Thursday, per the release notes."]
+    assert 'unprompted="true"' in turns[0]["user_message"], "the agent knows nobody asked"
+    assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_unprompted_turn_stays_silent_when_refused_or_without_its_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
+    with patch.object(app_module, "admit", denied):
+        await teams._participate(_unprompted_reply(), TENANT)
+    with patch.object(TeamsApp, "_history", AsyncMock(return_value=None)), patched_turns() as turns:
+        await teams._participate(_unprompted_reply(), TENANT)
+    assert sender.activities == [] and turns == []

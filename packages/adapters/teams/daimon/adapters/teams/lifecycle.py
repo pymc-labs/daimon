@@ -5,6 +5,8 @@ five seconds, and replaced by the first answer chunk; overflow chunks follow,
 the last with the feedback buttons; no usage footer. Teams streaming is unused:
 it works only in personal chats and stops after two minutes. Cancel clicks
 route by `cancel_key` (the card intent id), carried from the first render.
+An `unprompted` turn (organic thread participation) posts no card: it stays
+invisible until it has an answer, and posts nothing if it has none or fails.
 """
 
 from __future__ import annotations
@@ -105,8 +107,11 @@ class TeamsTurnLifecycle:
         request_id: Callable[[], str] = bound_request_id,
         tenant_id: uuid.UUID | None = None,
         alert_webhook_url: SecretStr | None = None,
+        unprompted: bool = False,
     ) -> None:
         self._sender = sender
+        # Nobody asked, so nothing is owed: no card, no notice, no failure post.
+        self._unprompted = unprompted
         self._request_id = request_id
         self._tenant_id = tenant_id
         self._alert_webhook_url = alert_webhook_url
@@ -162,6 +167,8 @@ class TeamsTurnLifecycle:
 
     async def post_initial(self) -> None:
         """Post the card now, before session setup, so Cancel exists from the start."""
+        if self._unprompted:
+            return
         self._message_id = await self._send(self._status(), message_id=self._message_id)
         self._last_flush = self._clock()
 
@@ -192,6 +199,9 @@ class TeamsTurnLifecycle:
         if self._terminal:
             return
         self._terminal = True
+        if self._unprompted and self._message_id is None:
+            log.info("teams.turn.unprompted_notice_dropped")
+            return
         try:
             await self._close(text)
         except TEAMS_SEND_ERRORS:
@@ -222,6 +232,8 @@ class TeamsTurnLifecycle:
         degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
         try:
+            if not answer and self._unprompted:
+                return  # an unprompted turn with nothing to say leaves the thread as it was
             if not answer:
                 tool_only = any(isinstance(b, ToolUseBlock) for b in state.content)
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE

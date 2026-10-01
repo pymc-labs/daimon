@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.config import TeamsSettings
+from daimon.core.config import TeamsSettings, ThreadParticipationSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
@@ -355,6 +355,7 @@ def build_teams_runtime(
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
     settings.tool_safety = OPEN_TOOL_SAFETY
+    settings.thread_participation = ThreadParticipationSettings()
     client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
     deployment_default = deployment_default or DeploymentDefault(
         agent_name="daimon", environment_name="default"
