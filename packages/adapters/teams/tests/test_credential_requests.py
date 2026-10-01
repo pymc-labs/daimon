@@ -384,7 +384,8 @@ async def test_a_member_cannot_replace_an_mcp_server_on_a_shared_agent(
 
     connect.assert_not_awaited()
     dispatch.assert_not_awaited()
-    assert refused.await_args is not None and refused.await_args.kwargs["is_admin"] is False
+    assert refused.await_args is not None, "the submit decided the replacement"
+    assert refused.await_args.kwargs["caller"].is_server_admin is False, "as a member"
     assert "was not replaced" in _edits(fake)[-1]
 
 
