@@ -31,8 +31,17 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 
-Nothing here does I/O; `daimon.core.authz_context` and the callers load the
-policy and resolve the agent.
+Nothing here does I/O; the callers load the policy and resolve the agent.
+
+Scope today: the pin decisions (turn admission, MCP and hub turns, routine
+save and fire, handoff, configuration writes and form submits), the caller
+gates of a platform turn and an MCP turn, pinned sends and direct messages,
+channel and session seal reads, and fork. Still decided outside this module,
+by the same `daimon.core.access_policy` predicates, and moving here next: the
+live protection and invoker checks in the scheduler, routine save and
+delivery and turn-reply protection; the admin sealed-read exemption on the
+hub; the OAuth no-request rule; and the shared-agent replace/remove table
+(`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
@@ -58,6 +67,10 @@ class Action(StrEnum):
     START_TURN = "start_turn"
     # Run a resolved agent here (a turn, a routine fire, a handoff binding).
     RUN_AGENT = "run_agent"
+    # Save (create or update) a routine for an agent: RUN_AGENT at the
+    # routine's destination, but only once a non-empty name of the agent is
+    # pinned (an empty name never makes a routine pinned).
+    SAVE_ROUTINE = "save_routine"
     # Change what an agent reaches: keys, connectors, MCP servers, prompt,
     # tools, skills, repo binding.
     CONFIGURE = "configure"
@@ -305,6 +318,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved") if policy.agent_channel_pins else ALLOW
+        if _outside_pin(policy, agent, place):
+            return _deny("agent_pinned_elsewhere")
+        return ALLOW
+
+    if req.action is Action.SAVE_ROUTINE:
+        if not any(name in policy.agent_channel_pins for name in agent.names if name):
+            return ALLOW
         if _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
         return ALLOW

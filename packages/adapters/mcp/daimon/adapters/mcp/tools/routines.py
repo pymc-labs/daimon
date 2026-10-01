@@ -311,7 +311,7 @@ def _check_agent_pin(
     if not authorize(
         policy,
         subject=Subject(),
-        action=Action.RUN_AGENT,
+        action=Action.SAVE_ROUTINE,
         surface=Surface.ROUTINE,
         agent=AgentRef.of(*agent_names),
         place=Place(channel_id=target_channel_id),

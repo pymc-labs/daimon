@@ -491,12 +491,6 @@ channels, and anyone reading where an agent posts -- not to restrict a
 workspace admin. So an admin is exempt only where the output reaches no one
 but them:
 
-Every rule in this section is decided by one pure function,
-`daimon.core.authz.authorize` (who is acting, what they want to do, where the
-result lands, which agent, which channel). The turn pipeline, the MCP gates,
-the channel tools, the routine and handoff tools and the fork paths gather
-their facts and ask it; each keeps only its own I/O and refusal copy.
-
 | Surface | Members | Admins |
 | --- | --- | --- |
 | Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |
@@ -539,6 +533,15 @@ Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
 user are never admins on these surfaces, whatever role their account holds or
 who minted them. A pin binds a bearer with no platform user too: such callers
 skip billing, not admission.
+
+The pin decisions (turn admission, MCP and hub turns, routine save and fire,
+handoff, configuration writes and form submits), pinned sends and direct
+messages, channel and session seal reads, and fork are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); each caller keeps only
+its own I/O and refusal copy. The live protection and invoker checks in the
+scheduler and routine delivery, the hub's admin sealed-read exemption and the
+OAuth no-request rule still use the same `access_policy` predicates directly.
 
 ## Tenancy and isolation
 

@@ -93,21 +93,21 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         {"subject": MEMBER, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
         _deny("agent_pinned_elsewhere"),
     ),
-    # --- G_admin_hub_exempt: admins exempt where only they see the output ---
+    # --- admin trust model: admins exempt where only they see the output ---
     (
-        "G_admin_hub_exempt admin DM",
+        "admin trust model: admin DM is pin-exempt",
         PINNED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
         ALLOW,
     ),
     (
-        "G_admin_hub_exempt admin hub",
+        "admin trust model: admin hub turn is pin-exempt",
         PINNED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.HUB, "agent": ACME},
         ALLOW,
     ),
     (
-        "G_admin_hub_exempt member hub",
+        "admin trust model: member hub turn is held",
         PINNED,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "surface": Surface.HUB, "agent": ACME},
         _deny("agent_pinned_elsewhere"),
@@ -313,7 +313,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "G_seal_replace_inherit a session stays under every seal after an unseal",
+        "G_seal_session_read a session stays under every seal after an unseal",
         TenantAccessPolicy(),
         {
             "subject": MEMBER,
