@@ -9,6 +9,7 @@ No try/except — exceptions propagate (guideline:architecture).
   revoked_at IS NULL; returns McpTokenRow | None (None = already-revoked or unknown).
 - list_mcp_tokens: operator listing, live tokens only unless asked.
 - lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
+- update_mcp_token_scopes: replace a live operator token's scopes.
 
 Injected `now` follows guideline:architecture — no datetime.now() calls
 inside core logic.
@@ -214,3 +215,21 @@ async def add_issued_usd(session: AsyncSession, *, jti: uuid.UUID, amount_usd: D
         .where(McpToken.jti == jti)
         .values(issued_usd=McpToken.issued_usd + amount_usd)
     )
+
+
+async def update_mcp_token_scopes(
+    session: AsyncSession, *, jti: uuid.UUID, scopes: Collection[str]
+) -> McpTokenRow | None:
+    """Set a live operator token's scopes; None when no live operator row has `jti`.
+
+    The caller checks the change only removes scopes (`validate_scope_narrowing`)
+    under `lock_mcp_token`; the verifier reads the new set on the next request.
+    """
+    stmt = (
+        update(McpToken)
+        .where(McpToken.jti == jti, McpToken.kind == "operator", McpToken.revoked_at.is_(None))
+        .values(scopes=sorted(scopes))
+        .returning(McpToken)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else McpTokenRow.model_validate(orm)

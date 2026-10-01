@@ -69,6 +69,22 @@ def validate_operator_terms(
         raise OperatorTokenError("the issuing ceiling must be whole cents (2 decimal places)")
 
 
+def validate_scope_narrowing(
+    *, current: Iterable[str], requested: frozenset[OperatorScope]
+) -> None:
+    """Refuse a scope change that adds a scope: a token's scopes only ever shrink.
+
+    Adding one would grant a live token more than it was minted with, so that
+    takes a new token from ``mint-operator-token``.
+    """
+    added = sorted(set(requested).difference(current))
+    if added:
+        raise OperatorTokenError(
+            "set-token-scopes only removes scopes, and this token lacks "
+            f"{', '.join(added)}; mint a new token instead"
+        )
+
+
 def issue_refusal(
     *,
     max_issued_usd: Decimal | None,

@@ -11,6 +11,7 @@ from daimon.core.operator_tokens import (
     parse_operator_scopes,
     scope_tag,
     validate_operator_terms,
+    validate_scope_narrowing,
 )
 
 
@@ -69,6 +70,19 @@ def test_validate_operator_terms_accepts_a_ceiling_in_cents(ceiling: str) -> Non
     validate_operator_terms(
         scopes=frozenset({"promo:create"}), ttl_days=90, max_issued_usd=Decimal(ceiling)
     )
+
+
+def test_validate_scope_narrowing_allows_removing_scopes() -> None:
+    validate_scope_narrowing(
+        current=("promo:redeem", "tenant:read"), requested=frozenset({"tenant:read"})
+    )
+
+
+def test_validate_scope_narrowing_refuses_adding_a_scope() -> None:
+    with pytest.raises(OperatorTokenError, match="this token lacks channels:write"):
+        validate_scope_narrowing(
+            current=("tenant:read",), requested=frozenset({"tenant:read", "channels:write"})
+        )
 
 
 def test_issue_refusal_allows_anything_without_a_ceiling() -> None:
