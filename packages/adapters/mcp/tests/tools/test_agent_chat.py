@@ -1623,17 +1623,16 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
         name="admission-over-balance",
         auth=StaticTokenVerifier(tokens={token: claims}),
     )
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-        )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=db_session_factory,
     )
+    mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory)
     register_agent_chat_tools(mcp, runtime, billing_config=None)
@@ -1645,6 +1644,8 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
         result = await call_mcp_tool(
             mcp.http_app(), token=token, name=tool_name, arguments={"message": "hello"}
         )
+    # Audit rows are written in the background; drain them before the next test wipes.
+    await identity.drain_audit()
 
     payload = result.get("result", result)
     assert isinstance(payload, dict), f"unexpected tools/call shape: {result!r}"
@@ -3140,17 +3141,16 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
         "client_id": "test",
     }
     mcp = FastMCP(name="admission-invoker", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-        )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=db_session_factory,
     )
+    mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(
         build_fake_anthropic(MARouter().dispatch), session_factory=db_session_factory
@@ -3163,6 +3163,8 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
         result = await call_mcp_tool(
             mcp.http_app(), token=token, name=tool_name, arguments={"message": "hello"}
         )
+    # Audit rows are written in the background; drain them before the next test wipes.
+    await identity.drain_audit()
 
     payload = result.get("result", result)
     assert isinstance(payload, dict) and payload.get("isError"), (
@@ -3236,17 +3238,16 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
         "client_id": "test",
     }
     mcp = FastMCP(name="admission-pin", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-        )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=db_session_factory,
     )
+    mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory)
     register_agent_chat_tools(mcp, runtime, billing_config=None)
@@ -3260,6 +3261,8 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
         result = await call_mcp_tool(
             mcp.http_app(), token=token, name=tool_name, arguments=arguments
         )
+    # Audit rows are written in the background; drain them before the next test wipes.
+    await identity.drain_audit()
 
     payload = result.get("result", result)
     assert isinstance(payload, dict) and payload.get("isError"), (
