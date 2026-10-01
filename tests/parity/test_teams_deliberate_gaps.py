@@ -11,11 +11,14 @@ answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; a turn replays its channel thread through Microsoft Graph,
 but the agent's own channel-reading tools stay hidden; files in a channel
 work only once a tenant admin grants the app the team's SharePoint site
-(`Sites.Selected`), because no team-scoped permission reaches it; and a
-dialog's password field cannot take a `.env` upload or a repository token.
-Removing the app archives nothing. The `billing` card has no promo code surface: Teams
-admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
-Discord and Slack only, so the card shows no channel budget either. So are
+(`Sites.Selected`), because no team-scoped permission reaches it; a dialog
+has no file input, so a `.env` file is pasted rather than uploaded; and once a
+dialog closes nothing private reaches the requester, so a GitHub token is
+checked against its repo before the request is spent (Discord and Slack spend
+it first, then say so privately; the Teams adapter's credential tests assert
+the unspent request). Removing the app archives nothing. The `billing` card
+has no promo code surface: Teams admins redeem with the MCP tool
+`redeem_promo_code`. Channel budgets are Discord and Slack only, so the card shows no channel budget either. So are
 channel admins: only the listed admins administer a Teams channel. A Teams
 answer carries no usage line (agent, time, tokens, cost, balance) where the
 finished Discord or Slack card has one; spend is on the `billing` card.
@@ -49,10 +52,7 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channels import register_channel_tools
-from daimon.adapters.mcp.tools.credential_requests import (
-    _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
-    register_credential_request_tools,
-)
+from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.teams import card as teams_card
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
@@ -61,6 +61,7 @@ from daimon.adapters.teams.attachments import (
     prepare_attachments,
 )
 from daimon.adapters.teams.billing_panel import panel_card
+from daimon.adapters.teams.credential_requests import credential_form
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
@@ -68,8 +69,9 @@ from daimon.core.billing_panel import BillingPanelState
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.config import TeamsSettings
+from daimon.core.credential_requests import ENV_FILE_TARGET
 from daimon.core.promo_credit import ActiveTimedCredit
-from daimon.core.stores.domain import ChannelBudgetRow, Role
+from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
 from fastmcp import FastMCP
@@ -128,7 +130,7 @@ def test_a_teams_setup_conversation_lives_inside_its_chat() -> None:
     )
 
 
-async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
+async def test_teams_turns_lack_the_graph_reading_and_dm_tools() -> None:
     mcp = FastMCP(name="t")
     runtime = cast(Any, MagicMock())
     register_channel_tools(mcp, runtime)
@@ -136,13 +138,11 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     tools = await mcp.list_tools()
     teams = {tool.name for tool in tools if "teams" in tool.tags}
     hidden = {"read_channel", "read_thread", "search_messages", "get_message", "list_channels"}
-    hidden |= {"parse_link", "request_repo_binding", "request_skill_repo_token"}
-    hidden |= {"send_direct_message"}
+    hidden |= {"parse_link", "send_direct_message"}
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
-    assert not teams & hidden, (
-        "these need tool-side Graph reads, a non-password input or Discord/Slack DMs"
-    )
+    assert teams >= {"request_repo_binding", "request_skill_repo_token"}, "every form exists"
+    assert not teams & hidden, "these need tool-side Graph reads or Discord/Slack DMs"
 
 
 def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
@@ -280,25 +280,29 @@ def test_removing_the_teams_app_archives_nothing() -> None:
     )
 
 
-async def test_a_teams_key_request_cannot_ask_for_a_env_upload() -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
+def test_a_teams_env_file_is_pasted_not_uploaded() -> None:
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    row = CredentialRequestRow(
+        token="t",
+        kind="env_file",
         tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        platform="teams",
-        external_id=TENANT,
-        platform_user_id="00000000-0000-0000-0000-000000000002",
-        is_admin=True,
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        target=ENV_FILE_TARGET,
+        mcp_server_url=None,
+        requester_platform_user_id="u",
+        channel_id="a:chat-1",
+        idempotency_key=uuid.uuid4(),
+        created_at=now,
+        expires_at=now,
+        used_at=None,
     )
-    with pytest.raises(ToolError, match="cannot take a .env file upload"):
-        await _request_agent_key_impl(
-            cast(Any, MagicMock()),
-            auth,
-            agent_name="a",
-            key=None,
-            purpose="several keys",
-            channel_id="19:c@thread.tacv2",
-        )
+    card = credential_form(row).model_dump(by_alias=True, exclude_none=True)
+    body = card["task"]["value"]["card"]["content"]["body"]
+    inputs = [item for item in body if str(item.get("type", "")).startswith("Input.")]
+    assert [(i["type"], i.get("isMultiline")) for i in inputs] == [("Input.Text", True)], (
+        "a dialog has no file input; if Teams gains one, replace this record"
+    )
 
 
 def test_a_teams_answer_carries_no_usage_line() -> None:

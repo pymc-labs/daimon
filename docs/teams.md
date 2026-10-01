@@ -193,12 +193,17 @@ their own, where outputs are not uploaded. Removing the site permission
 
 ### Keys and sign-ins
 
-When an agent asks for an API key or an MCP token (`request_agent_key`,
-`request_mcp_token`), it posts a card in the conversation. Only the person who
-asked can open it; the secret goes into a password field in a Teams dialog and
-never through the chat. `request_mcp_oauth` opens a private sign-in link the
-same way. Once the value is saved, the card shows the outcome and the waiting
-work resumes. Key names and replacing an existing key follow Slack's rules.
+When an agent asks for an API key, a `.env` file, an MCP token or GitHub
+access (`request_agent_key`, `request_mcp_token`, `request_repo_binding`,
+`request_skill_repo_token`), it posts a card in the conversation. Only the
+person who asked can open it; the secret goes into a Teams dialog and never
+through the chat. Key values and `.env` contents take a multi-line field (paste
+the file: a dialog has no file input), tokens a password field.
+`request_mcp_oauth` opens a private sign-in link the same way. Once the value
+is saved, the card shows the outcome and the waiting work resumes. Key names,
+replacing a key, whole-file imports, and binding a repo or importing skills
+onto a shared agent follow Slack's rules. A GitHub token that cannot read the
+repo is refused in the dialog, and the form stays open.
 
 ### Agent tools
 
@@ -240,9 +245,8 @@ different agent posts a notice instead of running. A deployment with
 Reactions, the agent's own channel-reading tools (`read_channel`,
 `read_thread`, `search_messages`, `get_message`, `list_channels` and
 `parse_link` are hidden from Teams turns), files in channels whose site is
-not granted and in private or shared channels, file posting
-through `send_message`, and private inputs a password field cannot take: `.env`
-uploads, multi-line secrets, and repository or skill-repository tokens.
+not granted and in private or shared channels, and file posting
+through `send_message`.
 Also Discord and Slack only: `send_direct_message`, `/dm` conversations,
 routine destinations (refused on save), table rendering
 (`DAIMON_TABLE_RENDERING`) and completion pings (`DAIMON_COMPLETION_PINGS`).

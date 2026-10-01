@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 import structlog
 from cryptography.fernet import Fernet
@@ -22,7 +23,9 @@ from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
+from daimon.core.credential_requests import ENV_FILE_TARGET, build_skill_repo_target
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -34,7 +37,9 @@ from daimon.core.posted_controls import (
 )
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.agent_files import get_agent_file, put_agent_file
+from daimon.core.stores.agent_files import get_agent_file, list_agent_files, put_agent_file
+from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
@@ -44,7 +49,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_account
-from daimon.testing.ma import MARouter
+from daimon.testing.ma import MARouter, list_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -66,6 +71,12 @@ TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 MA_ID = "agt_1"
 SECRET = "s3cr3t-never-shown"
 MCP_URL = "https://mcp.example.com/mcp"
+_TARGETS = {
+    "env": "API_KEY",
+    "env_file": ENV_FILE_TARGET,
+    "repo": build_skill_repo_target("https://github.com/o/r", "release", ""),
+    "skill_repo": build_skill_repo_target("https://github.com/o/skills", "main", "skills"),
+}
 
 
 @pytest.fixture
@@ -79,21 +90,34 @@ async def account_id(
 
 
 def _runtime(
-    db: async_sessionmaker[AsyncSession], *, managed: bool = False, mcp: bool = False
+    db: async_sessionmaker[AsyncSession],
+    *,
+    managed: bool = False,
+    mcp: bool = False,
+    updates: list[dict[str, Any]] | None = None,
 ) -> TeamsRuntime:
+    """`updates` collects each agent update, for the skill attach."""
     router = MARouter()
     metadata = {MA_METADATA_KEY_MANAGED: "true"} if managed else None
-    router.add_agent_list(ma_agent(id=MA_ID, name="daimon", tenant_id=TENANT, metadata=metadata))
+    agent = ma_agent(id=MA_ID, name="daimon", tenant_id=TENANT, metadata=metadata)
+    router.add_agent_list(agent)
+    router.add_agent(agent)
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
+
+    def update(request: httpx.Request, _match: object) -> httpx.Response:
+        (updates if updates is not None else []).append(json.loads(request.content))
+        return httpx.Response(200, json=agent.model_dump(mode="json"))
+
+    router.add("POST", rf"/v1/agents/{MA_ID}", update)
     runtime = build_teams_runtime(db, anthropic=build_fake_anthropic(router.dispatch))
     if mcp:
         runtime.settings.mcp.public_url = "https://daimon.example.com/mcp"
         runtime.settings.mcp.jwt_secret = SecretStr("j" * 32)
         runtime.settings.mcp.app_root_url = "https://daimon.example.com"
-        fernet = build_multifernet((Fernet.generate_key().decode(),))
-        runtime = dataclasses.replace(
-            runtime, turn_deps=dataclasses.replace(runtime.turn_deps, fernet=fernet)
-        )
-    return runtime
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    return dataclasses.replace(
+        runtime, turn_deps=dataclasses.replace(runtime.turn_deps, fernet=fernet)
+    )
 
 
 async def _request(
@@ -113,8 +137,8 @@ async def _request(
             tenant_id=TENANT,
             agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID),
             account_id=account_id,
-            target=target or ("API_KEY" if kind == "env" else "linear"),
-            mcp_server_url=None if kind == "env" else MCP_URL,
+            target=target or _TARGETS.get(kind, "linear"),
+            mcp_server_url=MCP_URL if kind in ("mcp", "mcp_oauth") else None,
             requester_platform_user_id=AAD_OBJECT_ID,
             channel_id=CONVERSATION_ID,
             expires_at=datetime.now(UTC) + expires_in,
@@ -160,7 +184,12 @@ def _edits(fake: TeamsApiFake) -> list[str]:
     ]
 
 
-async def test_only_the_requester_gets_the_password_form(
+def _field(form: dict[str, Any]) -> dict[str, Any]:
+    card = form["task"]["value"]["card"]["content"]
+    return next(item for item in card["body"] if item.get("id") == "secret")
+
+
+async def test_only_the_requester_gets_the_private_form(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     row = await _request(db_session_factory, account_id)
@@ -171,8 +200,7 @@ async def test_only_the_requester_gets_the_password_form(
         unknown = await post_activity(service, _open("nope"))
 
     card = form["task"]["value"]["card"]["content"]
-    field = next(item for item in card["body"] if item.get("id") == "secret")
-    assert field["style"] == "Password" and "value" not in field, "masked, never prefilled"
+    assert "value" not in _field(form), "never prefilled"
     assert card["actions"][0]["data"] == {"action": module.SUBMIT, "token": row.token}
     assert stranger["task"]["value"] == WRONG_REQUESTER_MESSAGE
     assert elsewhere["task"]["value"] == unknown["task"]["value"] == NO_LONGER_VALID_MESSAGE
@@ -579,10 +607,10 @@ async def _aws_pair(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID)
     return secret.updated_at
 
 
-def _admin_runtime(db: async_sessionmaker[AsyncSession]) -> TeamsRuntime:
+def _admin_runtime(db: async_sessionmaker[AsyncSession], **kw: Any) -> TeamsRuntime:
     from .conftest import teams_settings
 
-    runtime = _runtime(db)
+    runtime = _runtime(db, **kw)
     runtime.settings.teams = teams_settings(admins=(AAD_OBJECT_ID,))
     return runtime
 
@@ -703,4 +731,301 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
     assert live is not None and live.used_at is None, "the refused form was not spent"
     assert file is None, "nothing is saved"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("kind", "multiline"),
+    [("env", True), ("env_file", True), ("mcp", False), ("repo", False), ("skill_repo", False)],
+)
+async def test_each_kind_opens_one_input_sized_for_what_it_takes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    kind: str,
+    multiline: bool,
+) -> None:
+    """Values and pasted files can span lines; tokens are masked."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    # An admin: a member is refused a repo bind on the shared default agent.
+    async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+        field = _field(await post_activity(service, _open(row.token)))
+    assert bool(field.get("isMultiline")) is multiline, "values and files can span lines"
+    assert (field.get("style") == "Password") is not multiline, "a token is never shown"
+
+
+async def test_a_multi_line_env_value_is_stored_as_typed(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Line breaks in a pasted value survive the save."""
+    row = await _request(db_session_factory, account_id)
+    pem = "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"
+    async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+        await post_activity(service, _submit(row.token, secret=pem))
+        await service.turns.drain(5)
+    async with db_session_factory() as session:
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
+    assert file is not None and file.content == pem, "stored with its line breaks"
+
+
+async def _keys(db: async_sessionmaker[AsyncSession]) -> dict[str, str]:
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
+    async with db() as session:
+        files = await list_agent_files(session, tenant_id=TENANT, agent_id=agent_id)
+    return {file.key: file.content for file in files}
+
+
+async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A pasted file lands every key and spends the request once."""
+    row = await _request(db_session_factory, account_id, kind="env_file")
+    fake = TeamsApiFake()
+    body = "ALPHA_KEY=alpha-private\nBETA_TOKEN=beta-private\n"
+    with structlog.testing.capture_logs() as logs:
+        async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
+            bad = await post_activity(service, _submit(row.token, secret="NOT A KEY LINE\n"))
+            await service.turns.drain(5)
+            untouched = _edits(fake)
+            saved = await post_activity(service, _submit(row.token, secret=body))
+            await service.turns.drain(5)
+
+    assert "No keys were saved" in json.dumps(bad) and not untouched, "form open, nothing spent"
+    assert "Paste a corrected file" in json.dumps(bad), "a dialog takes a paste, not an upload"
+    assert not (saved or {}).get("task"), "the dialog closes"
+    assert await _keys(db_session_factory) == {
+        "ALPHA_KEY": "alpha-private",
+        "BETA_TOKEN": "beta-private",
+    }
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "applied", "spent once, applied"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
+    dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
+    sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert "private" not in sent, "no value reaches Teams or the logs"
+
+
+async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Slack's rule: a file that would replace a key writes nothing."""
+    await _hold(db_session_factory, "ALPHA_KEY", account_id)
+    row = await _request(db_session_factory, account_id, kind="env_file")
+    fake = TeamsApiFake()
+    body = "ALPHA_KEY=new\nBETA_TOKEN=beta\n"
+    async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
+        await post_activity(service, _submit(row.token, secret=body))
+        await service.turns.drain(5)
+
+    assert await _keys(db_session_factory) == {"ALPHA_KEY": "the-value-in-use"}, "whole-file"
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "stale_replacement", "spent, nothing written"
+    assert "ALPHA_KEY is already set" in _edits(fake)[-1], "the card names the held key"
+    dispatch.assert_not_awaited()
+
+
+async def test_a_repo_token_is_checked_then_binds_the_working_repo(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """The token is checked against the repo before the bind."""
+    row = await _request(db_session_factory, account_id, kind="repo")
+    fake = TeamsApiFake()
+    access = AsyncMock(side_effect=[False, True])
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(module, "pat_can_access_repo", access),
+    ):
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, dispatch):
+            bad = await post_activity(service, _submit(row.token, secret="ghp_wrong"))
+            await service.turns.drain(5)
+            untouched = _edits(fake)
+            saved = await post_activity(service, _submit(row.token, secret=" ghp_right \n"))
+            await service.turns.drain(5)
+
+    assert "cannot read o/r" in json.dumps(bad) and not untouched, "form open, nothing spent"
+    assert not (saved or {}).get("task"), "the dialog closes"
+    assert access.await_args is not None, "the token was checked"
+    assert access.await_args.kwargs["pat"] == "ghp_right", "checked as stored: stripped"
+    async with db_session_factory() as session:
+        binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
+        spent = await peek_credential_request(session, token=row.token)
+    assert binding is not None and binding.repo_url == "o/r", "the working repo is bound"
+    assert binding.default_branch == "release", "the branch the card was posted for"
+    assert binding.ma_secret_ref == f"inline-pat:{row.agent_id}", "the agent's own token"
+    assert binding.proof_kind == "pat", "proved by the token check"
+    assert spent is not None and spent.outcome == "applied", "spent once, applied"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
+    dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
+    sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert "ghp_right" not in sent and "ghp_wrong" not in sent, "no token in Teams or logs"
+
+
+@pytest.mark.parametrize("kind", ["repo", "skill_repo"])
+async def test_a_member_cannot_give_a_managed_agent_a_repo_or_skills(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
+) -> None:
+    """Decided before the consume, as on Slack: nothing spent, the card says why."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    fake, access, sync = TeamsApiFake(), AsyncMock(return_value=True), AsyncMock()
+    with (
+        patch.object(module, "pat_can_access_repo", access),
+        patch.object(module, "run_skill_sync", sync),
+    ):
+        async with _running(fake, _runtime(db_session_factory, managed=True)) as (service, _):
+            refused = await post_activity(service, _submit(row.token, secret="ghp_x"))
+            await service.turns.drain(5)
+
+    expected = module._SHARED_AGENT_SKILLS if kind == "skill_repo" else module._SHARED_AGENT  # pyright: ignore[reportPrivateUsage]
+    assert refused["task"]["value"] == expected, "the shared-agent refusal"
+    access.assert_not_awaited()
+    sync.assert_not_awaited()
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+        binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
+    assert live is not None and live.used_at is None, "the request is not spent"
+    assert binding is None, "nothing bound"
+    assert "working repo was not changed" in _edits(fake)[-1], "the card says why"
+
+
+def _imported() -> AsyncMock:
+    skill = ResourceOutcome(
+        kind="skill", name="eda", action=Action.CREATED, anthropic_id="skill_01eda"
+    )
+    return AsyncMock(return_value=[skill])
+
+
+async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Imported skills attach to the agent; the working repo is untouched."""
+    row = await _request(db_session_factory, account_id, kind="skill_repo")
+    fake, sync, updates = TeamsApiFake(), _imported(), list[dict[str, Any]]()
+    runtime = _admin_runtime(db_session_factory, updates=updates)
+    with (
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
+        patch.object(module, "run_skill_sync", sync),
+    ):
+        async with _running(fake, runtime) as (service, dispatch):
+            await post_activity(service, _submit(row.token, secret="ghp_skills"))
+            await service.turns.drain(5)
+
+    assert sync.await_args is not None, "the import ran"
+    where = (sync.await_args.kwargs["branch"], sync.await_args.kwargs["path"])
+    assert where == ("main", "skills"), "from the branch and path the card was posted for"
+    assert sync.await_args.kwargs["is_admin"] is True, "under the submitter's live role"
+    assert {s["skill_id"] for s in updates[-1]["skills"]} >= {"skill_01eda"}, "attached"
+    async with db_session_factory() as session:
+        binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
+        credential = await get_skill_repo_credential(
+            session,
+            tenant_id=TENANT,
+            agent_id=row.agent_id,
+            repo_url="https://github.com/o/skills",
+        )
+    assert binding is None, "the working repo does not change"
+    assert credential is not None and credential.proof_kind == "pat", "the skill repo token"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
+    dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
+
+
+async def test_a_skill_import_that_lands_nothing_is_not_reported_as_applied(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """An empty import ends partial, never applied."""
+    row = await _request(db_session_factory, account_id, kind="skill_repo")
+    fake, updates = TeamsApiFake(), list[dict[str, Any]]()
+    with (
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
+        patch.object(module, "run_skill_sync", AsyncMock(return_value=[])),
+    ):
+        runtime = _admin_runtime(db_session_factory, updates=updates)
+        async with _running(fake, runtime) as (service, d):
+            await post_activity(service, _submit(row.token, secret="ghp_skills"))
+            await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "write_failed", "spent, not applied"
+    assert not updates, "nothing to attach"
+    assert "✅" not in _edits(fake)[-1], "the card does not claim it landed"
+    d.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kind", ["repo", "skill_repo"])
+async def test_a_member_is_not_asked_for_a_repo_token_a_shared_agent_refuses(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
+) -> None:
+    """Slack gates a repo bind at the click, a skill import only at the submit."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    fake = TeamsApiFake()
+    async with _running(fake, _runtime(db_session_factory, managed=True)) as (service, _):
+        opened = await post_activity(service, _open(row.token))
+    if kind == "repo":
+        assert opened["task"]["value"] == module._SHARED_AGENT, "no form for a refused bind"  # pyright: ignore[reportPrivateUsage]
+    else:
+        assert "Skill repo only" in json.dumps(opened, ensure_ascii=False), "as Slack's form"
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+    assert live is not None and live.used_at is None, "a click spends nothing"
+    assert not _edits(fake), "the card stays as posted"
+
+
+@pytest.mark.parametrize("kind", ["repo", "skill_repo"])
+async def test_a_github_token_needs_encryption_keys(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
+) -> None:
+    """Without keys the token would be stored plain, so the form refuses it."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    runtime = _admin_runtime(db_session_factory)
+    runtime = dataclasses.replace(
+        runtime, turn_deps=dataclasses.replace(runtime.turn_deps, fernet=None)
+    )
+    async with _running(TeamsApiFake(), runtime) as (service, _):
+        refused = await post_activity(service, _submit(row.token, secret="ghp_x"))
+    assert refused["task"]["value"] == module._UNCONFIGURED, "not set up"  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+    assert live is not None and live.used_at is None, "nothing spent"
+
+
+async def test_a_skill_repo_token_that_cannot_read_the_repo_spends_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Checked before the consume, as the working repo's token is."""
+    row = await _request(db_session_factory, account_id, kind="skill_repo")
+    fake, sync = TeamsApiFake(), AsyncMock()
+    with (
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=False)),
+        patch.object(module, "run_skill_sync", sync),
+    ):
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, _):
+            bad = await post_activity(service, _submit(row.token, secret="ghp_wrong"))
+            await service.turns.drain(5)
+    assert "cannot read o/skills" in json.dumps(bad), "the form stays open with why"
+    sync.assert_not_awaited()
+    assert not _edits(fake), "the card stays as posted"
+
+
+async def test_a_failed_bind_spends_the_request_and_says_so_without_the_token(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A write error can quote its parameters, so only its type is logged."""
+    row = await _request(db_session_factory, account_id, kind="repo")
+    fake = TeamsApiFake()
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
+        patch.object(module, "set_binding", AsyncMock(side_effect=RuntimeError("ghp_leak"))),
+    ):
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, dispatch):
+            await post_activity(service, _submit(row.token, secret="ghp_leak"))
+            await service.turns.drain(5)
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "write_failed", "spent, not applied"
+    assert "✅" not in _edits(fake)[-1], "the card does not claim it landed"
+    assert "repo_bound" not in repr(logs), "nothing is logged as bound"
+    sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert "ghp_leak" not in sent, "no token in Teams or logs"
     dispatch.assert_not_awaited()
