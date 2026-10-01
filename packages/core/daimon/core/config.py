@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class DatabaseSettings(BaseModel):
@@ -77,6 +78,17 @@ class LogSettings(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         description="Minimum log level emitted by the structured logger.",
+    )
+
+
+class ObservabilitySettings(BaseModel):
+    health_interval_s: float = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Seconds between runtime.health structured log lines from each long-running process. "
+            "Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable."
+        ),
     )
 
 
@@ -683,17 +695,48 @@ class CryptoSettings(BaseModel):
     development.
     """
 
-    keys: tuple[SecretStr, ...] = Field(
+    keys: Annotated[tuple[SecretStr, ...], NoDecode] = Field(
         default=(),
         description=(
-            "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. Required to save agent keys: without keys, saving an "
-            "agent environment value is refused unless `allow_plaintext` is set. "
-            "The first key encrypts new values; older keys "
-            "remain valid for decrypting existing ciphertext during rotation. "
-            "Run `daimon crypto verify` to confirm no plaintext rows remain."
+            "Ordered Fernet keys used to encrypt/decrypt stored credentials: a "
+            "single key, a comma-separated list, or a JSON list. Required to save "
+            "agent keys: without keys, saving an agent environment value is "
+            "refused unless `allow_plaintext` is set. The first key encrypts new "
+            "values; older keys remain valid for decrypting existing ciphertext "
+            "during rotation. Run `daimon crypto verify` to confirm no plaintext "
+            "rows remain."
         ),
     )
+
+    @field_validator("keys", mode="before")
+    @classmethod
+    def _split_keys(cls, value: object) -> object:
+        """Accept a bare key or a comma-separated list as well as a JSON list.
+
+        The environment hands this field a raw string. Fernet keys are
+        base64-urlsafe, so they never contain a comma, a quote or a bracket.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return ()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Fixed message: the decoder's error quotes the input, i.e. key text.
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS starts with '[' but is not a valid JSON list"
+                ) from None
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS must be a key, a comma-separated list or a JSON list"
+                )
+            items = [str(item).strip() for item in cast("list[object]", parsed)]
+            return tuple(item for item in items if item)
+        return tuple(part.strip() for part in text.split(",") if part.strip())
+
     allow_plaintext: bool = Field(
         default=False,
         description=(
@@ -1030,6 +1073,7 @@ class Settings(BaseSettings):
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
@@ -1084,6 +1128,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Validation errors must never echo a raw value (crypto keys, API keys).
+        hide_input_in_errors=True,
     )
 
 
@@ -1101,7 +1147,11 @@ class _CryptoSettingsSource(BaseSettings):
 
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     model_config = SettingsConfigDict(
-        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
 

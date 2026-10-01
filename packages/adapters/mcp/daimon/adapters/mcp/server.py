@@ -11,7 +11,7 @@ any collaborator the caller supplied.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 import httpx
@@ -78,8 +78,10 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
@@ -165,6 +167,10 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
+    # The JSON chain and stdlib redaction before the first log line (uvicorn
+    # has configured its loggers by the time it calls this factory); without
+    # it structlog's dev renderer prints rich tracebacks with frame locals.
+    configure_logging(effective_settings.log.level)
     sentry_dsn = (
         effective_settings.sentry.dsn.get_secret_value() if effective_settings.sentry.dsn else None
     )
@@ -179,6 +185,7 @@ def create_mcp_app(
     _validate_settings(effective_settings, skip_auth=auth is not None)
 
     effective_sessionmaker = sessionmaker
+    engine = None
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
         effective_sessionmaker = build_session_factory(
@@ -241,7 +248,17 @@ def create_mcp_app(
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
         try:
-            yield
+            async with (
+                runtime_health(
+                    "mcp",
+                    engine,
+                    effective_settings.observability.health_interval_s,
+                    current_turn_counts,
+                )
+                if engine is not None
+                else nullcontext()
+            ):
+                yield
         finally:
             await identity_middleware.drain_audit()
 

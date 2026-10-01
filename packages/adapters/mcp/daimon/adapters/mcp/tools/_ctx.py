@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
-from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -83,7 +83,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
-      whose stored role is admin (`_session_access.hub_caller_is_admin`;
+      whose stored role is admin (`_session_access.load_hub_subject`;
       refreshed by the person's next platform turn); its reply reaches only
       them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
@@ -116,12 +116,20 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
 
+    # The hub admin exemption needs no agent lookup (`authorize` allows it
+    # before reading names), so skip the lookup for it.
+    hub_admin = pin_exempt and auth.platform_user_id is not None
     if (
         agent_names is not None
-        and not (pin_exempt and auth.platform_user_id is not None)
         and policy.agent_channel_pins
-        and is_outside_agent_pin(
-            policy, agent_names=await agent_names(), channel_id=token_channel_id(auth)
+        and not hub_admin
+        and not authorize(
+            policy,
+            subject=Subject(is_admin=pin_exempt, platform_user_id=auth.platform_user_id),
+            action=Action.RUN_AGENT,
+            surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
+            agent=AgentRef.of(*await agent_names()),
+            place=Place(channel_id=token_channel_id(auth)),
         )
     ):
         log.info(
@@ -141,7 +149,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     if auth.platform_user_id is None:
         return auth
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not is_invoker_allowed(policy, external_user_id=auth.platform_user_id, is_admin=is_admin):
+    if not authorize(
+        policy,
+        subject=Subject(is_admin=is_admin, platform_user_id=auth.platform_user_id),
+        action=Action.START_TURN,
+    ):
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),

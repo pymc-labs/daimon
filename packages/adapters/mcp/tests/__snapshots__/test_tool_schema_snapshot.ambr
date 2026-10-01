@@ -177,7 +177,8 @@
           channel, which can only be read from inside it. A workspace admin also
           sees everyone's channel conversations with this daimon, sealed ones
           included, and can read them with ``get_session``/``list_events``, but
-          can't continue a sealed one from here.
+          can't continue a sealed one from here. A channel admin sees the same
+          for the channels they administer.
         ''',
         'parameters': dict({
           'additionalProperties': False,

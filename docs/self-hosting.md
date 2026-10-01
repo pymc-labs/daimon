@@ -25,6 +25,8 @@ Open `.env`, then uncomment and fill in:
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
 - `DAIMON_CRYPTO__KEYS`: a Fernet key, from
   `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  Paste the key as is. During rotation, list several keys newest first,
+  comma-separated (`NEWKEY,OLDKEY`) or as a JSON list (`["NEWKEY","OLDKEY"]`).
   Agent keys, workspace tokens and MCP tokens are encrypted with it. Without
   it every agent key write is refused (see
   [Agent environment encryption](#agent-environment-encryption)). Back it up
@@ -341,8 +343,11 @@ keys (a key retired too early), listing the count per tenant (never names or
 values).
 `daimon crypto encrypt-plaintext` encrypts every plaintext row in place with the
 first key, in one transaction, leaving timestamps and attribution unchanged.
-Run it after enabling keys on a deployment that stored keys without them, then
-`verify` again. Add `verify` to your onboarding checklist.
+Run it after enabling keys on a deployment that stored keys without them, and
+only once **every** process (MCP, Discord, Slack, scheduler) has restarted with
+the keys: a process still running without keys can't read the rows it encrypts,
+and turns for those agents fail. Then run `verify` again. Add `verify` to your
+onboarding checklist.
 
 Stop old application readers and writers before upgrading through
 `0028_agent_env_encryption`, since old readers cannot decode encrypted values.

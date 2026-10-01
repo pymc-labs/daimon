@@ -20,6 +20,7 @@ from daimon.adapters.cli.tenant import (
 )
 from daimon.core import agent_lifecycle
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
+from daimon.core.authz import Action, AgentRef, Subject, authorize
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -482,10 +483,12 @@ async def agents_fork(
     # (the copy would carry no pin), and a copy starts credential-less.
     async with rt.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    if any(
-        name in policy.agent_channel_pins
-        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
-        if name is not None
+    if not authorize(
+        policy,
+        # The CLI is the deployment operator.
+        subject=Subject(is_admin=True),
+        action=Action.FORK,
+        agent=AgentRef.of(source.name, source.metadata.get(MA_METADATA_KEY_NAME)),
     ):
         raise StoreError(
             f"agent {src!r} is pinned to channels in the access policy, so it can't be copied."
