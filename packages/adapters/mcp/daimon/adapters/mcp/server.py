@@ -33,6 +33,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_subject_resolver,
     production_tenant_resolver,
 )
+from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddleware
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -93,6 +94,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -265,8 +267,8 @@ def create_mcp_app(
         finally:
             await identity_middleware.drain_audit()
 
-    # Stateless HTTP keys session state by a fresh id per request, kept a day:
-    # bound it. Nothing needs it past the request (see `http_app` below).
+    # Session state is keyed per request (StripSessionIdMiddleware, below) and
+    # kept a day: bound it. Nothing needs it past the request.
     state = MemoryStore(max_entries_per_collection=_MAX_STATE_ENTRIES)
     mcp = FastMCP(
         name="daimon", auth=effective_auth, lifespan=audit_lifespan, session_state_store=state
@@ -384,7 +386,11 @@ def create_mcp_app(
     # 404). Nothing needs one: IdentityMiddleware re-derives identity and tool
     # visibility on every request, and no tool streams progress, elicits,
     # samples or subscribes. JSON, as no request streams anything.
-    app = mcp.http_app(stateless_http=True, json_response=True)
+    app = mcp.http_app(
+        stateless_http=True,
+        json_response=True,
+        middleware=[Middleware(StripSessionIdMiddleware)],
+    )
     app.state.mcp = mcp
     app.add_route(
         "/uploads/{token}",
