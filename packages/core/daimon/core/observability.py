@@ -64,12 +64,12 @@ _SECRET_NAME_EXACT: frozenset[str] = frozenset(
 )
 _SECRET_NAME_PATTERN = re.compile(
     r"token|secret|passw|pwd|api[_-]?key|apikey|auth|cookie|session|signature|credential|"
-    r"private[_-]?key|verifier|bearer|(?:^|[_.-])(?:key|sig|dsn)$"
+    r"private[_-]?key|verifier|bearer|(?:^|[_.-])(?:keys?|sig|dsn)$"
 )
 # Names that contain a secret-looking word but carry counts, ids or labels.
 _SECRET_NAME_ALLOW = re.compile(
-    r"^(?:author|authors|authored|authority|session_id|sessionid_count|token_count|tokens|"
-    r"num_tokens|key_count|key_name|key_names|keys)$|_tokens$|_token_count$|^(?:max|min)_token$"
+    r"^(?:author|authors|authored|authority|session_id|token_count|key_count|key_name|key_names)$"
+    r"|^(?:input|output|prompt|completion|total|num|max|min|reasoning|cache(?:_[a-z]+)*)_tokens?$"
 )
 # OAuth's `code` and `state` are bearer material, but common words in prose, so
 # they are secret only in a query string (handled there) or an OAuth context.
@@ -96,6 +96,10 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1"),
     # userinfo in a URL: scheme://user:SECRET@host
     (re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]{0,15}://[^\s:/@]{0,64}:)[^\s@/]{1,256}(?=@)"), r"\1"),
+    # Provider token shapes: Slack, GitHub, Anthropic/OpenAI-style keys.
+    (re.compile(r"()\bxox[abposr]-[A-Za-z0-9-]{8,}"), r"\1"),
+    (re.compile(r"()\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})"), r"\1"),
+    (re.compile(r"()\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}"), r"\1"),
     # Fernet tokens and keys.
     (re.compile(r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
     (re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"), r"\1"),
@@ -104,15 +108,19 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 # lookahead so a non-secret pair never swallows the pair after it
 # (`failed: SLACK_BOT_TOKEN=x`); the scan decides by name.
 _NAME_VALUE = re.compile(
-    r"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]{0,63})(\s{0,4}(?:=|%3[Dd]|:)\s{0,4})"
-    r"(?=(['\"]?)([^\s&'\",;:=}\]\)]{1,4096}))"
+    r"(?<![A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,63})(\s{0,4}(?:=|%3[Dd]|:)\s{0,4})"
 )
+# A command-line flag followed by its value as the next word: `--password x`.
+_FLAG_VALUE = re.compile(r"(?<!\S)-{1,2}([A-Za-z][A-Za-z0-9_-]{0,63})(\s+)(?=[^\s-])")
+_FLAG_NAME = re.compile(r"^-{1,2}([A-Za-z][A-Za-z0-9_.-]{0,63})$")
 # Characters that end a URL query inside free text.
 _QUERY_END = re.compile(r"[\s#'\"<>]")
 # Words that mark text as an OAuth exchange, where `code`/`state` are secrets.
 _OAUTH_CONTEXT = re.compile(r"(?i)oauth|callback|authori[sz]e|redirect_uri|token exchange")
 # A quoted key and the opening quote of its quoted value (JSON, dict repr).
-_QUOTED_KEY = re.compile(r"""(["'])([^"'\\\n]{1,64})\1(\s{0,4}:\s{0,4})(["'])""")
+# Optionally backslash-escaped (JSON inside a JSON string).
+_QUOTED_KEY = re.compile(r"""(\\?["'])([^"'\\\n]{1,64})\1(\s{0,4}:\s{0,4})""")
+_VALUE_LIMIT = 4096
 
 
 def _is_secret_name(name: str, *, oauth: bool = False) -> bool:
@@ -137,10 +145,17 @@ def _redact_value(value: object, *, oauth: bool = False, depth: int = 0) -> obje
                 out[key] = _redact_value(item, oauth=oauth, depth=depth + 1)
         return out
     if isinstance(value, (list, tuple)):
-        items = [
-            _redact_value(item, oauth=oauth, depth=depth + 1)
-            for item in cast("list[object]", value)
-        ]
+        items: list[object] = []
+        redact_next = False
+        for item in cast("list[object]", value):
+            if redact_next:
+                items.append(_REDACTED)
+                redact_next = False
+                continue
+            # argv lists (CalledProcessError): `--password`, then its value.
+            flag = _FLAG_NAME.match(item) if isinstance(item, str) else None
+            redact_next = flag is not None and _is_secret_name(flag.group(1), oauth=oauth)
+            items.append(_redact_value(item, oauth=oauth, depth=depth + 1))
         return tuple(items) if isinstance(value, tuple) else items
     if isinstance(value, str):
         return _redact_secret_text(value)
@@ -224,41 +239,75 @@ def _redact_embedded_structures(text: str) -> str:
     return "".join(out)
 
 
-def _redact_quoted_pairs(text: str) -> str:
-    """Redact the quoted value after a quoted secret key, scanning linearly."""
-    out: list[str] = []
-    cursor = 0
-    oauth = _OAUTH_CONTEXT.search(text) is not None
-    for match in _QUOTED_KEY.finditer(text):
-        if match.start() < cursor or not _is_secret_name(match.group(2), oauth=oauth):
-            continue
-        quote = match.group(4)
-        value_start = match.end()
-        limit = min(len(text), value_start + 4096)
-        i = value_start
-        while i < limit and text[i] != quote:
+def _value_end(text: str, start: int) -> int:
+    """End of the value that starts at `start`, erring towards redacting more.
+
+    A quoted value runs to its matching unescaped quote (an escaped `\\"`
+    opener to the matching `\\"`); a bracketed value to its matching closer;
+    anything else to the next whitespace. Bounded by `_VALUE_LIMIT`.
+    """
+    limit = min(len(text), start + _VALUE_LIMIT)
+    if start >= limit:
+        return start
+    first = text[start]
+    if first == "\\" and start + 1 < limit and text[start + 1] in "\"'":
+        end = text.find("\\" + text[start + 1], start + 2, limit)
+        return limit if end == -1 else end + 2
+    if first in "\"'":
+        i = start + 1
+        while i < limit and text[i] != first:
             i += 2 if text[i] == "\\" else 1
-        if i >= limit:
-            continue
-        out.append(text[cursor:value_start])
-        out.append(_REDACTED)
-        cursor = i
-    out.append(text[cursor:])
-    return "".join(out)
+        return min(i + 1, limit)
+    if first in "{[":
+        depth = 0
+        for i in range(start, limit):
+            if text[i] in "{[":
+                depth += 1
+            elif text[i] in "}]":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        return limit
+    i = start
+    while i < limit and not text[i].isspace():
+        i += 1
+    return i
 
 
-def _redact_name_values(text: str, *, oauth: bool) -> str:
+def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Replace each (start, end) span with the marker, keeping a value's quotes."""
     out: list[str] = []
     cursor = 0
-    for match in _NAME_VALUE.finditer(text):
-        if match.start() < cursor or not _is_secret_name(match.group(1), oauth=oauth):
+    for start, end in sorted(spans):
+        if start < cursor or end <= start:
             continue
-        value_start = match.end() + len(match.group(3))
-        out.append(text[cursor:value_start])
+        head, tail = start, end
+        if text.startswith("\\", start) and end - start >= 4 and text[start + 1] in "\"'":
+            head, tail = start + 2, end - 2
+        elif text[start] in "\"'" and end - start >= 2 and text[end - 1] == text[start]:
+            head, tail = start + 1, end - 1
+        out.append(text[cursor:head])
         out.append(_REDACTED)
-        cursor = value_start + len(match.group(4))
+        cursor = tail
     out.append(text[cursor:])
     return "".join(out)
+
+
+def _secret_value_spans(text: str, *, oauth: bool) -> list[tuple[int, int]]:
+    """Value spans after secret names: quoted keys, `name=value`, `--flag value`."""
+    spans: list[tuple[int, int]] = []
+    if "'" in text or '"' in text:
+        for match in _QUOTED_KEY.finditer(text):
+            if _is_secret_name(match.group(2), oauth=oauth):
+                spans.append((match.end(), _value_end(text, match.end())))
+    for match in _NAME_VALUE.finditer(text):
+        if _is_secret_name(match.group(1), oauth=oauth):
+            spans.append((match.end(), _value_end(text, match.end())))
+    if "-" in text:
+        for match in _FLAG_VALUE.finditer(text):
+            if _is_secret_name(match.group(1), oauth=oauth):
+                spans.append((match.end(), _value_end(text, match.end())))
+    return spans
 
 
 def _redact_url_queries(text: str) -> str:
@@ -301,13 +350,12 @@ def _redact_secret_text(text: str) -> str:
         text = text[:_TEXT_LIMIT] + " [truncated]"
     if "{" in text or "[" in text:
         text = _redact_embedded_structures(text)
-    if "'" in text or '"' in text:
-        text = _redact_quoted_pairs(text)
     if "://" in text and "?" in text:
         text = _redact_url_queries(text)
     for pattern, keep in _FREE_TEXT_PATTERNS:
         text = pattern.sub(keep + _REDACTED, text)
-    return _redact_name_values(text, oauth=_OAUTH_CONTEXT.search(text) is not None)
+    oauth = _OAUTH_CONTEXT.search(text) is not None
+    return _redact_spans(text, _secret_value_spans(text, oauth=oauth))
 
 
 def _redact_secret_keys(mapping: dict[str, object], *, oauth: bool = False) -> None:
@@ -359,6 +407,8 @@ def _scrub_request(request: dict[str, object]) -> None:
                 typed[name] = _REDACTED
             elif isinstance(typed[name], str) and lowered in ("referer", "origin", "location"):
                 typed[name] = _redact_url(cast("str", typed[name]))
+            elif isinstance(typed[name], str):
+                typed[name] = _redact_secret_text(cast("str", typed[name]))
 
 
 def _drop_frame_vars(section: object) -> None:
@@ -480,9 +530,10 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
                 description = typed_span.get("description")
                 if isinstance(description, str):
                     typed_span["description"] = _redact_secret_text(description)
-                data = typed_span.get("data")
-                if isinstance(data, dict):
-                    _redact_secret_keys(cast("dict[str, object]", data))
+                for field in ("data", "tags"):
+                    mapping = typed_span.get(field)
+                    if isinstance(mapping, dict):
+                        _redact_secret_keys(cast("dict[str, object]", mapping))
     transaction = event.get("transaction")
     if isinstance(transaction, str):
         event["transaction"] = _redact_secret_text(transaction)
@@ -491,10 +542,10 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
     tags = event.get("tags")
     if isinstance(tags, dict):
         for key in list(tags.keys()):
-            value = tags[key]
+            value = cast("object", tags[key])
             if _is_secret_name(key):
                 tags[key] = _REDACTED
-            else:
+            elif isinstance(value, str):
                 tags[key] = _redact_secret_text(value)
 
     # User data (ids, emails, IPs) never leaves the process.

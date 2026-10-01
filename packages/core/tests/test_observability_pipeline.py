@@ -274,3 +274,108 @@ def test_a_scrubber_failure_sends_a_stripped_event_not_the_original(
     assert "redaction failed" in rendered
     assert canary not in rendered
     assert "RuntimeError" in rendered
+
+
+def _plain(canary: str) -> str:
+    """GitHub tokens are alphanumeric: drop the canary's hyphen for those shapes."""
+    return canary.replace("-", "")
+
+
+def _hard_canary() -> str:
+    """A canary holding the characters that end a naive value match."""
+    return "hard-" + uuid.uuid4().hex[:8]
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda c: f'API_TOKEN="hello {c}"',
+        lambda c: f"API_TOKEN='hello {c}'",
+        lambda c: f'API_TOKEN="ab\\"{c}"',
+        lambda c: f"API_TOKEN=ab:{c}",
+        lambda c: f"API_TOKEN=ab;{c}",
+        lambda c: f"API_TOKEN=ab,{c}",
+        lambda c: f"API_TOKEN=ab={c}",
+        lambda c: f"API_TOKEN=ab&{c}",
+        lambda c: f"API_TOKEN=ab){c}",
+        lambda c: f"API_TOKEN=ab'{c}",
+        lambda c: f"API_TOKEN=;{c}",
+        lambda c: f"run failed: --password={c}",
+        lambda c: f"--api-key={c} rejected",
+        lambda c: f"-token={c}",
+        lambda c: f"cli --password {c} exited 1",
+        lambda c: (
+            f"Command '['git', 'push', '--password', '{c}']' returned non-zero exit status 1."
+        ),
+        lambda c: f'body: {{\\"token\\": \\"{c}\\"}}',
+        lambda c: f"slack said xoxb-1234567890-{c}",
+        lambda c: f"github ghp_{_plain(c)}abcdefghijklmnop",
+        lambda c: f"pat github_pat_11AAAA_{_plain(c)}xyzxyzxyzxyz",
+        lambda c: f"key sk-ant-api03-{c}abcdefghijkl",
+        lambda c: f"key sk-proj-{c}abcdefghijklmnop",
+        lambda c: f"DAIMON_CRYPTO__KEYS={c}",
+        lambda c: (
+            "{'token': "
+            + "1" * 3
+            + f", 'oauth': {{'client_secret': {{'v': '{c}'}}}}, 'n': "
+            + "[1," * 40
+            + ""
+        ),
+    ],
+    ids=[
+        "dq-space",
+        "sq-space",
+        "dq-escaped",
+        "colon",
+        "semicolon",
+        "comma",
+        "equals",
+        "ampersand",
+        "paren",
+        "apostrophe",
+        "empty-then",
+        "flag-eq",
+        "flag-eq-dash",
+        "single-dash",
+        "flag-space",
+        "called-process",
+        "escaped-json",
+        "slack-token",
+        "github-token",
+        "github-pat",
+        "anthropic-key",
+        "openai-key",
+        "keys-suffix",
+        "unparseable-nested",
+    ],
+)
+def test_hard_value_shapes_never_reach_the_transport(
+    capturing_sentry: CapturingTransport, render: Callable[[str], str]
+) -> None:
+    canary = _hard_canary()
+    try:
+        raise RuntimeError(render(canary))
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert capturing_sentry.payloads
+    assert canary not in capturing_sentry.rendered()
+    assert _plain(canary) not in capturing_sentry.rendered()
+
+
+def test_span_tags_and_plain_headers_are_scrubbed() -> None:
+    from daimon.core.observability import _scrub_event  # pyright: ignore[reportPrivateUsage]
+
+    canary = _canary()
+    event: dict[str, object] = {
+        "type": "transaction",
+        "spans": [{"op": "http", "tags": {"api_token": canary, "note": f"token={canary}"}}],
+        "request": {"headers": {"Referer-Note": f"see token={canary}"}},
+        "tags": {"count": 3},
+    }
+
+    scrubbed = _scrub_event(event, {})  # pyright: ignore[reportArgumentType]
+
+    assert canary not in repr(scrubbed)
+    assert scrubbed is not None and "[redaction failed]" not in repr(scrubbed)
