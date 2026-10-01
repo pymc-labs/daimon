@@ -44,7 +44,7 @@ from daimon.core.operation_policy import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_mcp_credentials as cred_store
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_attachments
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
@@ -96,11 +96,11 @@ async def decide_mcp_replacement(
         "mcp_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with session_factory() as session:
-            reachable = await is_agent_shared_for_attachments(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=tenant_id,
-                agent_name=str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name),
-                ma_agent_id=agent.id,
+                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(agent.id),
                 default=default,
             )
     return decide_operation(

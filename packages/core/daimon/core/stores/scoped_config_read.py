@@ -247,9 +247,9 @@ async def is_agent_shared_for_key_changes(
     - a live handoff or setup thread is bound to it (by stable MA id);
     - it is someone's personal default, under any name.
 
-    Fails closed: no name at all counts as shared. Same semantics as #336's
-    `is_agent_shared_for_attachments` for MCP servers, widened to both names;
-    one should replace the other once both land.
+    Fails closed: no name at all counts as shared. Used for every key and MCP
+    server replace/remove decision; `is_agent_shared_for_attachments` is the
+    older single-name form of the same rule.
     """
     names = {name for name in agent_names if name}
     if not names:
