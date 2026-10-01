@@ -5,13 +5,26 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.middleware.mcp_identity import (
+    IdentityMiddleware,
+    production_agent_id_resolver,
+    production_internal_resolver,
+    production_is_admin_resolver,
+    production_role_resolver,
+    production_subject_resolver,
+    production_tenant_resolver,
+)
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._ctx import (
+    _admit,  # pyright: ignore[reportPrivateUsage]
+    _auth,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._pin_guard import (
     _trusted_admin,  # pyright: ignore[reportPrivateUsage]
 )
@@ -29,7 +42,8 @@ from daimon.adapters.mcp.tools.tenant_summary import (
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-from daimon.core.operator_tokens import OperatorScope
+from daimon.core.mcp_auth import mint_operator_mcp_token
+from daimon.core.operator_tokens import OperatorScope, scope_tag
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
@@ -37,6 +51,7 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
@@ -44,9 +59,12 @@ from daimon.testing.factories import (
     make_tenant,
     make_tenant_config,
 )
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import seed_server_admin
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
@@ -297,21 +315,64 @@ async def test_list_and_revoke_promo_codes(
         await _revoke_promo_code_impl(runtime, auth, str(uuid.uuid4()))
 
 
-def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operator() -> None:
-    operator = _identity(uuid.uuid4(), uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
+async def _verified_operator_identity(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> AuthIdentity:
+    """The identity a tool sees for a real operator token of a server admin.
+
+    Mints the token, then sends a call through the real verifier and identity
+    middleware, so nothing about the identity is assumed by the test.
+    """
+    secret = b"a" * 32
+    async with sessionmaker() as s, s.begin():
+        tenant_id, account_id = await seed_server_admin(s)
+        token = await mint_operator_mcp_token(
+            s,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            scopes=frozenset({"tenant:read"}),
+            label=None,
+            secret=secret,
+            now=datetime.now(UTC),
+            ttl_days=30,
+        )
+    middleware = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=sessionmaker,
+    )
+    mcp = FastMCP(name="identity", auth=DaimonJWTVerifier(secret=secret, sessionmaker=sessionmaker))
+    mcp.add_middleware(middleware)
+    captured: list[AuthIdentity] = []
+
+    @mcp.tool(tags={scope_tag("tenant:read")})
+    async def whoami(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
+        captured.append(await _auth(ctx))
+        return "ok"
+
+    await call_mcp_tool(mcp.http_app(), token=token, name="whoami")
+    await middleware.drain_audit()
+    assert len(captured) == 1, "the operator token reached the tool"
+    assert captured[0].is_operator, "the verifier marked it an operator token"
+    return captured[0]
+
+
+async def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operator(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    operator = await _verified_operator_identity(sessionmaker)
     assert _trusted_admin(operator) is False, (
         "an operator token carries a platform user, so it is not the unbilled operator path"
     )
 
 
 async def test_admit_bills_an_operator_token(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    operator = _identity(uuid.uuid4(), uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
-    with (
-        patch("daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=True)),
-        pytest.raises(ToolError, match="credit is depleted"),
-    ):
-        await _admit(
-            operator, sessionmaker=db_session_factory, billing_config=None, tool_name="ask"
-        )
+    operator = await _verified_operator_identity(sessionmaker)
+    with pytest.raises(ToolError, match="credit is depleted"):
+        await _admit(operator, sessionmaker=sessionmaker, billing_config=None, tool_name="ask")
