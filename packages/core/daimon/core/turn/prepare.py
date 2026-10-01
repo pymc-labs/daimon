@@ -57,6 +57,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
+from daimon.core.turn_origin import SessionState
 from daimon.core.usage_recording import record_turn_usage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,7 +82,21 @@ class ContinuityOutcome:
     user_prefix: str = ""
     system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = ()
 
+    def session_state(self) -> SessionState:
+        """This bind as `<turn_controls>` facts.
 
+        `lost` follows the replacement's transfer degrade ladder, which already
+        says what did not survive; that keeps the controls' "say what is
+        missing" instruction accurate.
+        """
+        lost = _LOST_BY_TRANSFER.get(self.transfer_kind, ())
+        return SessionState(state=self.state, applied=self.applied, lost=lost)
+
+
+_LOST_BY_TRANSFER: dict[TransferKind | None, tuple[str, ...]] = {
+    "transcript": ("working files",),
+    "history": ("working files", "earlier conversation"),
+}
 CONTINUED = ContinuityOutcome()
 
 

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -59,6 +59,31 @@ class HandoffNotice(BaseModel):
     workspace: Literal["transferred", "transcript_only", "history_only"]
     files: tuple[str, ...] = ()
     not_carried: tuple[str, ...] = ()
+
+
+def build_handoff_notice(
+    *,
+    from_name: str | None,
+    from_ma_agent_id: str | None,
+    requested_by: str,
+    requested_work: str,
+    transfer_kind: TransferKind | None,
+) -> HandoffNotice:
+    """The receiving agent's notice, claiming only what the bind carried across."""
+    workspace: Literal["transferred", "transcript_only", "history_only"] = "history_only"
+    not_carried: tuple[str, ...] = ("working files", "earlier conversation")
+    if transfer_kind == "full":
+        workspace, not_carried = "transferred", ()
+    elif transfer_kind == "transcript":
+        workspace, not_carried = "transcript_only", ("working files",)
+    return HandoffNotice(
+        from_name=from_name or "the previous agent",
+        from_ma_agent_id=from_ma_agent_id or "",
+        requested_by=requested_by,
+        requested_work=requested_work,
+        workspace=workspace,
+        not_carried=not_carried,
+    )
 
 
 @asynccontextmanager

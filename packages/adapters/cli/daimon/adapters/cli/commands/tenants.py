@@ -42,7 +42,10 @@ access_policy_app = typer.Typer(
 tenants_app.add_typer(access_policy_app, name="access-policy")
 
 
-_VALID_PLATFORMS = ("discord", "cli", "slack")
+_VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
+_ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# A Teams channel thread is its channel id plus ";messageid=<root post>".
+_TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
 
 
 def _validate_platform(value: str) -> Platform:
@@ -618,11 +621,15 @@ async def tenants_access_policy_set(
         if ids is not None:
             if not ids:
                 raise typer.BadParameter(f"{field}: pass at least one non-empty id")
+            if validated_platform == "teams" and field == "protected_category_ids":
+                raise typer.BadParameter(f"{field}: Teams has no categories, got {ids[0]!r}")
             for value in ids:
                 cleaned = value.strip()
                 pattern = (
                     r"[0-9]{15,21}"
                     if validated_platform == "discord"
+                    else (_ENTRA_OBJECT_ID if field == "invoker_user_ids" else _TEAMS_CHANNEL_ID)
+                    if validated_platform == "teams"
                     else r"[UW][A-Z0-9]+"
                     if field == "invoker_user_ids"
                     # A Slack thread is sealed on its own as channel_id:thread_ts.

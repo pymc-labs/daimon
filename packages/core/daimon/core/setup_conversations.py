@@ -120,7 +120,7 @@ async def resolve_setup_agents(
 def build_setup_opener(
     *,
     target_display: str | None,
-    bot_mention: str,
+    bot_mention: str | None,
     is_admin: bool,
     admin_noun: str,
 ) -> str:
@@ -129,7 +129,8 @@ def build_setup_opener(
     ``target_display`` arrives escaped, and bolded where the platform bolds it,
     from the adapter. ``admin_noun`` is the platform's own name for an admin,
     since "a workspace admin" and "someone with Manage Server" are the same
-    person on different platforms.
+    person on different platforms. ``bot_mention`` is None where every
+    message reaches the bot, as in a 1:1 chat, so there is nothing to explain.
     """
     subject = (
         f"This thread is about {target_display}. Tell me what to change, or name another agent."
@@ -146,4 +147,6 @@ def build_setup_opener(
             f"need {admin_noun}. Ask anyway and I'll write the request for them."
         )
     )
+    if bot_mention is None:
+        return f"{subject}\n\n{role}"
     return f"{subject}\n\n{role}\n\nMention {bot_mention} to reply."

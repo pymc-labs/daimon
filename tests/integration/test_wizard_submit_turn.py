@@ -26,7 +26,7 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
@@ -42,6 +42,7 @@ from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.wizard_session import get_wizard_session
+from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec

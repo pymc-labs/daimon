@@ -1,0 +1,45 @@
+{
+  "type": "message",
+  "id": "1700000000010",
+  "timestamp": "2017-02-01T21:10:07.437Z",
+  "localTimestamp": "2017-02-01T14:10:07.437-07:00",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/00000000-0000-0000-0000-000000000001/",
+  "channelId": "msteams",
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "name": "Ada Lovelace",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "conversation": {
+    "conversationType": "personal",
+    "tenantId": "00000000-0000-0000-0000-000000000001",
+    "id": "a:conversation-1"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "textFormat": "plain",
+  "text": "Hello Teams TestAgent.Sending bold-italic rich text",
+  "attachments": [
+    {
+      "contentType": "text/html",
+      "content": "<div><div>Hello Teams TestAgent. Sending <strong>bold</strong>-<em>italic</em> rich text.</div>\n</div>"
+    }
+  ],
+  "entities": [
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Windows",
+      "timezone": "America/Los_Angeles",
+      "type": "clientInfo"
+    }
+  ],
+  "channelData": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  "locale": "en-US"
+}

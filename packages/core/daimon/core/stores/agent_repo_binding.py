@@ -108,61 +108,6 @@ async def get_binding(
     return AgentRepoBindingRow.model_validate(orm)
 
 
-async def copy_binding(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    source_agent_id: uuid.UUID,
-    target_agent_id: uuid.UUID,
-    ma_secret_ref: str,
-) -> AgentRepoBindingRow | None:
-    """Copy a source agent's binding onto a target agent (fork's deep copy).
-
-    Returns None when the source has no binding — the caller's "nothing to
-    copy" case, mirroring how fork already returns early today.
-
-    This is a copy, not a new proof: `repo_url`, `default_branch`, and the
-    three proof columns are carried forward from the source row verbatim,
-    including when they are NULL. `repo_url` is the source's already-
-    canonical value and is NOT re-normalized. There is deliberately no
-    `proof` parameter here — the target can only inherit exactly what the
-    source held, never invent proof of its own.
-    """
-    source = await get_binding(session, tenant_id=tenant_id, agent_id=source_agent_id)
-    if source is None:
-        return None
-    stmt = (
-        pg_insert(AgentRepoBinding)
-        .values(
-            tenant_id=tenant_id,
-            agent_id=target_agent_id,
-            repo_url=source.repo_url,
-            default_branch=source.default_branch,
-            ma_secret_ref=ma_secret_ref,
-            proof_kind=source.proof_kind,
-            proof_at=source.proof_at,
-            proof_account_id=source.proof_account_id,
-        )
-        .on_conflict_do_update(
-            constraint="pk_agent_repo_binding",
-            set_={
-                "repo_url": source.repo_url,
-                "default_branch": source.default_branch,
-                "ma_secret_ref": ma_secret_ref,
-                "proof_kind": source.proof_kind,
-                "proof_at": source.proof_at,
-                "proof_account_id": source.proof_account_id,
-                "updated_at": func.now(),
-            },
-        )
-        .returning(AgentRepoBinding)
-    )
-    result = await session.execute(stmt)
-    orm = result.scalar_one()
-    await session.flush()
-    return AgentRepoBindingRow.model_validate(orm)
-
-
 async def clear_binding(
     session: AsyncSession,
     *,

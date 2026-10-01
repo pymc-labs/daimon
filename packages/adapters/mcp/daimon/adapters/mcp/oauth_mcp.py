@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.discord._credential_button import (
 from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
+from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_oauth import complete_mcp_oauth_flow, prepare_authorization
@@ -235,6 +236,10 @@ def build_oauth_mcp_routes(
                 )
             if row.platform == "slack":
                 await edit_slack_card_state(
+                    runtime, row=row, state=state, outcome=change, refusal=refusal
+                )
+            elif row.platform == "teams":
+                await edit_teams_card_state(
                     runtime, row=row, state=state, outcome=change, refusal=refusal
                 )
             else:

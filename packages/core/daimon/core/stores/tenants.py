@@ -7,6 +7,7 @@ queries re-keyed on tenant_id.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -35,6 +36,14 @@ async def get_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow |
     if row is None:
         return None
     return TenantRow.model_validate(row)
+
+
+async def get_tenants(session: AsyncSession, tenant_ids: Sequence[uuid.UUID]) -> list[TenantRow]:
+    """Return the rows that exist among `tenant_ids`, in no particular order."""
+    if not tenant_ids:
+        return []
+    rows = (await session.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))).scalars()
+    return [TenantRow.model_validate(row) for row in rows]
 
 
 async def list_all_tenant_ids(session: AsyncSession) -> set[uuid.UUID]:

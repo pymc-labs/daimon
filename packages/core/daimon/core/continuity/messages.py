@@ -338,6 +338,12 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
 _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
     "syntax": "I could not read this line.",
     "bad_name": "the name here is not usable as a key name.",
+    "reserved_name": "{name} is reserved: it changes how the agent's tools run.",
+    "not_credential_name": (
+        "{name} is not a secret name a member can add. Use a name ending in "
+        "_KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT. An admin "
+        "can add identity, account, region and URL names."
+    ),
     "duplicate_name": "{name} is set more than once.",
     "value_too_large": "{name} is too long.",
     "too_many_entries": "{name} is past the number of keys I can take at once.",
@@ -353,6 +359,12 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
     "empty": "There are no keys in the file.",
     "syntax": "I could not read the file.",
     "bad_name": "The names in the file are not usable as key names.",
+    "reserved_name": "The file sets a reserved name that changes how the agent's tools run.",
+    "not_credential_name": (
+        "A name in the file is not a secret name a member can add. Member keys must "
+        "end in _KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT; an "
+        "admin can add identity, account, region and URL names."
+    ),
     "duplicate_name": "The same name is set more than once.",
     "value_too_large": "One of the keys is too long.",
     "too_many_entries": "There are more keys in the file than I can take at once.",
@@ -446,7 +458,7 @@ def render_fresh_start(target_name: str) -> str:
         [
             "Starting fresh from your next message here.",
             "Leaves behind: this task's working files and unfinished work.",
-            f"Keeps: everything already posted in this thread, and {target_name}'s saved memory, "
+            f"Keeps: everything already posted here, and {target_name}'s saved memory, "
             "keys and connections.",
             "Nothing is removed until the new workspace is ready.",
         ]
@@ -461,7 +473,7 @@ def render_preparation_failed(target_name: str) -> str:
             "started this message.",
             "What was saved is still saved.",
             "Your task, decisions and working files are unchanged.",
-            "Mention me again to retry.",
+            "Ask again to retry.",
         ]
     )
 
@@ -469,11 +481,9 @@ def render_preparation_failed(target_name: str) -> str:
 def render_unexpected_loss(transfer_kind: Literal["transcript", "history"]) -> str:
     """Tell the person their workspace was lost and describe what was recovered."""
     if transfer_kind == "transcript":
-        recovered_line = (
-            "I have this thread's conversation and the files that were saved to your task."
-        )
+        recovered_line = "I have this conversation and the files that were saved to your task."
     else:
-        recovered_line = "I have what was posted in this thread, but not the earlier conversation."
+        recovered_line = "I have what was posted here, but not the earlier conversation."
     return "\n".join(
         [
             "I lost the workspace this task was running in and started a new one.",
@@ -512,7 +522,7 @@ def render_responder_changed_without_handoff(
             f"belongs to {owner}.",
             f'Say "have {new_responder} take over this task" and I\'ll move the conversation and '
             "working files across.",
-            f"Or start a new thread to begin fresh with {new_responder}.",
+            f"Or start a new conversation to begin fresh with {new_responder}.",
         ]
     )
 
@@ -527,7 +537,7 @@ def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str])
             "from the old workspace."
         )
     else:
-        base = "Only what was posted in this thread came across."
+        base = "Only what was posted here came across."
     lines = [base]
     if lost:
         lines.append("Not carried: " + ", ".join(lost) + ".")
@@ -548,8 +558,7 @@ def render_timer_target_changed(target_name: str, current_name: str) -> str:
     """Tell the person a timer did not run because another agent answers here now."""
     return "\n".join(
         [
-            f"A reminder here was set with {target_name}, but {current_name} answers in this "
-            "thread now.",
+            f"A reminder here was set with {target_name}, but {current_name} answers here now.",
             "It did not run.",
             "Ask again and I'll set it with the current agent.",
         ]

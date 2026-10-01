@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core._models import DirectMessageConversation, DirectMessagePolicy
+from daimon.core._models import DirectMessageConversation, DirectMessagePolicy, ThreadSession
 from daimon.core.errors import DaimonError
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,10 +31,12 @@ class DirectMessageRow(BaseModel):
     source_url: str
     context: str
     memory_read_only: bool
+    source_channel_id: str | None = None
+    source_thread_id: str | None = None
+    source_thread_keys: list[str] | None = None
     history: list[dict[str, str]]
     recent_message_ids: list[str]
     active_until: datetime | None
-    source_channel_id: str | None = None
 
 
 async def get_conversation(
@@ -117,6 +119,40 @@ async def finish_message(
     if history is not None:
         row.history = history
     await session.flush()
+
+
+async def quarantine_conversation(
+    session: AsyncSession, *, conversation: DirectMessageRow
+) -> list[str]:
+    """Remove this exact conversation and retire the provider sessions of its scope.
+
+    Returns the retired MA session ids, for a best-effort upstream archive. A
+    later message finds no conversation; a fresh /dm starts a new scope.
+    """
+    await session.execute(
+        delete(DirectMessageConversation).where(
+            DirectMessageConversation.platform == conversation.platform,
+            DirectMessageConversation.route_key == conversation.route_key,
+            DirectMessageConversation.external_user_id == conversation.external_user_id,
+            DirectMessageConversation.scope_id == conversation.scope_id,
+        )
+    )
+    retired = (
+        await session.execute(
+            update(ThreadSession)
+            .where(
+                ThreadSession.tenant_id == conversation.tenant_id,
+                ThreadSession.platform == conversation.platform,
+                ThreadSession.thread_id == conversation.scope_id,
+                ThreadSession.status == "live",
+            )
+            .values(status="dead")
+            .returning(ThreadSession.ma_session_id)
+        )
+    ).scalars()
+    ids = list(retired)
+    await session.flush()
+    return ids
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:

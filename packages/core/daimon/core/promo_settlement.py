@@ -29,7 +29,7 @@ from daimon.core.promo_credit import grant_promo_credit, unspent_timed_credit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import TimedPromoGrantRow
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -189,7 +189,7 @@ async def settle_promo_credit(
         ),
     ]
     results: list[tuple[int, Decimal]] = []
-    error: SQLAlchemyError | None = None
+    error: Exception | None = None
     for phase, lock, settle in phases:
         try:
             results.append(
@@ -197,7 +197,8 @@ async def settle_promo_credit(
                     session_factory, phase=phase, lock=lock, settle=settle, limit=limit
                 )
             )
-        except SQLAlchemyError as exc:
+        except Exception as exc:  # named boundary: one phase's failure must not skip the rest
+            log.error("promo_credit.settle_phase_failed", phase=phase, exc_info=exc)
             error = error or exc
             results.append((0, _ZERO))
     (granted, _), (expired, expired_usd), (restored, restored_usd) = results

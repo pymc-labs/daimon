@@ -19,7 +19,10 @@ from pydantic import BaseModel, ConfigDict
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
 # ValidationError on read — keep in sync.
-Platform = Literal["discord", "cli", "slack"]
+Platform = Literal["discord", "cli", "slack", "teams"]
+# Platforms whose turns run in a conversation and carry a turn origin.
+ChatPlatform = Literal["discord", "slack", "teams"]
+CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
 
 # Session-continuity vocabularies. Same contract as `Platform` above: the
 # columns are untyped Text, so a value outside the Literal raises on read.

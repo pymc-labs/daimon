@@ -9,6 +9,7 @@ file path — see test_discord.py for the same pattern) for the button post.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import inspect
 import json
@@ -21,10 +22,12 @@ from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools.credential_requests as _credential_requests_mod
 import discord.http
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -785,6 +788,93 @@ async def test_request_agent_key_rejects_invalid_key(
     with pytest.raises(ToolError, match=r"\[A-Za-z_\]\[A-Za-z0-9_\]\*"):
         await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="1BAD-KEY", purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+
+async def test_request_agent_key_rejects_a_tool_control_name_for_everyone(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """TAR_OPTIONS is hard-denied: even an admin cannot store it as a key."""
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth_identity(is_admin=True)
+    with pytest.raises(ToolError, match="reserved name"):
+        await _request_agent_key_impl(
+            runtime, admin, agent_name="daimon", key="TAR_OPTIONS", purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+
+async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-admin may add a credential name, not a free-form one; an admin may add either."""
+    runtime = _runtime(committing_sessionmaker)
+    member = _auth_identity()
+    # A member cannot add a non-credential name (no mint, no row).
+    with pytest.raises(ToolError, match="not a secret name a member can add"):
+        await _request_agent_key_impl(
+            runtime, member, agent_name="daimon", key="DATABASE_URL", purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+    # An admin may: this mints a row (full happy path needs an agent + origin).
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+    await make_account(db_session, tenant=tenant, id=admin.account_id)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=admin.account_id,
+            platform="discord",
+            parent_channel_id="1111",
+            thread_id="222",
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=admin.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    _patch_successful_post(monkeypatch, message_id="9301", posted={})
+    result = await _request_agent_key_impl(
+        runtime,
+        admin,
+        origin_context_id=str(origin.id),
+        expected_ma_agent_id="ag_env",
+        agent_name="daimon",
+        key="DATABASE_URL",
+        purpose="connection string",
+        channel_id="999",
+    )
+    assert result.target == "DATABASE_URL", "an admin may add a non-credential name"
+    assert await _row_count(db_session) == 1
+
+
+@pytest.mark.parametrize(
+    "key", ["LD_PRELOAD", "BASH_ENV", "PATH", "GIT_CONFIG_KEY_0", "HTTPS_PROXY", "NODE_OPTIONS"]
+)
+async def test_request_agent_key_rejects_a_reserved_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    key: str,
+) -> None:
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity()
+    with pytest.raises(ToolError, match="reserved name"):
+        await _request_agent_key_impl(
+            runtime, auth, agent_name="daimon", key=key, purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0
 
@@ -2119,3 +2209,152 @@ async def test_second_slack_request_in_same_thread_supersedes_the_live_one_and_e
     assert old_row is not None and old_row.outcome == "replaced_by_newer", (
         "the retired Slack request records why it was never clicked"
     )
+
+
+# ---------------------------------------------------------------------------
+# Teams: an Adaptive Card in the origin conversation, edited when replaced
+# ---------------------------------------------------------------------------
+
+_TEAMS_CALLER = "11111111-2222-3333-4444-555555555555"
+_TEAMS_CHAT = "a:teams-chat"
+
+
+def _teams_client(requests: list[httpx.Request]) -> TeamsBotClient:
+    def route(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/members/" in str(request.url):
+            return httpx.Response(200, json={"aadObjectId": _TEAMS_CALLER})
+        return httpx.Response(200, json={"id": f"act-{len(requests)}"})
+
+    return TeamsBotClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(route)),
+        client_id="app-id",
+        client_secret="secret",
+        tenant_id="entra",
+    )
+
+
+async def _teams_setup(
+    sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> tuple[McpRuntime, AuthIdentity, str, list[httpx.Request]]:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_t", name="daimon", tenant_id=tenant.id)]
+    )
+    requests: list[httpx.Request] = []
+    runtime = dataclasses.replace(
+        _runtime(sessionmaker, client=client), teams_client=_teams_client(requests)
+    )
+    auth = _auth_identity(
+        platform="teams", external_id="entra", platform_user_id=_TEAMS_CALLER, tenant_id=tenant.id
+    )
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    async with sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform="teams",
+            parent_channel_id=_TEAMS_CHAT,
+            thread_id=_TEAMS_CHAT,
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    return runtime, auth, str(origin.id), requests
+
+
+async def test_request_agent_key_on_teams_posts_a_card_and_edits_it_when_replaced(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth, origin_id, requests = await _teams_setup(committing_sessionmaker, db_session)
+    ask = {
+        "origin_context_id": origin_id,
+        "expected_ma_agent_id": "ag_t",
+        "agent_name": "daimon",
+        "key": "OPENAI_API_KEY",
+        "purpose": "x",
+        "channel_id": "untrusted",
+    }
+
+    first = await _request_agent_key_impl(runtime, auth, **ask)
+    await _request_agent_key_impl(runtime, auth, **ask)
+
+    writes = [r for r in requests if r.method in ("POST", "PUT") and "login." not in str(r.url)]
+    post, _second, put = writes
+    assert str(post.url).endswith(f"/v3/conversations/{_TEAMS_CHAT}/activities"), "origin chat"
+    card = json.loads(post.content)["attachments"][0]
+    assert card["contentType"] == "application/vnd.microsoft.card.adaptive"
+    row = await peek_credential_request(
+        db_session, token=card["content"]["body"][3]["actions"][0]["data"]["token"]
+    )
+    assert row is not None and row.platform == "teams" and row.posted_message_id == first.message_id
+    assert str(put.url).endswith(f"/activities/{first.message_id}"), "the old card is edited"
+    assert REPLACED_HEADLINE in put.content.decode(), "and says it was replaced"
+
+
+async def test_request_agent_key_on_teams_refuses_an_env_file(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth, origin_id, requests = await _teams_setup(committing_sessionmaker, db_session)
+    with pytest.raises(ToolError, match="Request each key by name"):
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=origin_id,
+            expected_ma_agent_id="ag_t",
+            agent_name="daimon",
+            key=None,
+            purpose="x",
+            channel_id="c",
+        )
+    assert await _row_count(db_session) == 0 and not requests, "nothing minted or posted"
+
+
+@pytest.mark.parametrize("key", ["OPENAI_API_KEY", None], ids=["one-key", "env-file"])
+async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str | None,
+) -> None:
+    """H3: without DAIMON_CRYPTO__KEYS nobody is asked for a value that would be stored plain."""
+    keyless = async_sessionmaker(
+        bind=committing_sessionmaker.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(keyless, client=client)
+    auth = _auth_identity(tenant_id=tenant.id)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
+
+    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_env",
+            agent_name="daimon",
+            key=key,
+            purpose="the CRM key",
+            channel_id="222",
+        )
+    assert await _row_count(db_session) == 0
+    assert posted == {}

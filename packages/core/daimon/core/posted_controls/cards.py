@@ -32,10 +32,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Final, Literal, Self
+from typing import Final, Literal, Self, cast
 
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.credential_requests import build_custom_id
+from daimon.core.credential_requests import build_custom_id, split_skill_repo_target
+from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.stores.domain import CredentialRequestRow
 from pydantic import BaseModel, ConfigDict, model_validator
 
 __all__ = [
@@ -52,6 +54,7 @@ __all__ = [
     "RefusalReason",
     "WRONG_REQUESTER_MESSAGE",
     "build_posted_card",
+    "card_for_request",
     "card_text",
     "classify_card_state",
     "expired_message",
@@ -497,3 +500,38 @@ def build_posted_card(
         )
 
     return PostedCard(kind=kind, state=state, headline=lines[0], facts=tuple(lines[1:]))
+
+
+def card_for_request(
+    row: CredentialRequestRow,
+    *,
+    state: CardState,
+    outcome: ConfigurationChange | None = None,
+    refusal: RefusalReason | None = None,
+    refusal_lines: Sequence[str] = (),
+) -> PostedCard:
+    """The card for one request row in `state`, rebuilt from the row alone.
+
+    Edits run in another process long after the post, so the durable row is
+    the only input. The repo kinds pack the branch into `target`.
+    """
+    repo = branch = None
+    if row.kind in ("repo", "skill_repo"):
+        repo_url, branch, _path = split_skill_repo_target(row.target)
+        repo = normalize_owner_repo(repo_url)
+    return build_posted_card(
+        kind=cast("CardKind", row.kind),
+        state=state,
+        agent_name=row.target_name or "the agent",
+        responder_name=row.responder_name or "Daimon",
+        target=row.target,
+        requester_platform_user_id=row.requester_platform_user_id,
+        expires_at=row.expires_at,
+        token=row.token,
+        mcp_server_url=row.mcp_server_url,
+        repo=repo,
+        branch=branch,
+        outcome=outcome,
+        refusal=refusal,
+        refusal_lines=refusal_lines,
+    )

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0033_channel_budgets.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0034_channel_budgets.py"
     spec = importlib.util.spec_from_file_location("migration_channel_budgets", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -74,7 +74,7 @@ async def test_downgrade_then_upgrade_backfills_known_routine_channels(
             "AND column_name = 'source_channel_id'"
         )
     )
-    assert source.scalar_one() == "YES", "a DM's source channel is nullable, with no backfill"
+    assert source.scalar_one() == "YES", "the DM source column belongs to an earlier revision"
     with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
             await db_session.execute(
