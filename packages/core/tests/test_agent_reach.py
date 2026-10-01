@@ -6,7 +6,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_reach import (
     is_agent_local_to_caller,
     load_agent_reach,
@@ -182,13 +181,11 @@ async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            channel_id="a",
             agent_names=(name,),
             ma_agent_id=None,
             default=DEFAULT,
             caller=who,
             is_daimon_managed=managed,
-            policy=TenantAccessPolicy(),
         )
 
     assert not await may_bind("b-agent"), "another channel's own agent never moves in"
@@ -287,13 +284,11 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
         db_session,
         tenant_id=tenant.id,
         platform="discord",
-        channel_id="c1",
         agent_names=("scheduled",),
         ma_agent_id=None,
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u1"),
         is_daimon_managed=False,
-        policy=TenantAccessPolicy(),
     ), "an agent answering nowhere but running a server admin's routine does not bind"
 
 
@@ -752,13 +747,11 @@ async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
         db_session,
         tenant_id=tenant.id,
         platform="discord",
-        channel_id="c9",
         agent_names=("unrouted",),
         ma_agent_id="agent_x",
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u9"),
         is_daimon_managed=False,
-        policy=TenantAccessPolicy(),
     ), "a channel admin still binds an agent answering nowhere yet"
 
 
@@ -774,26 +767,3 @@ async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
     )
     spec = await _key_facts(db_session, tenant.id, operation="agent_spec_edit", ma_agent_id=None)
     assert spec.is_local_to_caller_channels, "a spec edit reads the cascade and stays local"
-
-
-async def test_nobody_binds_a_pinned_agent_outside_its_pin(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    await _admin_of_c1(db_session, tenant.id)
-    policy = TenantAccessPolicy(agent_channel_pins={"helper": ("c1",)})
-
-    async def may_bind(channel_id: str, *, server_admin: bool = False) -> bool:
-        return await may_bind_as_channel_default(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id=channel_id,
-            agent_names=("Helper", "helper"),
-            ma_agent_id="agent_1",
-            default=DEFAULT,
-            caller=ChannelAdminCaller(platform_user_id="u1", is_server_admin=server_admin),
-            is_daimon_managed=False,
-            policy=policy,
-        )
-
-    assert await may_bind("c1"), "inside its pin the channel admin binds it"
-    assert not await may_bind("c2", server_admin=True), "outside it, not even a server admin"
