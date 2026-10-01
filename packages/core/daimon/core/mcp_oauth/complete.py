@@ -29,7 +29,7 @@ from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.accounts import get_account
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -83,9 +83,11 @@ async def complete_mcp_oauth_flow(
 
     The grant is personal, but the attach is not: repointing a server name the
     agent already declares at another URL redirects every caller. That is
-    re-decided here as `mcp_replace` against the requester's recorded role
-    (the browser callback carries no live platform identity), and a refused
-    replacement raises `McpServerReplaceRefusedError` with the agent unchanged.
+    re-decided here as `mcp_replace` against the requester as stored (the
+    browser callback carries no live platform identity): role, platform id and
+    role ids, so a channel admin passes or fails here as at the request. A
+    refused replacement raises `McpServerReplaceRefusedError` with the agent
+    unchanged.
     """
     client = registered_client(flow, fernet=fernet)
     assert flow.token_endpoint is not None  # narrowed by registered_client
@@ -135,7 +137,16 @@ async def complete_mcp_oauth_flow(
     if agent is None:
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
-        account = await get_account(session, flow.account_id)
+        requester = await get_account_with_tenant(session, account_id=flow.account_id)
+    caller = (
+        ChannelAdminCaller(platform_user_id=None)
+        if requester is None
+        else ChannelAdminCaller(
+            platform_user_id=requester.platform_user_id,
+            role_ids=frozenset(requester.platform_role_ids),
+            is_server_admin=requester.role is Role.ADMIN,
+        )
+    )
     # Decide and attach under the per-agent MCP lock, serialized with the
     # token forms' attach-then-publish and the direct tools.
     async with agent_mcp_write_lock(
@@ -148,13 +159,8 @@ async def complete_mcp_oauth_flow(
             agent_id=flow.agent_id,
             server_name=flow.server_name,
             url=flow.mcp_server_url,
-            # A sign-in records no platform identity, so it holds no channel
-            # admin grant: repointing a shared server stays a server admin's.
-            platform="",
-            caller=ChannelAdminCaller(
-                platform_user_id=None,
-                is_server_admin=account is not None and account.role is Role.ADMIN,
-            ),
+            platform=requester.platform if requester is not None else "",
+            caller=caller,
             default=default,
             shares_token=False,
         )
