@@ -491,6 +491,12 @@ channels, and anyone reading where an agent posts -- not to restrict a
 workspace admin. So an admin is exempt only where the output reaches no one
 but them:
 
+Every rule in this section is decided by one pure function,
+`daimon.core.authz.authorize` (who is acting, what they want to do, where the
+result lands, which agent, which channel). The turn pipeline, the MCP gates,
+the channel tools, the routine and handoff tools and the fork paths gather
+their facts and ask it; each keeps only its own I/O and refusal copy.
+
 | Surface | Members | Admins |
 | --- | --- | --- |
 | Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |

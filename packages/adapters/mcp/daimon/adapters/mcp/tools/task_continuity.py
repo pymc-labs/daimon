@@ -25,8 +25,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.access_policy import is_outside_agent_pin, origin_pin_location
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -179,24 +179,24 @@ async def _hand_off_task_impl(
             account_id=auth.account_id,
         )
 
-    # A DM origin runs in no channel, so it is outside every pin.
-    pin_channel, pin_parent = origin_pin_location(
-        parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
-    )
     decision = decide_handoff(
         destination_ma_agent_id=destination.id,
         destination_name=destination_name,
         destination_reachable=reachable,
         existing_binding_kind=binding.kind if binding is not None else None,
         origin_responder_ma_agent_id=origin.responder_ma_agent_id,
-        destination_pinned_elsewhere=is_outside_agent_pin(
+        # A DM origin runs in no channel, so it is outside every pin.
+        destination_pinned_elsewhere=not authorize(
             policy,
-            agent_names=(
-                destination_name,
-                *agent_pin_names(destination.name, destination.metadata),
+            subject=Subject(),
+            action=Action.RUN_AGENT,
+            surface=Surface.HANDOFF,
+            agent=AgentRef.of(
+                destination_name, *agent_pin_names(destination.name, destination.metadata)
             ),
-            channel_id=pin_channel,
-            parent_channel_id=pin_parent,
+            place=Place.from_origin(
+                parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
+            ),
         ),
         destination_answers_channel=channel_config.agent_name == destination_name,
         caller_is_admin=auth.is_admin,
