@@ -87,7 +87,7 @@ opened.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Final, cast
 
@@ -130,6 +130,9 @@ from daimon.core.env_file import (
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
+    env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
     env_name_problem,
     parse_env_file,
 )
@@ -173,6 +176,7 @@ from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.turn_keys import list_turn_key_names
 
 import discord
 
@@ -499,9 +503,19 @@ class EnvCredentialModal(discord.ui.Modal):
         # A replacement's gate is decided BEFORE the transaction opens: the
         # decision costs an MA listing and a config read, and neither may be
         # paid for while holding the request row's lock.
+        # A new name that a tool reads as a key already held (GH_TOKEN beside
+        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
+        # gate, decided for this submitter.
+        shadowed: str | None = None
+        if self._row.replaces_updated_at is None:
+            async with self._runtime.sessionmaker() as session:
+                held_names = await list_turn_key_names(
+                    session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
+                )
+            shadowed = env_alias_shadowed(self._row.target, held_names)
         replacement = (
             await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
-            if self._row.replaces_updated_at is not None
+            if self._row.replaces_updated_at is not None or shadowed is not None
             else "allow"
         )
 
@@ -614,14 +628,14 @@ class _KeyAlreadySet(Exception):
         self.entry = entry
 
 
-def _collision_lines(collisions: Sequence[EnvEntry]) -> tuple[str, ...]:
+def _collision_lines(collisions: Sequence[EnvEntry], held: Collection[str]) -> tuple[str, ...]:
     """Name the keys the file would have overwritten, by name and line only.
 
     A value never reaches this copy: the card these lines land on is public
     to the channel, so the only facts it may carry are the ones already on
     the uploader's screen.
     """
-    lines = [f"line {entry.line}: {entry.name} is already set." for entry in collisions]
+    lines = [env_collision_line(entry, held) for entry in collisions]
     shown = lines[:_COLLISIONS_SHOWN]
     remaining = len(lines) - _COLLISIONS_SHOWN
     if remaining > 0:
@@ -715,6 +729,7 @@ class EnvFileModal(discord.ui.Modal):
 
         now = datetime.now(UTC)
         collisions: tuple[EnvEntry, ...] = ()
+        held: set[str] = set()
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
@@ -732,7 +747,7 @@ class EnvFileModal(discord.ui.Modal):
                         agent_id=consumed_row.agent_id,
                     )
                 }
-                collisions = tuple(entry for entry in entries if entry.name in held)
+                collisions = env_import_collisions(entries, held)
                 if not collisions:
                     try:
                         # A savepoint, not the outer transaction: a key that
@@ -753,6 +768,7 @@ class EnvFileModal(discord.ui.Modal):
                                     raise _KeyAlreadySet(entry)
                     except _KeyAlreadySet as appeared:
                         collisions = (appeared.entry,)
+                        held.add(appeared.entry.name)
                 if not collisions:
                     is_continuation_queued = await record_input_continuation(
                         session, consumed_row, platform="discord"
@@ -782,7 +798,7 @@ class EnvFileModal(discord.ui.Modal):
             collision_count=len(collisions),
         )
         if collisions:
-            refusal_lines = _collision_lines(collisions)
+            refusal_lines = _collision_lines(collisions, held)
             await edit_posted_card(
                 interaction.client,
                 row=self._row,

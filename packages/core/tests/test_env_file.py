@@ -15,9 +15,13 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
     env_name_hard_denied,
     env_name_member_writable,
     env_name_problem,
+    env_row_skip_reason,
     is_reserved_env_name,
     parse_env_file,
     serialize_env_file,
@@ -598,3 +602,106 @@ def test_opaque_secret_exceptions_escape_their_prefix_and_nothing_else(name: str
     assert not env_name_hard_denied(name)
     neighbour = name.split("_", 1)[0] + "_CONFIG_USERCONFIG"
     assert env_name_hard_denied(neighbour), "the prefix still blocks everything else"
+
+
+# --- follow-up: more exec-on-env names, path-valued keys, alias groups -------
+
+_FOLLOWUP_HARD_DENY: list[str] = [
+    "RSYNC_RSH",
+    "CVS_RSH",
+    "GIT_PASSCOMMAND",
+    "SSHPASSCOMMAND",
+    "SVN_SSH",
+    "CONFIG_SITE",
+    "GCC_EXEC_PREFIX",
+    "CCACHE_PREFIX",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    "COR_PROFILER",
+    "COR_PROFILER_PATH",
+    "CORECLR_PROFILER",
+    "CORECLR_ENABLE_PROFILING",
+    "DOTNET_ADDITIONAL_DEPS",
+    "LUA_PATH",
+    "LUA_PATH_5_4",
+    "LUA_CPATH",
+    "LUA_CPATH_5_4",
+    "CLOUDSDK_PYTHON",
+    "COVERAGE_PROCESS_START",
+    "COVERAGE_RCFILE",
+    "NODE_REPL_EXTERNAL_MODULE",
+    "PYENV_VERSION",
+    "LESSKEYIN",
+    "LESSKEY_SYSTEM",
+    "LESSEDIT",
+    "MANROFFOPT",
+    "AS",
+    "NM",
+    "RANLIB",
+    "STRIP",
+    "FC",
+    "MAKE",
+    "MAKESHELL",
+    "GOINSECURE",
+    "GONOPROXY",
+    "GODEBUG",
+    "FCEDIT",
+    "ANSIBLE_VAULT_PASSWORD_FILE",
+]
+
+
+@pytest.mark.parametrize("name", _FOLLOWUP_HARD_DENY)
+def test_followup_exec_on_env_names_are_hard_denied(name: str) -> None:
+    assert env_name_hard_denied(name), f"{name} must be refused for everyone"
+    assert env_name_problem(name, is_admin=True) == "reserved_name"
+
+
+@pytest.mark.parametrize(
+    "name", ["KAFKA_CLIENT_KEY", "ETCDCTL_KEY", "DB_PASSWORD_FILE", "SERVICE_ACCOUNT_KEY_FILE"]
+)
+def test_path_valued_key_names_are_admin_only(name: str) -> None:
+    """A name that holds a PATH the tool opens is not a secret a member may add."""
+    assert not env_name_hard_denied(name), f"an admin may still set {name}"
+    assert env_name_problem(name, is_admin=False) == "not_credential_name"
+    assert env_name_problem(name, is_admin=True) is None
+
+
+def test_member_suffix_hint_lists_exactly_the_accepted_suffixes() -> None:
+    from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT
+
+    for suffix in ("_KEY", "_API_KEY", "_KEY_ID", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD"):
+        assert suffix in MEMBER_SECRET_SUFFIX_HINT, f"the refusal must name {suffix}"
+        assert env_name_member_writable(f"ACME{suffix}"), f"ACME{suffix} must be writable"
+
+
+@pytest.mark.parametrize(
+    ("adding", "held", "shadowed"),
+    [
+        ("GITHUB_TOKEN", ["GH_TOKEN"], "GH_TOKEN"),
+        ("GH_TOKEN", ["GITHUB_TOKEN"], "GITHUB_TOKEN"),
+        ("ANTHROPIC_AUTH_TOKEN", ["ANTHROPIC_API_KEY"], "ANTHROPIC_API_KEY"),
+        ("AWS_SESSION_TOKEN", ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "AWS_ACCESS_KEY_ID"),
+        ("OPENAI_KEY", ["OPENAI_API_KEY"], "OPENAI_API_KEY"),
+        ("GH_TOKEN", ["OPENAI_API_KEY"], None),
+        ("GH_TOKEN", ["GH_TOKEN"], None),
+    ],
+)
+def test_env_alias_shadowed(adding: str, held: list[str], shadowed: str | None) -> None:
+    assert env_alias_shadowed(adding, held) == shadowed
+
+
+def test_an_import_collides_on_an_alias_and_says_which_key() -> None:
+    entries = parse_env_file("OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
+    held = {"GH_TOKEN"}
+    collisions = env_import_collisions(entries, held)
+    assert [e.name for e in collisions] == ["GITHUB_TOKEN"]
+    line = env_collision_line(collisions[0], held)
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in line
+    assert "secret-b" not in line, "no value in the line"
+
+
+def test_skip_reason_is_the_assemblers_rule() -> None:
+    assert env_row_skip_reason("API_KEY", "v") is None
+    assert env_row_skip_reason("TAR_OPTIONS", "v") == "reserved_name"
+    assert env_row_skip_reason("A-B", "v") == "bad_name"
+    assert env_row_skip_reason("API_KEY", "a\0b") == "nul_in_value"

@@ -2655,3 +2655,70 @@ async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_o
     assert creds_created == [], "refused before the personal vault write"
     # The attach of a brand-new server name comes first and stays, token-less.
     assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_adding_an_alias_of_a_held_key_is_a_replacement_for_the_gate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GITHUB_TOKEN beside a held GH_TOKEN retargets `gh`: a member on a shared agent is refused."""
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=_MA_AGENT_ID, tenant_id=tenant_id, name="daimon", managed=True)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None, (
+        "an alias that would retarget a held credential is refused like an overwrite"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "write_failed"
+
+
+async def test_env_file_import_refuses_an_alias_of_a_held_key_and_names_both(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert [f.key for f in files] == ["GH_TOKEN"], (
+        "an import that shadows a held key writes nothing"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in card, "the refusal names both keys"
+    assert "secret-b" not in card, "no value on the card"

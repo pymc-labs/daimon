@@ -1896,3 +1896,50 @@ async def test_mcp_submission_admin_token_written_after_the_members_decision_is_
     assert fernet.decrypt(stored).decode() == "admin-token"
     assert not [c for c in ma_calls if c.startswith("POST /v1/vaults")], "no vault write"
     assert any("admin" in t for t in _ephemeral_texts(fake_slack_web_client))
+
+
+async def test_env_submission_alias_of_a_held_key_needs_the_replacement_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """ANTHROPIC_AUTH_TOKEN beside a held ANTHROPIC_API_KEY is refused for a member on a live agent."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        metadata={MA_METADATA_KEY_MANAGED: "true"},
+    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        key="ANTHROPIC_API_KEY",
+        content="the-value-in-use",
+        set_by_account_id=None,
+    )
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="ANTHROPIC_AUTH_TOKEN",
+        agent_id=agent_uuid,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert [r["key"] for r in rows] == ["ANTHROPIC_API_KEY"], "the alias must not be stored"
+    assert request_row is not None and request_row.outcome == "write_failed"

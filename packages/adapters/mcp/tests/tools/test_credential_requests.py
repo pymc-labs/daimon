@@ -2525,3 +2525,51 @@ async def test_request_mcp_token_still_allows_admins_drafts_and_new_names(
         channel_id="222",
     )
     assert result.message_id == "9403"
+
+
+async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GITHUB_TOKEN beside a held GH_TOKEN retargets `gh`: refused for a member on a shared agent."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_shared", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared")
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_uuid,
+            key="GH_TOKEN",
+            content="old-value",
+            set_by_account_id=None,
+        )
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9305", posted=posted)
+
+    with pytest.raises(ToolError, match="admin"):
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            key="GITHUB_TOKEN",
+            purpose="a GitHub token",
+            channel_id="222",
+        )
+    assert await _row_count(db_session) == 0
+    assert posted == {}

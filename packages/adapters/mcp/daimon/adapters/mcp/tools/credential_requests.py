@@ -50,7 +50,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
@@ -70,6 +70,7 @@ from daimon.core.stores.credential_requests import (
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -567,6 +568,20 @@ async def _request_agent_key_impl(
             # submit path compares against this timestamp and refuses a
             # write that would clobber someone else's later change.
             replaces_updated_at = existing.updated_at
+        else:
+            # A different name the same tool reads as this credential (GH_TOKEN
+            # beside GITHUB_TOKEN) retargets it as surely as an overwrite, so it
+            # takes the same gate. The submit path re-decides it for the person
+            # who actually submits.
+            async with runtime.session_factory() as session:
+                held = await list_turn_key_names(
+                    session, tenant_id=auth.tenant_id, agent_id=agent_id
+                )
+            shadowed = env_alias_shadowed(key, held)
+            if shadowed is not None:
+                await _require_key_replacement_allowed(
+                    runtime, auth, ma_agent=ma_agent, key=shadowed
+                )
     return await _mint_and_post(
         runtime,
         auth,
