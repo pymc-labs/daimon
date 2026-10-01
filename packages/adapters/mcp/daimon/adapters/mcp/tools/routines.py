@@ -41,8 +41,9 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -305,15 +306,20 @@ def _check_agent_pin(
     ``agent_names`` is every name the resolved agent answers to (the supplied
     name, its MA name and its config name), so a pin on any of them holds.
     """
-    if not any(name in policy.agent_channel_pins for name in agent_names if name):
-        return
     target_channel_id: str | None = None
     if kind is not None and destination_id is not None:
         if kind == "channel":
             target_channel_id = destination_id
         elif platform == "slack":
             target_channel_id = destination_id.partition(":")[0]
-    if is_outside_agent_pin(policy, agent_names=agent_names, channel_id=target_channel_id):
+    if not authorize(
+        policy,
+        subject=Subject(),
+        action=Action.SAVE_ROUTINE,
+        surface=Surface.ROUTINE,
+        agent=AgentRef.of(*agent_names),
+        place=Place(channel_id=target_channel_id),
+    ):
         raise ToolError(
             f"{agent_name} is pinned to specific channels by an operator, so its routines "
             "must post straight into one of them (a channel destination, not a thread "

@@ -26,11 +26,7 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import (
-    is_invoker_allowed,
-    is_outside_agent_pin,
-    is_write_protected,
-)
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -164,22 +160,26 @@ async def admit_impl(
     # Admins get no exemption. `category_id` is the Discord category the
     # channel sits in; `category_unresolved` says the adapter couldn't look it
     # up, which fails closed when any category is protected. ---
-    if is_write_protected(
-        policy,
-        channel_id=thread_id or channel_id,
-        parent_channel_id=channel_id,
-        category_id=category_id,
-        category_unresolved=category_unresolved,
-    ):
-        raise AdmissionDenied(reason="channel_protected")
-
     # --- Invoker policy: a tenant may restrict who can start a turn. Only a
     # live ADMIN role passed by the adapter exempts the caller; no role means
     # non-admin, never a stored role the user may have lost. An unreadable
-    # policy raised `AccessPolicyUnreadable` above -- refused, never open. ---
-    if not is_invoker_allowed(
-        policy, external_user_id=external_user_id, is_admin=role is Role.ADMIN
-    ):
+    # policy raised `AccessPolicyUnreadable` above -- refused, never open.
+    # Both gates are `authorize(START_TURN)`, protection first. ---
+    subject = Subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+    caller_gate = authorize(
+        policy,
+        subject=subject,
+        action=Action.START_TURN,
+        place=Place(
+            channel_id=thread_id or channel_id,
+            parent_channel_id=channel_id,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        ),
+    )
+    if caller_gate.reason == "channel_protected":
+        raise AdmissionDenied(reason="channel_protected")
+    if caller_gate.reason == "invoker_not_allowed":
         raise AdmissionDenied(reason="invoker_not_allowed")
 
     if (observation := current_outcome.get()) is not None:
@@ -279,11 +279,15 @@ async def admit_impl(
     # only in a DM, where the reply reaches no one else; in a channel or
     # thread other members would see it, so the pin holds for them too. The
     # role is the adapter's live one, never a stored role. ---
-    if not (is_dm and role is Role.ADMIN) and is_outside_agent_pin(
+    if not authorize(
         policy,
-        agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
-        channel_id=None if is_dm else (thread_id or channel_id),
-        parent_channel_id=None if is_dm else channel_id,
+        subject=subject,
+        action=Action.RUN_AGENT,
+        surface=Surface.DM if is_dm else Surface.CHANNEL,
+        agent=AgentRef.of(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        place=Place()
+        if is_dm
+        else Place(channel_id=thread_id or channel_id, parent_channel_id=channel_id),
     ):
         raise AdmissionDenied(reason="agent_pinned_elsewhere")
 

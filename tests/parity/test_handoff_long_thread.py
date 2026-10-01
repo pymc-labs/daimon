@@ -122,7 +122,14 @@ def _register_slack_defaults(
         },
         repeat=True,
     )
-    for method in ("auth.test", "chat.postMessage", "chat.update", "chat.postEphemeral"):
+    # auth.test carries the bot's own user id, which the mention gate matches
+    # against the event's <@U_BOT> token.
+    mock.post(  # pyright: ignore[reportUnknownMemberType]
+        f"{_SLACK_API_BASE}/auth.test",
+        payload={"ok": True, "user_id": "U_BOT"},
+        repeat=True,
+    )
+    for method in ("chat.postMessage", "chat.update", "chat.postEphemeral"):
         mock.post(  # pyright: ignore[reportUnknownMemberType]
             f"{_SLACK_API_BASE}/{method}",
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_LONG_THREAD"},

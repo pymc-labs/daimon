@@ -11,6 +11,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
+from daimon.core.authz import Action, SessionFacts, Subject, authorize
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
@@ -167,17 +168,20 @@ def _seal_allows(
     """
     metadata = session.metadata or {}
     channel = metadata.get(MA_METADATA_KEY_CHANNEL)
-    if channel is not None:
-        thread = metadata.get(MA_METADATA_KEY_THREAD)
-        if not seal_ids(metadata) <= read.origin_channel_ids:
-            return False
-        if thread is None:
-            return read.allows(channel)
-        # A Slack thread is sealed on its own as channel_id:thread_ts.
-        return read.allows(thread, channel) and read.allows(f"{channel}:{thread}", channel)
-    if legacy_thread_id is None or not read.policy.sealed_channel_ids:
-        return True
-    return legacy_thread_id in read.origin_channel_ids
+    return bool(
+        authorize(
+            read.policy,
+            subject=Subject(),
+            action=Action.READ_SESSION,
+            origin_channel_ids=read.origin_channel_ids,
+            session=SessionFacts(
+                channel=channel,
+                thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
+                seal_ids=frozenset(seal_ids(metadata)),
+                legacy_thread_id=legacy_thread_id,
+            ),
+        )
+    )
 
 
 async def _legacy_threads(

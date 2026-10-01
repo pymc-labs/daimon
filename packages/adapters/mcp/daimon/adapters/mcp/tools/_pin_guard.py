@@ -20,8 +20,8 @@ from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
     agent_pin_names,
-    pin_write_refused,
 )
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -75,12 +75,19 @@ async def require_pin_write_access(
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()
-    if pin_write_refused(
+    if not authorize(
         policy,
-        is_admin=False,
-        agent_names=agent_pin_names(ma_agent.name, ma_agent.metadata),
-        parent_channel_id=origin.parent_channel_id if origin is not None else None,
-        thread_id=origin.thread_id if origin is not None else None,
+        subject=Subject(is_admin=False, platform_user_id=auth.platform_user_id),
+        action=Action.CONFIGURE,
+        surface=Surface.CONFIG,
+        agent=AgentRef.of(*agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        place=(
+            Place.from_origin(
+                parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
+            )
+            if origin is not None
+            else Place()
+        ),
     ):
         raise ToolError(
             f"'{ma_agent.name}': {PIN_WRITE_REFUSAL} No card was posted. Tell the caller to "
