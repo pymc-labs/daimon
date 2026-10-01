@@ -23,10 +23,12 @@ from typing import Final
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.access_policy import is_outside_agent_pin
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
 
@@ -97,36 +99,50 @@ def _target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tupl
     return (agent_name, *agent_pin_names(agent.name, agent.metadata))
 
 
-async def require_bindable_by_channel_admin(
+async def require_bindable_as_channel_default(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
+    channel_id: str,
     agent_name: str,
     agent: BetaManagedAgentsAgent | None,
     is_daimon_managed: bool,
 ) -> None:
-    """Raise ``ToolError`` when a channel admin binds another channel's own agent."""
-    if auth.is_admin:
-        return
+    """Raise ``ToolError`` when the agent is pinned elsewhere, or a channel admin
+    binds another channel's own agent."""
+    names = tuple(name for name in _target_names(agent_name, agent) if name)
     async with runtime.session_factory() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
         allowed = await may_bind_as_channel_default(
             session,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
-            agent_names=tuple(name for name in _target_names(agent_name, agent) if name),
+            channel_id=channel_id,
+            agent_names=names,
             ma_agent_id=str(agent.id) if agent is not None else None,
             default=runtime.deployment_default,
             caller=channel_admin_caller(auth),
             is_daimon_managed=is_daimon_managed,
+            policy=policy,
         )
-    if not allowed:
+    if allowed:
+        return
+    if is_outside_agent_pin(policy, agent_names=names, channel_id=channel_id):
         raise ToolError(
-            f"'{agent_name}' answers in channels this caller does not administer, or runs "
-            "unattended for someone with wider rights, so only a workspace or server admin can "
-            "make it this channel's default. A channel admin may "
-            "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
-            "or one that answers only in their channels. Nothing was changed. Do not retry."
+            f"An operator pinned '{agent_name}' to other channels, so it would refuse every "
+            "turn here and cannot be this channel's default. Nothing was changed. Pick "
+            "another agent, or ask an operator to change the pin. Do not retry."
         )
+    raise ToolError(
+        f"'{agent_name}' answers in channels this caller does not administer, or runs "
+        "unattended for someone with wider rights, so only a workspace or server admin can "
+        "make it this channel's default. A channel admin may "
+        "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
+        "or one that answers only in their channels. Nothing was changed. Do not retry."
+    )
 
 
 async def require_admin_for_reachable_agent(

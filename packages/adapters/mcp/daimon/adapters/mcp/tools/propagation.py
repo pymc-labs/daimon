@@ -22,7 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.reachability import (
-    require_bindable_by_channel_admin,
+    require_bindable_as_channel_default,
     require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
@@ -101,9 +101,10 @@ async def _set_agent_default_impl(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
     if channel_id is not None:
-        await require_bindable_by_channel_admin(
+        await require_bindable_as_channel_default(
             runtime,
             auth,
+            channel_id=channel_id,
             agent_name=agent_name,
             agent=agent,
             is_daimon_managed=agent is not None
