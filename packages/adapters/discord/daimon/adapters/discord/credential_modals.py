@@ -444,7 +444,10 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        platform="discord",
+        caller=channel_admin_caller(interaction.user).model_copy(
+            update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
