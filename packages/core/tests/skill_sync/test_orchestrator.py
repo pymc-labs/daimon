@@ -3594,3 +3594,70 @@ async def test_sync_never_replaces_a_skill_added_by_hand(
             s, tenant_id=cli.tenant_id, principal_id=cli.id, agent_name="agent", name="o-r"
         )
     assert row is not None and (row.source, row.content_hash) == ("upload", "uploaded")
+
+
+async def test_sync_never_reattaches_a_detached_upload(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The attach step unions repo rows only: a removed upload stays removed."""
+    cli = await make_cli_principal(db_session, os_user="alice")
+    await db_session.commit()
+    fernet = make_fernet()
+    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
+    async with db_session_factory() as s, s.begin():
+        await upsert_user_skill(
+            s,
+            tenant_id=cli.tenant_id,
+            principal_id=cli.id,
+            agent_name="agent",
+            name="notes",
+            source_repo_url="",
+            source_repo_branch="",
+            source_path="",
+            content_hash="uploaded",
+            anthropic_id="sk_up",
+            anthropic_latest_version="1",
+            source="upload",
+        )
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    created = SkillListResponse(
+        id="sk_new",
+        type="custom",
+        display_title="agent/r",
+        latest_version="1",
+        created_at="2026-04-21T00:00:00Z",
+        updated_at="2026-04-21T00:00:00Z",
+        source="custom",
+    ).model_dump(mode="json")
+    agent = ma_agent(id="ag_target", name="agent", tenant_id=cli.tenant_id, version=7)
+    updates: list[dict[str, object]] = []
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json.loads(req.content))
+        return httpx.Response(200, json=agent.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
+    router.add("POST", r"/v1/skills", lambda req, _m: httpx.Response(200, json=created))
+    router.add_agent_list(agent)
+    router.add_agent(agent)
+    router.add("POST", r"/v1/agents/ag_target", on_update)
+
+    await sync_agent_skills(
+        principal_id=cli.id,
+        tenant_id=cli.tenant_id,
+        agent_name="agent",
+        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=http_client,
+        anthropic_client=build_fake_anthropic(router.dispatch),
+    )
+
+    assert [body.get("skills") for body in updates] == [
+        [{"type": "custom", "skill_id": "sk_new"}]
+    ], "the detached upload sk_up is not attached again"
