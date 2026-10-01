@@ -14,7 +14,8 @@ tools plus the eight tools tagged ``agent-chat`` in ``self_edit``/``vault``
 — so search is pointless. This subclass detects the narrowing (the
 request's ``auth`` state has a non-null ``agent_id``) and returns the
 catalog unchanged, letting the visibility filter narrow it to exactly the
-agent-chat-tagged tools.
+agent-chat-tagged tools. An operator token is narrowed the same way, to the
+tools tagged with its scopes, and lists them directly too.
 """
 
 from __future__ import annotations
@@ -33,8 +34,8 @@ if TYPE_CHECKING:
 class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
     """BM25 search collapse that yields to per-agent narrowing.
 
-    Narrowed agent sessions list their agent-chat tools directly; every other
-    session gets the normal search interface.
+    Narrowed agent and operator sessions list their tools directly; every
+    other session gets the normal search interface.
     """
 
     async def transform_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
@@ -44,8 +45,8 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
             # No active request context (no narrowing info) — use search.
             return await super().transform_tools(tools)
         auth = await ctx.get_state("auth")
-        if isinstance(auth, AuthIdentity) and auth.agent_id is not None:
-            # Narrowed agent session: skip the search collapse so the
-            # visibility filter can surface the agent-chat tools.
+        if isinstance(auth, AuthIdentity) and (auth.agent_id is not None or auth.is_operator):
+            # Narrowed agent or operator session: skip the search collapse so
+            # the visibility filter can surface the tools it was narrowed to.
             return tools
         return await super().transform_tools(tools)

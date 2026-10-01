@@ -23,6 +23,10 @@ walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
 
 The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
 chat keeps ``agent_id=None``; only the Google token path consumes chat identity.
+
+``token_kind``, ``token_jti`` and ``scopes`` come from the token's registry row
+(the verifier writes them under verifier-only claim keys). An operator token
+sees only the tools tagged with its scopes.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import McpTokenKind, Role
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,6 +53,15 @@ class AuthIdentity:
     is_admin: bool = False
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
+    # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
+    token_kind: McpTokenKind | None = None
+    token_jti: uuid.UUID | None = None
+    # What an operator token may call, read from its row on every request.
+    scopes: frozenset[str] = frozenset()
+
+    @property
+    def is_operator(self) -> bool:
+        return self.token_kind == "operator"
 
 
 def resolve_role(role_str: str | None) -> Role:
