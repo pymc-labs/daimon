@@ -223,11 +223,14 @@
         
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
-        with the same arguments plus the preview's ``content_hash`` to upload it. The
-        skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent must be forked
-        first. Anyone may change an agent no channel uses as its default; otherwise it
-        takes a server admin or an admin of every channel using it.
+        with the same arguments plus the preview's ``content_hash``, and the person
+        approves the upload on a confirmation card. Without cards the preview's
+        summary says to use Add skill in /agent-setup instead. The skill belongs to
+        this agent alone; ``sync_skills`` fills the shared library instead, and
+        ``remove_skill`` detaches it. A built-in agent must be forked first. Anyone may
+        change an agent nobody else uses (no default, thread, routine or queued
+        continuation); otherwise it takes a server admin or an admin of every channel
+        using it.
       ''',
       'parameters': dict({
         'additionalProperties': False,

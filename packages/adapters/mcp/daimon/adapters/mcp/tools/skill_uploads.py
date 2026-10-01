@@ -6,17 +6,22 @@ is testable without a FastMCP Context. The checks and the upload live in
 turns refusals into ``ToolError``.
 
 A call without ``content_hash`` only previews. The upload needs the hash that
-preview returned, so the person sees what is added before it is, and with tool
-safety on that second call also waits for their Approve on the card.
+preview returned, bound to this agent, and it never lands on the model's word
+alone: with tool safety on it waits for the person's Approve on the card (and
+an unattended run is refused); with it off there is no card, so the confirm
+adds nothing and points to Add skill in ``/agent-setup``, which previews and
+adds on the person's own click.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlparse
 
+import anthropic
 import httpx
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import InvalidToken
@@ -41,13 +46,17 @@ from daimon.core.skills.add import (
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    repo_origin,
 )
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.ingest import (
+    UPLOAD_SUFFIXES,
     SkillBundle,
     SkillPreview,
     bundle_from_markdown,
     bundle_from_upload,
+    confirmation_hash,
+    require_upload_suffix,
 )
 from daimon.core.slack_file_token import verify_file_token
 from daimon.core.slack_files import fetch_slack_file
@@ -69,8 +78,18 @@ class AddSkillResult(BaseModel):
     status: Literal["preview", "added"]
     agent_name: str
     preview: SkillPreview
+    """Its `content_hash` is the one to confirm: this content, for this agent."""
     added: SkillAddResult | None = None
     summary: str
+
+
+def _no_card_refusal(agent_name: str) -> str:
+    return (
+        "Nothing was added. Adding a skill from chat needs the person to press Approve on "
+        "a confirmation card, and this deployment shows none. Tell them to run "
+        f"/agent-setup, open {agent_name} and use Add skill: it shows the same preview and "
+        "adds it on their own click. Do not retry."
+    )
 
 
 async def require_skill_change(
@@ -84,8 +103,9 @@ async def require_skill_change(
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
     A built-in agent is forked first; a server admin may change any other; a
-    channel admin one that answers only in their channels; anyone one that
-    answers nowhere.
+    channel admin one that answers only in their channels; anyone one nobody
+    else uses: no default, bound thread, or someone else's routine or queued
+    continuation.
     """
     rejection = _system_agent_rejection(agent)
     if rejection is not None:
@@ -99,10 +119,11 @@ async def require_skill_change(
     )
     if decide_operation(operation, is_admin=auth.is_admin, target=facts) != "allow":
         raise ToolError(
-            f"'{agent_name}' answers in a channel or the whole workspace, so changing its "
-            "skills needs a workspace or server admin, or an admin of every channel it "
-            "answers in. Tell the caller an admin can ask Daimon to make this change. "
-            "Nothing was changed. Do not retry."
+            f"'{agent_name}' is used beyond this caller (a channel or workspace default, a "
+            "thread, or someone else's routine or queued task), so changing its skills needs "
+            "a workspace or server admin, or an admin of every channel it answers in. Tell "
+            "the caller an admin can ask Daimon to make this change. Nothing was changed. "
+            "Do not retry."
         )
 
 
@@ -119,10 +140,11 @@ async def _load_bundle(
 ) -> tuple[SkillBundle, str]:
     """The checked skill and a short origin for the ledger."""
     if skill_md is not None:
-        return bundle_from_markdown(skill_md), "pasted"
+        return await asyncio.to_thread(bundle_from_markdown, skill_md), "pasted"
     if attachment_url is not None:
         data, filename = await _fetch_platform_attachment(runtime, auth, http, attachment_url)
-        return bundle_from_upload(data, filename=filename), f"attachment {filename}"
+        bundle = await asyncio.to_thread(bundle_from_upload, data, filename=filename)
+        return bundle, f"attachment {filename}"
     if repo_url is None:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
     # The workspace's stored GitHub access fetches only for an admin, so a
@@ -141,8 +163,7 @@ async def _load_bundle(
     except GitHubFetchError as exc:
         hint = " A private repo needs an admin, or paste the SKILL.md." if token is None else ""
         raise ToolError(f"{exc}{hint}") from exc
-    where = f"{repo_url}/{path}".rstrip("/")
-    return bundle, f"{where}@{branch}"
+    return bundle, repo_origin(repo_url, path=path, branch=branch)
 
 
 async def _fetch_platform_attachment(
@@ -158,11 +179,13 @@ async def _fetch_platform_attachment(
         host = (parsed.hostname or "").lower()
         if parsed.scheme != "https" or host not in _DISCORD_ATTACHMENT_HOSTS:
             raise ToolError("attachment_url must be a Discord attachment link.")
+        filename = unquote(PurePosixPath(parsed.path).name)
+        require_upload_suffix(filename)
         try:
             data = await fetch_attachment(http, url)
         except httpx.HTTPError as exc:
             raise ToolError(f"Could not download the attachment: {exc}") from exc
-        return data, unquote(PurePosixPath(parsed.path).name)
+        return data, filename
     if auth.platform == "slack":
         return await _fetch_slack_attachment(runtime, auth, http, url)
     raise ToolError(
@@ -190,7 +213,11 @@ async def _fetch_slack_attachment(
     try:
         bot_token = decrypt_token(runtime.fernet, row.encrypted_token)
         data, _type, filename = await fetch_slack_file(
-            http, bot_token=bot_token, file_id=ref.file_id, max_bytes=MAX_UNCOMPRESSED_BYTES
+            http,
+            bot_token=bot_token,
+            file_id=ref.file_id,
+            max_bytes=MAX_UNCOMPRESSED_BYTES,
+            suffixes=UPLOAD_SUFFIXES,
         )
     except (InvalidToken, httpx.HTTPError) as exc:
         raise ToolError(f"Could not download the Slack file: {exc}") from exc
@@ -216,6 +243,9 @@ async def _add_skill_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     await require_skill_change(runtime, auth, agent, agent_name=agent_name, operation="skill_add")
+    has_card = runtime.settings.tool_safety.enabled
+    if content_hash is not None and not has_card:
+        raise ToolError(_no_card_refusal(agent_name))
     try:
         async with httpx.AsyncClient(timeout=30.0) as http:
             bundle, origin = await _load_bundle(
@@ -228,10 +258,18 @@ async def _add_skill_impl(
                 branch=branch,
                 path=path,
             )
-        preview = bundle.preview
+        bound = confirmation_hash(bundle.preview, agent_id=agent.id)
+        preview = bundle.preview.model_copy(update={"content_hash": bound})
         if content_hash is None:
             scripts = (
                 f" It holds {len(preview.scripts)} runnable file(s)." if preview.scripts else ""
+            )
+            then = (
+                f"Only after they say yes, call add_skill again with the same arguments and "
+                f"content_hash='{bound}'; they approve it once more on the card."
+                if has_card
+                else f"To add it they run /agent-setup, open {agent_name} and use Add skill; "
+                "adding from chat needs a confirmation card this deployment does not show."
             )
             return AddSkillResult(
                 status="preview",
@@ -239,11 +277,10 @@ async def _add_skill_impl(
                 preview=preview,
                 summary=(
                     f"Nothing is added yet. Show the person '{preview.name}': its description, "
-                    f"files and runnable files.{scripts} Only after they say yes, call add_skill "
-                    f"again with the same arguments and content_hash='{preview.content_hash}'."
+                    f"files and runnable files.{scripts} {then}"
                 ),
             )
-        if content_hash != preview.content_hash:
+        if content_hash != bound:
             raise ToolError(
                 "The skill changed since its preview, so nothing was added. Call add_skill "
                 "without content_hash to preview it again."
@@ -260,6 +297,12 @@ async def _add_skill_impl(
         )
     except DaimonError as exc:
         raise ToolError(str(exc)) from exc
+    except anthropic.APIError as exc:
+        status = getattr(exc, "status_code", None)
+        raise ToolError(
+            f"Adding the skill failed upstream{f' (HTTP {status})' if status else ''}; it is "
+            "not attached. Try again later."
+        ) from exc
     done = {
         "created": f"Added '{preview.name}' to '{agent_name}'",
         "updated": f"Updated '{preview.name}' on '{agent_name}'",
@@ -304,11 +347,14 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
-        with the same arguments plus the preview's ``content_hash`` to upload it. The
-        skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent must be forked
-        first. Anyone may change an agent no channel uses as its default; otherwise it
-        takes a server admin or an admin of every channel using it."""
+        with the same arguments plus the preview's ``content_hash``, and the person
+        approves the upload on a confirmation card. Without cards the preview's
+        summary says to use Add skill in /agent-setup instead. The skill belongs to
+        this agent alone; ``sync_skills`` fills the shared library instead, and
+        ``remove_skill`` detaches it. A built-in agent must be forked first. Anyone may
+        change an agent nobody else uses (no default, thread, routine or queued
+        continuation); otherwise it takes a server admin or an admin of every channel
+        using it."""
         return await _add_skill_impl(
             runtime,
             await _auth(ctx),

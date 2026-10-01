@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+import anthropic
 import httpx
 import pytest
 from anthropic.types.beta import SkillListResponse
@@ -26,12 +27,15 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.slack_file_token import mint_file_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.user_skills import load_user_skill
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
@@ -106,6 +110,7 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
         return httpx.Response(200, json=skill)
 
     settings = MagicMock()
+    settings.tool_safety = ToolSafetyPolicy(enabled=True)
     settings.mcp.public_url = None
     settings.mcp.app_root_url = "https://daimon.example"
     settings.mcp.jwt_secret = SecretStr("proxy-secret")
@@ -386,3 +391,189 @@ async def test_an_isolated_channels_agent_keeps_its_added_skill_inside_the_chann
 
     assert [s.name for s in await _list_impl(world.runtime, inside)] == ["helper/notes"]
     assert await _list_impl(world.runtime, world.auth()) == [], "hidden outside the channel"
+
+
+async def _preview_then_confirm(world: _World, auth: AuthIdentity, **source: Any):
+    preview = await _add_skill_impl(
+        world.runtime, auth, agent_name="helper", expected_ma_agent_id=None, **source
+    )
+    return await _add_skill_impl(
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id=None,
+        content_hash=preview.preview.content_hash,
+        **source,
+    )
+
+
+async def test_without_a_confirmation_card_chat_adds_nothing_and_points_to_the_panel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+
+    preview = await _add_skill_impl(
+        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+    )
+    assert "/agent-setup" in preview.summary and "content_hash=" not in preview.summary
+    with pytest.raises(ToolError, match="shows none"):
+        await _add_skill_impl(
+            world.runtime,
+            world.auth(),
+            agent_name="helper",
+            expected_ma_agent_id=None,
+            skill_md=_MD,
+            content_hash=preview.preview.content_hash,
+        )
+    assert world.created == [], "the confirm staged and uploaded nothing"
+
+
+async def test_a_preview_confirms_only_for_the_agent_it_was_made_for(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    preview = await _add_skill_impl(
+        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+    )
+    raw = bundle_from_markdown(_MD).preview.content_hash
+    assert preview.preview.content_hash != raw, "the hash to confirm is bound to agent_helper"
+    with pytest.raises(ToolError, match="changed since its preview"):
+        await _add_skill_impl(
+            world.runtime,
+            world.auth(),
+            agent_name="helper",
+            expected_ma_agent_id=None,
+            skill_md=_MD,
+            content_hash=raw,
+        )
+    assert world.created == []
+
+
+async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    await _preview_then_confirm(world, world.auth(), skill_md=_MD)
+    helper = world.state.agents["agent_helper"]
+    stamp = ma_agent(name="helper-fork", tenant_id=world.tenant_id).metadata
+    world.state.agents["agent_fork"] = helper | {
+        "id": "agent_fork",
+        "name": "helper-fork",
+        "metadata": helper["metadata"] | stamp,
+    }
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=world.tenant_id),
+            tenant_id=world.tenant_id,
+            agent_name="helper-fork",
+            mode="agent",
+        )
+
+    with pytest.raises(ToolError, match="also attached to helper-fork"):
+        await _preview_then_confirm(world, world.auth(admin=False), skill_md=_MD + "More.\n")
+    assert len(world.created) == 1, "nothing new was uploaded"
+
+
+async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id="222222222222222222",
+            responder_ma_agent_id="agent_helper",
+            responder_name="helper",
+            kind="handoff",
+        )
+    with pytest.raises(ToolError, match="a thread"):
+        await _add_skill_impl(
+            world.runtime,
+            world.auth(admin=False, platform="discord"),
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+        )
+
+
+async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    resolved: list[str] = []
+    tokens: list[str | None] = []
+
+    async def fake_resolve(_rt: object, _auth: object, url: str, _http: object) -> str:
+        resolved.append(url)
+        return "stored-token"
+
+    async def fake_fetch(_http: object, *, token: str | None, **_kwargs: object):
+        tokens.append(token)
+        return bundle_from_markdown(_MD)
+
+    monkeypatch.setattr(skill_uploads, "_resolve_sync_token", fake_resolve)
+    monkeypatch.setattr(skill_uploads, "fetch_repo_skill", fake_fetch)
+    url = "https://someone:ghp_secret@github.com/o/r.git?x=1"
+    source = {"repo_url": url, "path": "skills/notes"}
+
+    await _add_skill_impl(
+        world.runtime,
+        world.auth(admin=False),
+        agent_name="helper",
+        expected_ma_agent_id=None,
+        **source,
+    )
+    assert (resolved, tokens) == ([], [None]), "a member fetches without the stored access"
+
+    await _preview_then_confirm(world, world.auth(), **source)
+    assert tokens[1:] == ["stored-token", "stored-token"]
+    async with db_session_factory() as session:
+        row = await load_user_skill(
+            session,
+            tenant_id=world.tenant_id,
+            principal_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
+            agent_name="helper",
+            name="notes",
+        )
+    assert row is not None and row.origin == "o/r/skills/notes@main", "no credentials stored"
+
+
+async def test_an_upstream_failure_is_a_tool_error(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+
+    async def failing(*_args: object, **_kwargs: object) -> None:
+        response = httpx.Response(500, request=httpx.Request("POST", "https://api.example"))
+        raise anthropic.APIStatusError("boom", response=response, body=None)
+
+    monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
+    with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)"):
+        await _preview_then_confirm(world, world.auth(), skill_md=_MD)
+
+
+async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(_http: httpx.AsyncClient, url: str) -> bytes:
+        fetched.append(url)
+        return b""
+
+    monkeypatch.setattr(skill_uploads, "fetch_attachment", fake_fetch)
+    with pytest.raises(ToolError, match="upload a SKILL.md or a .zip"):
+        await _add_skill_impl(
+            world.runtime,
+            world.auth(platform="discord"),
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            attachment_url="https://cdn.discordapp.com/attachments/1/2/huge.iso",
+        )
+    assert fetched == []
