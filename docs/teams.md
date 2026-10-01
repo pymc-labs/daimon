@@ -30,7 +30,9 @@ is supported; government and China clouds use other Bot Framework hosts.
 - **1:1 chat.** Every message is a turn, in the organisation's tenant. It
   counts as a DM for the access policy, so `dm_memory_read_only` applies.
 - **Channels.** Only messages that @mention the bot. Each root post is its own
-  thread and session; replies that @mention it continue that thread.
+  thread and session; replies that @mention it continue that thread. A bare
+  @mention asks about the thread; if the thread cannot be read, the bot says
+  so instead of starting a turn.
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
@@ -76,6 +78,28 @@ MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
 There are no channel admins: only the listed admins administer a channel.
 
+### Channel history
+
+Like Discord and Slack, a channel turn replays the conversation it sits in,
+read through Microsoft Graph and marked untrusted for the agent. The first
+turn in a thread gets the root post and its newest 50 replies, a later turn
+only the replies since the bot's last answer, and a mention that starts a
+thread the channel's 25 most recently active posts. One page is read per turn,
+marked `truncated` when there is more. System events, deleted posts and the
+bot's own cards are left out; mentions read as `@name`, files as names.
+
+Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
+the manifest. A team owner grants it when adding the app to a team, for that
+team only; no tenant-wide permission or admin consent is needed. It also makes
+Teams deliver every channel post to the bot, which ignores those without a
+mention. An existing install needs the updated app package uploaded again
+(bump `version`), then accepting the permission when the team updates the
+app. Tenant admins can turn this consent off
+(`Set-MgBetaTeamRscConfiguration -State DisabledForAllApps`); the bot then
+answers without history. A refused, throttled or slow read (10 seconds) never
+fails a turn: it runs without history and the adapter logs one warning with
+the HTTP status and no content.
+
 ### Files
 
 - **In.** Images pasted into a message are fetched with the bot token and
@@ -85,12 +109,16 @@ There are no channel admins: only the listed admins administer a channel.
   with Teams' file consent card; accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
-- **Channels.** Reading a file shared in a channel, or posting one, needs
-  Microsoft Graph. The bot names a file it made there in a note and discards
-  it.
+- **Channels.** Teams sends a channel message's pasted images and files only
+  inside its HTML, so the bot reads the message from Graph and passes its
+  images to the agent. Files shared in a channel live in SharePoint, which no
+  team-scoped permission reaches, so the bot names them and tells the person
+  it could not open them; without Graph access it says the same of images.
+  The bot names a file it made in a channel in a note and discards it.
 
-The bot token is only sent to Bot Framework hosts, downloads and uploads only
-go to SharePoint hosts, and every redirect hop is re-checked.
+The bot token is only sent to Bot Framework hosts, the Graph token only to
+`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
+every redirect hop is re-checked (Graph reads follow none).
 
 ### Keys and sign-ins
 
@@ -138,9 +166,9 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported yet
 
-Reactions, reading channel history (`read_channel`, `read_thread`,
-`search_messages`, `get_message`, `list_channels` and `parse_link` are hidden
-from Teams turns), files in channels (both need Microsoft Graph), file posting
+Reactions, the agent's own channel-reading tools (`read_channel`,
+`read_thread`, `search_messages`, `get_message`, `list_channels` and
+`parse_link` are hidden from Teams turns), files in channels, file posting
 through `send_message`, and private inputs a password field cannot take: `.env`
 uploads, multi-line secrets, and repository or skill-repository tokens.
 Also Discord and Slack only: `send_direct_message`, `/dm` conversations,

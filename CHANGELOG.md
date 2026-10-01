@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams channel turns replay their thread, as on Discord and Slack.** The
+  first turn in a thread reads the root post and its newest replies through
+  Microsoft Graph, a later turn only what came after the bot's last answer,
+  and a mention that starts a thread the channel's recent posts, all marked
+  untrusted. A bare @mention asks about the thread. Images pasted into a
+  channel message now reach the agent; files shared in a channel are named and
+  the person is told they can't be opened, as is anything Graph can't read.
+  This needs the resource-specific consent `ChannelMessage.Read.Group`, which
+  a team owner grants at install: upload the updated app package again. A
+  refused or slow read never fails a turn, which then runs without history.
+
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
