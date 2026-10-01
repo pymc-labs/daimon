@@ -40,7 +40,6 @@ from daimon.adapters.mcp.hub.identity import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import agent_name_of
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
     admin_readable_legacy_sessions,
@@ -62,12 +61,12 @@ from daimon.adapters.mcp.tools.agent_chat import (
     agent_pin_names,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
+from daimon.core.access_policy import isolation_owner
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
@@ -122,9 +121,7 @@ async def _agents_by_tenant(
     for tenant in hub.tenants:
         try:
             async with runtime.session_factory() as session:
-                isolation = await load_channel_isolation(
-                    session, tenant_id=tenant.tenant_id, default=runtime.deployment_default
-                )
+                policy = await load_access_policy(session, tenant_id=tenant.tenant_id)
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
@@ -132,11 +129,7 @@ async def _agents_by_tenant(
         out.append(
             (
                 tenant,
-                [
-                    a
-                    for a in agents
-                    if isolation.is_visible(agent_name_of(a), inside_channel_id=None)
-                ],
+                [a for a in agents if isolation_owner(policy, agent_pin_names(a)) is None],
             )
         )
     return out

@@ -283,29 +283,24 @@ async def _check_destination(
 
 def _sees_routine(caller: CallerIsolation, row: RoutineRow) -> bool:
     """An isolated channel's routines, and its own agents', show only inside it."""
-    place = caller.isolation.isolated_channel(row.channel_id)
+    place = caller.isolated_place(row.channel_id)
     return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
 
 
 def _require_placement(
     caller: CallerIsolation, *, agent_name: str, destination_channel_id: str | None
 ) -> None:
-    """Refuse an agent the caller can't see, or a routine delivering across an isolation line.
+    """Refuse an agent the caller can't see, or another agent posting into an isolated channel.
 
-    No destination means a DM, which is outside every channel.
+    An own agent posting elsewhere is its pin's to refuse (`_check_agent_pin`).
     """
     if not caller.sees(agent_name):
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
-    if not caller.isolation.crosses(agent_name, destination_channel_id):
-        return
-    if caller.isolation.channel_of(agent_name) is not None:
+    target = caller.isolated_place(destination_channel_id)
+    if target is not None and caller.owner_of((agent_name,)) != target:
         raise ToolError(
-            f"{agent_name} belongs to an isolated channel, so its routines post only there: "
-            "give it a destination in that channel. Nothing was saved."
+            "That channel is isolated, so only its own agents post there. Nothing was saved."
         )
-    raise ToolError(
-        "That channel is isolated, so only its own agents post there. Nothing was saved."
-    )
 
 
 async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> TenantAccessPolicy:

@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools.reachability import (
     require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
@@ -118,13 +119,13 @@ async def _set_agent_default_impl(
             is_daimon_managed=agent is not None
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
-    isolation = await load_isolation(runtime, auth.tenant_id)
-    if isolation.is_active:
+    policy = await load_isolation(runtime, auth.tenant_id)
+    if policy.isolated_channel_ids:
         if agent is None:
             agent = await find_agent_by_daimon_tag(
                 runtime.client, tenant_id=auth.tenant_id, name=agent_name
             )
-        require_bindable(isolation, agent_name, agent=agent, channel_id=channel_id)
+        require_bindable(policy, agent_name, agent=agent, channel_id=channel_id)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -163,8 +164,8 @@ async def _clear_agent_default_impl(
 ) -> ClearDefaultResult:
     await _require_scope_admin(runtime, auth, channel_id)
     if channel_id is not None:
-        isolation = await load_isolation(runtime, auth.tenant_id)
-        refuse(isolation.clear_refusal(channel_id=channel_id), agent_name=None)
+        policy = await load_isolation(runtime, auth.tenant_id)
+        refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -277,7 +278,7 @@ async def _explain_agent_resolution_impl(
     """
     tenant_id: uuid.UUID = auth.tenant_id
     caller = await load_caller_isolation(runtime, auth)
-    if caller.isolation.isolated_channel(channel_id) != caller.inside_channel_id:
+    if caller.isolated_place(channel_id) != caller.inside_channel_id:
         raise ToolError(_ACROSS_LINE_MSG.format(place=f"channel '{channel_id}'"))
 
     async with runtime.session_factory() as session:

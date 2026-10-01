@@ -29,14 +29,9 @@ from daimon.adapters.mcp.tools.sessions import (
     _list_sessions_impl,
     register_sessions_tools,
 )
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.scope import DeploymentDefault
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.asgi import call_mcp_tool
-from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -67,12 +62,9 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_session_access, "load_read_policy", load)
 
 
-def _runtime(
-    client: AsyncAnthropic, session_factory: async_sessionmaker[AsyncSession] | None = None
-) -> McpRuntime:
-    """`session_factory` is read only once a session passes the ownership checks."""
+def _runtime(client: AsyncAnthropic) -> McpRuntime:
     return McpRuntime(
-        session_factory=session_factory or MagicMock(),
+        session_factory=MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
@@ -86,12 +78,7 @@ def _runtime(
 # ---------------------------------------------------------------------------
 
 
-def _sessions_mcp_app(
-    client: AsyncAnthropic,
-    token: str,
-    claims: dict[str, str],
-    session_factory: async_sessionmaker[AsyncSession],
-) -> ASGIApp:
+def _sessions_mcp_app(client: AsyncAnthropic, token: str, claims: dict[str, str]) -> ASGIApp:
     """Assemble a minimal FastMCP app with the sessions tool group registered
     behind the real auth + identity middleware pipeline."""
     mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
@@ -107,7 +94,7 @@ def _sessions_mcp_app(
             sessionmaker=mock_sessionmaker,
         )
     )
-    register_sessions_tools(mcp, _runtime(client, session_factory))
+    register_sessions_tools(mcp, _runtime(client))
     return mcp.http_app()
 
 
@@ -153,9 +140,7 @@ def _make_thread_idle_event_raw(*, stop_reason_type: str = "end_turn") -> dict[s
 # ---------------------------------------------------------------------------
 
 
-async def test_get_session_admits_novel_status_string_through_fastmcp(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_get_session_admits_novel_status_string_through_fastmcp() -> None:
     """get_session must not output-validation-error when MA reports a session
     status the pinned SDK's Literal does not model (e.g. "paused").
 
@@ -201,7 +186,7 @@ async def test_get_session_admits_novel_status_string_through_fastmcp(
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    app = _sessions_mcp_app(client, token, claims, db_session_factory)
+    app = _sessions_mcp_app(client, token, claims)
 
     result = await call_mcp_tool(
         app, token=token, name="get_session", arguments={"session_id": "ses_1"}
@@ -218,9 +203,7 @@ async def test_get_session_admits_novel_status_string_through_fastmcp(
     )
 
 
-async def test_list_session_events_admits_thread_status_events_through_fastmcp(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_list_session_events_admits_thread_status_events_through_fastmcp() -> None:
     """list_session_events must not output-validation-error on a
     session.thread_status_idle event — a variant the pinned SDK's
     discriminated union does not model.
@@ -272,7 +255,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp(
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    app = _sessions_mcp_app(client, token, claims, db_session_factory)
+    app = _sessions_mcp_app(client, token, claims)
 
     result = await call_mcp_tool(
         app, token=token, name="list_session_events", arguments={"session_id": "ses_1"}
@@ -291,9 +274,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp(
     )
 
 
-async def test_list_sessions_returns_only_tenant_scoped_sessions(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_list_sessions_returns_only_tenant_scoped_sessions() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -325,9 +306,7 @@ async def test_list_sessions_returns_only_tenant_scoped_sessions(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
-    result = await _list_sessions_impl(
-        _runtime(client, db_session_factory), auth, page=None, agent_name=None
-    )
+    result = await _list_sessions_impl(_runtime(client), auth, page=None, agent_name=None)
 
     assert len(result) == 1, "should drain one session for the tenant's only agent"
     assert result[0].id == "ses_1", "should expose the MA session id"
@@ -385,9 +364,7 @@ async def test_get_session_raises_when_session_belongs_to_other_tenant() -> None
         await _get_session_impl(_runtime(client), auth, "ses_x")
 
 
-async def test_get_session_returns_session_info_when_owned(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_get_session_returns_session_info_when_owned() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -418,16 +395,14 @@ async def test_get_session_returns_session_info_when_owned(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
-    result = await _get_session_impl(_runtime(client, db_session_factory), auth, "ses_1")
+    result = await _get_session_impl(_runtime(client), auth, "ses_1")
 
     assert isinstance(result, SessionInfo), "should return a SessionInfo"
     assert result.id == "ses_1", "should expose the requested session id"
     assert result.agent_id == "ag_a", "tenant ownership check must pass when agent matches"
 
 
-async def test_list_session_events_returns_page_envelope(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_list_session_events_returns_page_envelope() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -472,7 +447,7 @@ async def test_list_session_events_returns_page_envelope(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
     result = await _list_session_events_impl(
-        _runtime(client, db_session_factory), auth, "ses_1", page=None, limit=None, order=None
+        _runtime(client), auth, "ses_1", page=None, limit=None, order=None
     )
 
     assert len(result.items) == 1, "should expose the one event from the page"
@@ -569,9 +544,7 @@ async def test_get_session_refuses_an_unattributable_session() -> None:
         await _get_session_impl(_runtime(client), auth, "ses_1")
 
 
-async def test_list_sessions_hides_other_members_sessions(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def test_list_sessions_hides_other_members_sessions() -> None:
     """Enumeration is the same leak as retrieval, so it gets the same filter."""
     tenant_id = uuid.uuid4()
     mine = uuid.uuid4()
@@ -592,7 +565,7 @@ async def test_list_sessions_hides_other_members_sessions(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=mine, tenant_id=tenant_id, role=Role.ADMIN)
-    results = await _list_sessions_impl(_runtime(client, db_session_factory), auth, None, None)
+    results = await _list_sessions_impl(_runtime(client), auth, None, None)
 
     assert [r.id for r in results] == ["ses_mine"], (
         "listing must return only sessions this caller opened — not a "
@@ -621,76 +594,3 @@ def test_private_session_stamp_is_not_account_or_admin_authority(private_stamp, 
     assert not _session_belongs_to_caller(session, auth)
     assert not _owned_by_caller(session, auth)
     assert not _owned_by(session, auth)
-
-
-async def test_session_tools_keep_an_isolated_channels_sessions_on_its_side(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """From outside, the sessions of an isolated channel's own agent are neither
-    listed nor readable; from inside, only they are."""
-    tenant = await make_tenant(db_session)
-    await set_fields(
-        db_session,
-        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="room"),
-        tenant_id=tenant.id,
-        agent_name="local",
-        mode="agent",
-    )
-    await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
-    )
-    await db_session.commit()
-    account = uuid.uuid4()
-    agents = {"ag_local": "local", "ag_shared": "shared"}
-    router = MARouter()
-    router.add(
-        "GET",
-        r"/v1/agents",
-        lambda _r, _m: list_response(
-            [
-                ma_agent(id=agent_id, name=name, tenant_id=tenant.id).model_dump(mode="json")
-                for agent_id, name in agents.items()
-            ]
-        ),
-    )
-    router.add(
-        "GET",
-        r"/v1/sessions",
-        lambda request, _m: list_response(
-            [
-                _make_session_payload(
-                    session_id=f"ses_{agents[request.url.params['agent_id']]}",
-                    agent_id=request.url.params["agent_id"],
-                    account_id=str(account),
-                )
-            ]
-        ),
-    )
-    router.add(
-        "GET",
-        r"/v1/sessions/ses_local",
-        lambda _r, _m: httpx.Response(
-            200,
-            json=_make_session_payload(
-                session_id="ses_local", agent_id="ag_local", account_id=str(account)
-            ),
-        ),
-    )
-    runtime = _runtime(build_fake_anthropic(router.dispatch), db_session_factory)
-    outside = AuthIdentity(account_id=account, tenant_id=tenant.id, role=Role.USER)
-    inside = AuthIdentity(
-        account_id=account,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_local"),
-    )
-
-    listed = await _list_sessions_impl(runtime, outside, None, None)
-    assert [r.id for r in listed] == ["ses_shared"], "outside, the channel's sessions are hidden"
-    with pytest.raises(ToolError, match="session not found"):
-        await _get_session_impl(runtime, outside, "ses_local")
-    with pytest.raises(ToolError, match="not found"):
-        await _list_sessions_impl(runtime, outside, None, "local")
-    assert [r.id for r in await _list_sessions_impl(runtime, inside, None, None)] == ["ses_local"]
-    assert (await _get_session_impl(runtime, inside, "ses_local")).id == "ses_local"

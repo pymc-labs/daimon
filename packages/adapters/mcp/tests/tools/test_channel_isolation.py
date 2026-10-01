@@ -1,6 +1,6 @@
 """Channel isolation through the MCP tools: the admin tool and every filtered surface.
 
-C (``ROOM``) is isolated and its default agent ``local`` answers nowhere else;
+C (``ROOM``) is isolated: sealed, with its default agent ``local`` pinned to it.
 ``shared`` answers in another channel. A call is inside C when it executes as
 ``local``.
 """
@@ -8,11 +8,8 @@ C (``ROOM``) is isolated and its default agent ``local`` answers nowhere else;
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
-from typing import Any
 from unittest.mock import MagicMock
 
-import daimon.adapters.mcp.tools._isolation as isolation_mod
 import daimon.adapters.mcp.tools.routines as routines_mod
 import httpx
 import pytest
@@ -21,7 +18,6 @@ from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
-from daimon.adapters.mcp.tools._isolation import IsolationMemoMiddleware
 from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
@@ -53,7 +49,6 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
@@ -148,7 +143,11 @@ async def _world(
             await set_access_policy(
                 session,
                 tenant_id=tenant.id,
-                policy=TenantAccessPolicy(isolated_channel_ids=(ROOM,)),
+                policy=TenantAccessPolicy(
+                    sealed_channel_ids=(ROOM,),
+                    isolated_channel_ids=(ROOM,),
+                    agent_channel_pins={local: (ROOM,)},
+                ),
             )
     state = FakeMAState()
     for agent_id, name in (("agent_local", local), ("agent_shared", "shared")):
@@ -287,7 +286,7 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With no destination a routine reports by DM, outside every channel, so C's
-    agent needs a destination in C, on create and on every update."""
+    pinned agent needs a destination in C, on create and on every update."""
     world, runtime = await _world(committing_sessionmaker)
 
     async def destination(
@@ -299,7 +298,7 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
     inside = world.auth(admin=False, executing="agent_local")
     every_hour = {"cron_expr": "0 * * * *", "timezone": "UTC", "trigger_message": "hi"}
     for kind, target in ((None, None), ("channel", OTHER)):
-        with pytest.raises(ToolError, match="give it a destination in that channel"):
+        with pytest.raises(ToolError, match="pinned to specific channels"):
             await _create_routine_impl(
                 runtime,
                 inside,
@@ -320,36 +319,12 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
         runtime, inside, routine_id=routine.id, trigger_message="hey"
     )
     assert updated.trigger_message == "hey", "a routine posting into C still updates"
-    with pytest.raises(ToolError, match="give it a destination in that channel"):
+    with pytest.raises(ToolError, match="pinned to specific channels"):
         await _update_routine_impl(runtime, inside, routine_id=routine.id, clear_destination=True)
-    with pytest.raises(ToolError, match="give it a destination in that channel"):
+    with pytest.raises(ToolError, match="pinned to specific channels"):
         await _update_routine_impl(
             runtime, inside, routine_id=routine.id, destination_kind="channel", destination_id=OTHER
         )
-
-
-async def test_a_tool_call_reads_isolation_once(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    world, runtime = await _world(committing_sessionmaker)
-    reads: list[uuid.UUID] = []
-    real = isolation_mod.load_channel_isolation
-
-    async def counting(session: AsyncSession, **kwargs: Any) -> Any:
-        reads.append(kwargs["tenant_id"])
-        return await real(session, **kwargs)
-
-    monkeypatch.setattr(isolation_mod, "load_channel_isolation", counting)
-
-    async def call_next(context: Any) -> Any:
-        for _ in range(2):
-            await _list_routines_impl(runtime, world.auth(executing="agent_local"))
-        return MagicMock()
-
-    await IsolationMemoMiddleware().on_call_tool(MagicMock(), call_next)
-    assert len(reads) == 1, "one read per tool call, however many checks it runs"
-    await _list_routines_impl(runtime, world.auth())
-    assert len(reads) == 2, "the memo ends with the call"
 
 
 async def test_set_channel_isolation_refuses_or_forks_and_ends(
@@ -377,6 +352,9 @@ async def test_set_channel_isolation_refuses_or_forks_and_ends(
     async with committing_sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=world.tenant_id)
     assert set(policy.isolated_channel_ids) == {ROOM, NEW_ROOM}
+    assert policy.agent_channel_pins == {"local": (ROOM,), "channel-333333": (NEW_ROOM,)}, (
+        "each channel's own agent is pinned to it"
+    )
 
     ended = await _set_channel_isolation_impl(
         runtime, world.auth(), channel_id=ROOM, isolated=False
@@ -408,56 +386,13 @@ async def test_posts_and_direct_messages_stay_on_their_side(
     world, runtime = await _world(committing_sessionmaker)
     outside, inside = world.auth(), world.auth(executing="agent_local")
 
-    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+    with pytest.raises(ToolError, match="only its own agents post"):
         await require_channel_writable(runtime, outside, channel_id=ROOM)
-    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+    with pytest.raises(ToolError, match="only its own agents post"):
         await require_channel_writable(runtime, outside, channel_id="t1", parent_channel_id=ROOM)
-    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+    with pytest.raises(ToolError, match="pinned to its own channels"):
         await require_channel_writable(runtime, inside, channel_id=OTHER)
     await require_channel_writable(runtime, inside, channel_id="t1", parent_channel_id=ROOM)
     await require_channel_writable(runtime, outside, channel_id=OTHER)
-    with pytest.raises(ToolError, match="can't send direct messages"):
+    with pytest.raises(ToolError, match="only send a direct message to the person"):
         await send_direct_message_impl(runtime, inside, recipient_id="123", content="hi")
-
-
-async def test_a_turn_running_under_the_isolated_channel_is_inside_it(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """A setup thread under C runs as the built-in agent: while its turn runs, that
-    agent is inside C, so it sees C's agents and posts only inside C."""
-    world, runtime = await _world(committing_sessionmaker)
-    builtin = world.auth(admin=False, executing="agent_builtin")
-    now = datetime.now(UTC)
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=world.tenant_id,
-            account_id=world.account_id,
-            platform="discord",
-            parent_channel_id=ROOM,
-            thread_id="555555555555555555",
-            responder_ma_agent_id="agent_builtin",
-            responder_name="daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=Role.USER,
-            expires_at=now + timedelta(hours=1),
-            now=now,
-            is_setup=True,
-        )
-
-    assert [a.name for a in await _list_agents_impl(runtime, builtin, None)] == ["local"]
-    await require_channel_writable(runtime, builtin, channel_id=ROOM)
-    with pytest.raises(ToolError, match="cross an isolated channel's line"):
-        await require_channel_writable(runtime, builtin, channel_id=OTHER)
-    with pytest.raises(ToolError, match="can't send direct messages"):
-        await send_direct_message_impl(runtime, builtin, recipient_id="123", content="hi")
-
-    async with committing_sessionmaker.begin() as session:
-        await delete_origin(session, origin_id=origin.id)
-    assert [a.name for a in await _list_agents_impl(runtime, builtin, None)] == ["shared"], (
-        "once the turn ends the built-in agent is outside C again"
-    )
-    with pytest.raises(ToolError, match="cross an isolated channel's line"):
-        await require_channel_writable(runtime, builtin, channel_id=ROOM)
-    await require_channel_writable(runtime, builtin, channel_id=OTHER)

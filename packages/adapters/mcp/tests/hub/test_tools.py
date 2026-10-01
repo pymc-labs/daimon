@@ -155,7 +155,11 @@ async def test_hub_never_lists_or_resolves_an_isolated_channels_own_agent(
     await set_access_policy(
         db_session,
         tenant_id=t1.tenant_id,
-        policy=TenantAccessPolicy(isolated_channel_ids=("room",)),
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
     )
     await db_session.commit()
     router = _agents_router({t1.tenant_id: [("ag_1", "helper"), ("ag_2", "local")]})

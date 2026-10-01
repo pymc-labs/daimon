@@ -961,7 +961,13 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
         mode="agent",
     )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("C_ROOM",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C_ROOM",),
+            isolated_channel_ids=("C_ROOM",),
+            agent_channel_pins={"room-bot": ("C_ROOM",)},
+        ),
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))

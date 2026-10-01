@@ -48,7 +48,6 @@ from daimon.adapters.mcp.tools import (
     time,
     vault,
 )
-from daimon.adapters.mcp.tools._isolation import IsolationMemoMiddleware
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
@@ -252,7 +251,6 @@ def create_mcp_app(
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
     # structured ToolError instead of an opaque internal error (issue #14).
     mcp.add_middleware(MaErrorMiddleware())
-    mcp.add_middleware(IsolationMemoMiddleware())
 
     # A tool tagged both "admin" and "channel-admin" is hidden until either tag
     # is enabled for the session (see IdentityMiddleware).
