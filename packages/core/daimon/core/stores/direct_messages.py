@@ -5,10 +5,16 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core._models import DirectMessageConversation, DirectMessagePolicy, ThreadSession
+from daimon.core._models import (
+    DirectMessageConversation,
+    DirectMessagePolicy,
+    ThreadAgentBinding,
+    ThreadSession,
+)
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.errors import DaimonError
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, union, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -202,3 +208,19 @@ async def get_source_channel(
             )
         )
     ).scalar()
+
+
+async def list_dm_channel_ids(session: AsyncSession, *, tenant_id: uuid.UUID) -> set[str]:
+    """Channels this tenant's DM conversations were given, including ones since moved away.
+
+    Starting a DM writes its channel a config row and a ``dm:`` handoff binding.
+    The binding outlives the conversation row, so both are read.
+    """
+    conversations = select(DirectMessageConversation.channel_id).where(
+        DirectMessageConversation.tenant_id == tenant_id
+    )
+    bindings = select(ThreadAgentBinding.parent_channel_id).where(
+        ThreadAgentBinding.tenant_id == tenant_id,
+        ThreadAgentBinding.thread_id.startswith(DM_SCOPE_PREFIX),
+    )
+    return set((await session.execute(union(conversations, bindings))).scalars())
