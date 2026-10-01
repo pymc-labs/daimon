@@ -754,7 +754,14 @@ async def tenants_access_policy_set(
             try:
                 before = (await load_access_policy(session, tenant_id=tenant_id)).agent_channel_pins
             except AccessPolicyUnreadable:
-                # --clear is the way out of an unreadable row; nothing to list.
+                # --clear is the way out of an unreadable row, but the row may
+                # hold pins nobody can list: ask for --replace-pins all the same.
+                if not replace_pins:
+                    raise typer.BadParameter(
+                        "the stored policy can't be read, so its pins can't be listed; "
+                        "pass --replace-pins with --clear to drop it anyway. Nothing was "
+                        "changed."
+                    ) from None
                 before = {}
             if before and not replace_pins:
                 raise typer.BadParameter(

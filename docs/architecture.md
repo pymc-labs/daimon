@@ -316,9 +316,15 @@ A private DM conversation (`dm:` scope) is outside every pin wherever it is
 checked: admission, `hand_off_task`, and continuations owed to a DM, which are
 admitted as DM turns. Adding a key, connector token, skill-repo token or repo
 binding to a pinned agent (`request_agent_key`, `request_mcp_token`,
-`request_mcp_oauth`, and the other request tools) needs an admin or a request
-made inside one of its channels; the form's submit re-checks the rule and
-spends the request without writing if it no longer holds.
+`request_mcp_oauth`, `request_skill_repo_token`, `request_repo_binding`) needs
+an admin or a request made inside one of its channels. The form's submit
+re-checks the rule against the agent as it is now, resolved by its stable id
+and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
+pin added later or a rename still holds; a target that can't be resolved under
+a pin is refused. The direct configuration tools (`update_agent`,
+`attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`) take no turn
+origin, so on a pinned agent they are an admin's; members inside its channels
+use the request tools. One guard (`tools/_pin_guard.py`) serves all of them.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with

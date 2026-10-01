@@ -80,9 +80,10 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -309,8 +310,8 @@ async def _resolve_ma_agent(
 
 
 def agent_pin_names(agent: BetaManagedAgentsAgent) -> tuple[str | None, ...]:
-    """Every name a channel pin on ``agent`` may be keyed by: its MA name and its config name."""
-    return (agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
+    """Every name a channel pin on ``agent`` may be keyed by (`core.agent_pins`)."""
+    return core_agent_pin_names(agent.name, agent.metadata)
 
 
 async def _describe_agent_impl(

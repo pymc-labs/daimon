@@ -543,7 +543,12 @@ async def test_access_policy_set_refuses_to_overwrite_an_unreadable_row_until_cl
         )
 
     await tenants_access_policy_set(
-        rt=rt, console=_make_console(), platform="discord", external_id="guild-ap4", clear=True
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-ap4",
+        clear=True,
+        replace_pins=True,
     )
     await tenants_access_policy_set(
         rt=rt,
@@ -1063,3 +1068,26 @@ async def test_slack_pins_refuse_a_dm_channel(
             external_id="T_PIN_DM",
             add_pin_agent=["acme-project=D0123ABC"],
         )
+
+
+@pytest.mark.asyncio
+async def test_clear_on_an_unreadable_policy_still_needs_replace_pins(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An unreadable row may hold pins nobody can list; dropping them stays explicit."""
+    rt = await _pin_runtime(db_session_factory, workspace_id="guild-pin-unreadable")
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-pin-unreadable")
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null'::jsonb)"
+            ),
+            {"t": tenant_id},
+        )
+
+    with pytest.raises(typer.BadParameter, match="can't be read"):
+        await _set(rt, "guild-pin-unreadable", clear=True)
+    await _set(rt, "guild-pin-unreadable", clear=True, replace_pins=True)
+    assert await _policy(db_session_factory, workspace_id="guild-pin-unreadable") == (
+        OPEN_ACCESS_POLICY
+    )
