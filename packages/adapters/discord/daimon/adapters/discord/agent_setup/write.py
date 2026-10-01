@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
@@ -24,10 +24,8 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_skills_lenient,
 )
-from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
-    build_metadata,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
@@ -48,7 +46,6 @@ from daimon.core.specs import (
     SkillRepo,
     build_authoring_params,
     dump_agent_spec,
-    merge_default_agent_toolset,
 )
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -57,10 +54,6 @@ from pydantic import ValidationError
 from .state import PanelState, RosterEntry
 
 _log = structlog.get_logger()
-
-_FORK_COPY_FIELDS: Final = frozenset(
-    {"name", "model", "description", "system", "tools", "mcp_servers", "skills", "metadata"}
-)
 
 if TYPE_CHECKING:
     from cryptography.fernet import MultiFernet
@@ -396,78 +389,6 @@ async def create_blank_agent(
         # call_reconcile_for_panel's managed=False.
         managed=False,
     )
-
-
-async def fork_agent(
-    runtime: DiscordRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    source_spec: AgentSpec,
-    new_name: str,
-    account_id: uuid.UUID,
-) -> None:
-    """Create a new MA agent seeded from `source_spec`'s MA agent.
-
-    Direct `agents.create` — does NOT route through reconcile. Reconcile's
-    name-as-identity semantics turn a second fork-with-same-name into a SKIPPED
-    no-op (or worse, an UPDATE of the existing copy), which is the opposite of
-    what fork means. Mirrors the CLI's `agents fork` path.
-
-    Rejects if `new_name` exists ANYWHERE in this tenant, regardless of owner —
-    agent names are tenant-wide identity. Reconcile dedup and the resolver key
-    on (tenant, name) only, so a same-name agent from any owner would collide
-    at the identity layer.
-    """
-    collisions = await find_agents_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=new_name
-    )
-    if collisions:
-        raise DaimonError(
-            f"This server already has an agent named **{new_name}**. Pick a different name."
-        )
-
-    source = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=source_spec.name
-    )
-    if source is None:
-        raise DaimonError(f"Source agent {source_spec.name!r} not found on MA.")
-    source_ma = await runtime.anthropic.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params: dict[str, object] = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
-    fork_params["name"] = new_name
-    fork_params["metadata"] = build_metadata(
-        tenant_id=tenant_id, name=new_name, account_id=account_id
-    )
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        public_url,
-    )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    # A fork starts with no credentials (see strip_credentialed_mcp_servers).
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
-        sessionmaker=runtime.sessionmaker,
-        tenant_id=tenant_id,
-        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
-        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        tools=fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    fork_params["mcp_servers"] = servers
-    fork_params["tools"] = tools
-    await runtime.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
 
 
 async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
