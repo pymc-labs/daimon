@@ -28,12 +28,14 @@ from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.state import PanelState, RosterEntry
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import FIXED_TS, ma_agent
@@ -696,3 +698,65 @@ async def test_revoke_stops_the_view_so_the_timer_cannot_fire(
     assert sent_view.is_finished() is True, (
         "revoke must stop the view so its timer cannot re-attach a button later"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_thread", "channel_id", "bound"),
+    [(False, 555, "555"), (True, 555, "555"), (False, 777, None)],
+    ids=["sealed-channel", "thread-of-sealed-channel", "open-channel"],
+)
+async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    in_thread: bool,
+    channel_id: int,
+    bound: str | None,
+) -> None:
+    await _setup_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-bound"
+    )
+    await set_access_policy(
+        db_session, tenant_id=tenant_id, policy=TenantAccessPolicy(sealed_channel_ids=("555",))
+    )
+    agent = ma_agent(id="agent_bound", name="expert-bot", tenant_id=tenant_id)
+    monkeypatch.setattr(mcp_access_mod, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    runtime = DiscordRuntime(
+        settings=_make_settings(),
+        anthropic=build_stub_anthropic(),
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+    )
+    entry = _entry("expert-bot")
+    interaction = _make_interaction()
+    if in_thread:
+        interaction.channel = MagicMock(spec=discord.Thread, parent_id=channel_id)
+        interaction.channel_id = 999
+    else:
+        interaction.channel_id = channel_id
+
+    await send_coding_tools_access(
+        interaction,
+        runtime=runtime,
+        state=PanelState(roster=[entry], selected=entry, account_id=account_id),
+        allowed_user_id=42,
+    )
+
+    content: str = interaction.response.send_message.call_args.kwargs["content"]
+    jwt_token = content[content.index("Bearer ") + len("Bearer ") :].split()[0].strip("`\"'")
+    claims = pyjwt.decode(jwt_token, _JWT_SECRET_BYTES, algorithms=["HS256"])
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None
+    assert row.channel_id == bound, "a thread binds its parent; an open channel binds nothing"
+    assert row.platform == ("discord" if bound else None)
+    assert ("It runs in <#555>" in content) is (bound is not None)
