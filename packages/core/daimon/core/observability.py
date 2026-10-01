@@ -6,15 +6,44 @@ Functional-core / imperative-shell split:
 
 Do NOT call sentry_sdk.init at module import time (architecture rule 3).
 Adapters call init_sentry once at their entrypoint (Plan 02).
+
+What the scrubber does to every error and transaction event: no frame
+locals, breadcrumbs, user, cookies, request bodies or environ; request URLs
+reduced to scheme/host/path and every query value redacted; credential
+headers redacted and other header values text-scrubbed; and secrets in free
+text (exception values, messages, tags, contexts, spans) redacted by name or
+by shape, in time linear in the text.
+
+Known limitations, so error text at credential boundaries should still
+prefer fixed messages over provider bodies:
+
+- Free-text redaction is heuristic. It finds values after a secret-looking
+  name (`*TOKEN*`, `*SECRET*`, `*PASSW*`, `*KEY`/`*KEYS`, `auth*` …) and a few
+  known shapes (Slack, GitHub, `sk-`, JWT, Fernet, Discord webhook paths). A
+  secret under an innocuous name ("value", "id") or in an unknown format is
+  not recognised.
+- OAuth `code`/`state` are redacted in query strings everywhere, but in free
+  text only when the text looks like an OAuth exchange.
+- It errs towards over-redaction: an unquoted value runs to the next
+  whitespace, so trailing punctuation goes too, and a name like `--token-ttl`
+  hides its value.
+- Text over 64 KB is truncated; values over 4 KB are cut at 4 KB; at most 32
+  embedded JSON/repr structures per string are parsed (the rest are still
+  covered by the name/shape rules).
+- Form-encoded text is URL-decoded one level, so a reported message can show
+  decoded characters.
+- If the scrubber itself fails, the event is replaced by exception types and
+  "[redaction failed]".
 """
 
 from __future__ import annotations
 
 import ast
+import bisect
 import json
 import re
 from typing import TYPE_CHECKING, Literal, cast
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import sentry_sdk
 import structlog
@@ -88,9 +117,7 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # Authorization header in text: keep the scheme, drop the credential.
     (
-        re.compile(
-            r"(?i)(\bauthorization\s*[:=]\s*['\"]?[A-Za-z][A-Za-z0-9-]{0,20}\s+)[^\s'\",;]+"
-        ),
+        re.compile(r"(?i)(\bauthorization\s*[:=]\s*['\"]?[A-Za-z][A-Za-z0-9-]{0,20}\s+)\S+"),
         r"\1",
     ),
     (re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1"),
@@ -100,6 +127,11 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"()\bxox[abposr]-[A-Za-z0-9-]{8,}"), r"\1"),
     (re.compile(r"()\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})"), r"\1"),
     (re.compile(r"()\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}"), r"\1"),
+    (re.compile(r"()\bxapp-\d-[A-Za-z0-9-]{8,}"), r"\1"),
+    # JWTs (three base64url segments, the first a JSON header).
+    (re.compile(r"()\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"), r"\1"),
+    # Discord webhook URLs carry their token in the path.
+    (re.compile(r"(/api/webhooks/\d{5,25}/)[A-Za-z0-9_.-]+"), r"\1"),
     # Fernet tokens and keys.
     (re.compile(r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
     (re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"), r"\1"),
@@ -116,11 +148,17 @@ _FLAG_NAME = re.compile(r"^-{1,2}([A-Za-z][A-Za-z0-9_.-]{0,63})$")
 # Characters that end a URL query inside free text.
 _QUERY_END = re.compile(r"[\s#'\"<>]")
 # Words that mark text as an OAuth exchange, where `code`/`state` are secrets.
+_FORM_ENCODED = re.compile(r"%(?:26|3[Dd])")
 _OAUTH_CONTEXT = re.compile(r"(?i)oauth|callback|authori[sz]e|redirect_uri|token exchange")
 # A quoted key and the opening quote of its quoted value (JSON, dict repr).
 # Optionally backslash-escaped (JSON inside a JSON string).
 _QUOTED_KEY = re.compile(r"""(\\?["'])([^"'\\\n]{1,64})\1(\s{0,4}:\s{0,4})""")
 _VALUE_LIMIT = 4096
+_WHITESPACE = re.compile(r"\s")
+# A quote preceded by an even number of backslashes (unescaped), and one
+# preceded by an odd number (escaped, as in JSON inside a JSON string).
+_UNESCAPED_QUOTE = re.compile(r"""(?<!\\)((?:\\\\)*)(["'])""")
+_ESCAPED_QUOTE = re.compile(r"""(?<!\\)(?:\\\\)*\\(["'])""")
 
 
 def _is_secret_name(name: str, *, oauth: bool = False) -> bool:
@@ -239,52 +277,82 @@ def _redact_embedded_structures(text: str) -> str:
     return "".join(out)
 
 
-def _value_end(text: str, start: int) -> int:
-    """End of the value that starts at `start`, erring towards redacting more.
+class _ValueIndex:
+    """Per-string lookups that make each value end O(log n).
 
-    A quoted value runs to its matching unescaped quote (an escaped `\\"`
-    opener to the matching `\\"`); a bracketed value to its matching closer;
-    anything else to the next whitespace. Bounded by `_VALUE_LIMIT`.
+    Built once per text, from regex scans and `_matching_closers`, so the
+    cost of redacting stays linear however many secret names repeat.
     """
-    limit = min(len(text), start + _VALUE_LIMIT)
-    if start >= limit:
-        return start
-    first = text[start]
-    if first == "\\" and start + 1 < limit and text[start + 1] in "\"'":
-        end = text.find("\\" + text[start + 1], start + 2, limit)
-        return limit if end == -1 else end + 2
-    if first in "\"'":
-        i = start + 1
-        while i < limit and text[i] != first:
-            i += 2 if text[i] == "\\" else 1
-        return min(i + 1, limit)
-    if first in "{[":
-        depth = 0
-        for i in range(start, limit):
-            if text[i] in "{[":
-                depth += 1
-            elif text[i] in "}]":
-                depth -= 1
-                if depth == 0:
-                    return i + 1
-        return limit
-    i = start
-    while i < limit and not text[i].isspace():
-        i += 1
-    return i
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._whitespace = [m.start() for m in _WHITESPACE.finditer(text)]
+        self._quotes: dict[str, list[int]] = {'"': [], "'": []}
+        for match in _UNESCAPED_QUOTE.finditer(text):
+            self._quotes[match.group(2)].append(match.start(2))
+        self._escaped_quotes: dict[str, list[int]] = {'"': [], "'": []}
+        for match in _ESCAPED_QUOTE.finditer(text):
+            self._escaped_quotes[match.group(1)].append(match.start(1) - 1)
+        self._closers: dict[int, int] | None = None
+
+    @staticmethod
+    def _next(positions: list[int], after: int) -> int | None:
+        index = bisect.bisect_right(positions, after)
+        return positions[index] if index < len(positions) else None
+
+    def value_end(self, start: int) -> int:
+        """End of the value that starts at `start`, erring towards redacting more.
+
+        A quoted value runs to its matching unescaped quote (an escaped `\\"`
+        opener to the matching `\\"`); a bracketed value to its matching closer;
+        anything else to the next whitespace. Bounded by `_VALUE_LIMIT`.
+        """
+        text = self._text
+        limit = min(len(text), start + _VALUE_LIMIT)
+        if start >= limit:
+            return start
+        first = text[start]
+        if first == "\\" and start + 1 < limit and text[start + 1] in "\"'":
+            end = self._next(self._escaped_quotes[text[start + 1]], start + 1)
+            return limit if end is None or end + 2 > limit else end + 2
+        if first in "\"'":
+            end = self._next(self._quotes[first], start)
+            return limit if end is None or end + 1 > limit else end + 1
+        if first in "{[":
+            if self._closers is None:
+                self._closers = _matching_closers(text)
+            end = self._closers.get(start)
+            return limit if end is None or end + 1 > limit else end + 1
+        end = self._next(self._whitespace, start - 1)
+        return limit if end is None or end > limit else end
 
 
 def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
-    """Replace each (start, end) span with the marker, keeping a value's quotes."""
+    """Replace each span with the marker; overlapping spans merge by max end.
+
+    A lone quoted span keeps its quotes, so the redacted text stays readable.
+    """
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+            merged[-1][2] = 0
+        else:
+            merged.append([start, end, 1])
     out: list[str] = []
     cursor = 0
-    for start, end in sorted(spans):
-        if start < cursor or end <= start:
-            continue
+    for start, end, single in merged:
         head, tail = start, end
-        if text.startswith("\\", start) and end - start >= 4 and text[start + 1] in "\"'":
+        if (
+            single
+            and text.startswith("\\", start)
+            and end - start >= 4
+            and text[start + 1] in "\"'"
+        ):
             head, tail = start + 2, end - 2
-        elif text[start] in "\"'" and end - start >= 2 and text[end - 1] == text[start]:
+        elif single and text[start] in "\"'" and end - start >= 2 and text[end - 1] == text[start]:
             head, tail = start + 1, end - 1
         out.append(text[cursor:head])
         out.append(_REDACTED)
@@ -295,19 +363,22 @@ def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
 
 def _secret_value_spans(text: str, *, oauth: bool) -> list[tuple[int, int]]:
     """Value spans after secret names: quoted keys, `name=value`, `--flag value`."""
-    spans: list[tuple[int, int]] = []
+    starts: list[int] = []
     if "'" in text or '"' in text:
-        for match in _QUOTED_KEY.finditer(text):
-            if _is_secret_name(match.group(2), oauth=oauth):
-                spans.append((match.end(), _value_end(text, match.end())))
-    for match in _NAME_VALUE.finditer(text):
-        if _is_secret_name(match.group(1), oauth=oauth):
-            spans.append((match.end(), _value_end(text, match.end())))
+        starts.extend(
+            m.end() for m in _QUOTED_KEY.finditer(text) if _is_secret_name(m.group(2), oauth=oauth)
+        )
+    starts.extend(
+        m.end() for m in _NAME_VALUE.finditer(text) if _is_secret_name(m.group(1), oauth=oauth)
+    )
     if "-" in text:
-        for match in _FLAG_VALUE.finditer(text):
-            if _is_secret_name(match.group(1), oauth=oauth):
-                spans.append((match.end(), _value_end(text, match.end())))
-    return spans
+        starts.extend(
+            m.end() for m in _FLAG_VALUE.finditer(text) if _is_secret_name(m.group(1), oauth=oauth)
+        )
+    if not starts:
+        return []
+    index = _ValueIndex(text)
+    return [(start, index.value_end(start)) for start in starts]
 
 
 def _redact_url_queries(text: str) -> str:
@@ -350,6 +421,10 @@ def _redact_secret_text(text: str) -> str:
         text = text[:_TEXT_LIMIT] + " [truncated]"
     if "{" in text or "[" in text:
         text = _redact_embedded_structures(text)
+    if _FORM_ENCODED.search(text):
+        # Form-encoded bodies: decode one level so `%26name%3Dvalue` pairs are
+        # seen as `&name=value`.
+        text = unquote(text)
     if "://" in text and "?" in text:
         text = _redact_url_queries(text)
     for pattern, keep in _FREE_TEXT_PATTERNS:

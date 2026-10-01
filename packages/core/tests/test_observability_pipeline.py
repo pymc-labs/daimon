@@ -224,6 +224,11 @@ _ADVERSARIAL = {
     "urls-then-query": "http://x" * 8000 + "?a=1",
     "url-query": ("http://h/" + "p" * 60 + "?") * 900,
     "quoted-keys": "'k': " * 12000,
+    "secret-pairs": "password=" * 7200,
+    "secret-lists": "password=[" * 6500,
+    "secret-dicts": "password={" * 6500,
+    "secret-colons": "token=a:" * 8000,
+    "secret-flags": "-token=x" * 8000,
 }
 
 
@@ -379,3 +384,51 @@ def test_span_tags_and_plain_headers_are_scrubbed() -> None:
 
     assert canary not in repr(scrubbed)
     assert scrubbed is not None and "[redaction failed]" not in repr(scrubbed)
+
+
+def test_whole_event_with_many_adversarial_fields_scrubs_within_budget() -> None:
+    """One event can carry many large strings; the total must stay bounded."""
+    import time
+
+    from daimon.core.observability import _scrub_event  # pyright: ignore[reportPrivateUsage]
+
+    big = [_ADVERSARIAL[name] for name in sorted(_ADVERSARIAL) if name.startswith("secret-")]
+    event: dict[str, object] = {
+        "exception": {"values": [{"type": "RuntimeError", "value": v} for v in big]},
+        "message": big[0],
+        "contexts": {"extra_info": {f"f{i}": v for i, v in enumerate(big)}},
+        "tags": {"note": big[1][:200]},
+    }
+
+    started = time.perf_counter()
+    _scrub_event(event, {})  # pyright: ignore[reportArgumentType]
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, f"{elapsed:.3f}s"
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda c: f'password=a:token="b {c}"',
+        lambda c: f"Authorization: Token ab;{c}",
+        lambda c: f"socket token xapp-1-{c}ABCDEFGH",
+        lambda c: f"jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIx{_plain(c)}.c2lnbmF0dXJlLXZhbHVl",
+        lambda c: f"body a=1%26client_secret%3D{c}%26b=2",
+        lambda c: f"POST https://discord.com/api/webhooks/123456789/{c} returned 404",
+    ],
+    ids=["overlap", "auth-token-scheme", "xapp", "jwt", "form-encoded", "discord-webhook"],
+)
+def test_more_secret_shapes_never_reach_the_transport(
+    capturing_sentry: CapturingTransport, render: Callable[[str], str]
+) -> None:
+    canary = _hard_canary()
+    try:
+        raise RuntimeError(render(canary))
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert capturing_sentry.payloads
+    assert canary not in capturing_sentry.rendered()
+    assert _plain(canary) not in capturing_sentry.rendered()
