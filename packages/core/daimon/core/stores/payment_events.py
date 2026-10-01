@@ -71,14 +71,6 @@ async def try_claim_credit(session: AsyncSession, event_id: str) -> bool:
     return rowcount > 0
 
 
-async def unclaim_credit(session: AsyncSession, event_id: str) -> None:
-    """Reset credited_at to NULL. Reserved for future use; no current callers."""
-    await session.execute(
-        update(PaymentEvent).where(PaymentEvent.id == event_id).values(credited_at=None)
-    )
-    await session.flush()
-
-
 async def get(session: AsyncSession, event_id: str) -> PaymentEventRow | None:
     """Return the row by event_id, or None if missing."""
     result = await session.execute(select(PaymentEvent).where(PaymentEvent.id == event_id))

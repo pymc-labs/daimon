@@ -101,7 +101,3 @@ class BillingCog(commands.Cog):
                 render_error(exc, request_id=rid),
                 ephemeral=True,
             )
-
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(BillingCog(bot))
