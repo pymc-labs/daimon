@@ -560,4 +560,109 @@ def test_a_malformed_log_call_never_raises(capsys: pytest.CaptureFixture[str]) -
     finally:
         logger.removeHandler(handler)
         logger.propagate = True
-    assert "[redaction failed" in stream.getvalue()
+    rendered = stream.getvalue()
+    assert "bad %d" in rendered and "RuntimeError: boom" in rendered
+    assert "<_Broken>" in rendered
+
+
+class _Structured:
+    """A value that serializes itself for structlog (its repr can't be used)."""
+
+    def __structlog__(self) -> dict[str, object]:
+        return {"status": "ok", "count": 2, "session_id": "sesn_abc", "api_key": _HOOK_CANARY}
+
+    def __repr__(self) -> str:
+        raise ValueError("repr unavailable")
+
+
+_HOOK_CANARY = new_canary()
+
+
+def test_structlog_hook_values_keep_ids_and_counts_and_never_raise(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    configure_log_level("INFO")
+    capsys.readouterr()
+    structlog.get_logger("daimon.test").info("structured.done", diagnostic=_Structured())
+    line = next(raw for raw in capsys.readouterr().out.splitlines() if "structured.done" in raw)
+    diagnostic = json.loads(line)["diagnostic"]
+    assert diagnostic["status"] == "ok"
+    assert diagnostic["count"] == 2
+    assert diagnostic["session_id"] == "sesn_abc"
+    assert _HOOK_CANARY not in line
+
+
+def test_a_failing_structlog_hook_never_raises(capsys: pytest.CaptureFixture[str]) -> None:
+    class _BrokenHook:
+        def __structlog__(self) -> object:
+            raise RuntimeError("hook failed")
+
+    configure_log_level("INFO")
+    capsys.readouterr()
+    structlog.get_logger("daimon.test").info("hook.broken", diagnostic=_BrokenHook())
+    assert "redaction failed: RuntimeError" in capsys.readouterr().out
+
+
+def test_a_failing_scrubber_never_raises_into_the_caller(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fault injection: the redaction itself fails in every stage."""
+    from daimon.core import observability
+
+    canary = new_canary()
+
+    def _boom(_text: str) -> str:
+        raise ValueError("scrubber broke")
+
+    install_log_redaction()
+    configure_log_level("INFO")
+    monkeypatch.setattr(observability, "_redact_secret_text", _boom)
+
+    stream = io.StringIO()
+    handler = RichHandler(console=Console(file=stream, width=200), rich_tracebacks=True)
+    plain = logging.StreamHandler(stream)
+    logger = logging.getLogger("daimon.test.fault")
+    logger.addHandler(handler)
+    logger.addHandler(plain)
+    logger.propagate = False
+    try:
+        try:
+            _raise(f"api_key={canary}")
+        except RuntimeError:
+            logger.exception("failed with %s", f"token={canary}")
+    finally:
+        logger.removeHandler(handler)
+        logger.removeHandler(plain)
+        logger.propagate = True
+    out = stream.getvalue()
+    assert "redaction failed: ValueError" in out
+    assert "daimon.test.fault" in out
+    assert canary not in out
+
+    capsys.readouterr()
+    structlog.get_logger("daimon.test").info("fault.json", note=f"token={canary}")
+    rendered = capsys.readouterr().out
+    assert "redaction failed" in rendered
+    assert canary not in rendered
+
+
+def test_a_malformed_call_never_prints_raw_args(capfd: pytest.CaptureFixture[str]) -> None:
+    canary = new_canary()
+    install_log_redaction()
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("daimon.test.malformed")
+    logger.addHandler(handler)
+    logger.propagate = False
+    capfd.readouterr()
+    try:
+        logger.error("bad %d", f"password={canary}")
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
+    out = capfd.readouterr()
+    rendered = stream.getvalue() + out.out + out.err
+    assert "bad %d" in rendered
+    assert canary not in rendered

@@ -867,11 +867,32 @@ def _redact_record_text(record: logging.LogRecord) -> None:
     try:
         message = record.getMessage()
     except (TypeError, ValueError):
+        # A malformed call (`"%d" % "x"`): keep only the redacted template, so
+        # logging's handleError fallback can't print the raw args.
+        template = record.msg if isinstance(record.msg, str) else _safe_repr(record.msg)
+        record.msg = _redact_secret_text(template)
+        record.args = None
         return
     redacted = _redact_secret_text(message)
     if redacted != message:
         record.msg = redacted
         record.args = None
+
+
+def _failure_marker(exc: BaseException, record: logging.LogRecord | None = None) -> str:
+    """Fixed text for a record that couldn't be redacted: no message, no args."""
+    where = f" in {record.name} {record.pathname}:{record.lineno}" if record is not None else ""
+    return f"[redaction failed: {type(exc).__name__}{where}]"
+
+
+def _safe_record(record: logging.LogRecord, exc: BaseException) -> logging.LogRecord:
+    out = copy.copy(record)
+    out.msg = _failure_marker(exc, record)
+    out.args = None
+    out.exc_info = None
+    out.exc_text = None
+    out.stack_info = None
+    return out
 
 
 def _redacted_for_output(record: logging.LogRecord) -> logging.LogRecord:
@@ -900,10 +921,13 @@ class LogRedactionFilter(logging.Filter):
     redacted copy (message, cached traceback text and stack text)."""
 
     def filter(self, record: logging.LogRecord) -> logging.LogRecord:
-        if record.name == _ACCESS_LOGGER:
-            _redact_record_text(record)
-            return record
-        return _redacted_for_output(record)
+        try:
+            if record.name == _ACCESS_LOGGER:
+                _redact_record_text(record)
+                return record
+            return _redacted_for_output(record)
+        except Exception as exc:
+            return _safe_record(record, exc)
 
 
 _handler_handle = logging.Handler.handle
@@ -912,8 +936,14 @@ _installed = False
 
 
 def _redacting_format(self: logging.Handler, record: logging.LogRecord) -> str:
-    """The last step of every stdlib handler: redact the rendered line."""
-    return _redact_secret_text(_handler_format(self, record))
+    """The last step of every stdlib handler: redact the rendered line.
+
+    Never raises: a formatting or redaction failure yields a fixed marker
+    (the failing scrubber isn't retried)."""
+    try:
+        return _redact_secret_text(_handler_format(self, record))
+    except Exception as exc:
+        return _failure_marker(exc, record)
 
 
 def redact_rendered(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
@@ -921,9 +951,15 @@ def redact_rendered(logger: WrappedLogger, method_name: str, event_dict: EventDi
     (whatever a renderer made of nested values and reprs). After a renderer
     structlog passes the rendered string here, not a dict."""
     del logger, method_name
-    rendered = cast("object", event_dict)
+    try:
+        return _redact_rendered(cast("object", event_dict))
+    except Exception as exc:
+        return cast("EventDict", json.dumps({"event": _failure_marker(exc)}))
+
+
+def _redact_rendered(rendered: object) -> EventDict:
     if not isinstance(rendered, str):
-        return event_dict
+        return cast("EventDict", rendered)
     if rendered.startswith("{"):
         try:
             parsed = json.loads(rendered)
@@ -959,12 +995,7 @@ def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool 
     try:
         redacted = _redacted_for_output(record)
     except Exception as exc:
-        redacted = copy.copy(record)
-        redacted.msg = f"[redaction failed: {type(exc).__name__}]"
-        redacted.args = None
-        redacted.exc_info = None
-        redacted.exc_text = None
-        redacted.stack_info = None
+        redacted = _safe_record(record, exc)
     return _handler_handle(self, redacted)
 
 
@@ -1016,7 +1047,10 @@ def redact_log_event(logger: WrappedLogger, method_name: str, event_dict: EventD
     """
     del logger, method_name
     for key, value in list(event_dict.items()):
-        event_dict[key] = _redact_log_field(key, value)
+        try:
+            event_dict[key] = _redact_log_field(key, value)
+        except Exception as exc:
+            event_dict[key] = _failure_marker(exc)
     return event_dict
 
 
@@ -1040,7 +1074,12 @@ def _redact_log_field(key: str, value: object) -> object:
         return _redact_secret_text(value)
     if isinstance(value, (dict, list, tuple)):
         return _redact_value(cast("object", value))
-    return _redact_secret_text(repr(value))
+    hook = getattr(value, "__structlog__", None)
+    if callable(hook):
+        # The renderer's own serialization protocol: redact what it returns,
+        # keeping non-secret ids, counts and flags as they are.
+        return _redact_log_field(key, hook())
+    return _redact_secret_text(_safe_repr(value))
 
 
 def _event_scrubber() -> EventScrubber:
