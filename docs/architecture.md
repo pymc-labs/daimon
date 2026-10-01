@@ -130,6 +130,17 @@ config). The order is load-bearing and documented as such in the module:
 The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
+A Slack `app_mention` runs a turn only when its text contains the bot's own
+`<@U…>` mention token, follow-ups in a thread included. Slack's docs say the
+event fires only on a direct mention, but installs have reported it arriving
+for thread replies that never mentioned the bot, so `_handle_app_mention`
+checks the text itself, as Discord checks `message.mentions`. The bot's user
+id comes from `auth.test`, cached per workspace. The check runs after dedup and
+the token read and before the Slack Connect rejection, so an external sender
+who never addressed the bot gets no notice. A dropped event is logged as
+`slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
+without an error reply.
+
 Discord checks its per-guild in-flight limit before the optional process-wide
 turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
 replies and DMs count against it; an excess requested turn gets a retry notice.
