@@ -21,17 +21,20 @@ from daimon.adapters.discord.agent_setup.add_skill import (
     BUILT_IN_MESSAGE,
     AddSkillModal,
     SkillPreviewView,
+    preview_text,
 )
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
@@ -335,6 +338,42 @@ async def test_exactly_one_of_paste_or_file_is_taken(
     ).on_submit(interaction)
 
     assert "not both or neither" in _followups(interaction)[0]
+    interaction.edit_original_response.assert_not_awaited()
+
+
+def test_the_preview_shows_the_description_as_plain_text() -> None:
+    md = _MD.replace("Take meeting notes.", "Ping @everyone in **bold**.")
+    text = preview_text(bundle_from_markdown(md).preview, agent_name="helper")
+    assert "@\u200beveryone" in text and "\\*\\*bold\\*\\*" in text
+
+
+async def test_a_file_of_the_wrong_kind_is_never_read(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    upload = _attachment(b"", "notes.tar")
+    interaction = _interaction()
+
+    await _modal(_details_view(world, agent), agent, upload=upload).on_submit(interaction)
+
+    upload.read.assert_not_awaited()
+    assert "upload a SKILL.md or a .zip" in _followups(interaction)[0]
+
+
+async def test_a_failure_after_the_form_closes_is_reported(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    monkeypatch.setattr(
+        add_skill_mod, "skill_change_refusal", AsyncMock(side_effect=DaimonError("down"))
+    )
+    interaction = _interaction()
+
+    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(interaction)
+
+    assert _followups(interaction), "the deferred form gets an answer"
     interaction.edit_original_response.assert_not_awaited()
 
 

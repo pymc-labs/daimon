@@ -9,6 +9,7 @@ live, and Add re-reads the agent itself.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Final, cast
 
 import anthropic
@@ -39,6 +40,7 @@ from daimon.core.skills.ingest import (
     SkillPreview,
     bundle_from_markdown,
     bundle_from_upload,
+    require_upload_suffix,
 )
 
 import discord
@@ -61,8 +63,9 @@ _PATH_CHARS: Final = 80
 
 def needs_admin_message(agent_name: str) -> str:
     return (
-        f"{agent_name} answers in a channel or the whole server, so adding a skill needs "
-        f"{ADMIN_NOUN} or an admin of every channel it answers in."
+        f"Others use {agent_name} (a channel or server default, a thread, or someone else's "
+        f"routine or queued task), so adding a skill needs {ADMIN_NOUN} or an admin of every "
+        "channel it answers in."
     )
 
 
@@ -102,9 +105,10 @@ def _bounded(paths: list[str]) -> str:
 
 def preview_text(preview: SkillPreview, *, agent_name: str) -> str:
     """What the skill holds, in the words the Add button is confirming. Pure."""
+    description = discord.utils.escape_mentions(discord.utils.escape_markdown(preview.description))
     lines = [
         f"## Add {preview.name} to {agent_name}?",
-        preview.description,
+        description,
         f"**Files:** {_bounded(preview.files)}",
     ]
     if preview.scripts:
@@ -150,27 +154,36 @@ class AddSkillModal(discord.ui.Modal):
         if bool(pasted) == bool(uploads):
             raise SkillIngestError("Paste a SKILL.md or upload one file, not both or neither.")
         if pasted:
-            return bundle_from_markdown(pasted), "pasted"
+            return await asyncio.to_thread(bundle_from_markdown, pasted), "pasted"
         upload = uploads[0]
+        require_upload_suffix(upload.filename)
         if upload.size > MAX_UNCOMPRESSED_BYTES:
             raise SkillIngestError(f"{upload.filename} is larger than a skill may be.")
         try:
             data = await upload.read()
         except discord.HTTPException as exc:
             raise SkillIngestError("I could not read that file. Upload it again.") from exc
-        return bundle_from_upload(data, filename=upload.filename), f"attachment {upload.filename}"
+        bundle = await asyncio.to_thread(bundle_from_upload, data, filename=upload.filename)
+        return bundle, f"attachment {upload.filename}"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         view, agent = self._view, self._agent
         try:
             bundle, origin = await self._bundle()
+            refusal = await skill_change_refusal(
+                interaction, runtime=view.runtime, state=view.state, agent=agent
+            )
         except SkillIngestError as exc:
             await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
             return
-        refusal = await skill_change_refusal(
-            interaction, runtime=view.runtime, state=view.state, agent=agent
-        )
+        except DaimonError as exc:
+            request_id = generate_request_id()
+            log.exception("agent_setup.add_skill.preview_failed", request_id=request_id)
+            await interaction.followup.send(
+                render_error(exc, request_id=request_id), ephemeral=True
+            )
+            return
         if refusal is not None:
             await interaction.followup.send(refusal, ephemeral=True)
             return
