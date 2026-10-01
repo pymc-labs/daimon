@@ -349,7 +349,9 @@ async def test_run_new_agent_inside_an_isolated_channel_says_why_it_is_not_shown
         await set_access_policy(
             session,
             tenant_id=tenant_id,
-            policy=TenantAccessPolicy(isolated_channel_ids=(_CHANNEL_ID,)),
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(_CHANNEL_ID,), isolated_channel_ids=(_CHANNEL_ID,)
+            ),
         )
 
     await run_new_agent_submission(

@@ -151,16 +151,13 @@ async def test_slack_refusing_the_channel_falls_back_to_a_dm(
 
 
 @pytest.mark.parametrize(
-    ("agent", "expected"),
-    [("daimon", "channel_isolated"), ("local", "destination_unavailable")],
-    ids=["outside-agent-posting-in", "own-agent-never-dms"],
+    "agent", ["daimon", "local"], ids=["outside-agent-posting-in", "own-agent"]
 )
 async def test_an_isolated_channels_routine_never_leaves_it(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     agent: str,
-    expected: str,
 ) -> None:
     from slack_sdk.errors import SlackApiError
     from slack_sdk.web.async_slack_response import AsyncSlackResponse
@@ -175,7 +172,13 @@ async def test_an_isolated_channels_routine_never_leaves_it(
         mode="agent",
     )
     await set_access_policy(
-        db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(isolated_channel_ids=("C1",))
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C1",),
+            isolated_channel_ids=("C1",),
+            agent_channel_pins={"local": ("C1",)},
+        ),
     )
     await db_session.commit()
     post, client = _poster(db_session_factory, monkeypatch)
@@ -185,7 +188,7 @@ async def test_an_isolated_channels_routine_never_leaves_it(
 
     outcome = await post(row)
 
-    assert (outcome.status, outcome.note) == ("skipped", expected)
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     client.conversations_open.assert_not_awaited()
 
 
