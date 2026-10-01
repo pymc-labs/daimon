@@ -252,6 +252,11 @@ def test_daimon_add_skill_asks_only_when_it_uploads() -> None:
     assert decide(_ON, upload, attended=True, trusted_servers=trusted).outcome == "ask"
     unattended = decide(_ON, upload, attended=False, trusted_servers=trusted)
     assert (unattended.outcome, unattended.reason) == ("deny", "unattended_write")
+    for allowed in (("*",), ("daimon-mcp",), ("daimon-mcp/add_skill",)):
+        open_policy = _ON.model_copy(update={"unattended_writes": allowed})
+        for servers in (trusted, frozenset[str]()):
+            verdict = decide(open_policy, upload, attended=False, trusted_servers=servers)
+            assert verdict.outcome == "deny", f"{allowed}: nobody watching never confirms"
     assert decide(OPEN_TOOL_SAFETY, upload, attended=True, trusted_servers=trusted).reason == (
         "disabled"
     ), "off by default: nothing about add_skill changes until the policy is on"

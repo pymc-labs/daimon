@@ -26,7 +26,8 @@ Three questions, each a total function of its arguments:
   `create_session` sends as a per-session override. One daimon tool still
   asks: `add_skill`, once its input names the reviewed `content_hash`
   (`CONFIRMED_DAIMON_TOOLS`), since it puts new files in front of everyone
-  the agent answers.
+  the agent answers. A run nobody watches never confirms one, whatever
+  `unattended_writes` allows.
 
 With `enabled=False` (the default) nothing changes: every toolset stays
 `always_allow` and every call is allowed, which is the behaviour before this
@@ -94,7 +95,7 @@ ANY_KEY: Final[str] = "*"
 
 #: Daimon's own tools that wait for the card like a third-party write, keyed
 #: to the input field whose presence makes the call the write. Without it the
-#: call only previews, and runs.
+#: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {"add_skill": "content_hash"}
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
@@ -245,7 +246,8 @@ class ToolSafetyPolicy(BaseModel):
         default=(),
         description=(
             "Servers or server/tool pairs whose writes may run in routines and other "
-            'unattended runs, e.g. ["linear/create_issue"]. "*" allows every write there.'
+            'unattended runs, e.g. ["linear/create_issue"]. "*" allows every write there. '
+            "Daimon's own add_skill never confirms unattended."
         ),
     )
 
@@ -426,8 +428,9 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
-    if ANY_KEY in policy.unattended_writes or _listed(
-        policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name
+    if not _confirmed_daimon_write(call) and (
+        ANY_KEY in policy.unattended_writes
+        or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
     ):
         return ToolVerdict(outcome="allow", effect=effect, reason="unattended_write_allowed")
     return ToolVerdict(outcome="deny", effect=effect, reason="unattended_write")

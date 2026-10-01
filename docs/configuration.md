@@ -823,7 +823,8 @@ Servers or server/tool pairs that are always refused, e.g. ["hubspot/delete_deal
 `tuple[str, ...]` · optional · default unset
 
 Servers or server/tool pairs whose writes may run in routines and other unattended runs,
-e.g. ["linear/create_issue"]. "*" allows every write there.
+e.g. ["linear/create_issue"]. "*" allows every write there. Daimon's own add_skill never
+confirms unattended.
 
 ## Artifacts
 
