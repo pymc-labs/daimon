@@ -1501,6 +1501,105 @@
         'type': 'object',
       }),
     }),
+    'create_promo_code': dict({
+      'description': '''
+        Create a promo code any server or workspace can redeem for credit. Operator-only.
+        
+        ``amount_usd`` is the credit per redemption as a decimal string.
+        ``credit`` codes stay until spent; ``timed`` codes need
+        ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
+        at the end. Redemption is open between ``redeem_starts_at`` and
+        ``redeem_ends_at`` when given (a timed code's defaults to its credit
+        end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
+        only in this result.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'amount_usd': dict({
+            'type': 'string',
+          }),
+          'credit_ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'credit_starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'kind': dict({
+            'enum': list([
+              'credit',
+              'timed',
+            ]),
+            'type': 'string',
+          }),
+          'max_redemptions': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'note': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'redeem_ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'redeem_starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'amount_usd',
+          'kind',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'create_routine': dict({
       'description': '''
         Create a routine in the caller's tenant partition.
@@ -2254,6 +2353,22 @@
         'type': 'object',
       }),
     }),
+    'get_tenant_summary': dict({
+      'description': '''
+        Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
+        
+        Lists every channel with its own agent or environment setting, or a
+        spending budget, with the agent and environment that apply there and
+        the budget's limit, window and spend (``budget`` is null without one).
+        Money is a decimal string.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_thread_participation': dict({
       'description': '''
         Report whether you follow a thread or channel, and which tier decided it.
@@ -2617,6 +2732,15 @@
         is the bare name: pass it straight to delete_notebook to reclaim a host
         port, or to create_notebook_upload_url to re-upload over it.
       ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_promo_codes': dict({
+      'description': 'List every promo code on this deployment, newest first. Operator-only.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3715,6 +3839,25 @@
           'channel_id',
           'origin_context_id',
           'expected_ma_agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'revoke_promo_code': dict({
+      'description': '''
+        Stop a promo code from being redeemed again. Operator-only.
+        
+        Credit already redeemed stays, including timed credit that has not started.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'promo_code_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'promo_code_id',
         ]),
         'type': 'object',
       }),

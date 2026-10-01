@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -57,12 +58,14 @@ from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
+from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
+from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
@@ -80,6 +83,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.operator_tokens import scope_tag
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
@@ -242,6 +246,10 @@ def create_mcp_app(
         is_admin_resolver=effective_is_admin_resolver,
         internal_resolver=effective_internal_resolver,
         sessionmaker=effective_sessionmaker,
+        operator_rate_limiter=RateLimiter(
+            max_requests=effective_settings.mcp.operator_calls_per_minute,
+            window=timedelta(minutes=1),
+        ),
     )
 
     @asynccontextmanager
@@ -272,6 +280,9 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
     mcp.add_transform(Visibility(False, tags={"teams"}))
+    # Deployment-wide promo issuing: only an operator token holding the scope
+    # re-enables these (middleware/mcp_identity.py); admins never see them.
+    mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
@@ -352,6 +363,8 @@ def create_mcp_app(
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
+    register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
 
     register_upload_tool(mcp, runtime=runtime)
 
