@@ -416,9 +416,6 @@ class TeamsApp:
                 return
             self.spawn(self._observe(parsed), name="teams.participation")
             return
-        if parsed.kind == "channel" and self._participation is not None:
-            # A mention supersedes the thread's waiting batch; its turn replays those replies.
-            self._participation.cancel(parsed.conversation_id)
         self.spawn(self._handle(parsed), name="teams.turn")
 
     def _participation_for(self, inbound: TeamsInbound) -> TeamsParticipation:
@@ -570,6 +567,7 @@ class TeamsApp:
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._pending.setdefault(key, []).append(inbound)
+            self._supersede_batch(inbound)
             return
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
@@ -586,8 +584,17 @@ class TeamsApp:
             await self._say(inbound, _SHED)
             return
         self._last_message_at[key] = datetime.now(UTC)
+        self._supersede_batch(inbound)
         async with self._holding(key, tenant_id):
             await self._run_turns(key, tenant_id, [inbound])
+
+    def _supersede_batch(self, inbound: TeamsInbound) -> None:
+        """A mention's turn owns the thread now: drop its waiting batch, whose replies it replays.
+
+        Not on arrival: a mention refused before here (protected, command, shed) drops nothing.
+        """
+        if inbound.kind == "channel" and self._participation is not None:
+            self._participation.cancel(inbound.conversation_id)
 
     @contextlib.asynccontextmanager
     async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:

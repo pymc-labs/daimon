@@ -101,6 +101,30 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A refused mention (here a command in a channel) must not drop another person's batch."""
+    teams = _app(db_session_factory, FakeSender())
+    mention = dataclasses.replace(
+        make_inbound("is it shipped?", conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+    )
+    command = dataclasses.replace(mention, text="new")
+    participation = teams._participation_for(mention)
+
+    with (
+        patch.object(participation, "cancel", wraps=participation.cancel) as cancel,
+        patch.object(TeamsApp, "_run_turns", AsyncMock()),
+    ):
+        await teams._handle(command)
+        assert cancel.call_count == 0, "the pointer reply runs no turn, so the batch stays"
+        await teams._handle(mention)
+
+    cancel.assert_called_once_with(THREAD_ID)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_queued_message_follows_a_setup_conversation_that_ended_meanwhile(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
