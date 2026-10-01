@@ -308,8 +308,9 @@ rights, so a channel admin's edits reach them as they reach anyone chatting
 with the agent. A member's run carries that member's own read visibility, as
 their chat does, and a server admin who chats with an agent a channel admin
 edited runs its instructions with their own rights, as with any agent someone
-else wrote. The check reads requesters' rights at edit time: a requester
-promoted later runs earlier edits with the new rights. Server admins edit grants
+else wrote. The check reads requesters' rights at edit time, as stored at
+their last chat turn: a requester promoted later runs earlier edits with the
+new rights. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
 panel, or with the CLI:
 
@@ -579,8 +580,10 @@ against.
   then every Discord, Slack and MCP process on a timer-aware build. Only then
   may `create_timer` be called, and it is only exposed by that MCP build.
   Downgrading `0029_feat084_timers` deletes every timer row, fired or not.
-  A timer only runs as the agent it was set with. If the thread answers to
-  another agent when the timer fires, the adapter refuses it after
+  A wake (timer, handoff, applied private input) only runs as the agent it
+  was queued for; applied private input may also resume the agent of the
+  requester's live session in the thread. If the thread answers to
+  another agent when the wake fires, the adapter refuses it after
   `admit()` and before anything is bound or billed. It settles the row
   `skipped/skip_target_changed` and posts a notice in the thread.
 

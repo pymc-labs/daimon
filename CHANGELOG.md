@@ -71,7 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in channels they run (instructions, skills, keys, MCP servers, repos)
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
-  admins. Slack grants are by member only.
+  admins. Slack grants are by member only. A routine or wake set up by someone
+  with more rights keeps the agent out of a channel admin's hands.
   Nothing changes until a channel admin is named.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
@@ -195,7 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("remind me in two hours"). A timer runs in the thread it was set in, as the
   person who asked for it, and goes through the wake queue. A cancelled timer
   never fires, and a timer whose thread now answers to a different agent is
-  skipped with a notice instead of running under that agent. Migration
+  skipped with a notice instead of running under that agent. Handoffs and
+  applied private input are now skipped the same way. Migration
   `0029_feat084_timers` adds the `timer` reason; deploy it and timer-aware
   Discord, Slack and MCP builds before anyone can create timers (see
   `docs/architecture.md`). Downgrading it deletes all timer rows.

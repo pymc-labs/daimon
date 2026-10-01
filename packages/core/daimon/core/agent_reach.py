@@ -10,9 +10,9 @@ channel admin of a channel outside S. Unattended runs are routines and queued
 wakes (timers, handoffs, applied private input); each fires with its
 requester's rights, so a stronger requester's would run what the caller writes
 with those rights. A plain member's carries only that member's own reach, as
-their chat does. Rights are read when the caller edits: a requester promoted
-later runs earlier edits with the new rights. An agent that answers nowhere is
-local to any S.
+their chat does. Rights are those stored at the requester's last chat turn,
+read when the caller edits: a requester promoted later runs earlier edits with
+the new rights. An agent that answers nowhere is local to any S.
 
 A private conversation counts as the channel `/dm` ran in: its DM channel's
 row and its `dm:` scope answer only while it is the tenant's live conversation
