@@ -158,9 +158,9 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
 }
 
 _NO_CONTEXT = (
-    "I can't read this channel's messages, so there's nothing for me to go on. "
-    "Write your question after the mention, or ask a team owner to reinstall the app "
-    "and accept its permission to read channel messages."
+    "I couldn't read this thread, so there's nothing for me to go on. "
+    "Write your question after the mention. If this keeps happening, ask a team owner "
+    "to check the app's permission to read channel messages."
 )
 
 

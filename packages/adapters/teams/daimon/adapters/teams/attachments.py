@@ -11,9 +11,9 @@ hosts.
 A channel message carries its images and files only inside its `text/html`
 body (`<img>`, `<attachment>`), so those are counted there and read from the
 message in Microsoft Graph: images from its hosted content, with the Graph
-token and only from the Graph host. Channel files live in SharePoint, which
-the app has no permission to read, so the person is told; so they are when
-Graph cannot be read at all.
+token and only from the Graph host. Channel files live in SharePoint, read
+only from the team's own site once an admin grants it (`channel_files`);
+otherwise the person is told, as they are when Graph cannot be read at all.
 """
 
 from __future__ import annotations
