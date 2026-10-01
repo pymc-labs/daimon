@@ -862,14 +862,14 @@ class TeamsApp:
             adopted.answer_prefix = lifecycle.answer_prefix
             return adopted
 
-        embedded = any(f.kind in ("embedded_image", "embedded_file") for f in inbound.files)
         reader = self._reader
         attachments = await prepare_attachments(
             self.runtime.http_client,
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
-            channel_media=await reader.read_media(inbound) if reader and embedded else None,
+            # A channel activity carries only the text: its media are on Graph's copy.
+            channel_media=await reader.read_media(inbound) if reader else None,
             graph_token=reader.token if reader else None,
         )
         if attachments.notice is not None:

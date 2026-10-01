@@ -8,10 +8,11 @@ lines carrying the download URL. The bot token only goes to Bot Framework
 hosts, downloads only come from SharePoint, and no redirect leaves those
 hosts.
 
-A channel message carries its images and files only inside its `text/html`
-body (`<img>`, `<attachment>`), so those are counted there and read from the
-message in Microsoft Graph: images from its hosted content, with the Graph
-token and only from the Graph host. Channel files live in SharePoint, read
+A channel activity carries only the message's text, so every channel message
+is read from Microsoft Graph: images from its hosted content, with the Graph
+token and only from the Graph host. `<img>` and `<attachment>` tags in the
+activity's `text/html` body are counted only to tell the person what was
+missed when Graph cannot be read. Channel files live in SharePoint, read
 only from the team's own site once an admin grants it (`channel_files`);
 otherwise the person is told, as they are when Graph cannot be read at all.
 """
@@ -231,10 +232,8 @@ def _resolve_embedded(
 ) -> tuple[list[InboundFile], list[InboundFile]]:
     """`(files to read, embedded ones Graph could not name)`. Graph's view of the
     messages, when there is one, replaces what the activities listed for a channel."""
-    embedded = [f for f in files if f.kind in ("embedded_image", "embedded_file")]
-    if not embedded:
-        return list(files), []
     if media is None:
+        embedded = [f for f in files if f.kind in ("embedded_image", "embedded_file")]
         return [f for f in files if f not in embedded], embedded
     kept = [InboundFile("graph_image", "image", url) for url in media.image_urls]
     kept += [

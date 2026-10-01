@@ -214,6 +214,24 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     assert lookups, "the group id came from Bot Framework's team details, absent from the activity"
 
 
+async def test_a_channel_reply_whose_activity_names_no_media_is_read_from_graph(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """As captured: Teams sends the bot only the text; the files exist on Graph's copy."""
+    seen: list[httpx.Request] = []
+    [turn] = await _run(
+        db_session_factory, teams_api_fake, _load("channel_attachments_reply"), _graph(seen)
+    )
+
+    message = turn["user_message"]
+    assert len(turn["image_blocks"] or []) == 1, "the hosted image is found on Graph"
+    assert "[attachment] `q3.xlsx` was shared but can't be opened here." in message
+    assert "I couldn't read `q3.xlsx`" in _texts(teams_api_fake), "the person hears it"
+    assert any(r.url.path == f"{CHANNEL_PATH}/{ROOT}/replies/{REPLY}" for r in seen), (
+        "the mentioned message is read from Graph even with no markers in the activity"
+    )
+
+
 async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
