@@ -1,4 +1,4 @@
-"""`daimon channels budget set|clear|list` against the real database."""
+"""`daimon channels budget` and `daimon channels admins` against the real database."""
 
 from __future__ import annotations
 
@@ -12,10 +12,19 @@ from typing import cast
 import httpx
 import pytest
 import typer
-from daimon.adapters.cli.commands.channels import budget_clear, budget_list, budget_set
+from anthropic import AsyncAnthropic
+from daimon.adapters.cli.commands.channels import (
+    budget_clear,
+    budget_list,
+    budget_set,
+    channels_admins_clear,
+    channels_admins_get,
+    channels_admins_set,
+)
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.stores import channel_budgets
+from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -95,6 +104,70 @@ async def test_bad_requests_are_refused_before_any_write(
         )
     async with db_session_factory() as s:
         assert await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id) == []
+
+
+GUILD = "900000000000000001"
+CHANNEL = "900000000000000002"
+ROLE = "900000000000000003"
+USER = "900000000000000004"
+
+
+async def test_set_get_clear_round_trip(
+    db_session_factory: async_sessionmaker[AsyncSession], stub_anthropic: AsyncAnthropic
+) -> None:
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="discord", workspace_id=GUILD)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic)
+    where = {"rt": rt, "platform": "discord", "workspace_id": GUILD}
+
+    await channels_admins_set(
+        **where,
+        console=_console(),
+        channel_id=CHANNEL,
+        roles=[ROLE],
+        users=[USER, USER],
+        as_json=True,
+    )
+    listed = _console()
+    await channels_admins_get(**where, console=listed, channel_id=None, as_json=True)
+    (row,) = json.loads(_out(listed))
+    assert (row["channel_id"], row["role_ids"], row["user_ids"]) == (CHANNEL, [ROLE], [USER]), (
+        "json lists the saved grant"
+    )
+
+    cleared = _console()
+    await channels_admins_clear(**where, console=cleared, channel_id=CHANNEL)
+    assert "cleared" in _out(cleared), "clear reports it"
+    after = _console()
+    await channels_admins_get(**where, console=after, channel_id=CHANNEL, as_json=True)
+    assert json.loads(_out(after)) == [], "nothing is left after clear"
+
+
+async def test_set_refuses_bad_ids_empty_lists_and_unknown_tenants(
+    db_session_factory: async_sessionmaker[AsyncSession], stub_anthropic: AsyncAnthropic
+) -> None:
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="slack", workspace_id="T0ADMINS")
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic)
+    slack = {"rt": rt, "console": _console(), "platform": "slack", "workspace_id": "T0ADMINS"}
+
+    with pytest.raises(typer.BadParameter, match="no roles"):
+        await channels_admins_set(
+            **slack, channel_id="C0GROWTH", roles=["S1"], users=[], as_json=False
+        )
+    with pytest.raises(typer.BadParameter, match="use clear"):
+        await channels_admins_set(**slack, channel_id="C0GROWTH", roles=[], users=[], as_json=False)
+    with pytest.raises(StoreError, match="no tenant"):
+        await channels_admins_set(
+            rt=rt,
+            console=_console(),
+            platform="discord",
+            workspace_id=GUILD,
+            channel_id=CHANNEL,
+            roles=[],
+            users=[USER],
+            as_json=False,
+        )
 
 
 def _discord_settings() -> object:

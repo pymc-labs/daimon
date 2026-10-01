@@ -254,6 +254,55 @@ async def test_reachable_non_managed_target_flips_with_the_scope_row(
     )
 
 
+async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A role grant on the agent's only channel opens the gate; the server default stays shut."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.channel_admins import set_channel_admins
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(_GUILD_ID))
+        await set_channel_admins(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="500",
+            role_ids=["77"],
+            user_ids=[],
+            actor_account_id=None,
+        )
+        for name, scope in (
+            ("local-bot", ChannelScopeRef(tenant_id=tenant.id, channel_id="500")),
+            ("wide-bot", TenantScopeRef(tenant_id=tenant.id)),
+        ):
+            await scoped_config_write.set_fields(
+                session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
+            )
+    agents = [
+        _make_agent(ma_agent_id=f"agent_{name}", tenant_id=tenant.id, name=name, managed=False)
+        for name in ("local-bot", "wide-bot")
+    ]
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler(agents)),
+    )
+
+    async def refused(name: str) -> bool:
+        interaction = _member_interaction()
+        role = MagicMock(spec=discord.Role)
+        role.id = 77
+        role.is_default.return_value = False
+        interaction.user.roles = [role]
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=f"agent_{name}")
+        return await refuse_if_shared_and_not_admin_for_request(
+            interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
+        )
+
+    assert await refused("local-bot") is False, "the agent answers only in the admin's channel"
+    assert await refused("wide-bot") is True, "the server default stays with server admins"
+
+
 async def test_non_managed_non_reachable_target_member_allowed_no_ephemeral(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

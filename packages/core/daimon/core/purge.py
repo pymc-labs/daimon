@@ -99,6 +99,7 @@ from anthropic import APIError, AsyncAnthropic
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
+from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
@@ -146,6 +147,7 @@ class PurgeReport(BaseModel):
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    channel_admins: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -169,6 +171,7 @@ class PurgeReport(BaseModel):
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            channel_admins=self.channel_admins + other.channel_admins,
         )
 
 
@@ -256,6 +259,14 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # A channel admin grant names the person by platform user id; the row
+        # itself is the tenant's, so only their id leaves it.
+        channel_admins_count = await channel_admins_store.remove_user_from_channel_admins(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
     else:
         routines_count = 0
         kind = "cli"
@@ -303,6 +314,7 @@ async def _purge_principal_in_session(
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        channel_admins_count = 0
 
     # user_skills and github_credentials are keyed by principal_id alone — both
     # principal kinds own rows in these tables.
@@ -349,6 +361,7 @@ async def _purge_principal_in_session(
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
+        channel_admins=channel_admins_count,
     )
 
 

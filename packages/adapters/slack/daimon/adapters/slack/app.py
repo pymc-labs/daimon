@@ -29,6 +29,12 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
+from daimon.adapters.slack.agent_setup.channel_admins import (
+    ChannelAdminsSubmission,
+    evaluate_channel_admins_submission,
+    run_channel_admins_submission,
+)
+from daimon.adapters.slack.agent_setup.panel_views import CALLBACK_CHANNEL_ADMINS
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
     evaluate_new_agent_submission,
@@ -122,7 +128,7 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.continuity.continuation import check_wake_responder
+from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -762,6 +768,30 @@ class SlackApp:
                             )
 
                     self._spawn(_run_redeem())
+            elif cb_id == CALLBACK_CHANNEL_ADMINS:
+                # Pure evaluate, then an empty ack closes the form over the
+                # routing view the background run refreshes.
+                _ca = evaluate_channel_admins_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _ca is not None:
+                    _ca_team: dict[str, Any] = payload.get("team") or {}
+                    _ca_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_channel_admins(
+                        *,
+                        _t: str = str(_ca_team.get("id") or ""),
+                        _u: str = str(_ca_user.get("id") or ""),
+                        _s: ChannelAdminsSubmission = _ca,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_channel_admins_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_channel_admins())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -2527,7 +2557,10 @@ class SlackApp:
                 thread_id=thread_id,
                 account_id=row.requester_account_id,
             )
-        from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            asking_ma_agent_id = await load_asking_agent_id(
+                _predecessor_session, row, live_ma_agent_id=from_ma_agent_id
+            )
         from_name = (
             predecessor.effective_config.agent_name
             if predecessor is not None and predecessor.effective_config is not None
@@ -2554,7 +2587,7 @@ class SlackApp:
             # outside every pin, with the DM memory rule.
             is_dm=thread_id.startswith(DM_SCOPE_PREFIX),
         )
-        # A timer runs only as the agent it was set with; a thread rerouted in
+        # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
             reason=row.reason,
@@ -2562,6 +2595,7 @@ class SlackApp:
             target_name=row.target_name,
             admitted_ma_agent_id=follow_admission.agent.id,
             admitted_name=follow_admission.agent.name,
+            asking_ma_agent_id=asking_ma_agent_id,
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
         follow_prepared = await bind_session(

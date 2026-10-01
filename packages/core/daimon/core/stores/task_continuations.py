@@ -19,11 +19,17 @@ owner so a process that lost its lease can change nothing.
 from __future__ import annotations
 
 import uuid as _uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Literal
 
-from daimon.core._models import TaskContinuation
-from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
+from daimon.core.stores.domain import (
+    ContinuationReason,
+    Role,
+    TaskContinuationRow,
+    UnattendedRequester,
+)
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -575,3 +581,60 @@ async def count_pending_timer_rows(
             )
         )
     ).scalar_one()
+
+
+async def list_waiting_requesters(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    target_names: Collection[str],
+    target_ma_agent_id: str | None = None,
+) -> list[UnattendedRequester]:
+    """Who queued the pending or claimed wakes that will run the agent unattended.
+
+    A wake counts when it targets any of `target_names` or `target_ma_agent_id`.
+    An applied private input also counts against the agent that asked for it,
+    which it may resume instead (`daimon.core.continuity.continuation.
+    load_asking_agent_id`): the agent of the requester's session in the thread
+    when the request was made.
+    """
+    targets: list[ColumnElement[bool]] = [TaskContinuation.target_name.in_(target_names)]
+    if target_ma_agent_id is not None:
+        asking_ma_agent_id = (
+            select(ThreadSession.ma_agent_id)
+            .where(
+                CredentialRequest.idempotency_key == TaskContinuation.idempotency_key,
+                ThreadSession.tenant_id == TaskContinuation.tenant_id,
+                ThreadSession.platform == TaskContinuation.platform,
+                ThreadSession.thread_id == TaskContinuation.thread_id,
+                ThreadSession.account_id == TaskContinuation.requester_account_id,
+                ThreadSession.created_at <= CredentialRequest.created_at,
+            )
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+            .correlate(TaskContinuation)
+            .scalar_subquery()
+        )
+        targets += [
+            TaskContinuation.target_ma_agent_id == target_ma_agent_id,
+            and_(
+                TaskContinuation.reason == "private_input_applied",
+                asking_ma_agent_id == target_ma_agent_id,
+            ),
+        ]
+    rows = await session.execute(
+        select(TaskContinuation.requester_external_user_id, Account.role, Account.platform_role_ids)
+        .outerjoin(Account, Account.id == TaskContinuation.requester_account_id)
+        .where(
+            TaskContinuation.tenant_id == tenant_id,
+            or_(*targets),
+            TaskContinuation.status.in_(("pending", "claimed")),
+        )
+        .distinct()
+    )
+    return [
+        UnattendedRequester(
+            platform_user_id=user_id, is_admin=role == Role.ADMIN, role_ids=tuple(role_ids or ())
+        )
+        for user_id, role, role_ids in rows.tuples()
+    ]

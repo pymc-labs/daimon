@@ -23,7 +23,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import structlog
+from daimon.core.channel_admins import CHANNEL_ADMIN_PLATFORMS
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.channel_admins import list_administered_channel_ids
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
@@ -126,6 +128,21 @@ class DaimonJWTVerifier(JWTVerifier):
                     return None
             elif access.claims.get("kind") is not None:
                 return None  # only registered tokens carry a kind
+            administered_channel_ids = (
+                sorted(
+                    await list_administered_channel_ids(
+                        session,
+                        tenant_id=identity_row.tenant_id,
+                        platform=identity_row.platform,
+                        platform_user_id=identity_row.platform_user_id,
+                        role_ids=identity_row.platform_role_ids,
+                    )
+                )
+                if identity_row.role is not Role.ADMIN
+                and identity_row.platform in CHANNEL_ADMIN_PLATFORMS
+                and identity_row.platform_user_id is not None
+                else []
+            )
         if row is not None:
             refusal = token_row_refusal(
                 row, claims=access.claims, identity=identity_row, now=datetime.now(UTC)
@@ -139,6 +156,9 @@ class DaimonJWTVerifier(JWTVerifier):
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:
             access.claims["platform_user_id"] = identity_row.platform_user_id
+        # Always overwritten, so a token can never carry its own grant.
+        access.claims["platform_role_ids"] = list(identity_row.platform_role_ids)
+        access.claims["administered_channel_ids"] = administered_channel_ids
         if row is not None:
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)

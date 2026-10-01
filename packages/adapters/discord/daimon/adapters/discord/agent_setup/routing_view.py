@@ -20,9 +20,15 @@ from datetime import datetime
 
 import structlog
 from daimon.adapters.discord.agent_setup.budget import ROUTING_PAGE_SIZE
+from daimon.adapters.discord.agent_setup.channel_admins_view import (
+    CHANNEL_ADMINS_LABEL,
+    ChannelAdminsView,
+    load_grants,
+)
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
@@ -270,7 +276,8 @@ class RoutingView(PanelViewBase):
 
     Setup belongs to the roster and to Details, where a target is selected;
     offering it here would suggest this screen is the place a routing change
-    gets made, and it is not.
+    gets made, and it is not. Server admins also get Channel admins, which
+    edits who runs a channel rather than who answers in it.
     """
 
     def __init__(
@@ -307,6 +314,12 @@ class RoutingView(PanelViewBase):
         )
         back_button.callback = self._on_back  # type: ignore[method-assign]  # per-instance callback
         nav_row.add_item(back_button)
+        if state.is_admin:
+            admins_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=CHANNEL_ADMINS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            admins_button.callback = self._on_channel_admins  # type: ignore[method-assign]  # per-instance callback
+            nav_row.add_item(admins_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
 
@@ -332,6 +345,22 @@ class RoutingView(PanelViewBase):
     async def _on_next(self, interaction: discord.Interaction) -> None:
         self.state.routing_page += 1
         await self.swap_to(interaction, self._repaged())
+
+    async def _on_channel_admins(self, interaction: discord.Interaction) -> None:
+        """Open the channel admins screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        grants = await load_grants(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            ChannelAdminsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                grants=grants,
+            ),
+        )
 
     async def _on_back(self, interaction: discord.Interaction) -> None:
         """Return to the roster with its page and selection exactly as they were."""

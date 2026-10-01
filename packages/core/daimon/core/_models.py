@@ -87,6 +87,12 @@ class Account(Base):
         index=True,
     )
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="user")
+    # The platform roles the member held on their last chat turn, refreshed
+    # with `role`, so MCP calls can match a channel admin role grant without a
+    # live platform lookup. Empty on platforms without roles.
+    platform_role_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -275,6 +281,45 @@ class ChannelConfig(Base):
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
+class ChannelAdmin(Base):
+    """The roles and users who administer one channel, on top of server admins.
+
+    No row means nobody beyond the server or workspace admins, which is every
+    tenant's starting state.
+    """
+
+    __tablename__ = "channel_admins"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_channel_admins"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_channel_admins_tenants"
+        ),
+        ForeignKeyConstraint(
+            ["updated_by_account_id"],
+            ["accounts.id"],
+            ondelete="SET NULL",
+            name="fk_channel_admins_updated_by_account_id",
+        ),
+        CheckConstraint("platform IN ('discord', 'slack')", name="ck_channel_admins_platform"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str] = mapped_column(Text)
+    role_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    user_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (
@@ -390,6 +435,10 @@ class ThreadSession(Base):
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The channel the session runs for, recorded at creation: a thread's parent,
+    # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
+    # when unknown; agent reach then counts the session as possibly anywhere.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:
@@ -2109,6 +2158,13 @@ class TaskContinuation(Base):
             "status",
             "available_at",
             postgresql_where=text("available_at IS NOT NULL"),
+        ),
+        # Agent reach reads the wakes still owed to an agent.
+        Index(
+            "task_continuations_waiting_idx",
+            "tenant_id",
+            "target_name",
+            postgresql_where=text("status IN ('pending', 'claimed')"),
         ),
     )
 

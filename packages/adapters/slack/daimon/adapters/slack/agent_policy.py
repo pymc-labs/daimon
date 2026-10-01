@@ -23,7 +23,8 @@ Two entry points, differing only in how the target is named:
   `is_daimon_managed=False` and the reachability read.
 
 Both re-resolve admin status live (never from the rendered view or from
-`private_metadata`) and re-read reachability from the database on every call.
+`private_metadata`) and re-read reachability and channel admin grants from the
+database on every call.
 """
 
 from __future__ import annotations
@@ -35,8 +36,11 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -44,7 +48,6 @@ from daimon.core.operation_policy import (
     decide_operation,
     needs_reachability_read,
 )
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
@@ -100,25 +103,39 @@ AGENT_GONE_MESSAGE: Final[str] = (
 async def gather_target_facts(
     runtime: SlackRuntime,
     *,
+    operation: OperationKind,
     tenant_id: uuid.UUID,
-    agent: BetaManagedAgentsAgent,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str | None,
+    is_daimon_managed: bool,
+    caller: ChannelAdminCaller,
+    caller_account_id: uuid.UUID | None = None,
 ) -> TargetFacts:
-    """Both facts the policy table reads about `agent`.
+    """The policy facts about one target, read fresh and only while the decision turns on them.
 
-    `is_daimon_managed` comes off the MA metadata the caller already fetched;
-    `is_reachable_in_tenant` is one fresh database read, never cached and
-    never taken from the rendered view.
+    Reachability and channel admin locality are database reads, never cached and
+    never taken from the rendered view. Slack has no roles, so a caller is a
+    channel admin only when listed by user id. A decision that turns on neither
+    opens no session at all.
     """
+    if not needs_reachability_read(
+        operation, is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
+    ):
+        return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
     async with runtime.sessionmaker() as session:
-        reachable = await is_agent_reachable_in_tenant(
+        return await load_target_facts(
             session,
+            operation,
             tenant_id=tenant_id,
-            agent_name=_agent_name_of(agent),
+            platform="slack",
+            agent_names=agent_names,
+            ma_agent_id=ma_agent_id,
             default=runtime.deployment_default,
+            caller=caller,
+            is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=caller.platform_user_id,
         )
-    return TargetFacts(
-        is_daimon_managed=_is_daimon_managed(agent), is_reachable_in_tenant=reachable
-    )
 
 
 async def refuse_unless_allowed(
@@ -131,11 +148,13 @@ async def refuse_unless_allowed(
     channel_id: str,
     user_id: str,
     thread_ts: str | None = None,
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Decide `operation` against the agent daimon knows as `agent_id`.
 
     Returns True when the caller must stop (the refusal has been posted as an
-    ephemeral), False to proceed.
+    ephemeral), False to proceed. `caller_account_id` leaves the caller's own
+    live sessions out of the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
@@ -160,8 +179,15 @@ async def refuse_unless_allowed(
         )
         return True
 
-    facts = await _facts_for_decision(
-        runtime, operation=operation, is_admin=is_admin, tenant_id=tenant_id, agent=agent
+    facts = await gather_target_facts(
+        runtime,
+        operation=operation,
+        tenant_id=tenant_id,
+        agent_names=agent_pin_names(agent.name, agent.metadata),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=_is_daimon_managed(agent),
+        caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller_account_id=caller_account_id,
     )
     return await _render_outcome(
         client,
@@ -196,17 +222,17 @@ async def refuse_unless_allowed_for_agent_name(
         return False
 
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
-    is_daimon_managed = agent is not None and _is_daimon_managed(agent)
-    reachable = False
-    if needs_reachability_read(operation, is_admin=is_admin, is_daimon_managed=is_daimon_managed):
-        async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=tenant_id,
-                agent_name=agent_name,
-                default=runtime.deployment_default,
-            )
-    facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable)
+    facts = await gather_target_facts(
+        runtime,
+        operation=operation,
+        tenant_id=tenant_id,
+        agent_names=(agent_name,)
+        if agent is None
+        else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        ma_agent_id=None if agent is None else str(agent.id),
+        is_daimon_managed=agent is not None and _is_daimon_managed(agent),
+        caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+    )
     return await _render_outcome(
         client,
         operation=operation,
@@ -237,34 +263,8 @@ def _allowed_whatever_the_target(operation: OperationKind, *, is_admin: bool) ->
     )
 
 
-async def _facts_for_decision(
-    runtime: SlackRuntime,
-    *,
-    operation: OperationKind,
-    is_admin: bool,
-    tenant_id: uuid.UUID,
-    agent: BetaManagedAgentsAgent,
-) -> TargetFacts:
-    """`gather_target_facts`, minus the read the decision does not turn on.
-
-    When `needs_reachability_read` says the outcome is already settled, the
-    reachability value cannot change it, so the read is skipped and the field
-    carries its unreachable default.
-    """
-    is_daimon_managed = _is_daimon_managed(agent)
-    if not needs_reachability_read(
-        operation, is_admin=is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
-    return await gather_target_facts(runtime, tenant_id=tenant_id, agent=agent)
-
-
 def _is_daimon_managed(agent: BetaManagedAgentsAgent) -> bool:
     return agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-
-
-def _agent_name_of(agent: BetaManagedAgentsAgent) -> str:
-    return str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
 
 
 def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:

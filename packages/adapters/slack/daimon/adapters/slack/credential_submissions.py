@@ -32,7 +32,11 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_policy import AGENT_GONE_MESSAGE, refuse_unless_allowed
+from daimon.adapters.slack.agent_policy import (
+    AGENT_GONE_MESSAGE,
+    gather_target_facts,
+    refuse_unless_allowed,
+)
 from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     store_inline_pat,
@@ -41,7 +45,8 @@ from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.agent_pins import agent_pin_names, request_pin_refusal
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
@@ -50,7 +55,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
@@ -83,7 +88,7 @@ from daimon.core.mcp_token_connect import (
     connect_mcp_server_with_token,
 )
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
@@ -101,7 +106,6 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
@@ -236,8 +240,7 @@ async def _replacement_refused_at_submit(
     a target that can no longer be resolved fails closed.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
-    is_daimon_managed = False
-    is_reachable_in_tenant = False
+    facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
     if not is_admin:
         agent = await find_agent_by_derived_uuid(
             runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
@@ -249,27 +252,17 @@ async def _replacement_refused_at_submit(
                 agent_id=str(row.agent_id),
             )
             return True
-        is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        if needs_reachability_read(
-            "key_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
-        ):
-            async with runtime.sessionmaker() as session:
-                is_reachable_in_tenant = await is_agent_shared_for_key_changes(
-                    session,
-                    tenant_id=row.tenant_id,
-                    agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
-                    ma_agent_id=str(agent.id),
-                    default=runtime.deployment_default,
-                    caller_account_id=row.account_id,
-                    caller_platform_user_id=user_id,
-                )
-    outcome = decide_operation(
-        "key_replace",
-        is_admin=is_admin,
-        target=TargetFacts(
-            is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=is_reachable_in_tenant
-        ),
-    )
+        facts = await gather_target_facts(
+            runtime,
+            operation="key_replace",
+            tenant_id=row.tenant_id,
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            caller=ChannelAdminCaller(platform_user_id=user_id),
+            caller_account_id=row.account_id,
+        )
+    outcome = decide_operation("key_replace", is_admin=is_admin, target=facts)
     return outcome != "allow"
 
 
@@ -296,7 +289,11 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=await resolve_is_admin(client, user_id=user_id),
+        platform="slack",
+        caller=ChannelAdminCaller(
+            platform_user_id=user_id,
+            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -1416,6 +1413,7 @@ async def run_skill_repo_credential_submission(
         channel_id=channel_id,
         user_id=user_id,
         thread_ts=thread_ts,
+        caller_account_id=request.account_id,
     ):
         # Same shape as the repo bind: nothing is spent, and the card stops
         # offering a form this submitter could never finish.

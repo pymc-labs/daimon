@@ -26,7 +26,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pin_guard import (
-    _trusted_admin,  # pyright: ignore[reportPrivateUsage]
+    _trusted_credential,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
@@ -365,7 +365,7 @@ async def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operat
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     operator = await _verified_operator_identity(sessionmaker)
-    assert _trusted_admin(operator) is False, (
+    assert _trusted_credential(operator) is False, (
         "an operator token carries a platform user, so it is not the unbilled operator path"
     )
 

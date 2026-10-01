@@ -445,3 +445,46 @@ async def test_verifier_audits_each_refusal_of_a_registered_token(
         "the refusal is audited under the token's tenant"
     )
     assert token not in events[0].model_dump_json(), "the token value is never stored"
+
+
+async def test_verifier_computes_the_administered_channels_from_stored_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The grant is read from the DB; a claim the token brings is overwritten."""
+    from daimon.core.stores.accounts import set_platform_role_ids
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="discord")
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="discord", external_id="u1", tenant=tenant, account=account
+        )
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    token = pyjwt.encode(
+        {"sub": str(account.id), "iat": 0, "administered_channel_ids": ["c9"]},
+        SECRET,
+        algorithm="HS256",
+    )
+
+    before = await verifier.verify_token(token)
+    assert before is not None and before.claims["administered_channel_ids"] == [], (
+        "no grant yet, whatever the token claims"
+    )
+    async with sessionmaker() as s, s.begin():
+        await set_platform_role_ids(s, account.id, ["r1"])
+        await set_channel_admins(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="c1",
+            role_ids=["r1"],
+            user_ids=[],
+            actor_account_id=None,
+        )
+    after = await verifier.verify_token(token)
+    assert after is not None and after.claims["administered_channel_ids"] == ["c1"], (
+        "a new grant shows on the next verify"
+    )
+    assert after.claims["platform_role_ids"] == ["r1"], "the stored role ids ride along"

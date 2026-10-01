@@ -15,11 +15,13 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
     """The caller as `authorize` sees it.
 
     ``is_admin`` is the gate's own trusted admin signal (the stored role, the
-    hub exemption, the configuration guard's `_trusted_admin`); an
+    hub exemption, the configuration guard's `_trusted_credential`); an
     agent-scoped key is marked so `authorize` never exempts it as an admin.
+    The channel admin grants are the verifier's read of the stored ones.
     """
     return build_subject(
         is_admin=is_admin,
         platform_user_id=auth.platform_user_id,
         via_agent_key=auth.agent_id is not None,
+        administered_channel_ids=auth.administered_channel_ids,
     )

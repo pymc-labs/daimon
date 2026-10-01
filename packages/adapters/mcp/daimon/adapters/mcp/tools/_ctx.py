@@ -220,7 +220,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
-      whose stored role is admin (`_session_access.hub_caller_is_admin`;
+      whose stored role is admin (`_session_access.load_hub_subject`;
       refreshed by the person's next platform turn); its reply reaches only
       them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it

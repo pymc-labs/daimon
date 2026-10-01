@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 98 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 101 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -16,6 +16,7 @@ tool is hidden by default and restored only for a matching caller.
 
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
+- **channel admins too** — carries the `channel-admin` tag.
 - **Discord callers** — carries the `discord` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -77,6 +78,16 @@ Agent tools: list / get / create / update / fork / archive.
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents in the tenant pool, including each agent's attached ``mcp_servers`` and ``skills``. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
+
+## `channel_admins`
+
+Channel admin tools: who administers one channel on top of the server admins.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_channel_admins` | admin only | Remove every channel admin from one channel, leaving it to the server admins. |
+| `list_channel_admins` | admin only | List the channels that have their own admins, with the roles and members named for each. |
+| `set_channel_admins` | admin only | Name who administers one channel, on top of the server admins. |
 
 ## `channel_budgets`
 
@@ -192,9 +203,9 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_agent_default` | admin only, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
+| `clear_agent_default` | admin only, channel admins too, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers and which routing tier decided it. |
-| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
+| `set_agent_default` | admin only, channel admins too, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
 
 ## `publish`
 

@@ -12,7 +12,11 @@ from daimon.adapters.discord.bot import (
     DaimonBot,
     log_anthropic_overload,
 )
-from daimon.adapters.discord.checks import is_member_guild_admin, require_registered_guild
+from daimon.adapters.discord.checks import (
+    is_member_guild_admin,
+    member_role_ids,
+    require_registered_guild,
+)
 from daimon.core.direct_messages import (
     reply_to_dm,
     require_dm_enabled,
@@ -117,6 +121,7 @@ class DirectMessageCog(commands.Cog):
                 channel_id=source_channel_id,
                 thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=member_role_ids(member),
                 is_dm=True,
                 dm_source_channel_id=source_channel_id,
                 now=datetime.now(UTC),
@@ -225,6 +230,7 @@ class DirectMessageCog(commands.Cog):
                         expected_scope_id=conversation.scope_id,
                         text=message.content,
                         role=role,
+                        platform_role_ids=member_role_ids(member),
                     )
             finally:
                 self.bot.release_global_turn()

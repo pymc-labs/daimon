@@ -177,7 +177,8 @@
           channel, which can only be read from inside it. A workspace admin also
           sees everyone's channel conversations with this daimon, sealed ones
           included, and can read them with ``get_session``/``list_events``, but
-          can't continue a sealed one from here.
+          can't continue a sealed one from here. A channel admin sees the same
+          for the channels they administer.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -477,7 +478,8 @@
         
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent).  Requires Manage Server (admin).
+        default the call is a no-op (idempotent).  Requires Manage Server (admin);
+        an admin of the channel may clear that channel's default.
         
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -501,6 +503,25 @@
             'default': None,
           }),
         }),
+        'type': 'object',
+      }),
+    }),
+    'clear_channel_admins': dict({
+      'description': '''
+        Remove every channel admin from one channel, leaving it to the server admins.
+        For example, stop the @support-leads role running #support. A no-op when the
+        channel has none. Requires Manage Server (admin).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -2568,6 +2589,19 @@
         'type': 'object',
       }),
     }),
+    'list_channel_admins': dict({
+      'description': '''
+        List the channels that have their own admins, with the roles and members
+        named for each. For example, list the admins of #support. Requires Manage
+        Server (admin).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_channel_budgets': dict({
       'description': 'List every channel budget in this server or workspace with its spend. Admin-only.',
       'parameters': dict({
@@ -4208,7 +4242,10 @@
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin).
+        core).  Requires Manage Server (admin); an admin of the channel may set
+        that channel's default to a built-in agent, the workspace default, an
+        agent that answers nowhere yet, or one that answers only in channels
+        they administer.
         
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -4253,6 +4290,48 @@
         }),
         'required': list([
           'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_admins': dict({
+      'description': '''
+        Name who administers one channel, on top of the server admins. For example,
+        let the @support-leads role run #support. Replaces that channel's whole list;
+        pass both lists empty to clear it. Requires Manage Server (admin).
+        
+        A channel admin may change agents that answer only in the channels they
+        administer (instructions, skills, keys, MCP servers) and set or clear those
+        channels' default agent. Built-in agents and the workspace default stay with
+        server admins.
+        
+        Ids are the platform's own: Discord role and user ids, Slack user ids (Slack
+        has no roles, so ``role_ids`` must be empty there). ``channel_id`` MUST be the
+        parent channel's id, never a thread's.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'role_ids': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'user_ids': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'role_ids',
+          'user_ids',
         ]),
         'type': 'object',
       }),

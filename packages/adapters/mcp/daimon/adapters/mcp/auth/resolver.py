@@ -58,10 +58,18 @@ class AuthIdentity:
     token_jti: uuid.UUID | None = None
     # What an operator token may call, read from its row on every request.
     scopes: frozenset[str] = frozenset()
+    # Role ids the account held on its last chat turn, and the channels its
+    # channel admin grants name; both read by the verifier from the database.
+    platform_role_ids: tuple[str, ...] = ()
+    administered_channel_ids: frozenset[str] = frozenset()
 
     @property
     def is_operator(self) -> bool:
         return self.token_kind == "operator"
+
+    @property
+    def is_channel_admin(self) -> bool:
+        return bool(self.administered_channel_ids)
 
 
 def resolve_role(role_str: str | None) -> Role:

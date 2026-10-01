@@ -43,6 +43,11 @@ There are three rule families, each a fixed short-circuit order:
   new server name or the same name at the same URL; repointing an existing
   name at another URL, or overwriting the agent's shared token for a URL, is
   `mcp_replace`.
+
+Where either of the first two families would answer `needs_admin`, a channel
+admin whose channels hold every place the agent answers or runs
+(`is_local_to_caller_channels`, see `daimon.core.agent_reach`) is allowed
+instead. The managed check still refuses them: only a server admin passes it.
 """
 
 from __future__ import annotations
@@ -79,16 +84,24 @@ _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset(
 
 
 class TargetFacts(BaseModel):
-    """The two facts about a target agent that the policy table reads.
+    """The facts about a target agent that the policy table reads.
 
     Frozen: a decision is a pure function of these facts plus the caller's
-    admin status, never mutated after construction.
+    admin status, never mutated after construction. The locality fact
+    defaults to False, which is every caller with no channel admin grant.
     """
 
     model_config = {"frozen": True}
 
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
+    is_local_to_caller_channels: bool = False
+    # Why a channel admin's agent is not local: an unattended run owed to someone
+    # with wider rights. Explains a refusal; decisions never read it.
+    runs_unattended_beyond_caller: bool = False
+    # Or another member's conversation or routine in a channel never recorded,
+    # which could be anywhere. Explains a refusal too.
+    has_unplaced_run: bool = False
 
 
 def _decide_operation(
@@ -109,15 +122,17 @@ def _decide_operation(
             return "managed_agent"
         if is_admin:
             return "allow"
-        if target.is_reachable_in_tenant:
-            return "needs_admin"
-        return "allow"
+        return _reachable_outcome(target)
     # operation in _ATTACHMENT_OPERATIONS — the only remaining family.
     if is_admin:
         return "allow"
     if target.is_daimon_managed:
         return "managed_agent"
-    if target.is_reachable_in_tenant:
+    return _reachable_outcome(target)
+
+
+def _reachable_outcome(target: TargetFacts) -> PolicyOutcome:
+    if target.is_reachable_in_tenant and not target.is_local_to_caller_channels:
         return "needs_admin"
     return "allow"
 

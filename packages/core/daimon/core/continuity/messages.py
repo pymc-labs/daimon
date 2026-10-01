@@ -41,6 +41,7 @@ __all__ = [
     "render_responder_changed_without_handoff",
     "render_timer_seed",
     "render_timer_target_changed",
+    "render_wake_target_changed",
     "render_unexpected_loss",
     "render_unsaved_work_question",
 ]
@@ -567,6 +568,17 @@ def render_timer_seed(note: str, *, set_at: datetime) -> str:
         f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. This turn was "
         f"started by the timer, not by a new message; act on your note and reply "
         f"here.\n\n{note}"
+    )
+
+
+def render_wake_target_changed(target_name: str, current_name: str) -> str:
+    """Tell the person queued work did not run because another agent answers here now."""
+    return "\n".join(
+        [
+            f"Work here was queued for {target_name}, but {current_name} answers here now.",
+            "It did not run.",
+            "Ask again and the current agent will pick it up.",
+        ]
     )
 
 

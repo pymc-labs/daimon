@@ -13,7 +13,8 @@ from daimon.core.agent_pins import (
     request_pin_refusal,
 )
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import set_platform_role_ids, set_role
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import CredentialRequestRow, Role
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
@@ -148,3 +149,40 @@ async def test_an_unreadable_policy_refuses(db_session: AsyncSession) -> None:
     agent = ma_agent(id="ag_acme", name="acme-project", tenant_id=tenant_id)
     row = _row(tenant_id=tenant_id, account_id=account_id, channel=_ACME, target_name=None)
     assert await request_pin_refusal(db_session, row=row, agent=agent) == POLICY_UNREADABLE_REFUSAL
+
+
+async def test_a_channel_admins_request_from_outside_a_pin_they_run_is_applied(
+    db_session: AsyncSession,
+) -> None:
+    """The requester's stored grants count, by user id and by the roles of their last turn."""
+    tenant_id, account_id = await _setup(db_session, pins={"acme-project": (_ACME,)})
+    agent = ma_agent(id="ag_acme", name="acme-project", tenant_id=tenant_id)
+    row = _row(tenant_id=tenant_id, account_id=account_id, channel=_CLIENT_B, target_name=None)
+    assert await request_pin_refusal(db_session, row=row, agent=agent) == PIN_WRITE_REFUSAL
+
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=_ACME,
+        role_ids=[],
+        user_ids=["U1"],
+        actor_account_id=None,
+    )
+    assert await request_pin_refusal(db_session, row=row, agent=agent) is None
+
+    discord = row.model_copy(update={"platform": "discord", "requester_platform_user_id": "9"})
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=_ACME,
+        role_ids=["r1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    assert await request_pin_refusal(db_session, row=discord, agent=agent) == PIN_WRITE_REFUSAL
+    await set_platform_role_ids(db_session, account_id, ["r1"])
+    assert await request_pin_refusal(db_session, row=discord, agent=agent) is None, (
+        "a role held at the requester's last turn grants it"
+    )

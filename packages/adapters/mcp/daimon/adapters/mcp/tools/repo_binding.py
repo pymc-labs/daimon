@@ -32,19 +32,20 @@ from daimon.adapters.mcp.tools.credential_requests import (
     _OWNER_REPO_RE,  # pyright: ignore[reportPrivateUsage]
     _resolve_agent_uuid,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.reachability import target_facts
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.task_continuity import (
     _REPLY_VERBATIM,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.continuity.tool_messages import render_tool_unsaved_work_question
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import is_public_repo
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.domain import RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.thread_sessions import get_live_thread_session, set_pending_unsaved_work
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -127,22 +128,15 @@ async def _bind_public_repo_impl(
     await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
 
     is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "repo_bind", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_name=agent_name,
-                default=runtime.deployment_default,
-            )
-    outcome = decide_operation(
+    facts = await target_facts(
+        runtime,
+        auth,
         "repo_bind",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        agent_names=(agent_name, *agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        ma_agent_id=str(ma_agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
+    outcome = decide_operation("repo_bind", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(_refusal(agent_name, normalize_owner_repo(repo_url)))
 

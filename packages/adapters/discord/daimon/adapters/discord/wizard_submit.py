@@ -78,7 +78,7 @@ from daimon.adapters.discord.bot import (
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
 )
-from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.thread_send import safe_thread_send
@@ -461,6 +461,9 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=member_role_ids(author)
+                if isinstance(author, discord.Member)
+                else None,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )

@@ -17,6 +17,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Concatenate, ParamSpec, cast
 
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
 
@@ -42,6 +43,22 @@ def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None)
     if guild_owner_id is not None and member.id == guild_owner_id:
         return True
     return member.guild_permissions.administrator or member.guild_permissions.manage_guild
+
+
+def member_role_ids(member: discord.Member) -> list[str]:
+    """The member's role ids, minus @everyone, which every member holds."""
+    return [str(role.id) for role in member.roles if not role.is_default()]
+
+
+def channel_admin_caller(user: discord.User | discord.Member) -> ChannelAdminCaller:
+    """The live member as channel admin grants see them. A non-member holds no roles."""
+    if not isinstance(user, discord.Member):
+        return ChannelAdminCaller(platform_user_id=str(user.id))
+    return ChannelAdminCaller(
+        platform_user_id=str(user.id),
+        role_ids=frozenset(member_role_ids(user)),
+        is_server_admin=is_member_guild_admin(user, guild_owner_id=user.guild.owner_id),
+    )
 
 
 def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:

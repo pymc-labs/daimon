@@ -10,7 +10,8 @@ Runs only on requests that already passed `DaimonJWTVerifier.verify_token`
   6. Read platform/external_id/platform_user_id inline from injected claims (no DB call).
   7. Ask `agent_id_resolver` for the optional `agent_id` claim.
   8. Stash an `AuthIdentity` into `ctx.fastmcp_context.set_state("auth", ...)`.
-  9. Call `enable_components` for admin sessions so admin-tagged tools are visible.
+  9. Call `enable_components` for admin sessions so admin-tagged tools are visible,
+     and for channel admins so the `channel-admin` subset of them is.
      An operator token instead sees only the tools tagged with its scopes,
      and its tool calls are rate limited per jti.
 
@@ -324,6 +325,19 @@ class IdentityMiddleware(Middleware):
                 slack_turn_context_id = uuid.UUID(raw_slack_context)
             except ValueError:
                 slack_turn_context_id = None  # Malformed claims fail closed.
+        raw_role_ids = _token.claims.get("platform_role_ids") if _token else None
+        platform_role_ids = (
+            tuple(str(value) for value in cast(list[object], raw_role_ids))
+            if isinstance(raw_role_ids, list)
+            else ()
+        )
+        # Only a chat identity administers channels; an agent credential never does.
+        raw_administered = _token.claims.get("administered_channel_ids") if _token else None
+        administered_channel_ids = (
+            frozenset(str(value) for value in cast(list[object], raw_administered))
+            if isinstance(raw_administered, list) and not is_admin and agent_id is None
+            else frozenset[str]()
+        )
         identity = AuthIdentity(
             account_id=account_id,
             tenant_id=tenant_id,
@@ -335,6 +349,8 @@ class IdentityMiddleware(Middleware):
             slack_turn_context_id=slack_turn_context_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
+            platform_role_ids=platform_role_ids,
+            administered_channel_ids=administered_channel_ids,
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
@@ -342,6 +358,9 @@ class IdentityMiddleware(Middleware):
             return await self._resolve_operator(context, call_next, identity)
         if is_admin:
             await enable_components(fastmcp_ctx, tags={"admin"})
+        elif identity.is_channel_admin:
+            # The admin tools a channel admin may call for their own channels.
+            await enable_components(fastmcp_ctx, tags={"channel-admin"})
         # Enable the caller's platform tag (deny-by-default baselines live in
         # server.py). A CLI token's platform="cli" matches no baseline tag,
         # so this enable is a no-op for CLI — the intended outcome: CLI loses

@@ -164,7 +164,7 @@ async def dispatch_pending_continuations(
         except SessionPreparationFailed:
             await _settle(sessionmaker, claim, "blocked_preparation_failed")
         except ResponderChanged as exc:
-            # A timer whose thread another agent answers now; the turn never started.
+            # A wake whose thread another agent answers now; the turn never started.
             await _settle(sessionmaker, claim, "skip_target_changed")
             await notify(row, exc.message, reason="skip_target_changed")
         except AdmissionDenied as exc:

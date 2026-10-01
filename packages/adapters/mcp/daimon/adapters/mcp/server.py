@@ -50,6 +50,7 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
+from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
@@ -275,6 +276,8 @@ def create_mcp_app(
     # structured ToolError instead of an opaque internal error (issue #14).
     mcp.add_middleware(MaErrorMiddleware())
 
+    # A tool tagged both "admin" and "channel-admin" is hidden until either tag
+    # is enabled for the session (see IdentityMiddleware).
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(Visibility(False, tags={"discord"}))
@@ -361,6 +364,7 @@ def create_mcp_app(
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
+    register_channel_admin_tools(mcp, runtime)  # who administers a channel
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read

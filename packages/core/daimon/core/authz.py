@@ -20,23 +20,13 @@ policy. Two limits to check when adding a rule:
   re-read). A rule whose facts can change during a turn needs those facts
   refreshed there too.
 - Some callers still short-circuit before `authorize`: the hub's admin
-  exemption in ``_ctx._policy_gate``, `require_pin_write_access` for a
-  trusted admin or an unpinned tenant, and the hub's session reads, which
-  describe a non-admin hub caller as `Surface.AGENT_CHAT`. A rule that must
-  also bind admins or unpinned agents (isolation), or that opens reads to a
-  non-admin hub caller (channel admins), has to remove the matching
-  short-circuit or pass the real surface.
+  exemption in ``_ctx._policy_gate`` and `require_pin_write_access` for a
+  trusted admin or an unpinned tenant. A rule that must also bind admins or
+  unpinned agents (isolation) has to remove the matching short-circuit.
 
-**Example: channel admins reading their channels' sealed sessions.** Add
-``administered_channel_ids: frozenset[str] = frozenset()`` to `Subject`,
-populate it in `build_subject` (and `mcp_subject` on the MCP side), and in
-`_decide` allow `Action.READ_SESSION` when ``facts.seal_ids`` is non-empty,
-every seal id is in ``subject.administered_channel_ids`` and the session is
-not ``facts.private``. Never for `Action.CONTINUE_SESSION`. The hub's session
-reads ask `authorize(READ_SESSION)` with the session's seal ids, but a
-non-admin caller is described as `Surface.AGENT_CHAT` and other accounts'
-sessions are filtered before `authorize` for them: pass `Surface.HUB` and the
-other-account sessions to `authorize` for every hub caller as part of the rule.
+The channel admin rules are the worked example: `Subject.administered_channel_ids`
+is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
+grants, and decided under CONFIGURE and READ_SESSION.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -56,10 +46,20 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   admin is the caller's trusted signal (`Subject.is_admin`): the live platform
   role for a platform turn, the stored role for a hub or form caller. Agent
   keys and tokens with no person behind them are never exempt.
+- **Channel admins** hold a server admin's rights, limited to the channels
+  they administer (`Subject.administered_channel_ids`, from stored grants;
+  never `is_admin`). Configuring a pinned agent is theirs when they
+  administer every channel of every pin on it; a pin to no channel stays
+  with server admins. On their own hub they read any conversation that ran
+  in a channel they administer when every id that sealed it lies there too
+  (the channel, a thread under it, or a Slack ``channel:ts`` under it);
+  never a private DM, an unstamped session, or to continue a sealed one.
 - **Pinned sends**: wherever a pinned agent was admitted, it posts only into
   its pinned channels (and threads under them) or the requester's own DM,
   and sends direct messages only to the requester.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
+- **Channel default**: nobody makes a pinned agent the default of a channel
+  outside its pin, since it would refuse every turn there.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 
@@ -72,7 +72,8 @@ Scope today: the pin decisions (turn admission, MCP and hub turns, routine
 save and fire, handoff, configuration writes, form submits and the OAuth
 callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
-read and the refusal to continue a sealed conversation), and fork. Still
+and channel admin reads and the refusal to continue a sealed conversation),
+fork, and channel default binds. Still
 decided outside this module, by the same `daimon.core.access_policy`
 predicates: the live protection and invoker checks in the scheduler, routine
 save and delivery and turn-reply protection; and the shared-agent
@@ -81,7 +82,7 @@ replace/remove table (`daimon.core.operation_policy`).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
@@ -121,6 +122,8 @@ class Action(StrEnum):
     DIRECT_MESSAGE = "direct_message"
     # Copy an agent.
     FORK = "fork"
+    # Make an agent the default of one channel (`Place.channel_id`).
+    BIND_CHANNEL_DEFAULT = "bind_channel_default"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -152,7 +155,8 @@ class Subject:
     ``is_admin`` is the caller's trusted admin signal for this surface (see the
     module docstring); a caller that never trusts an admin -- an agent key, a
     bearer token -- passes False. ``platform_user_id`` is None for a token with
-    no person behind it.
+    no person behind it. ``administered_channel_ids`` are the channels a stored
+    channel admin grant gives the subject; a server admin needs none.
     """
 
     is_admin: bool = False
@@ -160,6 +164,7 @@ class Subject:
     # The caller holds an agent-scoped key: never exempt as an admin, whoever
     # minted it, because the key is long-lived and its role may be stale.
     via_agent_key: bool = False
+    administered_channel_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -296,6 +301,21 @@ def _outside_pin(policy: TenantAccessPolicy, agent: AgentRef, place: Place) -> b
     )
 
 
+def _pin_administered(
+    policy: TenantAccessPolicy, agent: AgentRef, administered_channel_ids: frozenset[str]
+) -> bool:
+    """Whether every channel of every pin on any of the agent's names is administered.
+
+    False for an unpinned agent and for a pin to no channel, which is nobody's.
+    """
+    pins = [
+        policy.agent_channel_pins[name]
+        for name in agent.names
+        if name is not None and name in policy.agent_channel_pins
+    ]
+    return bool(pins) and all(pin and frozenset(pin) <= administered_channel_ids for pin in pins)
+
+
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
     if place.channel_id is None:
         return False
@@ -350,6 +370,34 @@ def _session_readable(
     return facts.legacy_thread_id in origin_channel_ids
 
 
+def _seal_id_administered(
+    seal_id: str, facts: SessionFacts, administered_channel_ids: frozenset[str]
+) -> bool:
+    """An administered channel, the session's own thread under one, or a Slack
+    thread (``channel:ts``) under one. A thread sealed elsewhere has no known parent."""
+    if seal_id in administered_channel_ids:
+        return True
+    if seal_id == facts.thread and facts.channel in administered_channel_ids:
+        return True
+    channel, separator, _ = seal_id.partition(":")
+    return bool(separator) and channel in administered_channel_ids
+
+
+def _channel_admin_hub_read(subject: Subject, facts: SessionFacts) -> bool:
+    """A channel admin's hub read: anyone's conversation that ran in a channel they
+    administer, sealed only by ids that lie there too. Never a private DM or an
+    unstamped session, which can't be placed."""
+    administered = subject.administered_channel_ids
+    return (
+        subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and not facts.private
+        and facts.channel is not None
+        and facts.channel in administered
+        and all(_seal_id_administered(seal_id, facts, administered) for seal_id in facts.seal_ids)
+    )
+
+
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     subject, agent, place = req.subject, req.agent, req.place
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
@@ -391,6 +439,15 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
+        if not subject.via_agent_key and _pin_administered(
+            policy, agent, subject.administered_channel_ids
+        ):
+            return ALLOW
+        if _outside_pin(policy, agent, place):
+            return _deny("agent_pinned_elsewhere")
+        return ALLOW
+
+    if req.action is Action.BIND_CHANNEL_DEFAULT:
         if _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
         return ALLOW
@@ -440,10 +497,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     # person's private DM, and never to continue it (a follow-up would join
     # the channel's session). Their own sessions, DMs included, are read
     # without the seal filter: ownership was already proven by the caller.
+    # A channel admin holds the same read for their channels.
+    hub_read = req.action is Action.READ_SESSION and req.surface is Surface.HUB
     admin_hub_read = (
-        req.action is Action.READ_SESSION
-        and req.surface is Surface.HUB
-        and subject.is_admin
+        subject.is_admin
         and subject.platform_user_id is not None
         and not subject.via_agent_key
         and (
@@ -454,7 +511,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             )
         )
     )
-    if admin_hub_read:
+    if hub_read and (admin_hub_read or _channel_admin_hub_read(subject, facts)):
         return ALLOW
     if not facts.owned:
         return _deny("not_owner")
@@ -490,11 +547,26 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
 
 
 def build_subject(
-    *, is_admin: bool, platform_user_id: str | None, via_agent_key: bool = False
+    *,
+    is_admin: bool,
+    platform_user_id: str | None,
+    via_agent_key: bool = False,
+    administered_channel_ids: Collection[str] = (),
 ) -> Subject:
-    """Who is acting. The one place a caller's identity becomes a `Subject`."""
+    """Who is acting. The one place a caller's identity becomes a `Subject`.
+
+    ``administered_channel_ids`` are the channels the caller's stored channel
+    admin grants name; an agent key or a token with no person behind it holds
+    none, whatever its account's grants.
+    """
+    holds_grants = platform_user_id is not None and not via_agent_key
     return Subject(
-        is_admin=is_admin, platform_user_id=platform_user_id, via_agent_key=via_agent_key
+        is_admin=is_admin,
+        platform_user_id=platform_user_id,
+        via_agent_key=via_agent_key,
+        administered_channel_ids=frozenset(administered_channel_ids)
+        if holds_grants
+        else frozenset(),
     )
 
 

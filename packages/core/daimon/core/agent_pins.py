@@ -1,9 +1,10 @@
 """Whether a member may change what a pinned agent reaches, from where they are.
 
 One rule for every path that adds to or edits an agent's configuration (keys,
-connector tokens, MCP servers, prompt, tools, skills): an admin always may; on
-an agent the operator pinned to channels, anyone else may only act from a
-conversation inside those channels; an unpinned agent is unaffected. The
+connector tokens, MCP servers, prompt, tools, skills): an admin always may, and
+so does a channel admin of every channel the agent is pinned to; on an agent
+the operator pinned to channels, anyone else may only act from a conversation
+inside those channels; an unpinned agent is unaffected. The
 request tools, the direct configuration tools and the private forms' submit
 paths all decide it with `daimon.core.authz.authorize(CONFIGURE)`, so the rule
 and its names can't drift.
@@ -22,17 +23,16 @@ from daimon.core.authz import (
     agent_names,
     authorize,
     build_agent_ref,
-    build_subject,
 )
+from daimon.core.channel_admins import load_stored_subject
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import CredentialRequestRow, Role
+from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PIN_WRITE_REFUSAL = (
     "An operator pinned this agent to its own channels, so its keys, connections and "
-    "configuration can only be changed from a conversation inside them, or by a server "
-    "or workspace admin. Nothing was changed."
+    "configuration can only be changed from a conversation inside them, by an admin of "
+    "all of them, or by a server or workspace admin. Nothing was changed."
 )
 POLICY_UNREADABLE_REFUSAL = (
     "This workspace's access policy could not be read, so nothing was changed. "
@@ -54,7 +54,8 @@ async def request_pin_refusal(
     target resolved afresh by its stable id (``row.agent_id``), so a pin
     added since the card was posted, a rename, or a pin keyed by the config
     name all hold. An unreadable policy refuses. Admin is the requester's
-    stored role, the signal the MCP gate reads too.
+    stored role, the signal the MCP gate reads too; so are the requester's
+    channel admin grants, matched against the roles stored at their last turn.
     """
     try:
         policy = await load_access_policy(session, tenant_id=row.tenant_id)
@@ -62,11 +63,14 @@ async def request_pin_refusal(
         return POLICY_UNREADABLE_REFUSAL
     if not policy.agent_channel_pins:
         return None
-    account = await get_account(session, row.account_id)
     decision = authorize(
         policy,
-        subject=build_subject(
-            is_admin=account is not None and account.role is Role.ADMIN, platform_user_id=None
+        subject=await load_stored_subject(
+            session,
+            tenant_id=row.tenant_id,
+            platform=row.platform,
+            account_id=row.account_id,
+            platform_user_id=row.requester_platform_user_id,
         ),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,

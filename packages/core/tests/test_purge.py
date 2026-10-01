@@ -1555,3 +1555,42 @@ async def test_purge_principal_cli_message_feedback_reports_zero(
         "an os_user string must never be treated as a reaction identity and delete a "
         "platform user's votes"
     )
+
+
+async def test_purge_account_removes_the_person_from_channel_admins(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Erasure takes the person's id out of every grant and previews the same count."""
+    from daimon.core.privacy import collect_purge_preview
+    from daimon.core.stores import channel_admins as channel_admins_store
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="u-admin", tenant=tenant, account=account
+    )
+    for channel in ("c1", "c2"):
+        await channel_admins_store.set_channel_admins(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id=channel,
+            role_ids=["r1"] if channel == "c2" else [],
+            user_ids=["u-admin"],
+            actor_account_id=account.id,
+        )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.channel_admins.count == 2, "the preview counts both grants"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert report.db.channel_admins == 2, "purge removes both"
+    async with db_session_factory() as session:
+        rows = await channel_admins_store.list_channel_admins(
+            session, tenant_id=tenant.id, platform="discord"
+        )
+    assert [(row.channel_id, row.user_ids, row.updated_by_account_id) for row in rows] == [
+        ("c2", (), None)
+    ], "an emptied grant is dropped; a role grant stays without the person"
