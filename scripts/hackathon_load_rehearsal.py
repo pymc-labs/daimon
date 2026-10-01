@@ -1,6 +1,12 @@
 """Staging-only, disposable load rehearsal. Never run without an approved budget.
 
-Run from the staging worker's Discord container (copy this file there first):
+Run from the staging worker's Discord container (copy this file there first).
+For --discord, supply DISCORD_QA_BOT_TOKEN at runtime from the staging secret
+store; the script never prints it. Only guild IDs in DISCORD_QA_GUILDS are
+accepted. The driver creates temporary channels, and deleting them removes
+the Daimon-created threads. It restores the guild's previous turn cap.
+
+Backend example:
 
     docker exec daimon-discord-1 python /tmp/hackathon_load_rehearsal.py \
       --install --turn-load --cleanup --run-id rehearsal-1 --tenants 50 \
@@ -17,6 +23,8 @@ already in flight can still incur charges. Trial credit is split across the
 synthetic tenants, and the normal prepaid admission check applies. The first
 event timer observes the first SSE data frame. DB pool wait time is unavailable
 through the current engine interface and is reported as n/a.
+The Discord phase measures spend from the QA guild's ledger since the start of
+that phase. It uses the guild's existing default agent model and reports it.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import os
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +58,10 @@ if TYPE_CHECKING:
 
 PROMPT = "Reply with OK only. Do not call tools."
 SYNTHETIC_PREFIX = "hackathon-load-"
+DISCORD_QA_GUILDS = frozenset({"1435062989119295640"})
+DISCORD_QA_BOT_ID = "1533049261032341668"
+DISCORD_DAIMON_BOT_ID = "1530628070405308456"
+DISCORD_API = "https://discord.com/api/v10"
 ACTIVE_TENANT: ContextVar[str | None] = ContextVar("rehearsal_tenant", default=None)
 
 
@@ -142,6 +155,7 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--install", action="store_true")
     p.add_argument("--turn-load", action="store_true")
+    p.add_argument("--discord", action="store_true")
     p.add_argument("--cleanup", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--i-am-staging", action="store_true")
@@ -152,13 +166,20 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--arrival-seconds", type=float, default=1800)
     p.add_argument("--max-usd", type=Decimal, default=Decimal("5"))
     p.add_argument("--model", choices=("haiku", "event"), default="haiku")
+    p.add_argument("--discord-guild-id", action="append", default=[])
+    p.add_argument("--discord-turns", type=int, default=20)
+    p.add_argument("--discord-concurrency", type=int, default=20)
+    p.add_argument("--discord-file-every", type=int, default=0)
     return p
 
 
 def plan(args: argparse.Namespace) -> str:
     return (
         f"run={args.run_id} tenants={args.tenants} install={args.install} "
-        f"turns={args.turns if args.turn_load else 0} model={args.model} "
+        f"turns={args.turns if args.turn_load else 0} "
+        f"model={args.model if args.install or args.turn_load else 'n/a'} "
+        f"discord={args.discord} discord_turns={args.discord_turns if args.discord else 0} "
+        f"discord_concurrency={args.discord_concurrency} discord_model=tenant-default "
         f"arrival_seconds={args.arrival_seconds} max_usd={args.max_usd} "
         f"cleanup={args.cleanup}"
     )
@@ -419,6 +440,294 @@ def _print_results(title: str, results: list[Result]) -> None:
         )
 
 
+@dataclass
+class DiscordResult:
+    message_id: str
+    thread_id: str | None = None
+    first_s: float | None = None
+    final_s: float | None = None
+    status: str = "timeout"
+    attachments: int = 0
+
+
+def _percentile(values: list[float], percentile: float) -> str:
+    if not values:
+        return "n/a"
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile
+    low = int(position)
+    value = ordered[low] + (ordered[min(low + 1, len(ordered) - 1)] - ordered[low]) * (
+        position - low
+    )
+    return f"{value:.2f}"
+
+
+class DiscordREST:
+    def __init__(self, token: str) -> None:
+        self.client = httpx.AsyncClient(
+            base_url=DISCORD_API,
+            headers={"Authorization": f"Bot {token}"},
+            timeout=20,
+        )
+        self._routes: dict[str, asyncio.Lock] = {}
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    async def request(
+        self, method: str, path: str, *, body: dict[str, object] | None = None
+    ) -> dict[str, object] | list[dict[str, object]]:
+        # Discord's message bucket is per channel. Serialize each route and
+        # honor retry_after rather than letting a burst lose trigger messages.
+        route = path.split("?", 1)[0]
+        lock = self._routes.setdefault(route, asyncio.Lock())
+        async with lock:
+            for _ in range(8):
+                response = await self.client.request(method, path, json=body)
+                if response.status_code == 429:
+                    payload = response.json()
+                    await asyncio.sleep(float(payload.get("retry_after", 1)))
+                    continue
+                response.raise_for_status()
+                return cast(dict[str, object] | list[dict[str, object]], response.json())
+        raise RuntimeError(f"Discord rate limit persisted: {method} {route}")
+
+
+def _snowflake_time(message: dict[str, object], started: datetime) -> float:
+    return max(0.0, (datetime.fromisoformat(str(message["timestamp"])) - started).total_seconds())
+
+
+async def _discord_watch(
+    rest: DiscordREST,
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    message_id: str,
+    started: datetime,
+    created_threads: set[str],
+) -> DiscordResult:
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+
+    result = DiscordResult(message_id)
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        await asyncio.sleep(2)
+        if result.thread_id is None:
+            response = await rest.client.get(f"/channels/{message_id}")
+            if response.status_code == 200:
+                thread = response.json()
+                if str(thread.get("parent_id")) == channel_id:
+                    result.thread_id = message_id
+                    created_threads.add(message_id)
+            elif response.status_code != 404:
+                if response.status_code == 429:
+                    await asyncio.sleep(float(response.json().get("retry_after", 1)))
+                    continue
+                response.raise_for_status()
+        target = result.thread_id or channel_id
+        messages = cast(
+            list[dict[str, object]],
+            await rest.request("GET", f"/channels/{target}/messages?after={message_id}&limit=100"),
+        )
+        bot_messages: list[dict[str, object]] = []
+        for item in messages:
+            author_value = item.get("author")
+            if not isinstance(author_value, dict):
+                continue
+            author = cast(dict[str, object], author_value)
+            if str(author.get("id")) == DISCORD_DAIMON_BOT_ID:
+                bot_messages.append(item)
+        if bot_messages:
+            first = min(bot_messages, key=lambda item: str(item["id"]))
+            result.first_s = _snowflake_time(first, started)
+            for item in bot_messages:
+                content = str(item.get("content") or "")
+                if "too many chats" in content or "at capacity" in content:
+                    result.status = "shed"
+                    result.final_s = _snowflake_time(item, started)
+                    return result
+                if content or item.get("attachments"):
+                    result.final_s = max(result.final_s or 0, _snowflake_time(item, started))
+            result.attachments = sum(
+                len(cast(list[object], item.get("attachments") or [])) for item in bot_messages
+            )
+        if result.thread_id:
+            async with sm() as session:
+                outcomes = await list_for_tenant(session, tenant_id, limit=200)
+            done = next(
+                (
+                    row
+                    for row in outcomes
+                    if row.thread_id == result.thread_id and row.started_at >= started
+                ),
+                None,
+            )
+            if done is not None:
+                result.status = str(done.reason)
+                # The outcome may be written just before Discord posts the final reply.
+                if result.final_s is None:
+                    await asyncio.sleep(2)
+                    continue
+                return result
+    return result
+
+
+async def _discord_phase(
+    args: argparse.Namespace,
+    client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.stores.tenants import get_tenant, set_turn_cap
+
+    guild_ids = list(dict.fromkeys(args.discord_guild_id))
+    if not guild_ids or any(guild not in DISCORD_QA_GUILDS for guild in guild_ids):
+        raise RuntimeError("Discord guild must be explicitly selected from the QA-only allow-list")
+    token = os.environ.get("DISCORD_QA_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("DISCORD_QA_BOT_TOKEN must be set at runtime")
+    if settings.discord is None or DISCORD_QA_BOT_ID not in settings.discord.qa_bot_user_ids:
+        raise RuntimeError("staging Discord config must allow the QA bot")
+    print(f"Discord global cap: {settings.discord.max_concurrent_turns or 'unset'}", flush=True)
+    rest = DiscordREST(token)
+    previous: dict[uuid.UUID, int | None] = {}
+    created_threads: set[str] = set()
+    created_channels: set[str] = set()
+    tasks: set[asyncio.Task[DiscordResult]] = set()
+    try:
+        me = await rest.request("GET", "/users/@me")
+        assert isinstance(me, dict)
+        if str(me.get("id")) != DISCORD_QA_BOT_ID:
+            raise RuntimeError("token does not belong to the staging QA bot")
+        channels: list[tuple[str, uuid.UUID]] = []
+        for guild_id in guild_ids:
+            member = await rest.request(
+                "GET", f"/guilds/{guild_id}/members/{DISCORD_DAIMON_BOT_ID}"
+            )
+            assert isinstance(member, dict)
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+            async with sm() as session:
+                tenant = await get_tenant(session, tenant_id)
+            if tenant is None or tenant.provision_status != "ready" or tenant.archived_at:
+                raise RuntimeError(f"QA guild {guild_id} has no ready tenant")
+            agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="daimon")
+            if agent is None:
+                raise RuntimeError(f"QA guild {guild_id} has no default agent")
+            print(f"Discord QA guild {guild_id} default agent model: {agent.model.id}", flush=True)
+            previous[tenant_id] = tenant.turn_cap
+            for index in range(min(5, args.discord_concurrency)):
+                channel = await rest.request(
+                    "POST",
+                    f"/guilds/{guild_id}/channels",
+                    body={"name": f"qa-load-{args.run_id}-{index + 1}", "type": 0},
+                )
+                assert isinstance(channel, dict)
+                channel_id = str(channel["id"])
+                created_channels.add(channel_id)
+                channels.append((channel_id, tenant_id))
+        baseline = await _debits(sm, list(previous))
+        for tenant_id in previous:
+            async with sm() as session, session.begin():
+                await set_turn_cap(session, tenant_id=tenant_id, cap=args.discord_concurrency)
+        print(
+            f"Discord channels: {len(channels)}; tenant cap: {args.discord_concurrency}", flush=True
+        )
+        results: list[DiscordResult] = []
+        for index in range(args.discord_turns):
+            while len(tasks) >= args.discord_concurrency:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                results.extend(task.result() for task in done)
+            spent = await _debits(sm, list(previous)) - baseline
+            if not budget_allows(spent, args.max_usd):
+                print(
+                    f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}", flush=True
+                )
+                break
+            channel_id, tenant_id = channels[index % len(channels)]
+            prompt = "Reply with OK only. Do not call tools."
+            if args.discord_file_every and (index + 1) % args.discord_file_every == 0:
+                prompt = (
+                    "Create and attach a tiny text file named rehearsal.txt containing OK. "
+                    "Reply briefly."
+                )
+            started = datetime.now(UTC)
+            posted = await rest.request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                body={
+                    "content": f"<@{DISCORD_DAIMON_BOT_ID}> {prompt}",
+                    "allowed_mentions": {"parse": [], "users": [DISCORD_DAIMON_BOT_ID]},
+                },
+            )
+            assert isinstance(posted, dict)
+            message_id = str(posted["id"])
+            tasks.add(
+                asyncio.create_task(
+                    _discord_watch(
+                        rest, sm, tenant_id, channel_id, message_id, started, created_threads
+                    )
+                )
+            )
+            await asyncio.sleep(1 / max(1, len(channels)))
+        if tasks:
+            results.extend(await asyncio.gather(*tasks))
+        created_threads.update(row.thread_id for row in results if row.thread_id)
+        for row in results:
+            print(
+                f"Discord {row.message_id}: thread={row.thread_id or 'none'} "
+                f"first={row.first_s} final={row.final_s} status={row.status} "
+                f"attachments={row.attachments}",
+                flush=True,
+            )
+        for name, values in (
+            ("first", [r.first_s for r in results if r.first_s is not None]),
+            ("final", [r.final_s for r in results if r.final_s is not None]),
+        ):
+            print(
+                f"Discord {name} p50={_percentile(values, 0.5)}s p95={_percentile(values, 0.95)}s",
+                flush=True,
+            )
+        print(
+            f"Discord totals: launched={len(results)} "
+            f"threads={sum(r.thread_id is not None for r in results)} "
+            f"shed={sum(r.status == 'shed' for r in results)} "
+            f"errors={sum(r.status not in ('completed', 'shed') for r in results)} "
+            f"attachments={sum(r.attachments for r in results)} "
+            f"spent=${await _debits(sm, list(previous)) - baseline}",
+            flush=True,
+        )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        cleanup_errors: list[str] = []
+        for channel_id in created_channels:
+            try:
+                await rest.request("DELETE", f"/channels/{channel_id}")
+                response = await rest.client.get(f"/channels/{channel_id}")
+                if response.status_code != 404:
+                    cleanup_errors.append(
+                        f"channel {channel_id}: HTTP {response.status_code} after delete"
+                    )
+            except Exception as exc:
+                cleanup_errors.append(f"channel {channel_id}: {exc}")
+        for tenant_id, cap in previous.items():
+            async with sm() as session, session.begin():
+                await set_turn_cap(session, tenant_id=tenant_id, cap=cap)
+        await rest.close()
+        print(
+            f"Discord cleanup: channels={len(created_channels)} "
+            f"threads={len(created_threads)} tenant_caps_restored={len(previous)}",
+            flush=True,
+        )
+        if cleanup_errors:
+            raise RuntimeError("Discord cleanup failed: " + "; ".join(cleanup_errors))
+
+
 async def _run(args: argparse.Namespace) -> None:
     from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
     from daimon.core.config import load_settings
@@ -551,6 +860,8 @@ async def _phases(
             )
         _print_results("turns", await asyncio.gather(*turns))
         print(f"ledger debits: ${await _debits(sm, ids)}; DB pool waits: n/a")
+    if args.discord:
+        await _discord_phase(args, client, sm, settings)
     if args.cleanup:
         _print_results("cleanup", await _cleanup(client, sm, names))
 
@@ -564,10 +875,17 @@ def main() -> None:
         or not 1 <= args.turns <= 150
         or args.arrival_seconds < 0
         or args.max_usd <= 0
+        or not 1 <= args.discord_turns <= 150
+        or not 1 <= args.discord_concurrency <= 150
+        or args.discord_file_every < 0
     ):
         raise SystemExit("require tenants >= 1, turns 1-150, arrival >= 0, max-usd > 0")
-    if not (args.install or args.turn_load or args.cleanup):
-        raise SystemExit("choose --install, --turn-load, or --cleanup")
+    if not (args.install or args.turn_load or args.discord or args.cleanup):
+        raise SystemExit("choose --install, --turn-load, --discord, or --cleanup")
+    if args.discord and (
+        not args.discord_guild_id or any(g not in DISCORD_QA_GUILDS for g in args.discord_guild_id)
+    ):
+        raise SystemExit("--discord requires an allow-listed --discord-guild-id")
     print(plan(args), flush=True)
     if args.dry_run:
         print("dry run: no settings, database, or upstream calls")

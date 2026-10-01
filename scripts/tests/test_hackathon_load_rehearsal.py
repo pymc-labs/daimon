@@ -1,15 +1,21 @@
 """Pure safety and scheduling checks for the staging rehearsal script."""
 
+from argparse import Namespace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
+import httpx
+import pytest
 import yaml
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 
 from scripts.hackathon_load_rehearsal import (
+    DiscordREST,
     _defaults_root,  # pyright: ignore[reportPrivateUsage]
+    _discord_phase,  # pyright: ignore[reportPrivateUsage]
+    _percentile,  # pyright: ignore[reportPrivateUsage]
     arrival_offsets,
     budget_allows,
     expected_agent_model,
@@ -17,7 +23,9 @@ from scripts.hackathon_load_rehearsal import (
 )
 
 if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
     from daimon.core.config import Settings
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,3 +83,44 @@ def test_event_rehearsal_expects_the_seeded_default_model(tmp_path: Path) -> Non
     assert _defaults_root(settings, "event", tmp_path) == REPO_ROOT / "defaults"
     seeded = yaml.safe_load((REPO_ROOT / "defaults" / "agents" / "daimon.yaml").read_text())
     assert expected_agent_model("event") == seeded["model"] == DEFAULT_AGENT_MODEL
+
+
+def test_discord_percentiles_handle_empty_and_small_samples() -> None:
+    assert _percentile([], 0.95) == "n/a"
+    assert _percentile([1, 3, 5], 0.5) == "3.00"
+    assert _percentile([1, 3, 5], 0.95) == "4.80"
+
+
+@pytest.mark.asyncio
+async def test_discord_refuses_non_qa_guild_before_reading_token() -> None:
+    args = Namespace(discord_guild_id=["1533730917854609528"])
+    with pytest.raises(RuntimeError, match="allow-list"):
+        await _discord_phase(
+            args,
+            cast("AsyncAnthropic", None),
+            cast("async_sessionmaker[AsyncSession]", None),
+            cast("Settings", None),
+        )
+
+
+@pytest.mark.asyncio
+async def test_discord_rest_retries_429_after_retry_after() -> None:
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"retry_after": 0})
+        return httpx.Response(200, json={"id": "ok"})
+
+    rest = DiscordREST("test-token")
+    await rest.client.aclose()
+    rest.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://discord.test"
+    )
+    try:
+        assert await rest.request("GET", "/users/@me") == {"id": "ok"}
+        assert calls == 2
+    finally:
+        await rest.close()
