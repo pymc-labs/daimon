@@ -20,8 +20,10 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_isolation import thread_turn_crosses
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
     get_participation_modes,
@@ -60,8 +62,10 @@ class ThreadParticipant:
         bot_display_name: str,
         billing_config: BillingConfig | None,
         markup: Decimal,
+        deployment_default: DeploymentDefault,
     ) -> None:
         self._settings = settings
+        self._deployment_default = deployment_default
         self._sessionmaker = sessionmaker
         self._anthropic = anthropic
         self._bot_user_id = bot_user_id
@@ -99,9 +103,9 @@ class ThreadParticipant:
     ) -> bool:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
 
-        The balance, cap and channel budget gates run here, before the classifier, on the
-        caller the turn would run as: a tenant that could not be admitted
-        must not pay for the question of whether to admit it. The call that
+        The balance, cap, channel budget and isolation gates run here, before the
+        classifier, on the caller the turn would run as: a tenant that could not be
+        admitted must not pay for the question of whether to admit it. The call that
         does run is metered to the tenant like any other model spend.
 
         `trigger` is the message the turn would run as -- passed in rather
@@ -158,6 +162,20 @@ class ThreadParticipant:
                 "thread_participation.skipped",
                 reason="over_channel_budget",
                 thread_id=str(thread.id),
+            )
+            return False
+        async with self._sessionmaker() as session:
+            crosses = await thread_turn_crosses(
+                session,
+                tenant_id=tenant_id,
+                platform=PLATFORM,
+                channel_id=parent_channel_id,
+                thread_id=str(thread.id),
+                default=self._deployment_default,
+            )
+        if crosses:
+            log.info(
+                "thread_participation.skipped", reason="channel_isolated", thread_id=str(thread.id)
             )
             return False
         recent = await self._recent_window(thread, exclude_ids={m.id for m in candidates})

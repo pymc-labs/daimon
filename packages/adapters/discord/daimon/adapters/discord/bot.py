@@ -1213,6 +1213,7 @@ class DaimonBot(commands.Bot):
                 bot_display_name=bot_display_name,
                 billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
+                deployment_default=self.runtime.deployment_default,
             )
         return self._participant
 

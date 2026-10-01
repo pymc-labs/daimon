@@ -26,11 +26,12 @@ from typing import Literal
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_reach import build_agent_reach
-from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
+from daimon.core.errors import DaimonError
+from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ScopeContext, TenantConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.core.stores.scoped_config_read import list_propagations_for_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import (
     list_dm_bindings,
     list_handoff_parent_channel_ids,
@@ -228,6 +229,41 @@ async def load_channel_isolation(
     )
 
 
+async def thread_turn_crosses(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    default: DeploymentDefault,
+) -> bool:
+    """Whether a turn in `thread_id` under `channel_id` would be refused as `channel_isolated`.
+
+    Read from routing alone, with no agent lookup, so a gate can skip paid work
+    first; admission still decides. One policy read while nothing is isolated.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    if not policy.isolated_channel_ids:
+        return False
+    context = ScopeContext(
+        tenant_id=tenant_id, channel_id=channel_id, platform=platform, thread_id=thread_id
+    )
+    try:
+        config = await resolve(session, context=context, default=default)
+    except DaimonError:  # a deleted binding: admission words that refusal
+        return False
+    if config.agent_name is None:
+        return False
+    isolation = await load_channel_isolation(
+        session, tenant_id=tenant_id, default=default, policy=policy
+    )
+    place = (thread_id, channel_id)
+    if config.thread_binding_kind == "setup" and isolation.isolated_channel(*place) is not None:
+        return False  # a setup thread inside answers as the built-in agent
+    return isolation.crosses(config.agent_name, *place)
+
+
 async def load_isolation_viewer(
     session: AsyncSession,
     *,
@@ -257,4 +293,5 @@ __all__ = [
     "load_channel_isolation",
     "load_isolation_viewer",
     "routine_destination_channel",
+    "thread_turn_crosses",
 ]
