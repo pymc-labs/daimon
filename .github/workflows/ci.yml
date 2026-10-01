@@ -287,6 +287,15 @@ jobs:
       - run: uv sync --all-extras --all-packages
       - name: pytest (notebook-host)
         run: uv run pytest apps/notebook-host -n auto
+      # The real-browser isolation test: two real marimo notebooks on their own
+      # *.localhost origins in headless Chromium. Playwright stays out of the
+      # locked dependencies; it is only needed here.
+      - name: playwright chromium
+        run: uv run --with playwright==1.63.0 playwright install --with-deps chromium
+      - name: pytest (notebook-host, real browser)
+        run: >-
+          uv run --with playwright==1.63.0 pytest
+          apps/notebook-host/tests/test_notebook_origin_browser.py -m slow
 
   pytest-report-host:
     runs-on: ubuntu-latest

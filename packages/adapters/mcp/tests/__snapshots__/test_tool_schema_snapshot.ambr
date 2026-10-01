@@ -1431,11 +1431,16 @@
         returned upload_url — the source never goes through a tool argument (which
         truncates large notebooks).
         
-        permanent=False (default) publishes a scratch notebook: the editor is
-        visible, and the host reaps it after its TTL. permanent=True publishes it
-        as a read-only blog — code hidden, interactive widgets live, survives host
-        restarts, never reaped. Prefer the default; re-upload the same slug with
-        permanent=True once the notebook is worth keeping.
+        permanent=False (default) publishes a scratch notebook that the host reaps
+        after its TTL. permanent=True publishes it as a blog that survives host
+        restarts and is never reaped. Prefer the default; re-upload the same slug
+        with permanent=True once the notebook is worth keeping.
+        
+        Both are read-only apps by default: code hidden, interactive widgets live.
+        editable=True (scratch only, and only where the operator has turned it on)
+        serves the marimo code editor instead. Anyone holding that link can run
+        arbitrary code on the notebook host, so pass it only when the person you
+        are sharing with asked to edit the notebook.
         
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL
@@ -1443,11 +1448,17 @@
         
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
         curl response JSON carries the live url (and expires_at for scratch
-        notebooks); share that. Never paste large file contents into a tool argument.
+        notebooks); share that whole url. Its access_token is the notebook's only
+        key, so share it only where the notebook belongs. Never paste large file
+        contents into a tool argument.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'editable': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'permanent': dict({
             'default': False,
             'type': 'boolean',

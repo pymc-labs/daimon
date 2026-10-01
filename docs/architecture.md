@@ -547,7 +547,15 @@ If you add another, reuse `admit()` rather than re-deriving the gate order.
 ## Standalone apps
 
 `apps/notebook-host/` serves published marimo notebooks, spawning one
-`marimo edit` subprocess per notebook behind a reverse proxy.
+marimo subprocess per notebook behind a reverse proxy. Each subprocess has
+its own access token, and scratch notebooks are read-only unless the
+publisher asks for the editor and the operator allows it
+(`notebook.allow_editable` on the bot and `allow_editable` on the host). With
+`DAIMON_NOTEBOOK__ORIGIN_BASE` set, each notebook is served from its own origin
+(`<label>.<origin_base>`); the proxy routes by Host and refuses cross-origin
+requests and WebSockets. Without it, notebooks share one origin, so a public
+host admits uploads from one tenant only, named in the bot's signed upload
+token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach daimon over HTTP with capability tokens, and the
