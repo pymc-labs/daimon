@@ -30,7 +30,11 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
-from daimon.adapters.mcp.tools.reachability import channel_admin_caller, target_facts
+from daimon.adapters.mcp.tools.reachability import (
+    UNPLACED_RUN_REASON,
+    channel_admin_caller,
+    target_facts,
+)
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -279,9 +283,10 @@ async def _require_key_replacement_allowed(
         is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("key_replace", is_admin=auth.is_admin, target=facts)
+    shared = UNPLACED_RUN_REASON if facts.has_unplaced_run else "is shared with everyone here"
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
+            f"'{ma_agent.name}' {shared}, and adding '{adding}' "
             f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
             "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
@@ -290,7 +295,7 @@ async def _require_key_replacement_allowed(
         )
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
+            f"'{ma_agent.name}' {shared}, so replacing the key "
             f"'{key}' it already has needs an admin, and the caller "
             f"is not one. Nothing changed: the existing '{key}' is still in use and no "
             "card was posted. Tell them an admin can ask Daimon to replace the "
