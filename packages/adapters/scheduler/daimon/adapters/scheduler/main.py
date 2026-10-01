@@ -55,7 +55,7 @@ from daimon.core.github_installation_reconcile import (
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
-from daimon.core.logging_setup import configure_log_level
+from daimon.core.logging_setup import configure_logging
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
@@ -537,7 +537,7 @@ async def run(
     # Configure the JSON log chain BEFORE the first log line so structured output
     # takes effect for the whole process (OB-1; this entrypoint owns the call site
     # since 61 is unexecuted).
-    configure_log_level(settings.log.level)
+    configure_logging(settings.log.level)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,

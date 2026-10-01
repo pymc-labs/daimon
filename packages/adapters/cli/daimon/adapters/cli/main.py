@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.metadata
+import io
+import sys
+import traceback
 
-import rich.traceback
+import click
 import typer
 from daimon.adapters.cli.commands.agents import agents_app
 from daimon.adapters.cli.commands.audit import audit_app
@@ -24,9 +27,13 @@ from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
+from daimon.adapters.cli.logging import configure_bootstrap_logging
 from daimon.adapters.cli.run.command import run_command
+from daimon.core.observability import install_log_redaction, redact_text
 
-app = typer.Typer(help="Daimon CMA CLI")
+# Typer's pretty exceptions print frame locals and raw messages; unhandled
+# errors go through `main` instead, which prints a redacted traceback.
+app = typer.Typer(help="Daimon CMA CLI", pretty_exceptions_enable=False)
 app.add_typer(agents_app, name="agents")
 app.add_typer(backup_app, name="backup")
 app.add_typer(environments_app, name="environments")
@@ -50,7 +57,10 @@ app.command("smoke")(smoke_command)
 
 @app.callback()
 def root() -> None:
-    rich.traceback.install(show_locals=False)
+    # Every command logs through the redacting bootstrap chain (no frame
+    # locals); unhandled exceptions are rendered by `main`, redacted.
+    configure_bootstrap_logging()
+    install_log_redaction()
 
 
 @app.command("version")
@@ -59,5 +69,36 @@ def version_command() -> None:
     typer.echo(f"daimon {version}")
 
 
+def main() -> None:
+    """Console-script entry point: `daimon`.
+
+    Usage errors and unhandled exceptions are printed redacted (no frame
+    locals, credential text removed); exit codes are kept (2 for usage, 1
+    for an unhandled error).
+    """
+    try:
+        rc = app(standalone_mode=False)
+    except click.exceptions.Exit as exc:
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        print("Aborted!", file=sys.stderr)
+        raise SystemExit(1) from None
+    except click.ClickException as exc:
+        buffer = io.StringIO()
+        exc.show(file=buffer)
+        print(redact_text(buffer.getvalue()), file=sys.stderr, end="")
+        raise SystemExit(exc.exit_code) from None
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as exc:
+        trace = "".join(traceback.format_exception(exc))
+        print(redact_text(trace), file=sys.stderr, end="")
+        raise SystemExit(1) from None
+    # Without standalone mode a command's typer.Exit(code=N) comes back as
+    # the return value; keep it as the process exit code.
+    if isinstance(rc, int) and rc:
+        raise SystemExit(rc)
+
+
 if __name__ == "__main__":
-    app()
+    main()
