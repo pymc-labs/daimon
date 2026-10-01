@@ -62,17 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Scoped operator tokens for integrations.** `daimon mcp
-  mint-operator-token` mints a token acting over `/mcp` for one server admin
-  with only the scopes it names (`tenant:read`, `channels:write`,
-  `promo:redeem`, deployment-wide `promo:create` with an optional
-  `--max-issued-usd`), for 30 days by default and at most 90. Each request
-  rechecks the row and the account's stored admin role, which changes on the
-  person's next platform turn, so `revoke-token` is the immediate stop and
-  `set-token-scopes` narrows. Calls are rate limited
+- **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
+  mints a token acting over `/mcp` for one server admin with only the scopes it
+  names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide
+  `promo:create` with an optional `--max-issued-usd`), for 30 days by default
+  and at most 90. Each request rechecks the row and the account's stored admin
+  role, which changes on the person's next platform turn, so `revoke-token` is
+  the immediate stop and `set-token-scopes` narrows. Calls are rate limited
   (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`); calls, refusals and token changes
-  are audited. New tools: `get_tenant_summary`, and `create_promo_code`,
-  `list_promo_codes`, `revoke_promo_code` for `promo:create`. `mint-token`
+  are audited. Channel budget, agent and admin tools take the scopes. New tools:
+  `get_tenant_summary` (with each channel's admins) and, for `promo:create`,
+  `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`
   tokens now expire and can be revoked. Run migration `0036_operator_tokens`.
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
