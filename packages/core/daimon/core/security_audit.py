@@ -16,6 +16,8 @@ class AuditDecision:
     operation: str | None = None
     denied: bool = False
     reason: str = "completed"
+    scope: str | None = None
+    """The operator-token scope the call was checked against."""
 
 
 _current: ContextVar[AuditDecision | None] = ContextVar("security_audit", default=None)
@@ -37,3 +39,22 @@ def record_policy_decision(operation: str, outcome: str) -> None:
         decision.operation = operation
         decision.denied = outcome != "allow"
         decision.reason = "policy_allow" if outcome == "allow" else outcome
+
+
+def record_scope_decision(scope: str, *, allowed: bool) -> None:
+    """Record the operator-token scope a tool checked, denying when the token lacks it."""
+    decision = _current.get()
+    if decision is None:
+        return
+    decision.scope = scope
+    if not allowed and not decision.denied:
+        decision.denied = True
+        decision.reason = "scope_missing"
+
+
+def record_denial(reason: str) -> None:
+    """Deny the current request for a reason no policy decision covers, e.g. a rate limit."""
+    decision = _current.get()
+    if decision is not None and not decision.denied:
+        decision.denied = True
+        decision.reason = reason

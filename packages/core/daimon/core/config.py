@@ -162,6 +162,14 @@ class McpSettings(BaseModel):
             "objects."
         ),
     )
+    operator_calls_per_minute: int = Field(
+        default=60,
+        description=(
+            "Per-token cap on tool calls an operator token (minted with "
+            "`daimon mcp mint-operator-token`) may make per rolling minute, "
+            "counted in each MCP process. Set to 0 to disable."
+        ),
+    )
 
     @property
     def app_root_url(self) -> str | None:

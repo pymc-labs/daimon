@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 
 import jwt as pyjwt
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_internal_mcp_token, mint_jwt
+from daimon.core.mcp_auth import (
+    mint_agent_mcp_token,
+    mint_cli_mcp_token,
+    mint_internal_mcp_token,
+    mint_jwt,
+    mint_operator_mcp_token,
+)
+from daimon.core.stores.mcp_tokens import get_mcp_token
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Agent tokens are minted with a TTL, and the tests below mint them at a fixed
@@ -374,3 +382,60 @@ async def test_mint_agent_mcp_token_writes_row_readable_by_get_mcp_token(
         "row.agent_id must equal str(agent_id) (A2 — stringified derived UUID)"
     )
     assert row.revoked_at is None, "freshly minted token row must not be revoked"
+
+
+# ---- mint_operator_mcp_token / mint_cli_mcp_token ----
+
+
+async def test_mint_operator_mcp_token_claims_and_row_carry_kind_scopes_and_expiry(
+    db_session: AsyncSession,
+) -> None:
+    """Claims are exactly {sub, jti, exp, kind}; the scopes and ceiling live on the row."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"c" * 32
+    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+
+    token = await mint_operator_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        scopes=frozenset({"tenant:read", "promo:create"}),
+        label="integration",
+        secret=secret,
+        now=now,
+        ttl_days=7,
+        max_issued_usd=Decimal("250"),
+    )
+
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+    assert set(claims) == {"sub", "jti", "exp", "kind"}, "no scopes or role in the token"
+    assert claims["kind"] == "operator", "the kind claim names the token kind"
+    assert claims["exp"] == int((now + dt.timedelta(days=7)).timestamp()), "exp is now + ttl"
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None, "the jti has a registry row"
+    assert row.kind == "operator" and row.agent_id is None, "an operator token names no agent"
+    assert row.scopes == ("promo:create", "tenant:read"), "scopes are stored sorted"
+    assert row.expires_at == now + dt.timedelta(days=7), "the row mirrors exp"
+    assert row.max_issued_usd == Decimal("250") and row.issued_usd == 0, "ceiling starts unused"
+
+
+async def test_mint_cli_mcp_token_registers_an_expiring_row(db_session: AsyncSession) -> None:
+    """CLI tokens now carry a jti and exp, so they expire and can be revoked."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"d" * 32
+    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+
+    token = await mint_cli_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        secret=secret,
+        now=now,
+        ttl_days=90,
+    )
+
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+    assert claims["kind"] == "cli" and "jti" in claims and "exp" in claims, "cli claim set"
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.kind == "cli", "a cli registry row exists"
+    assert row.scopes == () and row.max_issued_usd is None, "cli tokens carry no scopes"
