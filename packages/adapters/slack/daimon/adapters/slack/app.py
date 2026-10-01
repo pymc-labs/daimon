@@ -1843,9 +1843,9 @@ class SlackApp:
             turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
             # --- Stage two: bind_session (find-or-create, mapping write,
-            # recorder binding) -- D-01 bind_session(). Slack has no
-            # per_caller_thread_sessions equivalent: session_account_id is always
-            # the admitted caller's account, and threads always pre-exist. ---
+            # recorder binding) -- D-01 bind_session(). As on Discord,
+            # session_account_id is the admitted caller's account, and threads
+            # always pre-exist. ---
             try:
                 prepared = await bind_session(
                     self.runtime.turn_deps,

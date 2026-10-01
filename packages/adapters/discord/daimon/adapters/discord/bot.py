@@ -49,7 +49,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.anthropic_spend import spend_limit_error
-from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -88,7 +88,7 @@ from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_inte
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
@@ -263,29 +263,6 @@ async def _resolve_agent_display_name(
             if name:
                 return str(name)
     return "the previous agent"
-
-
-def _resolve_session_account_id(
-    discord_settings: DiscordSettings,
-    admission: Admission,
-    *,
-    tenant_id: uuid.UUID,
-    thread_id: str,
-) -> uuid.UUID:
-    """Per-caller vs legacy single-session-per-thread account key.
-
-    Shared by the main mention path and continuation dispatch's follow-up
-    turn -- both must derive the SAME key for the same (tenant, thread,
-    caller) so a follow-up turn binds the session the mention path would
-    have bound. See `_orchestrate`'s original inline comment (#162) for the
-    confused-deputy history this closes.
-    """
-    if (
-        discord_settings.per_caller_thread_sessions
-        or admission.config.thread_binding_id is not None
-    ):
-        return admission.account_id
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"legacy-thread-sentinel:{tenant_id}:{thread_id}")
 
 
 def _compose_queued_content(messages: list[discord.Message]) -> str:
@@ -1950,11 +1927,6 @@ class DaimonBot(commands.Bot):
         one to before `bind_session` has even run.
         """
         _ = guild_id  # kept for parity with _handle_mention's error-context signature
-        discord_settings = self.runtime.settings.discord
-        assert discord_settings is not None, (
-            "_run_continuation_turn called without discord settings"
-        )
-
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -2054,9 +2026,7 @@ class DaimonBot(commands.Bot):
             make_lifecycle=_make_lifecycle,
         )
 
-        session_account_id = _resolve_session_account_id(
-            discord_settings, admission, tenant_id=tenant_id, thread_id=row.thread_id
-        )
+        session_account_id = admission.account_id
         prepared = await bind_session(
             self.runtime.turn_deps,
             admission,
@@ -2561,26 +2531,13 @@ class DaimonBot(commands.Bot):
             make_lifecycle=_make_lifecycle,
         )
 
-        # Compute the account_id used to key thread-session lookup and create.
-        # When per_caller_thread_sessions is ON (default): use the caller's real
-        # account_id so each caller in a thread gets their own durable session
-        # (closing the #162 confused-deputy hole — a low-priv caller never
-        # reuses the starter's session). When OFF (opt-out): use a
-        # deterministic per-(tenant,thread) uuid5 as a sentinel that is
-        # identical for every caller in this thread, preserving the legacy
-        # single-session-per-thread behavior byte-for-byte.
-        #
-        # The sentinel is a uuid5 derived from NAMESPACE_URL — real accounts use
-        # random uuid4, so the sentinel can NEVER collide with any real account row
-        # (W1). The formula is stable across restarts so the OFF path always reuses
-        # one session per thread deterministically.
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
             "_orchestrate called without discord settings — entrypoint must validate at boot"
         )
-        session_account_id = _resolve_session_account_id(
-            discord_settings, admission, tenant_id=tenant_id, thread_id=str(thread.id)
-        )
+        # Each caller in a thread keys their own session on their own account,
+        # so nobody reuses another caller's session identity (#162).
+        session_account_id = admission.account_id
 
         # --- Stage two: bind_session (find-or-create, mapping write,
         # recorder binding) -- D-01 bind_session(). ---
