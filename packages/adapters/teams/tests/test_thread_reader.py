@@ -125,3 +125,22 @@ async def test_an_unreadable_classifier_window_raises_for_the_caller_to_stay_sil
         await _reader(httpx.MockTransport(handler)).read_window(
             _inbound("1700000000003"), exclude_ids=frozenset(), limit=10
         )
+
+
+async def test_read_media_reads_every_message_a_composed_turn_answers() -> None:
+    """Queued messages fold into one turn: each one's hosted images are read, not only the last."""
+    paths: list[str] = []
+    replies = f"/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages/{ROOT}/replies"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        message_id = request.url.path.rsplit("/", 1)[-1]
+        src = f"https://graph.microsoft.com{replies}/{message_id}/hostedContents/h/$value"
+        body = {"contentType": "html", "content": f'<img src="{src}">'}
+        return httpx.Response(200, json={"id": message_id, "body": body})
+
+    inbound = dataclasses.replace(_inbound("1700000000005"), composed_ids=("1700000000004",))
+    media = await _reader(httpx.MockTransport(handler)).read_media(inbound)
+
+    assert paths == [f"{replies}/1700000000004", f"{replies}/1700000000005"], "oldest first"
+    assert media is not None and len(media.image_urls) == 2, "the earlier message's image too"

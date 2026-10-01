@@ -122,6 +122,16 @@ def test_delta_block_keeps_replies_after_the_watermark_and_truncates_only_a_full
     assert all_new.attrs == {"truncated": "true"}, "every reply is new and Graph has more"
 
 
+def test_thread_and_delta_blocks_name_the_newest_message_read_even_when_skipped() -> None:
+    """The watermark's source: the newest id on the page, the trigger and status card included."""
+    page = GraphPage(value=[_msg("105"), _msg("104"), _msg("101")])
+    thread = thread_block(_msg("100"), page, skip_ids=frozenset({"105"}), bot_app_id=BOT)
+    delta = delta_block(page, after=104, skip_ids=frozenset({"105"}), bot_app_id=BOT)
+    channel = channel_block(page, skip_ids=frozenset(), bot_app_id=BOT)
+    assert thread.newest_id == delta.newest_id == "105", "skipped is still read"
+    assert channel.newest_id is None, "other threads' posts say nothing about this thread"
+
+
 def test_channel_block_counts_posts_and_another_bots_post_is_not_self() -> None:
     posts = GraphPage(value=[_msg("200"), _bot("201", "<p>deploy done</p>", app_id="other")])
     block = channel_block(posts, skip_ids=frozenset(), bot_app_id=BOT)

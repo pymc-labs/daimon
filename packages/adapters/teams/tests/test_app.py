@@ -82,8 +82,9 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
         await started.wait()
-        await teams._orchestrate(make_inbound("two"), TENANT)
-        await teams._orchestrate(make_inbound("three"), TENANT)
+        two, three = make_inbound("two"), make_inbound("three")
+        await teams._orchestrate(two, TENANT)
+        await teams._orchestrate(three, TENANT)
         await teams._orchestrate(make_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
         assert len(ran) == 1, "queued messages wait for the running turn"
         release.set()
@@ -94,6 +95,9 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
         (AAD_OBJECT_ID, "two\n\nthree"),
         (OTHER_AAD_OBJECT_ID, "other"),
     ]
+    assert ran[1].message_ids == (two.activity_id, three.activity_id), (
+        "the composed turn knows every message it answers, for media and history"
+    )
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

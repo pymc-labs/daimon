@@ -35,11 +35,21 @@ _FILE_TYPES = frozenset({"reference", "application/vnd.microsoft.teams.file.down
 
 @dataclass(frozen=True)
 class HistoryBlock:
-    """Rendered `<message>` lines for one envelope, `tag` naming the window."""
+    """Rendered `<message>` lines for one envelope, `tag` naming the window.
+
+    `newest_id` is the newest message read in the thread, rendered or not.
+    """
 
     tag: str
     lines: tuple[str, ...]
     attrs: Mapping[str, str] = field(default_factory=dict[str, str])
+    newest_id: str | None = None
+
+
+def newest_message_id(ids: Iterable[str | None]) -> str | None:
+    """The newest of `ids` (Teams message ids are epoch milliseconds), or None."""
+    numeric = [int(i) for i in ids if i and i.isdigit()]
+    return str(max(numeric)) if numeric else None
 
 
 class _Text(HTMLParser):
@@ -200,8 +210,10 @@ def thread_block(
     root: GraphMessage, replies: GraphPage, *, skip_ids: frozenset[str], bot_app_id: str
 ) -> HistoryBlock:
     """First turn in a thread: the root and one page of its newest replies."""
-    lines = _lines([root, *replies.value], skip_ids=skip_ids, bot_app_id=bot_app_id)
-    return HistoryBlock("thread_history", lines, _truncated(replies.next_link is not None))
+    messages = [root, *replies.value]
+    lines = _lines(messages, skip_ids=skip_ids, bot_app_id=bot_app_id)
+    newest = newest_message_id(m.id for m in messages)
+    return HistoryBlock("thread_history", lines, _truncated(replies.next_link is not None), newest)
 
 
 def delta_block(
@@ -215,7 +227,8 @@ def delta_block(
     newer = [m for m in replies.value if m.id.isdigit() and int(m.id) > after]
     cut = replies.next_link is not None and len(newer) == len(replies.value)
     lines = _lines(newer, skip_ids=skip_ids, bot_app_id=bot_app_id)
-    return HistoryBlock("thread_delta", lines, _truncated(cut))
+    newest = newest_message_id(m.id for m in replies.value)
+    return HistoryBlock("thread_delta", lines, _truncated(cut), newest)
 
 
 def classifier_window(

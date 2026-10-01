@@ -230,7 +230,7 @@ def _resolve_embedded(
     files: Sequence[InboundFile], media: ChannelMedia | None
 ) -> tuple[list[InboundFile], list[InboundFile]]:
     """`(files to read, embedded ones Graph could not name)`. Graph's view of the
-    message, when there is one, replaces what the activity listed for a channel."""
+    messages, when there is one, replaces what the activities listed for a channel."""
     embedded = [f for f in files if f.kind in ("embedded_image", "embedded_file")]
     if not embedded:
         return list(files), []

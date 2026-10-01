@@ -32,7 +32,7 @@ from daimon.adapters.teams.commands import (
     CommandHandler,
     parse_command,
 )
-from daimon.adapters.teams.context import HistoryBlock, render_user_message
+from daimon.adapters.teams.context import HistoryBlock, newest_message_id, render_user_message
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -184,6 +184,7 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
             items[-1],
             text="\n\n".join(item.text for item in items),
             files=tuple(file for item in items for file in item.files),
+            composed_ids=tuple(item.activity_id for item in items[:-1]),
         )
         for items in by_author.values()
     ]
@@ -823,10 +824,11 @@ class TeamsApp:
                 raise
             return
 
-        # The trigger and this turn's status card are not history.
-        skip = frozenset(filter(None, (inbound.activity_id, lifecycle.message_id)))
+        # The messages this turn answers and its status card are not history.
+        skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
         history = await self._history(inbound, watermark=watermark, skip_ids=skip)
+        read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.
         if (bare or inbound.unprompted) and history is None:
             await lifecycle.close_with_notice(_NO_CONTEXT)
@@ -901,7 +903,8 @@ class TeamsApp:
 
             async def reseed() -> str:
                 # A recreated session has seen nothing: replay the whole thread.
-                return render(history=await self._history(inbound, watermark=None, skip_ids=skip))
+                read.append(await self._history(inbound, watermark=None, skip_ids=skip))
+                return render(history=read[-1])
 
             outcome = await run_prepared_turn(
                 deps,
@@ -939,10 +942,14 @@ class TeamsApp:
         if summary is not None and not final.answer_prefix_applied:
             await self._say(inbound, summary)
         if outcome.mapping_id is not None and final.final_message_id is not None:
+            mark = final.final_message_id
+            if inbound.kind == "channel":
+                # The newest message read, not the answer: replies posted while the
+                # turn ran are older than the answer, and the next delta needs them.
+                newest = (h.newest_id for h in read if h is not None)
+                mark = newest_message_id([*inbound.message_ids, *newest]) or mark
             async with self.runtime.sessionmaker.begin() as session:
-                await update_watermark(
-                    session, id=outcome.mapping_id, watermark_message_id=final.final_message_id
-                )
+                await update_watermark(session, id=outcome.mapping_id, watermark_message_id=mark)
         if prepared.continuity.pending:
             await self._say(
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)

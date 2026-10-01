@@ -10,7 +10,7 @@ want of history.
 from __future__ import annotations
 
 import structlog
-from daimon.adapters.teams.attachments import ChannelMedia
+from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.context import (
     CHANNEL_BACKFILL_LIMIT,
@@ -107,22 +107,30 @@ class ThreadReader:
         )
 
     async def read_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
-        """The mentioned message's hosted images and files, or None if unreadable.
+        """The images and files of every message the turn answers, or None if one is unreadable.
 
         Shared files get a download URL when the team's site is granted.
         """
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
             return None
+        images: list[str] = []
+        files: list[SharedFile] = []
         try:
             group = await self._group_id(inbound)
-            message = await self._graph.get_message(
-                group, inbound.channel_id, inbound.activity_id, root_id=root
-            )
+            for message_id in inbound.message_ids:
+                message = await self._graph.get_message(
+                    group, inbound.channel_id, message_id, root_id=root
+                )
+                media = channel_media(
+                    message, group_id=group, channel_id=inbound.channel_id, root_id=root
+                )
+                images += media.image_urls
+                files += media.files
         except GraphUnavailable as err:
             log.warning("teams.media.unavailable", status=err.status, reason=err.reason)
             return None
-        media = channel_media(message, group_id=group, channel_id=inbound.channel_id, root_id=root)
+        media = ChannelMedia(image_urls=tuple(images), files=tuple(files))
         if self._files is None or not media.files:
             return media
         return await self._files.resolve(media, group_id=group)

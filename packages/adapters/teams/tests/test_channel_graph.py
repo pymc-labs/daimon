@@ -16,6 +16,8 @@ import httpx
 import pytest
 from daimon.adapters.teams.app import _NO_CONTEXT
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.thread_sessions import get_latest_thread_session
 from microsoft_teams.api import MessageActivity
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -122,14 +124,21 @@ GRANTED_SITE = {
 }
 
 
-def _graph(seen: list[httpx.Request], *, site: dict[str, Any] | None = None) -> httpx.AsyncClient:
+def _graph(
+    seen: list[httpx.Request],
+    *,
+    site: dict[str, Any] | None = None,
+    newer: tuple[dict[str, Any], ...] = (),
+) -> httpx.AsyncClient:
     """Graph answering the fixtures' thread: a root post, two replies, the media message.
 
     `site` adds SharePoint answers by path; without it the team's files are refused.
+    `newer` are replies posted after the media message.
     """
     replies = {
         "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(chatMessage)",
         "value": [
+            *newer,
             MEDIA_MESSAGE,
             _graph_message("1700000000002", "<p>the numbers are in the sheet</p>"),
         ],
@@ -218,6 +227,26 @@ async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_fil
     assert DOWNLOAD_URL in message, "the pre-authorised SharePoint link, for the sandbox to fetch"
     assert "q3.xlsx" not in _texts(teams_api_fake), "nothing to apologise for"
     assert {r.url.host for r in seen} == {"graph.microsoft.com"}, "resolved through Graph only"
+
+
+async def test_the_watermark_is_the_newest_message_read_not_the_bots_answer(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Replies posted while a turn runs are older than its answer: the next delta must keep them."""
+    newer = _graph_message("1700000000004", "<p>also check the budget</p>")
+    payload = _load("channel_media_reply")
+    await _run(db_session_factory, teams_api_fake, payload, _graph([], newer=(newer,)))
+
+    async with db_session_factory() as session:
+        row = await get_latest_thread_session(
+            session,
+            tenant_id=derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID),
+            platform="teams",
+            thread_id=payload["conversation"]["id"],
+        )
+    assert row is not None and row.watermark_message_id == "1700000000004", (
+        "the newest reply the turn read, not the answer posted after it"
+    )
 
 
 async def test_without_graph_the_turn_runs_and_the_person_hears_what_was_missed(

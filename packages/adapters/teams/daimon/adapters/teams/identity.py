@@ -57,6 +57,7 @@ class TeamsInbound:
     id; `team_group_id` its Entra group id, when the activity carries it.
     `unprompted` marks a thread reply nobody addressed to the bot: it may only
     enter organic thread participation, never the mention path.
+    `composed_ids` are the earlier queued messages folded into this one.
     """
 
     kind: Literal["dm", "channel"]
@@ -74,10 +75,16 @@ class TeamsInbound:
     team_group_id: str | None = None
     unprompted: bool = False
     user_name: str | None = None
+    composed_ids: tuple[str, ...] = ()
 
     @property
     def thread_id(self) -> str:
         return self.setup_thread_id or self.conversation_id
+
+    @property
+    def message_ids(self) -> tuple[str, ...]:
+        """Every message this turn answers, oldest first."""
+        return (*self.composed_ids, self.activity_id)
 
 
 @dataclass(frozen=True)
