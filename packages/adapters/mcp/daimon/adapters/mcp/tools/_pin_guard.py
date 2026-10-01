@@ -22,7 +22,6 @@ from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
     agent_pin_names,
-    is_pin_administered,
     pin_write_refused,
 )
 from daimon.core.channel_admins import load_administered_channel_ids
@@ -31,22 +30,23 @@ from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 
 
-def _trusted_admin(auth: AuthIdentity) -> bool:
-    """An admin this guard trusts to configure a pinned agent.
+def _trusted_credential(auth: AuthIdentity) -> bool:
+    """A credential whose stored roles this guard trusts to configure a pinned agent.
 
     - A chat turn's credential (``chat_agent_id``): minted for one turn whose
-      admission recorded the adapter's live platform role as the account's
-      stored role, which ``is_admin`` reads -- current as of that turn. The
-      same vault token is reused by that person's later hub and routine
-      sessions, so there it is as current as their last platform turn.
+      admission recorded the adapter's live platform role (and role ids) as
+      the account's stored ones, which ``is_admin`` and the channel admin
+      grants read -- current as of that turn. The same vault token is reused
+      by that person's later hub and routine sessions, so there it is as
+      current as their last platform turn.
     - The deployment operator's own token (no agent, no chat turn, no
       platform user; ``is_admin`` comes from the internal claim or the stored
       role), which already controls the deployment.
 
     An agent-scoped key (``agent_id``) is never trusted, whoever minted it:
-    it is long-lived and its account role may be stale.
+    it is long-lived and its account's roles may be stale.
     """
-    if not auth.is_admin or auth.agent_id is not None:
+    if auth.agent_id is not None:
         return False
     if auth.chat_agent_id is not None:
         return auth.platform_user_id is not None
@@ -65,10 +65,12 @@ async def require_pin_write_access(
     ``ma_agent`` may be a resolver, called only when the tenant pins anything,
     for paths that don't otherwise look the agent up.
 
-    Admins are trusted to configure an agent (`_trusted_admin`); agent
-    keys never are.
+    A trusted credential (`_trusted_credential`) of an admin, or of a
+    channel admin of every pinned channel, may write from anywhere; agent
+    keys never are trusted.
     """
-    if _trusted_admin(auth):
+    trusted = _trusted_credential(auth)
+    if trusted and auth.is_admin:
         return
     async with runtime.session_factory() as session:
         try:
@@ -80,22 +82,23 @@ async def require_pin_write_access(
     if callable(ma_agent):
         ma_agent = await ma_agent()
     names = agent_pin_names(ma_agent.name, ma_agent.metadata)
-    if not pin_write_refused(
+    administered: frozenset[str] = frozenset()
+    if trusted:
+        async with runtime.session_factory() as session:
+            administered = await load_administered_channel_ids(
+                session,
+                tenant_id=auth.tenant_id,
+                platform=auth.platform or "",
+                caller=channel_admin_caller(auth),
+            )
+    if pin_write_refused(
         policy,
         is_admin=False,
         agent_names=names,
         parent_channel_id=origin.parent_channel_id if origin is not None else None,
         thread_id=origin.thread_id if origin is not None else None,
+        administered_channel_ids=administered,
     ):
-        return
-    async with runtime.session_factory() as session:
-        administered = await load_administered_channel_ids(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=auth.platform or "",
-            caller=channel_admin_caller(auth),
-        )
-    if not is_pin_administered(policy, agent_names=names, administered_channel_ids=administered):
         raise ToolError(
             f"'{ma_agent.name}': {PIN_WRITE_REFUSAL} No card was posted. Tell the caller to "
             "ask in one of that agent's channels, or ask an admin. Do not retry."

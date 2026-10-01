@@ -295,6 +295,37 @@ async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_a
         await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
 
 
+@pytest.mark.parametrize("is_admin", [False, True], ids=["channel-admin", "server-admin"])
+async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    is_admin: bool,
+) -> None:
+    """Both exemptions read stored roles, so both need a chat turn's fresh credential."""
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="C_ACME",
+        role_ids=[],
+        user_ids=["42"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
+    login = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN if is_admin else Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        is_admin=is_admin,
+    )
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(runtime, login, ma_agent=agent, origin=None)
+
+
 async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
