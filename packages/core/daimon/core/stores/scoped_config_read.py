@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal, cast
 
-from daimon.core._models import ChannelConfig, TenantConfig, UserConfig
+from daimon.core._models import Account, ChannelConfig, TenantConfig, ThreadAgentBinding, UserConfig
 from daimon.core.errors import DaimonError
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -141,6 +141,44 @@ async def is_agent_reachable_in_tenant(
     """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     return is_agent_reachable(agent_name, tenant=tenant_row, channels=channel_rows, default=default)
+
+
+async def is_agent_shared_for_attachments(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    ma_agent_id: str,
+    default: DeploymentDefault,
+) -> bool:
+    """Reachability for the attachment rules (replacing or removing an MCP server).
+
+    Wider than `is_agent_reachable_in_tenant`: an agent also answers other
+    people when a live handoff or setup thread is bound to it, or when it is
+    someone's personal default. Repointing its servers reaches them too.
+    """
+    if await is_agent_reachable_in_tenant(
+        session, tenant_id=tenant_id, agent_name=agent_name, default=default
+    ):
+        return True
+    bound = await session.scalar(
+        select(ThreadAgentBinding.id)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.responder_ma_agent_id == ma_agent_id,
+            ThreadAgentBinding.deleted.is_(False),
+        )
+        .limit(1)
+    )
+    if bound is not None:
+        return True
+    personal = await session.scalar(
+        select(UserConfig.account_id)
+        .join(Account, Account.id == UserConfig.account_id)
+        .where(Account.tenant_id == tenant_id, UserConfig.agent_name == agent_name)
+        .limit(1)
+    )
+    return personal is not None
 
 
 async def _fetch_user(session: AsyncSession, *, account_id: uuid.UUID) -> UserConfigRow | None:

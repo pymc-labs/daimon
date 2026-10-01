@@ -3333,8 +3333,8 @@
         
         Use ``request_mcp_token`` for servers that take a pasted bearer token and
         ``attach_mcp_server`` for public servers. Members can use this on shared
-        agents and built-in Daimon; the admin and fork gates for direct spec edits
-        do not apply.
+        agents and built-in Daimon; repointing an existing server name at another
+        URL needs an admin there.
         
         Posts a requester-only card; its button opens a private sign-in link that
         expires in ten minutes. Finishing sign-in stores the grant for that person
@@ -3371,7 +3371,7 @@
             'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
           }),
           'server_name': dict({
-            'description': 'Connection name; reusing a name replaces that server entry.',
+            'description': 'Connection name; reuse at a new URL replaces it (admin if shared).',
             'type': 'string',
           }),
           'url': dict({
@@ -3400,7 +3400,8 @@
         
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
         credentials in chat. Members can use this form on shared agents and built-in
-        Daimon; the admin and fork gates for direct spec edits do not apply.
+        Daimon to add a server; replacing one the agent already has (same name at
+        another URL, or a new token for a connected URL) needs an admin there.
         
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
@@ -3438,7 +3439,7 @@
             'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
           }),
           'server_name': dict({
-            'description': 'Connection name; reusing a name replaces that server entry.',
+            'description': 'Connection name; reuse at a new URL replaces it (admin if shared).',
             'type': 'string',
           }),
           'url': dict({

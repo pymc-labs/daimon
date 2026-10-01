@@ -318,7 +318,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     probe = AsyncMock(return_value=McpProbe(status_code=401, resource_metadata_url=None))
     runtime = dataclasses.replace(_runtime(db_session_factory, mcp=True), mcp_token_probe=probe)
     fake, store = TeamsApiFake(), AsyncMock()
-    with patch.object(module, "add_external_mcp_credential", store):
+    with patch.object(module, "connect_mcp_server_with_token", store):
         async with _running(fake, runtime) as (service, dispatch):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
@@ -332,17 +332,15 @@ async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     row = await _request(db_session_factory, account_id, kind="mcp")
-    fake, store, attach = TeamsApiFake(), AsyncMock(), AsyncMock()
-    with (
-        patch.object(module, "add_external_mcp_credential", store),
-        patch.object(module, "attach_mcp_server_to_agent", attach),
-    ):
+    fake, connect = TeamsApiFake(), AsyncMock()
+    with patch.object(module, "connect_mcp_server_with_token", connect):
         async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
-    assert store.await_args is not None and store.await_args.kwargs["token"] == SECRET
-    assert attach.await_args is not None and attach.await_args.kwargs["url"] == MCP_URL
+    assert connect.await_args is not None
+    assert connect.await_args.kwargs["token"] == SECRET
+    assert connect.await_args.kwargs["mcp_server_url"] == MCP_URL
     assert "✅" in _edits(fake)[-1]
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
 
@@ -362,3 +360,26 @@ async def test_an_oauth_click_hands_the_requester_a_private_sign_in_link(
     assert button["url"].startswith("https://daimon.example.com/")
     assert again["task"]["value"] != link["task"]["value"], "the link is handed out once"
     assert _edits(fake), "the card stops offering the button"
+
+
+async def test_a_member_cannot_replace_an_mcp_server_on_a_shared_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """H2 on Teams: an `mcp_replace` refusal spends the request and publishes nothing."""
+    from daimon.core.mcp_attach import McpConnectDecision
+
+    row = await _request(db_session_factory, account_id, kind="mcp")
+    fake, connect = TeamsApiFake(), AsyncMock()
+    refused = AsyncMock(return_value=McpConnectDecision(replaces=True, replace_allowed=False))
+    with (
+        patch.object(module, "decide_mcp_connect", refused),
+        patch.object(module, "connect_mcp_server_with_token", connect),
+    ):
+        async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+
+    connect.assert_not_awaited()
+    dispatch.assert_not_awaited()
+    assert refused.await_args is not None and refused.await_args.kwargs["is_admin"] is False
+    assert "was not replaced" in _edits(fake)[-1]

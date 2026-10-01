@@ -2358,3 +2358,170 @@ async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
         )
     assert await _row_count(db_session) == 0
     assert posted == {}
+
+
+# ---------------------------------------------------------------------------
+# mcp_replace: repointing an existing server needs an admin on a shared agent
+# ---------------------------------------------------------------------------
+
+
+def _ma_agent_with_server(
+    *, agent_id: str, tenant_id: uuid.UUID, server_name: str, url: str
+) -> dict[str, object]:
+    agent = _ma_agent(agent_id=agent_id, name="daimon", tenant_id=tenant_id)
+    agent["mcp_servers"] = [{"name": server_name, "type": "url", "url": url}]
+    return agent
+
+
+@pytest.mark.parametrize("kind", ["token", "oauth"])
+async def test_request_mcp_refuses_repointing_an_existing_server_on_a_shared_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """H2: a member must not repoint a live agent's `linear` at their own URL."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent_with_server(
+                agent_id="ag_shared",
+                tenant_id=tenant.id,
+                server_name="linear",
+                url="https://mcp.linear.app/sse",
+            )
+        ]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9401", posted=posted)
+    impl = _request_mcp_token_impl if kind == "token" else _request_mcp_oauth_impl
+
+    with pytest.raises(ToolError, match="admin"):
+        await impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            server_name="linear",
+            url="https://attacker.example/mcp",
+            channel_id="222",
+        )
+
+    assert await _row_count(db_session) == 0, "a refused replacement must mint no request row"
+    assert posted == {}, "a refused replacement must post no card"
+
+
+async def test_request_mcp_token_refuses_overwriting_the_shared_token_for_a_url(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent-wide token for a URL is mirrored to every caller: overwriting it is a replace."""
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent_with_server(
+                agent_id="ag_shared",
+                tenant_id=tenant.id,
+                server_name="linear",
+                url="https://mcp.linear.app/sse",
+            )
+        ]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    await save_agent_mcp_credential(
+        sessionmaker=committing_sessionmaker,
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+        mcp_server_url="https://mcp.linear.app/sse",
+        plaintext_token="existing-token",
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9402", posted=posted)
+
+    with pytest.raises(ToolError, match="admin"):
+        await _request_mcp_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            server_name="linear",
+            url="https://mcp.linear.app/sse",
+            channel_id="222",
+        )
+    assert posted == {}
+
+
+@pytest.mark.parametrize(
+    ("is_admin", "reachable", "server_name"),
+    [(True, True, "linear"), (False, False, "linear"), (False, True, "notion")],
+    ids=["admin-on-shared", "member-on-private-draft", "member-new-name"],
+)
+async def test_request_mcp_token_still_allows_admins_drafts_and_new_names(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    is_admin: bool,
+    reachable: bool,
+    server_name: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent_with_server(
+                agent_id="ag_shared",
+                tenant_id=tenant.id,
+                server_name="linear",
+                url="https://mcp.linear.app/sse",
+            )
+        ]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon" if reachable else "other"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=is_admin)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9403", posted=posted)
+
+    result = await _request_mcp_token_impl(
+        runtime,
+        auth,
+        origin_context_id=str(origin_id),
+        expected_ma_agent_id="ag_shared",
+        agent_name="daimon",
+        server_name=server_name,
+        url="https://mcp.example.com/mcp",
+        channel_id="222",
+    )
+    assert result.message_id == "9403"

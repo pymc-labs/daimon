@@ -182,6 +182,7 @@ def build_oauth_mcp_routes(
                     public_url=str(public_url),
                     now=moment,
                     session_factory=runtime.session_factory,
+                    default=runtime.deployment_default,
                 )
         except (DaimonError, httpx.HTTPError, anthropic.AnthropicError) as err:
             log.warning(

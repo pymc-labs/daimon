@@ -11,8 +11,9 @@ import uuid
 from datetime import UTC, datetime
 
 from daimon.core._models import AgentMcpCredential
+from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.stores.domain import AgentMcpCredentialRow
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,17 +75,34 @@ async def delete_credential(
 ) -> bool:
     """Delete the credential for one server. ``True`` when a row was removed.
 
-    Matches with or without a trailing slash: rows written by the setup panel
-    kept the URL as typed, and detach strips the slash before asking.
+    Matches every row for the same server in `canonical_mcp_url` form: rows
+    written by the setup panel kept the URL as typed.
     """
     result = await session.execute(
         select(AgentMcpCredential).where(
             AgentMcpCredential.tenant_id == tenant_id,
             AgentMcpCredential.agent_id == agent_id,
-            func.rtrim(AgentMcpCredential.mcp_server_url, "/") == mcp_server_url.rstrip("/"),
         )
     )
-    rows = result.scalars().all()
+    rows = [orm for orm in result.scalars() if same_mcp_url(orm.mcp_server_url, mcp_server_url)]
     for orm in rows:
         await session.delete(orm)
     return bool(rows)
+
+
+async def replace_token_by_id(
+    session: AsyncSession, *, id: uuid.UUID, encrypted_token: bytes
+) -> None:
+    """Rotate one row's ciphertext in place, keeping its stored URL."""
+    orm = await session.get(AgentMcpCredential, id)
+    if orm is not None:
+        orm.encrypted_token = encrypted_token
+        orm.updated_at = datetime.now(tz=UTC)
+        await session.flush()
+
+
+async def delete_credential_by_id(session: AsyncSession, *, id: uuid.UUID) -> None:
+    orm = await session.get(AgentMcpCredential, id)
+    if orm is not None:
+        await session.delete(orm)
+        await session.flush()

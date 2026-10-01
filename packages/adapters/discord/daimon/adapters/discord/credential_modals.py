@@ -109,7 +109,6 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
@@ -138,9 +137,18 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.mcp_attach import attach_mcp_server_to_agent
+from daimon.core.mcp_attach import (
+    McpConnectDecision,
+    McpServerReplaceRefusedError,
+    decide_mcp_connect,
+)
 from daimon.core.mcp_token_check import is_token_rejected, rejected_token_message
-from daimon.core.mcp_vault import add_external_mcp_credential
+from daimon.core.mcp_token_connect import (
+    McpAgentGoneError,
+    McpAttachFailedError,
+    McpTokenWriteFailedError,
+    connect_mcp_server_with_token,
+)
 from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
@@ -397,6 +405,36 @@ async def _decide_key_replacement(
         "key_replace",
         is_admin=False,
         target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+
+
+async def _decide_mcp_connect_at_submit(
+    interaction: discord.Interaction, *, runtime: DiscordRuntime, row: CredentialRequestRow
+) -> McpConnectDecision:
+    """Re-decide an MCP token submission against the person submitting it.
+
+    Repointing a server the agent already has, or overwriting the agent-wide
+    token for its URL, is an `mcp_replace` attachment write: on a shared agent
+    it needs a live guild admin. Read before the consume, like a key
+    replacement, so no row lock is held across the MA listing. A target that
+    cannot be resolved is left to the unavailable-target path after the
+    consume, and nothing may be replaced for it.
+    """
+    agent = await find_agent_by_derived_uuid(
+        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+    )
+    if agent is None or row.mcp_server_url is None:
+        return McpConnectDecision(replaces=False, replace_allowed=False)
+    return await decide_mcp_connect(
+        runtime.sessionmaker,
+        tenant_id=row.tenant_id,
+        agent=agent,
+        agent_id=row.agent_id,
+        server_name=row.target,
+        url=row.mcp_server_url,
+        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        default=runtime.deployment_default,
+        shares_token=True,
     )
 
 
@@ -800,6 +838,26 @@ class McpCredentialModal(discord.ui.Modal):
         self.token_input = _text_input_of(token_label)
         self.add_item(token_label)
 
+    async def _refuse_replacement(
+        self, interaction: discord.Interaction, consumed_row: CredentialRequestRow
+    ) -> None:
+        """Spend the request and write nothing: no vault token, no attach."""
+        await _settle_spent_request(
+            self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+        )
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="refused",
+            refusal="replacement_admin_required",
+        )
+        await interaction.followup.send(
+            f"{_agent_name(consumed_row)} already has `{consumed_row.target}` (or a token "
+            "for that URL) and is shared here, so replacing it needs a server admin. "
+            "Nothing was saved.",
+            ephemeral=True,
+        )
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
@@ -827,6 +885,9 @@ class McpCredentialModal(discord.ui.Modal):
             interaction, runtime=self._runtime, row=self._row
         ):
             return
+        connect = await _decide_mcp_connect_at_submit(
+            interaction, runtime=self._runtime, row=self._row
+        )
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker() as session, session.begin():
             consumed_row = await credential_requests.consume_credential_request(
@@ -837,6 +898,9 @@ class McpCredentialModal(discord.ui.Modal):
             return
 
         await edit_posted_card(interaction.client, row=consumed_row, state="received")
+        if connect.refused:
+            await self._refuse_replacement(interaction, consumed_row)
+            return
 
         mcp_server_url = consumed_row.mcp_server_url
         if mcp_server_url is None:
@@ -864,116 +928,50 @@ class McpCredentialModal(discord.ui.Modal):
             await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
             await interaction.followup.send(rejected_token_message(mcp_server_url), ephemeral=True)
             return
+        # Attach first, publish the agent-wide token only after that authorized
+        # attach, then the submitter's own vault copy: no other session may
+        # ever mirror a token this submission is refused for.
         try:
-            # Agent-scoped copy first: the server is attached to the AGENT, so
-            # every caller's session needs this credential mirrored in at
-            # create time. Without this row the server works only for whoever
-            # filled in this modal.
-            if self._runtime.turn_deps.fernet is not None:
-                await save_agent_mcp_credential(
-                    sessionmaker=self._runtime.sessionmaker,
-                    fernet=self._runtime.turn_deps.fernet,
-                    tenant_id=consumed_row.tenant_id,
-                    agent_id=consumed_row.agent_id,
-                    mcp_server_url=mcp_server_url,
-                    plaintext_token=token_value,
-                )
-            else:
-                _log.warning(
-                    "credential_modal.no_fernet_for_agent_scope",
-                    mcp_server_url=mcp_server_url,
-                )
-            await add_external_mcp_credential(
+            await connect_mcp_server_with_token(
                 self._runtime.anthropic,
-                account_id=consumed_row.account_id,
+                sessionmaker=self._runtime.sessionmaker,
+                fernet=self._runtime.turn_deps.fernet,
+                tenant_id=consumed_row.tenant_id,
                 agent_id=consumed_row.agent_id,
-                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
-                public_url=str(public_url_setting),
+                account_id=consumed_row.account_id,
+                server_name=consumed_row.target,
                 mcp_server_url=mcp_server_url,
                 token=token_value,
+                replace_allowed=connect.replace_allowed,
+                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
+                public_url=str(public_url_setting),
                 now=now,
-                session_factory=self._runtime.sessionmaker,
             )
-        except Exception as err:
-            _log.exception(
-                "credential_modal.mcp_write_failed",
-                mcp_server_url=mcp_server_url,
-                err_type=type(err).__name__,
-            )
-            # Keep exception details in the operator log; SDK failures can
-            # include the request envelope.
-            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
-            await interaction.followup.send(
-                "This request was used, but saving the MCP token did not finish. "
-                "Some changes may have been saved. Ask for a new request to retry.",
-                ephemeral=True,
-            )
+        except McpServerReplaceRefusedError:
+            # A server or token for this URL appeared after the pre-consume check.
+            await self._refuse_replacement(interaction, consumed_row)
             return
-
-        # The vault credential alone is inert: MA rejects an agent whose
-        # mcp_servers are not each referenced by an mcp_toolset, so a token
-        # stored against a server the agent never declares is unreachable.
-        # This tool is documented as the replacement for attach_mcp_server on
-        # auth-required servers, so it owes the attach too (#49) — the vault
-        # write happens first, because a declared server with no credential
-        # advertises calls that fail.
-        agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic,
-            tenant_id=consumed_row.tenant_id,
-            agent_id=consumed_row.agent_id,
-        )
-        if agent is None:
-            _log.error(
-                "credential_modal.mcp_agent_not_found",
-                agent_id=str(consumed_row.agent_id),
-            )
-            # The token IS stored, so this is `partial`, not a refusal — and
-            # the continuation carries no work, because the connection the
-            # waiting turn needs is not usable.
-            is_queued = await _settle_spent_request(
-                self._runtime,
-                row=consumed_row,
-                outcome="write_failed",
-                carries_work=False,
-            )
-            await edit_posted_card(
-                interaction.client,
-                row=consumed_row,
-                state="partial",
-                outcome=ConfigurationChange(
-                    target_name=_agent_name(consumed_row),
-                    kind="mcp",
-                    availability="preparation_failed",
-                    detail=consumed_row.target,
-                ),
-            )
-            await interaction.followup.send(
-                "Auth token stored, but the agent could not be found to attach "
-                f"`{mcp_server_url}` to it. The server is not connected yet.",
-                ephemeral=True,
-            )
-            if is_queued:
-                await _dispatch_origin_thread(interaction, consumed_row)
-            return
-        try:
-            await attach_mcp_server_to_agent(
-                self._runtime.anthropic,
-                agent.id,
-                server_name=consumed_row.target,
-                url=mcp_server_url,
-            )
-        except Exception as err:
-            # Partial state is real and must not be reported as success: the
-            # token is stored, but the connection could not be completed.
-            # Exception details stay in the operator log.
-            _log.exception(
+        except (McpAgentGoneError, McpAttachFailedError) as err:
+            # Exception class name only; SDK failures can include the request
+            # envelope. Nothing was stored.
+            _log.warning(
                 "credential_modal.mcp_attach_failed",
                 mcp_server_url=mcp_server_url,
-                err_type=type(err).__name__,
+                err_type=type(err.__cause__ or err).__name__,
             )
-            # The continuation is recorded carrying no work: the trail shows
-            # the request ended here, and no turn resumes work that needs a
-            # connection the agent does not have.
+            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
+            await interaction.followup.send(
+                f"This request was used, but `{mcp_server_url}` could not be attached to the "
+                "agent. Nothing was saved. Ask for a new request to retry.",
+                ephemeral=True,
+            )
+            return
+        except McpTokenWriteFailedError as err:
+            _log.warning(
+                "credential_modal.mcp_write_failed",
+                mcp_server_url=mcp_server_url,
+                err_type=type(err.__cause__ or err).__name__,
+            )
             is_queued = await _settle_spent_request(
                 self._runtime,
                 row=consumed_row,
@@ -990,6 +988,11 @@ class McpCredentialModal(discord.ui.Modal):
                     availability="preparation_failed",
                     detail=consumed_row.target,
                 ),
+            )
+            await interaction.followup.send(
+                f"`{mcp_server_url}` is attached, but saving its token did not finish. "
+                "Ask for a new request to retry.",
+                ephemeral=True,
             )
             if is_queued:
                 await _dispatch_origin_thread(interaction, consumed_row)

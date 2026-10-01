@@ -44,7 +44,10 @@ from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
     delete_credential as delete_agent_mcp_credential,
 )
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import (
+    is_agent_reachable_in_tenant,
+    is_agent_shared_for_attachments,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -94,10 +97,11 @@ async def _detach_mcp_server_impl(
         "mcp_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_attachments(
                 session,
                 tenant_id=auth.tenant_id,
                 agent_name=agent_name,
+                ma_agent_id=agent.id,
                 default=runtime.deployment_default,
             )
     outcome = decide_operation(
