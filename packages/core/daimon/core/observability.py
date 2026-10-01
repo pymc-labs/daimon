@@ -10,8 +10,11 @@ Adapters call init_sentry once at their entrypoint (Plan 02).
 
 from __future__ import annotations
 
+import ast
+import json
 import re
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import sentry_sdk
 import structlog
@@ -42,40 +45,181 @@ _SECRET_KEYS: frozenset[str] = frozenset(
 )
 
 
-# Secret-shaped substrings inside free text: key=value pairs whose key names a
-# secret, bearer credentials, and Fernet tokens/keys.
+# Names that mark a value as secret wherever they appear as a key: a query
+# parameter, a header, a JSON/dict field or a context entry. OAuth's `code`
+# and `state` are bearer material for the few minutes they are valid.
+_SECRET_NAME_EXACT: frozenset[str] = frozenset(
+    {
+        *_SECRET_KEYS,
+        "code",
+        "state",
+        "k",
+        "key",
+        "sig",
+        "signature",
+        "token",
+        "id_token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "code_verifier",
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+_SECRET_NAME_PATTERN = re.compile(
+    r"(?i)(token|secret|passw|api[_-]?key|auth|cookie|session|signature|credential|"
+    r"private[_-]?key|verifier)"
+)
+# The same names as an alternation for free-text `name=value` / `name: value`.
+_SECRET_TEXT_NAMES = (
+    r"(?:access_token|refresh_token|id_token|token|api[_-]?key|apikey|client_secret|secret|"
+    r"password|passwd|authorization|code_verifier|code|state|signature|sig|session|cookie|"
+    r"private[_-]?key)"
+)
+
+# Free-text patterns, applied after structured redaction: bearer credentials,
+# unquoted name=value pairs, and Fernet tokens/keys.
 _SECRET_TEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(
-        r"(?i)((?:access_token|refresh_token|token|api_key|apikey|secret|password|"
-        r"passwd|authorization|code_verifier|client_secret)(?:%3D|=|:\s*)"
-        r"['\"]?)[^\s&'\",;]+"
-    ),
+    re.compile(r"(?i)(\b" + _SECRET_TEXT_NAMES + r"(?:%3D|=|:\s*)['\"]?)[^\s&'\",;}\]]+"),
     re.compile(r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"),
     re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"),
 )
+# A quoted key followed by a quoted value, as in JSON or a Python dict repr.
+_QUOTED_PAIR = re.compile(r"""(["'])([^"'\\\n]{1,64})\1(\s*:\s*)(["'])((?:\\.|(?!\4)[^\\])*)\4""")
+_STRUCTURED_TEXT_LIMIT = 64 * 1024
+_REDACTED = "[redacted]"
+
+
+def _is_secret_name(name: str) -> bool:
+    lowered = name.strip().lower()
+    return lowered in _SECRET_NAME_EXACT or _SECRET_NAME_PATTERN.search(lowered) is not None
+
+
+def _redact_value(value: object) -> object:
+    """Redact secrets inside any JSON-like value, by key at every depth."""
+    if isinstance(value, dict):
+        out: dict[object, object] = {}
+        for key, item in cast("dict[object, object]", value).items():
+            if isinstance(key, str) and _is_secret_name(key):
+                out[key] = _REDACTED
+            else:
+                out[key] = _redact_value(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_value(item) for item in cast("list[object]", value)]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in cast("tuple[object, ...]", value))
+    if isinstance(value, str):
+        return _redact_secret_text(value)
+    return value
+
+
+def _redact_embedded_structures(text: str) -> str:
+    """Parse JSON or a dict/list repr embedded in `text` and redact it by key."""
+    if len(text) > _STRUCTURED_TEXT_LIMIT:
+        return text
+    decoder = json.JSONDecoder()
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] not in "{[":
+            out.append(text[i])
+            i += 1
+            continue
+        try:
+            parsed, end = decoder.raw_decode(text, i)
+            rendered = json.dumps(_redact_value(parsed))
+        except ValueError:
+            closer = "}" if text[i] == "{" else "]"
+            end = text.rfind(closer) + 1
+            try:
+                parsed = ast.literal_eval(text[i:end]) if end > i else None
+            except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+                parsed = None
+            if not isinstance(parsed, (dict, list, tuple)):
+                out.append(text[i])
+                i += 1
+                continue
+            rendered = repr(_redact_value(cast("object", parsed)))
+        out.append(rendered)
+        i = end
+    return "".join(out)
+
+
+def _redact_quoted_pairs(text: str) -> str:
+    def _sub(match: re.Match[str]) -> str:
+        if not _is_secret_name(match.group(2)):
+            return match.group(0)
+        key_quote, key, colon, quote = match.group(1, 2, 3, 4)
+        return f"{key_quote}{key}{key_quote}{colon}{quote}{_REDACTED}{quote}"
+
+    return _QUOTED_PAIR.sub(_sub, text)
 
 
 def _redact_secret_text(text: str) -> str:
+    """Redact secrets in free text: embedded JSON/reprs, quoted pairs, name=value."""
+    if any(c in text for c in "{["):
+        text = _redact_embedded_structures(text)
+    text = _redact_quoted_pairs(text)
     for pattern in _SECRET_TEXT_PATTERNS:
-        text = pattern.sub(r"\1[redacted]", text)
+        text = pattern.sub(r"\1" + _REDACTED, text)
     return text
 
 
 def _redact_secret_keys(mapping: dict[str, object]) -> None:
-    """Redact values whose key is on the secret denylist, recursing into dicts/lists."""
+    """Redact secret-named values in place, at any depth, including list items."""
     for key in list(mapping.keys()):
-        value = mapping[key]
-        if key.lower() in _SECRET_KEYS:
-            mapping[key] = "[redacted]"
-        elif isinstance(value, dict):
-            _redact_secret_keys(cast("dict[str, object]", value))
-        elif isinstance(value, list):
-            for item in cast("list[object]", value):
-                if isinstance(item, dict):
-                    _redact_secret_keys(cast("dict[str, object]", item))
-        elif isinstance(value, str):
-            mapping[key] = _redact_secret_text(value)
+        if _is_secret_name(key):
+            mapping[key] = _REDACTED
+        else:
+            mapping[key] = _redact_value(mapping[key])
+
+
+def _redact_url(url: str) -> str:
+    """Keep scheme, host and path; drop userinfo, query and fragment."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _REDACTED
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _redact_query(query: str) -> str:
+    """Keep parameter names, redact every value."""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    return urlencode([(name, _REDACTED) for name, _ in pairs], safe="[]")
+
+
+def _scrub_request(request: dict[str, object]) -> None:
+    for field in ("data", "cookies", "env"):
+        request.pop(field, None)
+    url = request.get("url")
+    if isinstance(url, str):
+        request["url"] = _redact_url(url)
+    query = request.get("query_string")
+    if isinstance(query, str):
+        request["query_string"] = _redact_query(query)
+    elif isinstance(query, (bytes, bytearray)):
+        request["query_string"] = _redact_query(bytes(query).decode("latin-1"))
+    headers = request.get("headers")
+    if isinstance(headers, dict):
+        typed = cast("dict[str, object]", headers)
+        for name in list(typed.keys()):
+            lowered = name.lower()
+            if _is_secret_name(lowered) or (
+                lowered.startswith("x-") and ("token" in lowered or "key" in lowered)
+            ):
+                typed[name] = _REDACTED
+            elif isinstance(typed[name], str) and lowered in ("referer", "origin", "location"):
+                typed[name] = _redact_url(cast("str", typed[name]))
 
 
 def _drop_frame_vars(section: object) -> None:
@@ -106,10 +250,24 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     2. Redacts any value whose key matches the secret denylist (case-insensitive).
     Returns the scrubbed event dict, or None to drop the event entirely.
     """
-    # Drop request body — may contain raw user message content.
+    # Requests carry OAuth codes/state in the query, credentials in headers
+    # and cookies, and arbitrary bodies.
     request = event.get("request")
-    if isinstance(request, dict) and "data" in request:
-        del request["data"]
+    if isinstance(request, dict):
+        _scrub_request(request)
+
+    # Log-message events (capture_message, logging integration).
+    message = event.get("message")
+    if isinstance(message, str):
+        event["message"] = _redact_secret_text(message)
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        entry = logentry
+        for field in ("message", "formatted"):
+            text = entry.get(field)
+            if isinstance(text, str):
+                entry[field] = _redact_secret_text(text)
+        entry.pop("params", None)
 
     # Drop extra fields entirely — arbitrary payload, too risky.
     if "extra" in event:
@@ -139,6 +297,22 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
                 text = entry.get("value")
                 if isinstance(text, str):
                     entry["value"] = _redact_secret_text(text)
+
+    # Transaction spans: descriptions and data can hold URLs and SQL.
+    spans = event.get("spans")
+    if isinstance(spans, list):
+        for span in cast("list[object]", spans):
+            if isinstance(span, dict):
+                typed_span = cast("dict[str, object]", span)
+                description = typed_span.get("description")
+                if isinstance(description, str):
+                    typed_span["description"] = _redact_secret_text(description)
+                data = typed_span.get("data")
+                if isinstance(data, dict):
+                    _redact_secret_keys(cast("dict[str, object]", data))
+    transaction = event.get("transaction")
+    if isinstance(transaction, str):
+        event["transaction"] = _redact_secret_text(transaction)
 
     # Redact secret-keyed values anywhere in the event tags mapping.
     tags = event.get("tags")
@@ -214,6 +388,7 @@ def init_sentry(
         max_breadcrumbs=0,
         traces_sample_rate=traces_sample_rate,
         before_send=_scrub_event,
+        before_send_transaction=_scrub_event,
         event_scrubber=_event_scrubber(),
         integrations=integrations,
     )
