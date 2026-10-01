@@ -22,7 +22,8 @@ import json
 import uuid
 
 import jwt as pyjwt
-from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -191,7 +192,14 @@ def coding_token_channel(
     if channel_id in policy.sealed_channel_ids:
         return channel_id
     pinned = any(name is not None and name in policy.agent_channel_pins for name in agent_names)
-    if pinned and not is_outside_agent_pin(policy, agent_names=agent_names, channel_id=channel_id):
+    if pinned and authorize(
+        policy,
+        subject=Subject(),
+        action=Action.RUN_AGENT,
+        surface=Surface.AGENT_CHAT,
+        agent=AgentRef.of(*agent_names),
+        place=Place(channel_id=channel_id),
+    ):
         return channel_id
     return None
 
