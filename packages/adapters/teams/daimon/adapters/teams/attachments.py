@@ -312,6 +312,11 @@ async def prepare_attachments(
                 http, file.url, is_allowed=is_allowed, token=token, max_bytes=MAX_VISION_IMAGE_BYTES
             )
             blocks.append(image_block(data))
+            # Unnamed in the text, an image block reads as part of the prompt, not as shared.
+            lines.append(
+                f"[attachment] `{file.name}`, shared by the user with this message, "
+                "is attached as an image."
+            )
         except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
             # Never log or show the URL: a download URL is itself a credential.
             reason = str(err) if isinstance(err, FetchRefused) else type(err).__name__
