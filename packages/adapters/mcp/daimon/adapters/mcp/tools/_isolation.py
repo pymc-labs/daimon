@@ -1,10 +1,12 @@
 """Channel isolation as the agent tools see it (`daimon.core.channel_isolation`).
 
 A call is inside isolated channel C when the agent executing it is one of C's
-own agents (`agent_id` for agent-session tokens, `chat_agent_id` for chat), or
-when a tool that knows its turn's location says it runs in C. From inside C a
-caller sees only C's own agents; from anywhere else it sees every agent but
-those. A tenant that isolates nothing pays one policy read and sees everything.
+own agents (`agent_id` for agent-session tokens, `chat_agent_id` for chat), when
+that agent is running a turn for the caller under C (a setup thread there runs
+as the built-in agent), or when a tool that knows its turn's location says it
+runs in C. From inside C a caller sees only C's own agents; from anywhere else
+it sees every agent but those. A tenant that isolates nothing pays one policy
+read and sees everything.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -31,12 +34,18 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.turn_origins import list_active_origins
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
 
 _UNREADABLE_MSG = (
     "This workspace's access policy could not be read, so daimon can't tell which agents "
     "this conversation may reach. Nothing was changed."
+)
+_SPLIT_MSG = (
+    "This conversation has turns running in more than one isolated channel, so daimon "
+    "can't tell which side of the line it is on. Try again when one finishes. "
+    "Nothing was changed."
 )
 
 
@@ -121,11 +130,39 @@ async def load_isolation(runtime: McpRuntime, tenant_id: uuid.UUID) -> ChannelIs
     """The tenant's isolation; an unreadable policy refuses the call rather than fall open."""
     try:
         async with runtime.session_factory() as session:
-            return await load_channel_isolation(
+            isolation = await load_channel_isolation(
                 session, tenant_id=tenant_id, default=runtime.deployment_default
             )
     except AccessPolicyUnreadable as exc:
         raise ToolError(_UNREADABLE_MSG) from exc
+    return isolation
+
+
+async def _running_turn_channel(
+    runtime: McpRuntime, auth: AuthIdentity, isolation: ChannelIsolation, executing: uuid.UUID
+) -> str | None:
+    """The isolated channel the executing agent is running the caller's turn in, if any."""
+    if auth.platform is None:
+        return None
+    async with runtime.session_factory() as session:
+        origins = await list_active_origins(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    channels = {
+        channel
+        for origin in origins
+        if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        == executing
+        and (channel := isolation.isolated_channel(origin.thread_id, origin.parent_channel_id))
+        is not None
+    }
+    if len(channels) > 1:
+        raise ToolError(_SPLIT_MSG)
+    return next(iter(channels), None)
 
 
 async def load_caller_isolation(
@@ -136,12 +173,12 @@ async def load_caller_isolation(
     location_channel_id: str | None = None,
 ) -> CallerIsolation:
     """Where the caller stands. Pass `agents` when already listed; `location_channel_id`
-    (a thread's parent) when the tool knows the turn's channel."""
+    (a thread's parent) when the tool knows the turn's channel from its verified origin."""
     isolation = await load_isolation(runtime, auth.tenant_id)
     if not isolation.is_active:
         return OPEN_ISOLATION
-    inside = isolation.isolated_channel(location_channel_id)
     executing = auth.agent_id or auth.chat_agent_id
+    inside = isolation.isolated_channel(location_channel_id)
     if inside is None and executing is not None:
         if agents is None:
             agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
@@ -154,6 +191,8 @@ async def load_caller_isolation(
             None,
         )
         inside = isolation.channel_of(agent_name_of(agent)) if agent is not None else None
+        if inside is None:
+            inside = await _running_turn_channel(runtime, auth, isolation, executing)
     return CallerIsolation(isolation, inside)
 
 

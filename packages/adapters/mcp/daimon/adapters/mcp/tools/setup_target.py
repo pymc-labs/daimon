@@ -96,7 +96,9 @@ async def _set_setup_target_impl(
 ) -> TurnOriginRow:
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    caller = await load_caller_isolation(runtime, auth, agents=agents)
+    caller = await load_caller_isolation(
+        runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
+    )
     target = next((agent for agent in agents if agent.id == agent_id), None)
     if target is None or not caller.sees_agent(target):
         raise ToolError(

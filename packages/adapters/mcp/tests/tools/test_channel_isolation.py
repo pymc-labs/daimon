@@ -8,6 +8,7 @@ C (``ROOM``) is isolated and its default agent ``local`` answers nowhere else;
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import httpx
@@ -47,6 +48,7 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
@@ -342,3 +344,46 @@ async def test_posts_and_direct_messages_stay_on_their_side(
     await require_channel_writable(runtime, outside, channel_id=OTHER)
     with pytest.raises(ToolError, match="can't send direct messages"):
         await send_direct_message_impl(runtime, inside, recipient_id="123", content="hi")
+
+
+async def test_a_turn_running_under_the_isolated_channel_is_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A setup thread under C runs as the built-in agent: while its turn runs, that
+    agent is inside C, so it sees C's agents and posts only inside C."""
+    world, runtime = await _world(committing_sessionmaker)
+    builtin = world.auth(admin=False, executing="agent_builtin")
+    now = datetime.now(UTC)
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id="555555555555555555",
+            responder_ma_agent_id="agent_builtin",
+            responder_name="daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + timedelta(hours=1),
+            now=now,
+            is_setup=True,
+        )
+
+    assert [a.name for a in await _list_agents_impl(runtime, builtin, None)] == ["local"]
+    await require_channel_writable(runtime, builtin, channel_id=ROOM)
+    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+        await require_channel_writable(runtime, builtin, channel_id=OTHER)
+    with pytest.raises(ToolError, match="can't send direct messages"):
+        await send_direct_message_impl(runtime, builtin, recipient_id="123", content="hi")
+
+    async with committing_sessionmaker.begin() as session:
+        await delete_origin(session, origin_id=origin.id)
+    assert [a.name for a in await _list_agents_impl(runtime, builtin, None)] == ["shared"], (
+        "once the turn ends the built-in agent is outside C again"
+    )
+    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+        await require_channel_writable(runtime, builtin, channel_id=ROOM)
+    await require_channel_writable(runtime, builtin, channel_id=OTHER)

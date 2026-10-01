@@ -73,6 +73,26 @@ async def get_active_origin(
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
+async def list_active_origins(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    now: datetime,
+) -> list[TurnOriginRow]:
+    """The account's turns running now on `platform`, one origin each."""
+    origins = await session.scalars(
+        select(TurnOrigin).where(
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.account_id == account_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.expires_at > now,
+        )
+    )
+    return [TurnOriginRow.model_validate(origin) for origin in origins]
+
+
 async def update_origin_target(
     session: AsyncSession,
     *,
