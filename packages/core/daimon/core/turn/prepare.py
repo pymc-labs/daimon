@@ -225,6 +225,28 @@ async def create_ma_session(
             own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
             tenant_seals_anything=bool(policy.sealed_channel_ids),
         )
+    if predecessor_session_id is not None:
+        # The predecessor lookup above awaits MA: decide again after it, so a
+        # pin or seal saved during it applies to the successor being built.
+        admission = await reauthorize(deps, admission)
+        seal |= admission.origin_seal_ids
+    built = admission
+
+    async def fence() -> None:
+        # `create_session` awaits vault, credential, file and repository work
+        # before `sessions.create`; decide once more immediately before it.
+        # A pin raises `AdmissionDenied`; a seal the session was not built
+        # with makes the turn wait and be prepared again read-only.
+        current = await reauthorize(deps, built)
+        if (
+            current.origin_seal_ids != built.origin_seal_ids
+            or current.memory_read_only != built.memory_read_only
+        ):
+            raise SessionBusyError(
+                pending_reasons=("seal",),
+                retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+            )
+
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
@@ -249,6 +271,7 @@ async def create_ma_session(
         origin_channel_id=admission.origin_channel_id,
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
+        before_create=fence,
     )
 
     has_repo = any(
@@ -507,16 +530,23 @@ async def _stamp_reused_seal(
     whose replacement inherits its seal. One MA won't update mid-turn blocks
     this turn: running it unstamped is the leak this exists to close.
     """
-    admission = prepared.admission
-    if not prepared.reused or not admission.origin_seal_ids or admission.origin_channel_id is None:
+    if prepared.reused:
+        await stamp_session_seal(deps, prepared.ma_session_id, prepared.admission, now=now)
+
+
+async def stamp_session_seal(
+    deps: TurnDeps, ma_session_id: str, admission: Admission, *, now: Callable[[], dt.datetime]
+) -> None:
+    """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
+    if not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
     try:
-        current = await deps.anthropic.beta.sessions.retrieve(prepared.ma_session_id)
+        current = await deps.anthropic.beta.sessions.retrieve(ma_session_id)
         recorded = seal_ids(current.metadata)
         if admission.origin_seal_ids <= recorded:
             return
         await deps.anthropic.beta.sessions.update(
-            prepared.ma_session_id,
+            ma_session_id,
             metadata=dict(
                 origin_stamp(
                     channel_id=admission.origin_channel_id,
@@ -526,13 +556,13 @@ async def _stamp_reused_seal(
             ),
         )
     except anthropic_pkg.NotFoundError:
-        log.info("turn.seal_stamp_session_gone", ma_session_id=prepared.ma_session_id)
+        log.info("turn.seal_stamp_session_gone", ma_session_id=ma_session_id)
     except anthropic_pkg.APIStatusError as error:
         # MA refuses updates mid-turn ("... while session is running"); any
         # other refusal fails the turn rather than running it unstamped.
         if error.status_code != 409 and "while session is running" not in str(error):
             raise
-        log.info("turn.seal_stamp_busy", ma_session_id=prepared.ma_session_id)
+        log.info("turn.seal_stamp_busy", ma_session_id=ma_session_id)
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
         ) from error

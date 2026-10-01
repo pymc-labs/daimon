@@ -105,6 +105,25 @@ async def _policy_gate(
         and account is not None
         and account.role is Role.ADMIN
     )
+    names: tuple[str | None, ...] = ()
+    if agent_names is not None and policy.agent_channel_pins and not hub_admin:
+        # Resolving the agent's names may await the network (an MA lookup);
+        # read the policy again after it, so the pin is decided on the policy
+        # as it is once every await is done, not as it was before the lookup.
+        names = await agent_names()
+        try:
+            async with sessionmaker() as session:
+                policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+                account = await get_account(session, auth.account_id)
+        except AccessPolicyUnreadable as exc:
+            refused(TerminationReason.ADMISSION_DENIED)
+            raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
+        hub_admin = (
+            pin_exempt
+            and auth.platform_user_id is not None
+            and account is not None
+            and account.role is Role.ADMIN
+        )
     if (
         agent_names is not None
         and policy.agent_channel_pins
@@ -120,7 +139,7 @@ async def _policy_gate(
             ),
             action=Action.RUN_AGENT,
             surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
-            agent=AgentRef.of(*await agent_names()),
+            agent=AgentRef.of(*names),
         )
     ):
         log.info(

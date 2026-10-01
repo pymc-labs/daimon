@@ -2282,6 +2282,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "github_app_id",
         "github_app_private_key",
         "billing_exempt",
+        "before_create",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 
@@ -3285,4 +3286,69 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
     )
     assert "pinned this agent" in str(payload.get("content"))
     mock_create_session.assert_not_awaited()
+    assert sends == []
+
+
+async def test_start_turn_decides_again_inside_session_create(db_session_factory) -> None:
+    """A pin landing during create_session's vault/env work leaves no session and sends nothing."""
+    env_payload = {
+        "id": _ENV_ID,
+        "type": "environment",
+        "name": _ENV_NAME,
+        "config": EMPTY_CLOUD_CONFIG.model_dump(mode="json"),
+        "description": "",
+        "metadata": {"daimon_tenant": str(_TENANT_ID), "daimon_name": _ENV_NAME},
+        "created_at": "2026-06-23T00:00:00Z",
+        "updated_at": "2026-06-23T00:00:00Z",
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload]))
+    sends: list[httpx.Request] = []
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda r, _m: sends.append(r) or httpx.Response(500),
+    )
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    pinned = False
+    created: list[str] = []
+
+    async def recheck() -> None:
+        if pinned:
+            raise ToolError("TERMINAL ERROR: pinned")
+
+    async def create_with_inner_work(*args: object, **kwargs: Any) -> object:
+        nonlocal pinned
+        pinned = True  # the pin commits during the vault/env/memory work
+        before_create = kwargs.get("before_create")
+        if before_create is not None:
+            await before_create()
+        created.append("ses_test001")
+        return ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+
+    with (
+        patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create_with_inner_work),
+        pytest.raises(ToolError, match="pinned"),
+    ):
+        await _start_turn_impl(runtime, _auth(), "Say hello", recheck=recheck)
+    assert created == []
     assert sends == []

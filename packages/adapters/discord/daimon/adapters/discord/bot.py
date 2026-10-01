@@ -56,6 +56,7 @@ from daimon.core.continuity.continuation import (
     load_asking_agent_id,
 )
 from daimon.core.continuity.messages import (
+    render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
     render_replacement_summary,
@@ -2639,14 +2640,20 @@ class DaimonBot(commands.Bot):
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
-        except SessionBusyError:
+        except SessionBusyError as busy:
             # Nothing failed and nothing is misconfigured: the previous turn in
             # this thread is still running, and the session it is running in
             # belongs to the OUTGOING responder. Making the change around it
             # would answer as one agent inside another agent's workspace, so no
             # turn runs here -- the person is told the in-flight message
-            # finishes first and the switch applies to their next one.
-            busy_text = render_current_work_must_finish(agent.name, handoff=True)
+            # finishes first and the switch applies to their next one. A seal
+            # that landed while the turn was prepared defers it the same way;
+            # the next message is prepared read-only, so it says to send again.
+            busy_text = (
+                render_access_changed_try_again()
+                if "seal" in busy.pending_reasons
+                else render_current_work_must_finish(agent.name, handoff=True)
+            )
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:

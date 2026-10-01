@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+from collections.abc import Awaitable, Callable
 
 from anthropic import AsyncAnthropic, ConflictError, NotFoundError
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
@@ -94,8 +95,14 @@ async def put_mcp_oauth_credential(
     token_endpoint: str,
     resource: str | None,
     now: dt.datetime,
+    before_write: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """Replace whatever credential the vault holds for the URL; return the new id.
+
+    ``before_write`` is the caller's access decision, awaited after the slot
+    is listed and again immediately before the create, on every attempt: the
+    list and the deletes await the network, and a policy change during them
+    must stop the write. It raises to refuse.
 
     The caller holds the per-(account, agent) vault lock
     (`mcp_vault.hold_agent_vault_lock`), as do the other writers that list
@@ -128,10 +135,14 @@ async def put_mcp_oauth_credential(
             if not isinstance(existing.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
             and same_server_url(existing.auth.mcp_server_url, mcp_server_url)
         ]
+        if before_write is not None:
+            await before_write()
         for credential_id in stale:
             # Already gone: another writer removed it, which is what we wanted.
             with contextlib.suppress(NotFoundError):
                 await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+        if before_write is not None:
+            await before_write()
         try:
             created = await anthropic.beta.vaults.credentials.create(
                 vault_id=vault_id,
