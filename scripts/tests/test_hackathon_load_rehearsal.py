@@ -16,6 +16,7 @@ from scripts.hackathon_load_rehearsal import (
     _defaults_root,  # pyright: ignore[reportPrivateUsage]
     _discord_phase,  # pyright: ignore[reportPrivateUsage]
     _percentile,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_model,  # pyright: ignore[reportPrivateUsage]
     arrival_offsets,
     budget_allows,
     expected_agent_model,
@@ -89,6 +90,13 @@ def test_discord_percentiles_handle_empty_and_small_samples() -> None:
     assert _percentile([], 0.95) == "n/a"
     assert _percentile([1, 3, 5], 0.5) == "3.00"
     assert _percentile([1, 3, 5], 0.95) == "4.80"
+
+
+def test_discord_model_requirement_rejects_staging_mismatch() -> None:
+    _require_discord_model("claude-sonnet-5-5", None)
+    _require_discord_model("claude-haiku-4-5", "claude-haiku-4-5")
+    with pytest.raises(RuntimeError, match="claude-sonnet-5-5 != claude-haiku-4-5"):
+        _require_discord_model("claude-sonnet-5-5", "claude-haiku-4-5")
 
 
 @pytest.mark.asyncio

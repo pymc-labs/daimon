@@ -170,6 +170,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--discord-turns", type=int, default=20)
     p.add_argument("--discord-concurrency", type=int, default=20)
     p.add_argument("--discord-file-every", type=int, default=0)
+    p.add_argument("--discord-require-model")
     return p
 
 
@@ -462,6 +463,11 @@ def _percentile(values: list[float], percentile: float) -> str:
     return f"{value:.2f}"
 
 
+def _require_discord_model(actual: str, required: str | None) -> None:
+    if required is not None and actual != required:
+        raise RuntimeError(f"QA default agent model {actual} != {required}")
+
+
 class DiscordREST:
     def __init__(self, token: str) -> None:
         self.client = httpx.AsyncClient(
@@ -616,6 +622,7 @@ async def _discord_phase(
             if agent is None:
                 raise RuntimeError(f"QA guild {guild_id} has no default agent")
             print(f"Discord QA guild {guild_id} default agent model: {agent.model.id}", flush=True)
+            _require_discord_model(agent.model.id, args.discord_require_model)
             previous[tenant_id] = tenant.turn_cap
             for index in range(min(5, args.discord_concurrency)):
                 channel = await rest.request(
