@@ -16,6 +16,7 @@ import uuid
 import jwt as pyjwt
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import AgentRef
 from daimon.core.mcp_auth import (
     coding_token_channel,
     mint_agent_mcp_token,
@@ -427,4 +428,6 @@ _PINS = TenantAccessPolicy(
 def test_coding_token_channel_binds_only_sealed_or_pinned_channels(
     names: tuple[str | None, ...], channel_id: str | None, expected: str | None
 ) -> None:
-    assert coding_token_channel(_PINS, agent_names=names, channel_id=channel_id) == expected
+    assert (
+        coding_token_channel(_PINS, agent=AgentRef.of(*names), channel_id=channel_id) == expected
+    ), "a token binds only to a sealed channel or one inside its agent's pin"

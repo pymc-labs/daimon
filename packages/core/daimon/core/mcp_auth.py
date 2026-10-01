@@ -23,7 +23,14 @@ import uuid
 
 import jwt as pyjwt
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Surface,
+    authorize,
+    build_subject,
+    build_turn_place,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -174,10 +181,7 @@ async def mint_agent_mcp_token(
 
 
 def coding_token_channel(
-    policy: TenantAccessPolicy,
-    *,
-    agent_names: tuple[str | None, ...],
-    channel_id: str | None,
+    policy: TenantAccessPolicy, *, agent: AgentRef, channel_id: str | None
 ) -> str | None:
     """The channel a coding-tool token minted in `channel_id` is bound to, or None.
 
@@ -185,20 +189,22 @@ def coding_token_channel(
     The token is bound there when the channel is sealed, or when the agent is
     pinned and the channel is inside its pin: those are the places where an
     agent key from outside every channel could not reach what the channel's
-    own turns do. Anywhere else the token stays unbound, as before.
+    own turns do. Anywhere else the token stays unbound, as before. The pin
+    is decided as the key's own turns will be (`build_subject` with
+    ``via_agent_key``, the channel as a `build_turn_place`).
     """
     if channel_id is None:
         return None
     if channel_id in policy.sealed_channel_ids:
         return channel_id
-    pinned = any(name is not None and name in policy.agent_channel_pins for name in agent_names)
+    pinned = any(name is not None and name in policy.agent_channel_pins for name in agent.names)
     if pinned and authorize(
         policy,
-        subject=Subject(),
+        subject=build_subject(is_admin=False, platform_user_id=None, via_agent_key=True),
         action=Action.RUN_AGENT,
         surface=Surface.AGENT_CHAT,
-        agent=AgentRef.of(*agent_names),
-        place=Place(channel_id=channel_id),
+        agent=agent,
+        place=build_turn_place(channel_id=channel_id, thread_id=None),
     ):
         return channel_id
     return None

@@ -34,7 +34,8 @@ from daimon.adapters.discord.agent_setup.expiry import (
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.authz import build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -129,7 +130,7 @@ async def send_coding_tools_access(
     parent_id = channel.parent_id if isinstance(channel, discord.Thread) else interaction.channel_id
     bound_channel_id = coding_token_channel(
         policy,
-        agent_names=(selected.name, *agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        agent=build_agent_ref(ma_agent.name, ma_agent.metadata, selected.name),
         channel_id=str(parent_id) if parent_id is not None else None,
     )
 

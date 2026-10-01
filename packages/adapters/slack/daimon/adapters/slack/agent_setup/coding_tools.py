@@ -31,7 +31,8 @@ from daimon.adapters.slack.agent_setup.read import (
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.authz import AgentRef, build_agent_ref
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     coding_token_channel,
@@ -296,11 +297,11 @@ async def _bound_channel(
     """The channel a token minted here is bound to; the agent is read only under a pin."""
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    names: tuple[str | None, ...] = (target.name,)
+    agent = AgentRef.of(target.name)
     if channel_id is not None and policy.agent_channel_pins:
-        agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
-        names = (target.name, *agent_pin_names(agent.name, agent.metadata))
-    return coding_token_channel(policy, agent_names=names, channel_id=channel_id)
+        ma_agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
+        agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
+    return coding_token_channel(policy, agent=agent, channel_id=channel_id)
 
 
 async def _respond(
