@@ -229,6 +229,10 @@ _ADVERSARIAL = {
     "secret-dicts": "password={" * 6500,
     "secret-colons": "token=a:" * 8000,
     "secret-flags": "-token=x" * 8000,
+    "jwt-dashes": "eyJ-" * 16384,
+    "sk-dashes": "sk--" * 16384,
+    "xox-dashes": "xoxb-" * 13000,
+    "fernet-runs": "gAAAAA" * 10900,
 }
 
 
@@ -386,25 +390,62 @@ def test_span_tags_and_plain_headers_are_scrubbed() -> None:
     assert scrubbed is not None and "[redaction failed]" not in repr(scrubbed)
 
 
-def test_whole_event_with_many_adversarial_fields_scrubs_within_budget() -> None:
-    """One event can carry many large strings; the total must stay bounded."""
+def _best_of_three(fn: Callable[[], object]) -> float:
     import time
 
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
+def test_redaction_time_grows_linearly(name: str) -> None:
+    """Doubling an adversarial input must not much more than double the time."""
+    from daimon.core.observability import _redact_secret_text  # pyright: ignore[reportPrivateUsage]
+
+    text = _ADVERSARIAL[name][: 16 * 1024]
+    single = _best_of_three(lambda: _redact_secret_text(text))
+    double = _best_of_three(lambda: _redact_secret_text(text + text))
+
+    assert double <= 3 * single + 0.01, f"{name}: {single:.4f}s -> {double:.4f}s"
+
+
+def test_whole_event_scrub_stays_within_the_event_text_budget() -> None:
+    """Past ~256 KB of text per event the rest is replaced, not scanned."""
     from daimon.core.observability import _scrub_event  # pyright: ignore[reportPrivateUsage]
 
-    big = [_ADVERSARIAL[name] for name in sorted(_ADVERSARIAL) if name.startswith("secret-")]
+    canary = _canary()
+    big = "x" * (60 * 1024)
     event: dict[str, object] = {
-        "exception": {"values": [{"type": "RuntimeError", "value": v} for v in big]},
-        "message": big[0],
-        "contexts": {"extra_info": {f"f{i}": v for i, v in enumerate(big)}},
-        "tags": {"note": big[1][:200]},
+        "exception": {
+            "values": [{"type": "RuntimeError", "value": big} for _ in range(6)]
+            + [{"type": "RuntimeError", "value": f"token={canary}"}]
+        },
     }
 
-    started = time.perf_counter()
-    _scrub_event(event, {})  # pyright: ignore[reportArgumentType]
-    elapsed = time.perf_counter() - started
+    scrubbed = _scrub_event(event, {})  # pyright: ignore[reportArgumentType]
 
-    assert elapsed < 1.0, f"{elapsed:.3f}s"
+    rendered = repr(scrubbed)
+    assert canary not in rendered
+    assert "[redacted: event budget]" in rendered
+
+
+def test_adversarial_event_is_not_much_slower_than_a_harmless_one() -> None:
+    from daimon.core.observability import _scrub_event  # pyright: ignore[reportPrivateUsage]
+
+    def _event(values: list[str]) -> dict[str, object]:
+        return {"exception": {"values": [{"type": "E", "value": v} for v in values]}}
+
+    adversarial = [_ADVERSARIAL[name] for name in sorted(_ADVERSARIAL)][:4]
+    harmless = ["ok=1 status: fine " * (len(v) // 18) for v in adversarial]
+
+    base = _best_of_three(lambda: _scrub_event(_event(list(harmless)), {}))  # pyright: ignore[reportArgumentType]
+    hostile = _best_of_three(lambda: _scrub_event(_event(list(adversarial)), {}))  # pyright: ignore[reportArgumentType]
+
+    assert hostile <= 5 * base + 0.05, f"{base:.3f}s vs {hostile:.3f}s"
 
 
 @pytest.mark.parametrize(
@@ -432,3 +473,32 @@ def test_more_secret_shapes_never_reach_the_transport(
     assert capturing_sentry.payloads
     assert canary not in capturing_sentry.rendered()
     assert _plain(canary) not in capturing_sentry.rendered()
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda c: f"GET https://h/cb?msg=a%20b&uid={c} failed x%3Dy",
+        lambda c: f"GET https://h/oauth?error=bad%20scope&code={c}%26",
+        lambda c: f"body password=ab%20{c}%26next=1",
+        lambda c: f"body a=1%2526client_secret%253D{c}",
+    ],
+    ids=[
+        "encoded-space-then-param",
+        "oauth-encoded-space",
+        "password-encoded-space",
+        "double-encoded",
+    ],
+)
+def test_percent_encoded_text_never_leaks_later_params(
+    capturing_sentry: CapturingTransport, render: Callable[[str], str]
+) -> None:
+    canary = _hard_canary()
+    try:
+        raise RuntimeError(render(canary))
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert capturing_sentry.payloads
+    assert canary not in capturing_sentry.rendered()

@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import ast
 import bisect
+import contextvars
 import json
 import re
 from typing import TYPE_CHECKING, Literal, cast
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import sentry_sdk
 import structlog
@@ -109,6 +110,8 @@ _TEXT_LIMIT = 64 * 1024
 _LITERAL_EVAL_LIMIT = 8 * 1024
 _MAX_STRUCTURE_ATTEMPTS = 32
 
+_TOKEN_START = r"(?<![A-Za-z0-9_-])"
+
 _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # pydantic echoes the rejected input: never keep it.
     (
@@ -124,16 +127,24 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # userinfo in a URL: scheme://user:SECRET@host
     (re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]{0,15}://[^\s:/@]{0,64}:)[^\s@/]{1,256}(?=@)"), r"\1"),
     # Provider token shapes: Slack, GitHub, Anthropic/OpenAI-style keys.
-    (re.compile(r"()\bxox[abposr]-[A-Za-z0-9-]{8,}"), r"\1"),
-    (re.compile(r"()\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})"), r"\1"),
-    (re.compile(r"()\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}"), r"\1"),
-    (re.compile(r"()\bxapp-\d-[A-Za-z0-9-]{8,}"), r"\1"),
+    # Each shape starts only where a run of token characters starts
+    # (`_TOKEN_START`), so a long run is scanned once, not once per offset.
+    (re.compile(_TOKEN_START + r"()xox[abposr]-[A-Za-z0-9-]{8,}"), r"\1"),
+    (
+        re.compile(_TOKEN_START + r"()(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})"),
+        r"\1",
+    ),
+    (re.compile(_TOKEN_START + r"()sk-(?:ant-)?[A-Za-z0-9_-]{16,}"), r"\1"),
+    (re.compile(_TOKEN_START + r"()xapp-\d-[A-Za-z0-9-]{8,}"), r"\1"),
     # JWTs (three base64url segments, the first a JSON header).
-    (re.compile(r"()\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"), r"\1"),
+    (
+        re.compile(_TOKEN_START + r"()eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
+        r"\1",
+    ),
     # Discord webhook URLs carry their token in the path.
     (re.compile(r"(/api/webhooks/\d{5,25}/)[A-Za-z0-9_.-]+"), r"\1"),
     # Fernet tokens and keys.
-    (re.compile(r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
+    (re.compile(_TOKEN_START + r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
     (re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"), r"\1"),
 )
 # Any `name = value` / `name: value` / `name%3Dvalue`. The value sits in a
@@ -147,8 +158,10 @@ _FLAG_VALUE = re.compile(r"(?<!\S)-{1,2}([A-Za-z][A-Za-z0-9_-]{0,63})(\s+)(?=[^\
 _FLAG_NAME = re.compile(r"^-{1,2}([A-Za-z][A-Za-z0-9_.-]{0,63})$")
 # Characters that end a URL query inside free text.
 _QUERY_END = re.compile(r"[\s#'\"<>]")
+# Form-encoded separators: `%26` (&) and `%3D` (=), also double-encoded
+# (`%2526`, `%253D`).
+_FORM_ENCODED = re.compile(r"%(?:25)?(?:26|3[Dd])")
 # Words that mark text as an OAuth exchange, where `code`/`state` are secrets.
-_FORM_ENCODED = re.compile(r"%(?:26|3[Dd])")
 _OAUTH_CONTEXT = re.compile(r"(?i)oauth|callback|authori[sz]e|redirect_uri|token exchange")
 # A quoted key and the opening quote of its quoted value (JSON, dict repr).
 # Optionally backslash-escaped (JSON inside a JSON string).
@@ -411,6 +424,15 @@ def _redact_url_queries(text: str) -> str:
     return "".join(out)
 
 
+# Total free text one event may have scrubbed; beyond it values are replaced
+# outright, so a huge event costs bounded time on the capturing thread.
+_EVENT_TEXT_BUDGET = 256 * 1024
+_EVENT_BUDGET_MARKER = "[redacted: event budget]"
+_event_text_budget: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "daimon_sentry_event_text_budget", default=None
+)
+
+
 def _redact_secret_text(text: str) -> str:
     """Redact secrets in free text, in time linear in its length.
 
@@ -419,14 +441,21 @@ def _redact_secret_text(text: str) -> str:
     """
     if len(text) > _TEXT_LIMIT:
         text = text[:_TEXT_LIMIT] + " [truncated]"
+    remaining = _event_text_budget.get()
+    if remaining is not None:
+        if len(text) > remaining:
+            _event_text_budget.set(0)
+            return _EVENT_BUDGET_MARKER
+        _event_text_budget.set(remaining - len(text))
     if "{" in text or "[" in text:
         text = _redact_embedded_structures(text)
-    if _FORM_ENCODED.search(text):
-        # Form-encoded bodies: decode one level so `%26name%3Dvalue` pairs are
-        # seen as `&name=value`.
-        text = unquote(text)
     if "://" in text and "?" in text:
         text = _redact_url_queries(text)
+    if _FORM_ENCODED.search(text):
+        # Form-encoded bodies: decode only the pair separators, so
+        # `%26name%3Dvalue` reads as `&name=value` while `%20`, `%23` and
+        # friends stay encoded and can't end a value early.
+        text = _FORM_ENCODED.sub(lambda m: "&" if m.group(0)[-2:] == "26" else "=", text)
     for pattern, keep in _FREE_TEXT_PATTERNS:
         text = pattern.sub(keep + _REDACTED, text)
     oauth = _OAUTH_CONTEXT.search(text) is not None
@@ -513,10 +542,13 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     A scrubber bug must neither drop the error report nor let the original
     through, so any failure falls back to type names and a fixed message.
     """
+    reset = _event_text_budget.set(_EVENT_TEXT_BUDGET)
     try:
         return _scrub_event_fields(event, hint)
     except Exception:
         return _stripped_event(event)
+    finally:
+        _event_text_budget.reset(reset)
 
 
 def _stripped_event(event: Event) -> Event:
