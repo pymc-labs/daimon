@@ -24,7 +24,11 @@ import pytest
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
-from daimon.core.continuity.continuation import ContinuationDecision, ContinuationRequest
+from daimon.core.continuity.continuation import (
+    ContinuationDecision,
+    ContinuationRequest,
+    ResponderChanged,
+)
 from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -276,8 +280,13 @@ async def test_dispatch_continuations_in_thread_releases_the_guard_when_dispatch
 
 
 def _make_continuation_row(
-    *, tenant_id: uuid.UUID, account_id: uuid.UUID, reason: ContinuationReason
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    reason: ContinuationReason,
+    target_ma_agent_id: str = "ag_test",
 ) -> TaskContinuationRow:
+    """A claimed row queued for `target_ma_agent_id`; by default the agent admission resolves."""
     now = datetime.now(UTC)
     return TaskContinuationRow(
         id=uuid.uuid4(),
@@ -287,8 +296,8 @@ def _make_continuation_row(
         parent_channel_id=str(_THREAD_ID - 1),
         requester_account_id=account_id,
         requester_external_user_id="555",
-        target_ma_agent_id="ag_target",
-        target_name="target-agent",
+        target_ma_agent_id=target_ma_agent_id,
+        target_name="test-agent" if target_ma_agent_id == "ag_test" else "target-agent",
         requested_work="finish the migration",
         reason=reason,
         status="claimed",
@@ -348,6 +357,7 @@ async def _run_continuation(
     reason: ContinuationReason,
     guild: MagicMock | None = None,
     prior_role: Role | None = None,
+    target_ma_agent_id: str = "ag_test",
 ) -> tuple[str, uuid.UUID]:
     """Run one continuation turn; return its `user_message` and the tenant id.
 
@@ -373,7 +383,12 @@ async def _run_continuation(
 
     bot = make_bot(_make_runtime(db_session_factory))
     thread = _make_thread(guild=guild)
-    row = _make_continuation_row(tenant_id=tenant.id, account_id=account.id, reason=reason)
+    row = _make_continuation_row(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        reason=reason,
+        target_ma_agent_id=target_ma_agent_id,
+    )
     decision = ContinuationDecision(action="dispatch", seed_user_message="finish the migration")
 
     with (
@@ -439,6 +454,20 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
     )
+
+
+@pytest.mark.parametrize("reason", ["task_handoff", "private_input_applied"])
+async def test_continuation_turn_refuses_work_queued_for_another_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], reason: ContinuationReason
+) -> None:
+    """Every wake runs only as the agent it was queued for, not only a timer."""
+    with pytest.raises(ResponderChanged, match="queued for target-agent"):
+        await _run_continuation(
+            db_session_factory,
+            workspace_id="710000020" if reason == "task_handoff" else "710000021",
+            reason=reason,
+            target_ma_agent_id="ag_target",
+        )
 
 
 async def _requester_account_role(
