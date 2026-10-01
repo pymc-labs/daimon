@@ -543,7 +543,7 @@ but them:
 | Hub `ask` / `start_turn` / `continue_turn` | pinned agent refused | pin exempt |
 | Hub `list_my_sessions` / `get_session` / `list_events` on a sealed conversation | refused | allowed, anyone's |
 | Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
-| Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin) |
+| Credential and configuration tools on a pinned agent | from inside its channels only, or anywhere by a chat turn's channel admin of every pinned channel | allowed (a chat turn's admin) |
 | `fork_agent` of a pinned agent | refused | refused |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 
