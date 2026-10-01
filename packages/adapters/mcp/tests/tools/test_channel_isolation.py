@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
+import daimon.adapters.mcp.tools._isolation as isolation_mod
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -18,6 +20,7 @@ from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._isolation import IsolationMemoMiddleware
 from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
@@ -276,6 +279,30 @@ async def test_routines_of_an_isolated_channel_show_only_inside_it(
             timezone="UTC",
             trigger_message="hi",
         )
+
+
+async def test_a_tool_call_reads_isolation_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    reads: list[uuid.UUID] = []
+    real = isolation_mod.load_channel_isolation
+
+    async def counting(session: AsyncSession, **kwargs: Any) -> Any:
+        reads.append(kwargs["tenant_id"])
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(isolation_mod, "load_channel_isolation", counting)
+
+    async def call_next(context: Any) -> Any:
+        for _ in range(2):
+            await _list_routines_impl(runtime, world.auth(executing="agent_local"))
+        return MagicMock()
+
+    await IsolationMemoMiddleware().on_call_tool(MagicMock(), call_next)
+    assert len(reads) == 1, "one read per tool call, however many checks it runs"
+    await _list_routines_impl(runtime, world.auth())
+    assert len(reads) == 2, "the memo ends with the call"
 
 
 async def test_set_channel_isolation_refuses_or_forks_and_ends(

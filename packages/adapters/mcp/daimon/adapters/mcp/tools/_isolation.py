@@ -6,14 +6,16 @@ that agent is running a turn for the caller under C (a setup thread there runs
 as the built-in agent), or when a tool that knows its turn's location says it
 runs in C. From inside C a caller sees only C's own agents; from anywhere else
 it sees every agent but those. A tenant that isolates nothing pays one policy
-read and sees everything.
+read and sees everything, and inside one tool call each tenant's isolation is
+read once (`IsolationMemoMiddleware`).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -37,6 +39,10 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.turn_origins import list_active_origins
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import ToolResult
+
+import mcp.types as mt
 
 _UNREADABLE_MSG = (
     "This workspace's access policy could not be read, so daimon can't tell which agents "
@@ -126,8 +132,46 @@ def require_bindable(
     refuse(refusal, agent_name=agent_name)
 
 
+@dataclass
+class _CallMemo:
+    isolation: dict[uuid.UUID, ChannelIsolation] = field(
+        default_factory=dict[uuid.UUID, ChannelIsolation]
+    )
+    callers: dict[tuple[object, ...], CallerIsolation] = field(
+        default_factory=dict[tuple[object, ...], CallerIsolation]
+    )
+
+
+_memo: ContextVar[_CallMemo | None] = ContextVar("daimon_isolation_memo", default=None)
+
+
+class IsolationMemoMiddleware(Middleware):
+    """Read each tenant's isolation, and where the caller stands, once per tool call."""
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        token = _memo.set(_CallMemo())
+        try:
+            return await call_next(context)
+        finally:
+            _memo.reset(token)
+
+
+def forget_isolation(tenant_id: uuid.UUID) -> None:
+    """Drop this call's memo for a tenant whose isolation it just changed."""
+    if (memo := _memo.get()) is not None:
+        memo.isolation.pop(tenant_id, None)
+        memo.callers.clear()
+
+
 async def load_isolation(runtime: McpRuntime, tenant_id: uuid.UUID) -> ChannelIsolation:
     """The tenant's isolation; an unreadable policy refuses the call rather than fall open."""
+    memo = _memo.get()
+    if memo is not None and tenant_id in memo.isolation:
+        return memo.isolation[tenant_id]
     try:
         async with runtime.session_factory() as session:
             isolation = await load_channel_isolation(
@@ -135,6 +179,8 @@ async def load_isolation(runtime: McpRuntime, tenant_id: uuid.UUID) -> ChannelIs
             )
     except AccessPolicyUnreadable as exc:
         raise ToolError(_UNREADABLE_MSG) from exc
+    if memo is not None:
+        memo.isolation[tenant_id] = isolation
     return isolation
 
 
@@ -178,6 +224,10 @@ async def load_caller_isolation(
     if not isolation.is_active:
         return OPEN_ISOLATION
     executing = auth.agent_id or auth.chat_agent_id
+    memo = _memo.get()
+    key = (auth.tenant_id, auth.account_id, auth.platform, executing, location_channel_id)
+    if memo is not None and key in memo.callers:
+        return memo.callers[key]
     inside = isolation.isolated_channel(location_channel_id)
     if inside is None and executing is not None:
         if agents is None:
@@ -193,15 +243,20 @@ async def load_caller_isolation(
         inside = isolation.channel_of(agent_name_of(agent)) if agent is not None else None
         if inside is None:
             inside = await _running_turn_channel(runtime, auth, isolation, executing)
-    return CallerIsolation(isolation, inside)
+    caller = CallerIsolation(isolation, inside)
+    if memo is not None:
+        memo.callers[key] = caller
+    return caller
 
 
 __all__ = [
     "NO_SKILL_OWNERS",
     "OPEN_ISOLATION",
     "CallerIsolation",
+    "IsolationMemoMiddleware",
     "SkillOwners",
     "agent_name_of",
+    "forget_isolation",
     "load_caller_isolation",
     "load_isolation",
     "load_skill_owners",

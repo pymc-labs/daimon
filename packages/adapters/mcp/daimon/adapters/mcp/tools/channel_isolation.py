@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import forget_isolation
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
@@ -129,6 +130,7 @@ async def _set_channel_isolation_impl(
         )
     except DaimonError as exc:
         raise ToolError(f"{exc} Nothing was changed.") from exc
+    forget_isolation(auth.tenant_id)
     return SetChannelIsolationResult(
         channel_id=change.channel_id,
         isolated=change.isolated,
