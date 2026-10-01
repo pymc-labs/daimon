@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+import structlog
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
@@ -26,6 +28,7 @@ from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from microsoft_teams.api import MessageActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -33,10 +36,13 @@ from .conftest import (
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
+    SERVICE_URL,
     FakeSender,
     bot_token,
     build_teams_runtime,
+    make_channel_activity,
     make_inbound,
+    make_message_activity,
     patched_admission,
     patched_turns,
 )
@@ -215,6 +221,46 @@ def _click(key: str, clicker: str) -> Any:
         value=SimpleNamespace(action=action), from_=SimpleNamespace(aad_object_id=clicker)
     )
     return SimpleNamespace(activity=activity)
+
+
+def _message(payload: dict[str, object], reply: AsyncMock) -> Any:
+    activity = MessageActivity.model_validate(payload)
+    return SimpleNamespace(
+        activity=activity, conversation_ref=SimpleNamespace(service_url=SERVICE_URL), reply=reply
+    )
+
+
+async def test_a_channel_message_without_a_mention_is_dropped_with_a_log(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(_message(make_channel_activity(mention_bot=False), reply))
+    reply.assert_not_awaited()
+    assert {
+        "event": "teams.message.ignored",
+        "log_level": "info",
+        "conversation_type": "channel",
+        "reason": "not_mentioned",
+    } in logs, "a silent drop leaves the conversation type and why, never the text"
+
+
+async def test_a_refusal_that_cannot_be_sent_is_logged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+    reply = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(
+            _message(make_message_activity(conversation_type="groupChat"), reply)
+        )
+    reply.assert_awaited_once()
+    assert {
+        "event": "teams.refusal.send_failed",
+        "log_level": "warning",
+        "conversation_type": "groupChat",
+        "reason": "ConnectError",
+    } in logs, "a refusal nobody saw is still on record"
 
 
 async def test_only_the_author_can_cancel(

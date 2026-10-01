@@ -380,12 +380,25 @@ class TeamsApp:
             service_url=ctx.conversation_ref.service_url,
         )
         if isinstance(parsed, Refusal):
+            # Type and reason only, never the text: these drops are otherwise invisible.
+            conversation_type = activity.conversation.conversation_type
+            if parsed.text is None:
+                log.info(
+                    "teams.message.ignored",
+                    conversation_type=conversation_type,
+                    reason="not_mentioned",
+                )
+                return
             conversation_id = activity.conversation.id
-            if parsed.text is not None and await self._may_post(
-                conversation_id.split(";", 1)[0], conversation_id
-            ):
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+            if await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
+                try:
                     await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
+                except TEAMS_SEND_ERRORS as exc:
+                    log.warning(
+                        "teams.refusal.send_failed",
+                        conversation_type=conversation_type,
+                        reason=type(exc).__name__,
+                    )
             return
         self.spawn(self._handle(parsed), name="teams.turn")
 

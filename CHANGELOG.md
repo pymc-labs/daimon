@@ -329,6 +329,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Teams channel message the bot ignores because it was not mentioned is now
+  logged as `teams.message.ignored`, and a refusal reply that fails to send as
+  `teams.refusal.send_failed`, each with the conversation type and reason and
+  never the message text. Both cases used to leave no trace.
 - The Slack bot no longer answers thread replies that don't mention it. Slack
   can deliver an `app_mention` event for a reply in a thread the bot is in even
   when the reply never mentions it, and each one ran a billed turn. A turn now
