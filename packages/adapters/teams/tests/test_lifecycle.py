@@ -346,3 +346,38 @@ async def test_a_hung_send_times_out_as_a_send_error() -> None:
 def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
     chunks = split_fenced("统计" * 5_000, card.TEAMS_LIMIT)
     assert len(chunks) > 1 and all(len(json.dumps(chunk)) < 28_000 for chunk in chunks)
+
+
+def _unprompted(sender: FakeSender) -> TeamsTurnLifecycle:
+    return TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        unprompted=True,
+    )
+
+
+async def test_an_unprompted_turn_posts_only_its_answer() -> None:
+    """Nobody asked: no status card up front, the answer arrives as a new message."""
+    sender = FakeSender()
+    lifecycle = _unprompted(sender)
+    await lifecycle.post_initial()
+    await lifecycle.on_render(_answer("draft"))
+    assert sender.sent == [], "no card and no render before there is an answer"
+
+    await lifecycle.on_terminal_success(_answer("Thursdays."))
+    [answer] = sender.activities
+    assert answer.id is None and answer.text == "Thursdays.", "posted, not an edit"
+    assert lifecycle.final_message_id == "m-1", "the watermark can move past it"
+
+
+async def test_an_unprompted_turn_without_an_answer_or_with_a_failure_stays_silent() -> None:
+    sender = FakeSender()
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await _unprompted(sender).on_terminal_success(TurnState(content=[tool]))
+    error = TurnError(kind="upstream", message="overloaded")
+    await _unprompted(sender).on_terminal_failure(TurnState(error=error), error)
+    await _unprompted(sender).close_with_notice("Sorry, something went wrong.")
+    assert sender.sent == [], "no tool trail, failure card or notice in a thread nobody asked in"

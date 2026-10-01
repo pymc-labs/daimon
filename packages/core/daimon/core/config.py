@@ -275,7 +275,7 @@ class ThreadParticipationSettings(BaseModel):
     """Organic thread participation: replying in a thread unprompted.
 
     Platform-agnostic settings (the store and tool are keyed by platform);
-    only the Discord adapter reads them today. `mode` is the deployment tier
+    the Discord and Teams adapters read them. `mode` is the deployment tier
     of a cascade (deployment, workspace, channel, thread) that the agent's
     `set_thread_participation` tool writes the other tiers of. `off` (the
     default) changes nothing for anyone: no classifier runs and every server

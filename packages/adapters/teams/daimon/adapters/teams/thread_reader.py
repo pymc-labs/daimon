@@ -16,11 +16,13 @@ from daimon.adapters.teams.context import (
     HistoryBlock,
     channel_block,
     channel_media,
+    classifier_window,
     delta_block,
     thread_block,
 )
 from daimon.adapters.teams.graph import GraphClient, GraphToken, GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.thread_participation import ClassifierMessage
 
 log = structlog.get_logger(__name__)
 
@@ -74,6 +76,26 @@ class ThreadReader:
         except GraphUnavailable as err:
             log.warning("teams.history.unavailable", status=err.status, reason=err.reason)
             return None
+
+    async def read_window(
+        self, inbound: TeamsInbound, *, exclude_ids: frozenset[str], limit: int
+    ) -> list[ClassifierMessage]:
+        """The thread before a participation burst, for the classifier.
+
+        Raises `GraphUnavailable`: with no thread to judge, the caller stays silent.
+        """
+        root = root_id(inbound.conversation_id)
+        if inbound.kind != "channel" or root is None:
+            raise GraphUnavailable("not a channel thread")
+        group = await self._group_id(inbound)
+        channel = inbound.channel_id
+        replies = await self._graph.list_replies(group, channel, root)
+        messages = list(replies.value)
+        if replies.next_link is None:  # the whole thread fits: the root opens it
+            messages.append(await self._graph.get_message(group, channel, root))
+        return classifier_window(
+            messages, exclude_ids=exclude_ids, limit=limit, bot_app_id=self._bot_app_id
+        )
 
     async def read_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
         """The mentioned message's hosted images and files, or None if unreadable."""

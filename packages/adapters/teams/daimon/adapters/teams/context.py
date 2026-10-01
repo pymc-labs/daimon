@@ -21,6 +21,7 @@ import httpx
 from daimon.adapters.teams.attachments import ChannelMedia
 from daimon.adapters.teams.graph import GraphMessage, GraphPage, is_graph_url
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
 # Top-level posts replayed for a mention that starts a thread, as on Discord.
@@ -198,6 +199,30 @@ def delta_block(
     return HistoryBlock("thread_delta", lines, _truncated(cut))
 
 
+def classifier_window(
+    messages: Iterable[GraphMessage], *, exclude_ids: frozenset[str], limit: int, bot_app_id: str
+) -> list[ClassifierMessage]:
+    """The `limit` newest readable messages outside the burst, oldest first, for the classifier.
+
+    Only the bot's own messages count as the bot (`is_bot`), as on Discord;
+    another app reads as one more participant.
+    """
+    window: list[ClassifierMessage] = []
+    for message in _order(messages):
+        if message.id in exclude_ids or message.message_type != "message":
+            continue
+        if message.deleted_date_time is not None or not (text := _body_text(message)):
+            continue
+        sender = message.sender
+        user = sender.user if sender is not None else None
+        app = sender.application if sender is not None else None
+        author = user or app
+        is_self = user is None and app is not None and app.id == bot_app_id
+        name = (author.display_name if author else None) or "unknown"
+        window.append(ClassifierMessage(author_name=name, content=text, is_bot=is_self))
+    return window[-limit:]
+
+
 def channel_block(posts: GraphPage, *, skip_ids: frozenset[str], bot_app_id: str) -> HistoryBlock:
     """A top-level mention: the channel's most recently active posts."""
     rendered = _rendered(posts.value, skip_ids=skip_ids, bot_app_id=bot_app_id)
@@ -214,11 +239,23 @@ def render_user_message(
     prefix: str,
     history: HistoryBlock | None,
 ) -> str:
-    """Host facts and any replayed history, then the person's escaped words."""
-    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>'
+    """Host facts and any replayed history, then the person's escaped words.
+
+    A channel turn names its thread too, the id thread-scoped settings such as
+    `set_thread_participation` key on. `unprompted="true"` marks a message
+    nobody addressed to the bot (organic thread participation).
+    """
+    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>']
+    if inbound.kind == "channel":
+        context = [
+            f'<channel platform="teams" id={quoteattr(inbound.channel_id)} role="parent_channel"/>',
+            f'<thread platform="teams" id={quoteattr(inbound.thread_id)} role="current_thread"/>',
+        ]
     query = (
         f"<user_query author_id={quoteattr(inbound.user_id)} "
-        f'is_admin="{str(is_admin).lower()}">{escape(inbound.text)}</user_query>'
+        f'is_admin="{str(is_admin).lower()}"'
+        + (' unprompted="true"' if inbound.unprompted else "")
+        + f">{escape(inbound.text)}</user_query>"
     )
     replay: Sequence[str] = ()
     if history is not None:
@@ -227,7 +264,7 @@ def render_user_message(
         [
             controls,
             "<context>",
-            context,
+            *context,
             *([keys] if keys else []),
             *replay,
             "</context>",

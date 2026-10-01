@@ -370,8 +370,8 @@ Read from `daimon.core.config.ThreadParticipationSettings`. Prefix
 
 Organic thread participation: replying in a thread unprompted.
 
-Platform-agnostic settings (the store and tool are keyed by platform); only the Discord
-adapter reads them today. `mode` is the deployment tier of a cascade (deployment,
+Platform-agnostic settings (the store and tool are keyed by platform); the Discord and
+Teams adapters read them. `mode` is the deployment tier of a cascade (deployment,
 workspace, channel, thread) that the agent's `set_thread_participation` tool writes the
 other tiers of. `off` (the default) changes nothing for anyone: no classifier runs and
 every server behaves as today until someone asks the agent to follow a thread, or an
