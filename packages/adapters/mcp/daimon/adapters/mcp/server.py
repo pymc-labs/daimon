@@ -88,6 +88,7 @@ from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from google import genai
+from key_value.aio.stores.memory import MemoryStore
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -101,6 +102,8 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _MIN_SECRET_BYTES = 32
+# Far above the requests in flight at once; only its own request reads an entry.
+_MAX_STATE_ENTRIES = 10_000
 
 log = structlog.get_logger()
 
@@ -262,7 +265,12 @@ def create_mcp_app(
         finally:
             await identity_middleware.drain_audit()
 
-    mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=audit_lifespan)
+    # Stateless HTTP keys session state by a fresh id per request, kept a day:
+    # bound it. Nothing needs it past the request (see `http_app` below).
+    state = MemoryStore(max_entries_per_collection=_MAX_STATE_ENTRIES)
+    mcp = FastMCP(
+        name="daimon", auth=effective_auth, lifespan=audit_lifespan, session_state_store=state
+    )
     mcp.add_middleware(identity_middleware)
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
     # structured ToolError instead of an opaque internal error (issue #14).
@@ -371,7 +379,12 @@ def create_mcp_app(
     else:
         log.info("mcp.generation_tools_skipped", reason="DAIMON_GEMINI__API_KEY not set")
 
-    app = mcp.http_app()
+    # Stateless, like the hub: a session id in one process's memory stranded
+    # clients after a redeploy or on another instance ("session terminated",
+    # 404). Nothing needs one: IdentityMiddleware re-derives identity and tool
+    # visibility on every request, and no tool streams progress, elicits,
+    # samples or subscribes. JSON, as no request streams anything.
+    app = mcp.http_app(stateless_http=True, json_response=True)
     app.state.mcp = mcp
     app.add_route(
         "/uploads/{token}",

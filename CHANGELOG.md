@@ -357,6 +357,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The MCP endpoint is stateless.** It kept MCP sessions in one process's
+  memory, so after a redeploy, or on a deployment running the MCP server on
+  more than one instance, a client's tool calls failed with "server terminated
+  the MCP session" (HTTP 400) or "Session not found" (HTTP 404) for the rest of
+  its session. Every request now stands alone, needs no `initialize` first and
+  answers with JSON, as the hub endpoints already did; an unknown session id
+  is ignored. Identity and tool visibility were already worked out per request
+  from the token, so no tool changes.
 - A Teams channel message the bot ignores because it was not mentioned is now
   logged as `teams.message.ignored`, and a refusal reply that fails to send as
   `teams.refusal.send_failed`, each with the conversation type and reason and
