@@ -18,6 +18,7 @@ import uuid
 import jwt as pyjwt
 import pytest
 from daimon.adapters.mcp.auth.verifier import (
+    REFUSAL_AUDIT_TOOL,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
@@ -27,7 +28,8 @@ from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token, mint_
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
-from daimon.core.stores.mcp_tokens import revoke_mcp_token
+from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
+from daimon.core.stores.security_audit import list_events
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -407,3 +409,39 @@ async def test_verifier_accepts_registered_cli_token(
         "a registered CLI token verifies"
     )
     assert SCOPES_CLAIM not in result.claims, "only operator tokens carry scopes"
+
+
+@pytest.mark.parametrize("reason", ["revoked", "expired", "not_admin", "kind_mismatch"])
+async def test_verifier_audits_each_refusal_of_a_registered_token(
+    sessionmaker: async_sessionmaker[AsyncSession], reason: str
+) -> None:
+    """A refused row leaves an audit row with its tenant, kind, jti and reason, never the token."""
+    account_id, token = await _mint_operator(sessionmaker)
+    jti = _jti(token)
+    async with sessionmaker() as s, s.begin():
+        if reason == "revoked":
+            await revoke_mcp_token(s, jti=jti, now=dt.datetime.now(dt.UTC))
+        elif reason == "expired":
+            await s.execute(
+                text("UPDATE mcp_tokens SET expires_at = :at WHERE jti = :jti"),
+                {"at": dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1), "jti": jti},
+            )
+        elif reason == "not_admin":
+            await set_role(s, account_id, Role.USER)
+    if reason == "kind_mismatch":
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+        token = pyjwt.encode({**claims, "kind": "cli"}, SECRET, algorithm="HS256")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+
+    assert await verifier.verify_token(token) is None, f"a {reason} token gets a 401"
+
+    async with sessionmaker() as s:
+        row = await get_mcp_token(s, jti=jti)
+        assert row is not None, "the refused token's row stays"
+        events = await list_events(s, tenant_id=row.tenant_id)
+    assert [
+        (e.tool_name, e.outcome, e.reason, e.token_kind, e.token_jti, e.account_id) for e in events
+    ] == [(REFUSAL_AUDIT_TOOL, "denied", reason, "operator", jti, account_id)], (
+        "the refusal is audited under the token's tenant"
+    )
+    assert token not in events[0].model_dump_json(), "the token value is never stored"
