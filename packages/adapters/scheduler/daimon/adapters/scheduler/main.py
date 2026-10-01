@@ -44,7 +44,7 @@ from daimon.core.access_policy import (
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import load_channel_isolation
+from daimon.core.channel_isolation import is_refused_by_isolation
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -160,6 +160,23 @@ class _CapsAdapter:
         )
 
 
+def _fire_refusal(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None,
+) -> str | None:
+    """Why the agent that will run may not deliver to `channel_id` (None: by DM)."""
+    if is_outside_agent_pin(policy, agent_names=agent_names, channel_id=channel_id):
+        return "agent_pinned_elsewhere"
+    if channel_id is not None and is_refused_by_isolation(
+        policy, agent_names=agent_names, channel_id=channel_id, parent_channel_id=parent_channel_id
+    ):
+        return "channel_isolated"
+    return None
+
+
 async def _build_fire(
     *,
     client: AsyncAnthropic,
@@ -257,15 +274,6 @@ async def _build_fire(
                     channel_id=target.channel_id if target is not None else None,
                 ):
                     policy_error = "agent_pinned_elsewhere"
-                # An isolated channel's own agent posts only inside it, and
-                # only its own agents post there; routing may have changed
-                # since the routine was saved.
-                if policy_error is None and policy.isolated_channel_ids:
-                    isolation = await load_channel_isolation(
-                        s, tenant_id=row.tenant_id, default=deployment_default, policy=policy
-                    )
-                    if isolation.routine_crosses(row):
-                        policy_error = "channel_isolated"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
@@ -332,25 +340,29 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
-        # The pin is checked again on the agent that will actually run, by
-        # every name a pin can be keyed by, after self-healing may have picked
-        # a replacement: the saved routine name alone can miss a pin on the
-        # display name or a rename.
-        if fire_policy is not None and fire_policy.agent_channel_pins:
+        # The pin and channel isolation are checked again on the agent that
+        # will actually run, by every name a pin can be keyed by, after
+        # self-healing may have picked a replacement: the saved routine name
+        # alone can miss a pin on the display name or a rename.
+        if fire_policy is not None and (
+            fire_policy.agent_channel_pins or fire_policy.isolated_channel_ids
+        ):
             ran = await client.beta.agents.retrieve(resolved_agent_id)
-            if is_outside_agent_pin(
+            refusal = _fire_refusal(
                 fire_policy,
                 agent_names=(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
                 channel_id=fire_channel_id,
-            ):
+                parent_channel_id=row.channel_id,
+            )
+            if refusal is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
                     routine_id=str(row.id),
                     tenant_id=str(row.tenant_id),
-                    reason="agent_pinned_elsewhere",
+                    reason=refusal,
                 )
                 async with sm() as pin_s, pin_s.begin():
-                    await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
+                    await record_result(pin_s, row.id, tail=None, error=refusal)
                 return
         # Admission gate: the routine's channel budget, after the cap (run_one_tick),
         # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is

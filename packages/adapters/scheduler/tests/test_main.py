@@ -1378,6 +1378,7 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
     posting into a channel isolated since then is skipped, not run."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing import ma_agent
 
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -1389,7 +1390,13 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
         idempotency_key=f"trial:{tenant.id}",
     )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
     )
     row = await create_routine(
         db_session,
@@ -1407,24 +1414,40 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
     )
     await db_session.commit()
 
-    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     fire = await _build_fire(
-        client=fake_client,
+        client=client,
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
     )
-    with unittest.mock.patch(
-        "daimon.adapters.scheduler.main.run_turn",
-        side_effect=AssertionError("a routine crossing the line must not run a turn"),
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_x"
+
+    agent = ma_agent(id="agent_x", name="daimon", tenant_id=tenant.id)
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn",
+            side_effect=AssertionError("a routine crossing the line must not run a turn"),
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+        unittest.mock.patch.object(
+            client.beta.agents, "retrieve", new=unittest.mock.AsyncMock(return_value=agent)
+        ),
     ):
         await fire(row)
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None and fetched.last_error == "channel_isolated"
-    await fake_client.close()
+    await client.close()
 
 
 @pytest.mark.parametrize(
