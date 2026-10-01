@@ -68,6 +68,12 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
+    # The channel and thread the turn runs in, and whether the tenant seals
+    # them: stamped on a fresh session so the transcript tools can apply the
+    # seal to it (`daimon.core.sessions.create_session`).
+    origin_channel_id: str | None = None
+    origin_thread_id: str | None = None
+    origin_sealed: bool = False
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -289,6 +295,9 @@ async def admit_impl(
     return Admission(
         memory_read_only=memory_read_only,
         source_sealed=source_sealed,
+        origin_channel_id=channel_id,
+        origin_thread_id=thread_id,
+        origin_sealed=source_sealed,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

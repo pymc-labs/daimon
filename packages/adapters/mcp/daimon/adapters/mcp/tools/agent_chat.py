@@ -72,7 +72,11 @@ from daimon.adapters.mcp.tools._ctx import (
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
-from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
+from daimon.adapters.mcp.tools._session_access import (
+    require_session_outside_seals,
+    session_belongs_to_caller,
+    sessions_outside_seals,
+)
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
@@ -242,12 +246,37 @@ async def _verify_agent_owns_session(
     would let one member read, drive or stop another's conversation. Raises
     ``ToolError("session not found")`` — same message as a genuinely missing
     session, so existence isn't leaked across agents or accounts.
+
+    A conversation that ran in a sealed channel is then refused outright: these
+    callers (agent keys, the hub) run outside every channel, and its transcript
+    holds what the seal keeps in. Checked on every call, so a follow-up after
+    the channel is sealed is refused too.
     """
     s = await runtime.client.beta.sessions.retrieve(handle)
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id or not _owned_by_caller(s, auth):
         raise ToolError("session not found")
+    await require_session_outside_seals(runtime, auth, s)
     return s
+
+
+_CHAT_TURN_REFUSED = (
+    "a chat turn can't open or drive another conversation through agent chat. "
+    "Answer in this conversation instead. Do not retry."
+)
+
+
+def _require_outside_chat_turn(auth: AuthIdentity) -> None:
+    """Refuse agent-chat turns driven by a chat turn's own credential.
+
+    These tools are for headless callers (agent keys, the hub), which run
+    outside every channel. A chat turn's token carries ``chat_agent_id`` and
+    is kept off this surface by visibility; this check holds the line if that
+    ever changes. A chat turn in a sealed channel could otherwise open or
+    continue a session with no seal stamp and carry sealed content into it.
+    """
+    if auth.chat_agent_id is not None or auth.slack_turn_context_id is not None:
+        raise ToolError(_CHAT_TURN_REFUSED)
 
 
 def _owned_by_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
@@ -345,7 +374,10 @@ async def _start_turn_impl(
     ``daimon_billing_exempt="mcp-internal-caller"``, so the usage sweep skips
     it: the operator absorbs that usage. The stamp is the creator's posture
     and covers the whole session, including later ``continue_turn`` calls.
+
+    A chat turn's own credential is refused (``_require_outside_chat_turn``).
     """
+    _require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
@@ -465,8 +497,10 @@ async def _continue_turn_impl(
     events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
-    same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
+    same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
+    chat turn's own credential is refused (``_require_outside_chat_turn``).
     """
+    _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
@@ -497,15 +531,15 @@ async def _list_sessions_impl(
 
     Resolves the caller's MA agent from the verified claim, lists that agent's
     sessions, and keeps only those tagged with the caller's account. Other
-    agents' sessions in the same tenant, and other members' sessions of this
-    agent, are never returned.
+    agents' sessions in the same tenant, other members' sessions of this
+    agent, and conversations that ran in a sealed channel are never returned.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
-    results: list[SessionInfo] = []
+    owned: list[BetaManagedAgentsSession] = []
     async for s in runtime.client.beta.sessions.list(agent_id=str(ma_agent.id)):
         if _owned_by_caller(s, auth):
-            results.append(SessionInfo.from_ma(s))
-    return results
+            owned.append(s)
+    return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
 async def _get_session_impl(

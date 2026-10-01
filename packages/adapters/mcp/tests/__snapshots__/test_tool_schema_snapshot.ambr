@@ -173,7 +173,8 @@
           Sessions you started with this daimon, for resuming with ``handle``.
           
           Other people's conversations with the same daimon are not listed and
-          their handles are not accepted.
+          their handles are not accepted; nor are conversations from a sealed
+          channel, which can only be read from inside it.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -2117,10 +2118,26 @@
       }),
     }),
     'get_session': dict({
-      'description': 'Look up a session by id (tenant-scoped).',
+      'description': '''
+        Look up one of your sessions by id (tenant-scoped).
+        
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'session_id': dict({
             'type': 'string',
           }),
@@ -2517,7 +2534,12 @@
       }),
     }),
     'list_session_events': dict({
-      'description': 'List events for a session (SDK pass-through, single page).',
+      'description': '''
+        List events for one of your sessions (SDK pass-through, single page).
+        
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2539,6 +2561,17 @@
                   'asc',
                   'desc',
                 ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
                 'type': 'string',
               }),
               dict({
@@ -2569,11 +2602,27 @@
       }),
     }),
     'list_sessions': dict({
-      'description': 'List sessions in the tenant pool. ``agent_name`` narrows to one agent.',
+      'description': '''
+        List your sessions in the tenant pool. ``agent_name`` narrows to one agent.
+        
+        Conversations from a sealed channel are listed only when
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
