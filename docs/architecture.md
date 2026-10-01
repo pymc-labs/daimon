@@ -251,7 +251,8 @@ server's session tools take the calling turn's `origin_context_id`, claimable
 only by a chat turn's own credential; agent-chat keys run outside every
 channel, so they never list, read or continue a sealed conversation, and the
 hub does the same for members. A workspace admin may list and read any sealed
-conversation from the hub, but continue none (see [Trust model](#trust-model)).
+conversation from the hub, and a channel admin those of the channels they
+administer, but continue none (see [Trust model](#trust-model)).
 Sealing a channel later covers its existing sessions, and unsealing never
 releases a session that ran sealed -- only that thread, when the thread was
 sealed on its own. A session from before the stamp that a thread ran on
@@ -385,12 +386,17 @@ started from. A session counts in the channel recorded when it was created
 routine in the one its spend counts against; one with none recorded could run
 anywhere, and the refusal says so. An agent answering nowhere is local to
 nobody, so locality only narrows what key and MCP server replacements and
-removals count as shared, never past it. A channel admin binds only a shared agent
+removals count as shared, never past it. In `daimon.core.authz` a channel admin
+is `Subject.administered_channel_ids`, filled from the stored grants and never
+`is_admin`: configuring a pinned agent from anywhere is theirs once they
+administer every channel of every pin on it (a pin to no channel stays with
+server admins). A channel admin binds only a shared agent
 (managed or tenant-wide), one answering nowhere yet, or one already local
 to them, never another channel's own agent. No chat tool or panel binds a
 pinned agent as the default of a channel outside its pin, for server admins
-too; the operator CLI (`daimon config set`, `daimon config propagate`) still
-can. Managed agents and the tenant default stay with server
+too (`authorize(BIND_CHANNEL_DEFAULT)`); the operator CLI
+(`daimon config set`, `daimon config propagate`) still can. Managed agents
+and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
 included, keep the old grant. Unattended runs are routines and queued wakes
@@ -563,9 +569,9 @@ but them:
 | Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |
 | DM (`admit(is_dm=True)`, Teams personal chats included) | pinned agent refused | pin exempt |
 | Hub `ask` / `start_turn` / `continue_turn` | pinned agent refused | pin exempt |
-| Hub `list_my_sessions` / `get_session` / `list_events` on a sealed conversation | refused | allowed, anyone's |
+| Hub `list_my_sessions` / `get_session` / `list_events` on a sealed conversation | refused | allowed, anyone's; a channel admin's in the channels they administer |
 | Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
-| Credential and configuration tools on a pinned agent | from inside its channels only, or anywhere by a chat turn's channel admin of every pinned channel | allowed (a chat turn's admin) |
+| Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin, or channel admin of every pinned channel) |
 | `fork_agent` of a pinned agent | refused | refused |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 
@@ -578,6 +584,10 @@ requester is in); and direct messages to the requester. Its context never
 lands in another channel or another person's DM. A session that ran in a DM
 (a Slack IM, a Teams personal chat, or a `/dm` conversation) is private:
 admins never read it from the hub.
+
+A channel admin has a server admin's rights limited to the channels they
+administer, so only those two rows' exemptions apply to them, and only there.
+Hub turns, DMs and forks treat them as members.
 
 Continuing a sealed channel conversation from the hub stays refused for admins
 because a follow-up would join the channel's own conversation, which the
@@ -592,9 +602,11 @@ Who counts as an admin:
   that turn's admission, and as current as the person's last platform turn
   when the same vault token is reused by their hub or routine sessions. The
   operator's own internal token is trusted too; an agent-scoped key never.
-- In the hub, the account's stored role. The hub has no live platform role,
-  so a demotion or promotion takes effect on the person's next Discord, Slack
-  or Teams turn in that workspace, which records the platform's current role.
+- In the hub, the account's stored role, and for a channel admin the stored
+  grants matched against the role ids of their last turn. The hub has no
+  live platform role, so a demotion or promotion takes effect on the
+  person's next Discord, Slack or Teams turn in that workspace, which
+  records the platform's current role.
 
 Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
 user are never admins on these surfaces, whatever role their account holds or
@@ -603,12 +615,14 @@ skip billing, not admission.
 
 The pin decisions (turn admission, MCP and hub turns, routine save and fire,
 handoff, configuration writes and form submits), pinned sends and direct
-messages, channel and session seal reads, and fork are decided by one pure
+messages, channel and session seal reads, fork, channel admins'
+configuration rights and channel default binds are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
 where the result lands, which agent, which channel); each caller keeps only
 its own I/O and refusal copy. The live protection and invoker checks in the
-scheduler and routine delivery, the hub's admin sealed-read exemption and the
-OAuth no-request rule still use the same `access_policy` predicates directly.
+scheduler and routine delivery, the hub's admin and channel admin sealed-read
+exemption and the OAuth no-request rule still use the same `access_policy`
+predicates directly.
 
 ## Tenancy and isolation
 

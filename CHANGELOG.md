@@ -91,9 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   personal default, someone else's live session or routine in another channel
   or in no known one, and, for key and MCP server changes, answering nowhere.
   An admin of every channel an agent is pinned to may change it from outside
-  them. No chat tool or panel can make a pinned agent the default of a channel
-  outside its pin; the operator CLI still can. Nothing changes until a channel
-  admin is named.
+  them, and from the hub may list and read the sealed conversations of the
+  channels they run, as a server admin may of any; DMs stay private. No chat
+  tool or panel can make a pinned agent the default of a channel outside its
+  pin; the operator CLI still can. Nothing changes until a channel admin is
+  named.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
