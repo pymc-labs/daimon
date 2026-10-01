@@ -1,12 +1,19 @@
-"""Session output files to Teams: a consent card in 1:1 chats, a note in channels.
+"""Session output files to Teams: a consent card in 1:1 chats, the channel's Files in channels.
 
 Thin adapter over `sweep_session_outputs`. In a 1:1 chat each file is offered
 with a FileConsentCard and the post defers, so the file stays listed until the
 person accepts (upload, then delete) or declines (delete). The card's context
 round-trips through the client, so it carries only a random token keyed to a
-server-side offer that is checked against the clicker and expires. Bots
-cannot upload into channels without Microsoft Graph, so a channel thread gets
-a short note per file instead, through the sweep's skip path.
+server-side offer that is checked against the clicker and expires.
+
+In a channel each file is uploaded to the channel's Files folder through
+Graph (`channel_files`), and the links are edited in below the answer, or
+sent as one message when they do not fit (never after an unprompted
+answer): a note per file cluttered the thread. A failed upload is named
+there too. Without access a file goes down the skip path to be logged, and
+the agent guidance has the agent say so in its reply.
+Either way the listing entry, the delivery ledger, is deleted; the sandbox
+keeps its copy, so the agent can still read or paste it later.
 """
 
 from __future__ import annotations
@@ -25,12 +32,13 @@ import httpx
 import structlog
 from daimon.adapters.teams.attachments import FetchRefused, is_sharepoint_host
 from daimon.adapters.teams.card_actions import card_actor, submitted_fields
+from daimon.adapters.teams.channel_files import ChannelFiles
+from daimon.adapters.teams.graph import GraphUnavailable
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
-    MAX_BYTES_PER_FILE,
     DeliverableFile,
     OutputDeliveryDeferred,
     SkippedFile,
@@ -57,10 +65,22 @@ OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _DECLINED = "Okay, I won't send `{name}`."
-_CHANNEL_SKIP = (
-    "I made `{name}`, but I can't attach files in channels. Ask me in a 1:1 chat when you "
-    "need a file."
-)
+_SAVED = "Saved to this channel's files:"
+_NOT_SAVED = "I couldn't save `{name}` to this channel's files."
+
+# Edits a line in below the answer on screen; False if it cannot go there.
+AppendToAnswer = Callable[[str], Awaitable[bool]]
+
+
+async def _log_channel_skip(file: SkippedFile) -> None:
+    log.info("teams.channel_output.skipped", file_id=file.file_id, size_bytes=file.size_bytes)
+
+
+def _file_link(name: str, web_url: str | None) -> str:
+    label = name.replace("[", "\\[").replace("]", "\\]")
+    if web_url is None or not is_sharepoint_host(httpx.URL(web_url)):
+        return f"- {label}"
+    return f"- [{label}]({web_url.replace('(', '%28').replace(')', '%29')})"
 
 
 class Spawn(Protocol):
@@ -111,12 +131,14 @@ class TeamsOutputDelivery:
         runtime: TeamsRuntime,
         sender: TeamsSender,
         spawn: Spawn,
+        files: ChannelFiles | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._runtime = runtime
         self._sender = sender
         self._spawn = spawn
+        self._files = files
         self._clock = clock
         self._sleep = sleep
         self._offers: dict[str, _Offer] = {}
@@ -129,8 +151,13 @@ class TeamsOutputDelivery:
             conversation_id, MessageActivityInput(text=text), service_url=service_url
         )
 
-    async def sweep(self, inbound: TeamsInbound, session_id: str) -> None:
-        """Deliver the session's outputs. Chained per session: two sweeps never overlap."""
+    async def sweep(
+        self, inbound: TeamsInbound, session_id: str, *, append: AppendToAnswer | None = None
+    ) -> None:
+        """Deliver the session's outputs. Chained per session: two sweeps never overlap.
+
+        `append` puts a channel's file links below the turn's answer.
+        """
         previous = self._sweeps.get(session_id)
         current = asyncio.current_task()
         if current is not None:
@@ -139,25 +166,84 @@ class TeamsOutputDelivery:
             if previous is not None:
                 with contextlib.suppress(Exception):
                     await previous
-            channel = inbound.kind == "channel"
+            if inbound.kind == "channel":
+                await self._sweep_channel(inbound, session_id, append)
+                return
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
                 post=functools.partial(self._offer, inbound, session_id),
-                on_skip=functools.partial(self._skip_notice, inbound, channel),
+                on_skip=functools.partial(self._skip_notice, inbound),
                 sleep=self._sleep,
-                # Zero sends every channel file down the skip path: a note, then delete.
-                max_bytes=0 if channel else MAX_BYTES_PER_FILE,
             )
         finally:
             if self._sweeps.get(session_id) is current:
                 self._sweeps.pop(session_id, None)
 
-    async def _skip_notice(self, inbound: TeamsInbound, channel: bool, file: SkippedFile) -> None:
-        text = render_oversize_notice(file)
-        if channel:
-            text = _CHANNEL_SKIP.format(name=sanitize_title(file.filename))
-        await self._say(inbound.conversation_id, inbound.service_url, text)
+    async def _sweep_channel(
+        self, inbound: TeamsInbound, session_id: str, append: AppendToAnswer | None
+    ) -> None:
+        files = self._files
+        if files is None or not await files.is_available(inbound):
+            # Zero sends every file down the skip path: a log line, then delete.
+            await sweep_session_outputs(
+                self._runtime.anthropic,
+                session_id=session_id,
+                post=functools.partial(self._offer, inbound, session_id),
+                on_skip=_log_channel_skip,
+                sleep=self._sleep,
+                max_bytes=0,
+            )
+            return
+        links: list[str] = []
+        notices: list[str] = []
+
+        async def upload(file: DeliverableFile) -> None:
+            name = display_filename_for(file.filename, file.mime_type)
+            try:
+                item = await files.upload(inbound, name, file.content)
+            except GraphUnavailable as err:
+                log.warning(
+                    "teams.channel_output.upload_failed",
+                    file_id=file.file_id,
+                    status=err.status,
+                    reason=err.reason,
+                )
+                notices.append(_NOT_SAVED.format(name=sanitize_title(name)))
+                return
+            links.append(_file_link(sanitize_title(item.name or name), item.web_url))
+
+        async def oversize(file: SkippedFile) -> None:
+            notices.append(render_oversize_notice(file))
+
+        await sweep_session_outputs(
+            self._runtime.anthropic,
+            session_id=session_id,
+            post=upload,
+            on_skip=oversize,
+            sleep=self._sleep,
+        )
+        saved = ["\n".join([_SAVED, *links])] if links else []
+        text = "\n\n".join([*saved, *notices])
+        if not text:
+            return
+        if append is not None and await append(text):
+            return
+        if inbound.unprompted:
+            # Nobody asked: an unprompted turn posts its answer and nothing else.
+            log.info("teams.channel_output.links_withheld", reason="unprompted")
+            return
+        try:
+            await self._sender.send(
+                inbound.conversation_id,
+                MessageActivityInput(text=text, text_format="markdown"),
+                service_url=inbound.service_url,
+            )
+        except TEAMS_SEND_ERRORS:
+            log.warning("teams.channel_output.links_failed", exc_info=True)
+
+    async def _skip_notice(self, inbound: TeamsInbound, file: SkippedFile) -> None:
+        await self._say(inbound.conversation_id, inbound.service_url, render_oversize_notice(file))
 
     async def _offer(self, inbound: TeamsInbound, session_id: str, file: DeliverableFile) -> None:
         """Send a consent card, then defer: the click decides the file's fate."""

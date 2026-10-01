@@ -23,15 +23,20 @@ from daimon.adapters.teams import (
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
+from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.feedback import record_feedback
+from daimon.adapters.teams.graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.adapters.teams.help import send_help
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
+from daimon.adapters.teams.sharepoint import SharePoint
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
@@ -203,6 +208,33 @@ def create_teams_http_service(
         token = await teams_app.token_provider.get_app_token()
         return str(token) if token is not None else None
 
+    async def graph_token() -> str | None:
+        # MSAL caches app tokens per scope, so this is a network call about hourly.
+        token = await teams_app.token_provider.get_app_token(GRAPH_SCOPE, settings.tenant_id)
+        return str(token) if token is not None else None
+
+    async def team_group(team_id: str) -> str | None:
+        try:
+            details = await teams_app.api.from_service_url(SERVICE_URL).teams.get_by_id(team_id)
+        except TEAMS_SEND_ERRORS as err:
+            log.warning("teams.team_lookup.failed", error=type(err).__name__)
+            return None
+        return details.aad_group_id
+
+    async def channel_names(team_id: str) -> dict[str, str | None]:
+        try:
+            teams = teams_app.api.from_service_url(SERVICE_URL).teams
+            channels = await teams.get_conversations(team_id)
+        except TEAMS_SEND_ERRORS as err:
+            log.warning("teams.channel_lookup.failed", error=type(err).__name__)
+            return {}
+        # Private and shared channels keep files in a site of their own: none here.
+        standard = (c for c in channels if c.id and c.type in (None, "standard"))
+        return {channel.id: channel.name for channel in standard if channel.id}
+
+    graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
+    files = ChannelFiles(SharePoint(graph, runtime.http_client), groups, channel_names)
+    reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
 
     def spawn(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
@@ -220,7 +252,14 @@ def create_teams_http_service(
         "billing": billing.command,
     }
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
-    turns = TeamsApp(runtime=runtime, sender=teams_app, commands=commands, bot_token=bot_token)
+    turns = TeamsApp(
+        runtime=runtime,
+        sender=teams_app,
+        commands=commands,
+        bot_token=bot_token,
+        reader=reader,
+        channel_files=files,
+    )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
         try:

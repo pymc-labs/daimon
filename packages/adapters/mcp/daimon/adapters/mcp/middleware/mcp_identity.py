@@ -339,6 +339,8 @@ class IdentityMiddleware(Middleware):
             administered_channel_ids=administered_channel_ids,
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
+        # Each enable appends a rule to session state, which must be this
+        # request's alone: StripSessionIdMiddleware (server.py) sees to it.
         if is_admin:
             await enable_components(fastmcp_ctx, tags={"admin"})
         elif identity.is_channel_admin:

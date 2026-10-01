@@ -8,14 +8,22 @@ anything; `packages/adapters/teams/tests/test_boot_sweep.py` asserts that.
 
 The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
-keyed inside it; channel history and files need Microsoft Graph; and a dialog's
-password field cannot take a `.env` upload or a repository token. Removing the
-app archives nothing. The `billing` card has no promo code surface: Teams
+keyed inside it; a turn replays its channel thread through Microsoft Graph,
+but the agent's own channel-reading tools stay hidden; files in a channel
+work only once a tenant admin grants the app the team's SharePoint site
+(`Sites.Selected`), because no team-scoped permission reaches it; and a
+dialog's password field cannot take a `.env` upload or a repository token.
+Removing the app archives nothing. The `billing` card has no promo code surface: Teams
 admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
 Discord and Slack only, so the card shows no channel budget either. So are
 channel admins: only the listed admins administer a Teams channel. A Teams
 answer carries no usage line (agent, time, tokens, cost, balance) where the
 finished Discord or Slack card has one; spend is on the `billing` card.
+Thread participation shares Discord's gates
+(`test_thread_participation_platforms.py`) but needs Graph, so without the
+consent a followed thread stays mention-only; and where Discord's unprompted
+card appears once there is output, Teams posts only the answer, so there is
+no running card or Cancel button.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -30,6 +38,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 import yaml
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -45,9 +54,16 @@ from daimon.adapters.mcp.tools.credential_requests import (
     register_credential_request_tools,
 )
 from daimon.adapters.teams import card as teams_card
+from daimon.adapters.teams.attachments import (
+    ChannelMedia,
+    InboundFile,
+    SharedFile,
+    prepare_attachments,
+)
 from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.billing_panel import BillingPanelState
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import ChannelBudgetStatus
@@ -55,14 +71,16 @@ from daimon.core.config import TeamsSettings
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow, Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
+from daimon.core.turn.state import TextBlock, TurnState
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from microsoft_teams.api import MessageActivity
+from microsoft_teams.api import MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.api.activities.install_update import UninstalledActivity
 from pydantic import SecretStr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TENANT = "00000000-0000-0000-0000-000000000001"
+CONTENT_URL = "https://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx"
 
 
 def test_teams_refuses_group_chats() -> None:
@@ -122,7 +140,38 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     hidden |= {"send_direct_message"}
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
-    assert not teams & hidden, "these need Graph, a non-password input or Discord/Slack DMs"
+    assert not teams & hidden, (
+        "these need tool-side Graph reads, a non-password input or Discord/Slack DMs"
+    )
+
+
+def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
+    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
+    granted = manifest["authorization"]["permissions"]["resourceSpecific"]
+    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group"], (
+        "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
+    )
+
+
+async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request for a channel file: {request.url.host}")
+
+    async def token() -> str:
+        return "t"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as http:
+        prepared = await prepare_attachments(
+            http,
+            [InboundFile("embedded_file", "file")],
+            bot_token=token,
+            service_url=None,
+            channel_media=ChannelMedia(files=(SharedFile("q3.xlsx", CONTENT_URL),)),
+            graph_token=token,
+        )
+    assert (
+        prepared.notice == "I couldn't read `q3.xlsx` (files shared in channels need a 1:1 chat)."
+    ), "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
 
 
 def test_the_teams_billing_card_has_no_promo_code_surface() -> None:
@@ -258,3 +307,28 @@ def test_a_teams_answer_carries_no_usage_line() -> None:
     assert message.channel_data is not None and message.channel_data.feedback_loop is not None, (
         "the last part still asks for feedback"
     )
+
+
+async def test_an_unprompted_teams_turn_shows_no_running_card() -> None:
+    sent: list[MessageActivityInput] = []
+
+    class _Sender:
+        async def send(
+            self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+        ) -> SentActivity:
+            sent.append(activity)
+            return SentActivity(id=f"m-{len(sent)}", activity_params=activity)
+
+    lifecycle = TeamsTurnLifecycle(
+        sender=_Sender(),
+        conversation_id="19:a@thread.tacv2;messageid=1",
+        service_url=None,
+        cancel_key="k",
+        clock=lambda: 0.0,
+        unprompted=True,
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_render(TurnState(content=[TextBlock(kind="text", text="draft")]))
+    assert sent == [], "no card while it runs, so no Cancel button"
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
+    assert [a.text for a in sent] == ["Done."], "only the answer is posted"

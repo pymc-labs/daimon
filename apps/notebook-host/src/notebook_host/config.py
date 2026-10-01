@@ -10,9 +10,11 @@ all fields are top-level on the single Settings class).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -153,9 +155,45 @@ class Settings(BaseSettings):
     # set, the proxy routes by Host, requires the exact origin on every
     # cross-origin request and WebSocket, and refuses path-mode /n/<slug>/ on
     # any other host. Unset: all notebooks share one origin, so a public host
-    # serves one tenant only (see README).
+    # serves only the tenants listed in ``tenants`` (see README).
     origin_base: str | None = None
     origin_scheme: Literal["https", "http"] = "https"
+    tenants: Annotated[tuple[UUID, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads "
+            "from, comma-separated or as a JSON array of strings. Their notebooks share one "
+            "browser origin and can reach each other, so list only tenants one operator "
+            "controls. Empty refuses every upload. Ignored with ORIGIN_BASE (every notebook "
+            "gets its own origin) and on localhost. An unlisted tenant's 403 names its id; "
+            "`daimon tenants list --json` shows every tenant's id."
+        ),
+    )
+
+    @field_validator("tenants", mode="before")
+    @classmethod
+    def _parse_tenants(cls, v: object) -> object:
+        # Arrives as a raw env_file line; a JSON-only parse crash-looped boot
+        # on "", a bare UUID or a comma list. Bad ids still fail, named.
+        if not isinstance(v, str):
+            return v
+        raw = v.strip()
+        try:
+            items: list[object] = json.loads(raw) if raw.startswith("[") else [*raw.split(",")]
+        except json.JSONDecodeError as e:
+            raise ValueError(f"DAIMON_NOTEBOOK__TENANTS is not a JSON array: {e}") from e
+        tenants: list[UUID] = []
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            try:
+                tenants.append(UUID(text))
+            except ValueError:
+                raise ValueError(
+                    f"DAIMON_NOTEBOOK__TENANTS: {text!r} is not a tenant UUID"
+                ) from None
+        return tuple(tenants)
 
     @property
     def is_local_dev(self) -> bool:

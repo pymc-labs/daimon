@@ -274,6 +274,32 @@ async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() ->
     assert not await lifecycle.prepend_revealed_answer("I lost the workspace.")
 
 
+async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer() -> None:
+    """Prefix and links land on the same message, each edit keeping the other."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("Saved to this channel's files:\n- [a](u)")
+    final = sender.activities[-1]
+    assert final.id == "m-1", "the answer is edited, nothing new is posted"
+    assert final.text == (
+        "I lost the workspace.\n\nThe posterior mean is 3.\n\nSaved to this channel's files:\n- [a](u)"
+    )
+    assert final.channel_data is not None and final.channel_data.feedback_loop is not None
+
+
+async def test_file_links_that_would_overflow_the_last_message_are_refused() -> None:
+    """Over the Teams limit the caller sends the links as their own message instead."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
+
+    assert not await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert len(sender.sent) == 2, "no edit was tried"
+
+
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -346,3 +372,38 @@ async def test_a_hung_send_times_out_as_a_send_error() -> None:
 def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
     chunks = split_fenced("统计" * 5_000, card.TEAMS_LIMIT)
     assert len(chunks) > 1 and all(len(json.dumps(chunk)) < 28_000 for chunk in chunks)
+
+
+def _unprompted(sender: FakeSender) -> TeamsTurnLifecycle:
+    return TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        unprompted=True,
+    )
+
+
+async def test_an_unprompted_turn_posts_only_its_answer() -> None:
+    """Nobody asked: no status card up front, the answer arrives as a new message."""
+    sender = FakeSender()
+    lifecycle = _unprompted(sender)
+    await lifecycle.post_initial()
+    await lifecycle.on_render(_answer("draft"))
+    assert sender.sent == [], "no card and no render before there is an answer"
+
+    await lifecycle.on_terminal_success(_answer("Thursdays."))
+    [answer] = sender.activities
+    assert answer.id is None and answer.text == "Thursdays.", "posted, not an edit"
+    assert lifecycle.final_message_id == "m-1", "the watermark can move past it"
+
+
+async def test_an_unprompted_turn_without_an_answer_or_with_a_failure_stays_silent() -> None:
+    sender = FakeSender()
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await _unprompted(sender).on_terminal_success(TurnState(content=[tool]))
+    error = TurnError(kind="upstream", message="overloaded")
+    await _unprompted(sender).on_terminal_failure(TurnState(error=error), error)
+    await _unprompted(sender).close_with_notice("Sorry, something went wrong.")
+    assert sender.sent == [], "no tool trail, failure card or notice in a thread nobody asked in"

@@ -6,7 +6,14 @@ short-lived, pre-authorised SharePoint `downloadUrl`. Images within the vision
 limits become image blocks; other files reach the agent as `[attachment]`
 lines carrying the download URL. The bot token only goes to Bot Framework
 hosts, downloads only come from SharePoint, and no redirect leaves those
-hosts. Channel file shares need Microsoft Graph, so the person is told.
+hosts.
+
+A channel message carries its images and files only inside its `text/html`
+body (`<img>`, `<attachment>`), so those are counted there and read from the
+message in Microsoft Graph: images from its hosted content, with the Graph
+token and only from the Graph host. Channel files live in SharePoint, read
+only from the team's own site once an admin grants it (`channel_files`);
+otherwise the person is told, as they are when Graph cannot be read at all.
 """
 
 from __future__ import annotations
@@ -14,11 +21,13 @@ from __future__ import annotations
 import io
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Literal, cast
 
 import httpx
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.adapters.teams.graph import is_graph_url
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
@@ -56,11 +65,57 @@ class FetchRefused(DaimonError):
 
 @dataclass(frozen=True)
 class InboundFile:
-    """One attachment. `unreachable` (a channel share) has no fetchable `url`."""
+    """One attachment. `unreachable` (a channel share) has no fetchable `url`; an
+    `embedded_*` one is only known from a channel message's HTML, until Graph names it."""
 
-    kind: Literal["pasted_image", "shared_file", "unreachable"]
+    kind: Literal[
+        "pasted_image",
+        "shared_file",
+        "unreachable",
+        "embedded_image",
+        "embedded_file",
+        "graph_image",
+    ]
     name: str
     url: str = ""
+
+
+@dataclass(frozen=True)
+class SharedFile:
+    """A file shared in a channel: its SharePoint URL, and a download URL once resolved."""
+
+    name: str
+    content_url: str | None = None
+    download_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ChannelMedia:
+    """What a channel message carries per Graph: hosted image URLs and shared files."""
+
+    image_urls: tuple[str, ...] = ()
+    files: tuple[SharedFile, ...] = ()
+
+
+class _EmbeddedCounter(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.images = self.files = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "attachment":
+            self.files += 1
+        elif tag == "img" and "emoji" not in (dict(attrs).get("itemtype") or "").lower():
+            self.images += 1
+
+
+def _embedded(attachments: Sequence[Attachment]) -> _EmbeddedCounter:
+    counter = _EmbeddedCounter()
+    for attachment in attachments:
+        if attachment.content_type == "text/html" and isinstance(attachment.content, str):
+            counter.feed(attachment.content)
+    counter.close()
+    return counter
 
 
 @dataclass(frozen=True)
@@ -89,7 +144,7 @@ def _sharepoint_url(value: object) -> str | None:
 def parse_attachments(
     attachments: Sequence[Attachment], *, personal: bool
 ) -> tuple[InboundFile, ...]:
-    """The images and files on a message. Pure; cards and HTML bodies are ignored."""
+    """The images and files on a message. Pure; cards are ignored."""
     found: list[InboundFile] = []
     for attachment in attachments:
         content_type = attachment.content_type or ""
@@ -104,6 +159,13 @@ def parse_attachments(
             found.append(
                 InboundFile("shared_file", name, url) if url else InboundFile("unreachable", name)
             )
+    if not personal:
+        # What the HTML body holds beyond the attachments Teams also listed.
+        embedded = _embedded(attachments)
+        listed_images = sum(file.kind == "pasted_image" for file in found)
+        listed_files = sum(file.kind == "unreachable" for file in found)
+        found += [InboundFile("embedded_image", "image")] * max(0, embedded.images - listed_images)
+        found += [InboundFile("embedded_file", "file")] * max(0, embedded.files - listed_files)
     if len(found) > MAX_ATTACHMENTS:
         log.warning("teams.attachments.truncated", count=len(found))
     return tuple(found[:MAX_ATTACHMENTS])
@@ -164,15 +226,42 @@ def _link_line(file: InboundFile, reason: str | None) -> str:
     )
 
 
+def _resolve_embedded(
+    files: Sequence[InboundFile], media: ChannelMedia | None
+) -> tuple[list[InboundFile], list[InboundFile]]:
+    """`(files to read, embedded ones Graph could not name)`. Graph's view of the
+    messages, when there is one, replaces what the activities listed for a channel."""
+    embedded = [f for f in files if f.kind in ("embedded_image", "embedded_file")]
+    if not embedded:
+        return list(files), []
+    if media is None:
+        return [f for f in files if f not in embedded], embedded
+    kept = [InboundFile("graph_image", "image", url) for url in media.image_urls]
+    kept += [
+        InboundFile("shared_file", sanitize_title(f.name), f.download_url)
+        if f.download_url
+        else InboundFile("unreachable", sanitize_title(f.name))
+        for f in media.files
+    ]
+    return kept, []
+
+
 async def prepare_attachments(
     http: httpx.AsyncClient,
     files: Sequence[InboundFile],
     *,
     bot_token: BotToken,
     service_url: str | None,
+    channel_media: ChannelMedia | None = None,
+    graph_token: BotToken | None = None,
 ) -> PreparedAttachments:
-    """Download what can be inlined; describe the rest. One bad file never aborts the turn."""
+    """Download what can be inlined; describe the rest. One bad file never aborts the turn.
+
+    `channel_media` is the channel message as Graph sees it, or None when it
+    could not be read; `graph_token` authorises its hosted images.
+    """
     service_host = httpx.URL(service_url).host if service_url else None
+    files, unnamed = _resolve_embedded(files, channel_media)
 
     def is_bot_framework(url: httpx.URL) -> bool:
         host = url.host
@@ -183,24 +272,38 @@ async def prepare_attachments(
     blocks: list[BetaManagedAgentsImageBlockParam] = []
     lines: list[str] = []
     unread: list[str] = []
+    for file in unnamed:
+        image = file.kind == "embedded_image"
+        what = "an image" if image else "a file"
+        lines.append(f"[attachment] {what} was shared but can't be opened here.")
+        unread.append(
+            "a pasted image (I can't read this channel's messages)"
+            if image
+            else "a shared file (files shared in channels need a 1:1 chat)"
+        )
     for file in files:
         if file.kind == "unreachable":
             lines.append(f"[attachment] `{file.name}` was shared but can't be opened here.")
             unread.append(f"`{file.name}` (files shared in channels need a 1:1 chat)")
             continue
-        pasted = file.kind == "pasted_image"
+        pasted = file.kind in ("pasted_image", "graph_image")
         if not pasted and not file.name.lower().endswith(_IMAGE_EXTENSIONS):
             lines.append(_link_line(file, None))
             continue
         try:
             if len(blocks) >= MAX_VISION_IMAGES:
                 raise FetchRefused(f"more than {MAX_VISION_IMAGES} images in one message")
+            # Each token only ever goes to its own hosts; SharePoint URLs carry their own.
+            if file.kind == "graph_image":
+                is_allowed, token = is_graph_url, await graph_token() if graph_token else None
+                if token is None:
+                    raise FetchRefused("no Graph token")
+            elif pasted:
+                is_allowed, token = is_bot_framework, await bot_token()
+            else:
+                is_allowed, token = is_sharepoint_host, None
             data = await fetch_bytes(
-                http,
-                file.url,
-                is_allowed=is_bot_framework if pasted else is_sharepoint_host,
-                token=await bot_token() if pasted else None,
-                max_bytes=MAX_VISION_IMAGE_BYTES,
+                http, file.url, is_allowed=is_allowed, token=token, max_bytes=MAX_VISION_IMAGE_BYTES
             )
             blocks.append(image_block(data))
         except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
