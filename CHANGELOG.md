@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a team owner grants at install: upload the updated app package again. A
   refused or slow read never fails a turn, which then runs without history.
 
+- **Teams threads can be followed, as on Discord.** Ask the agent to follow a
+  thread (`set_thread_participation`; a channel or the whole organisation
+  needs a listed admin) and it reads replies nobody addressed to it, then
+  joins in when the same classifier, quiet timer and hourly cap Discord uses
+  say it can help. The turn passes the usual admission and billing gates,
+  runs as the newest author, and posts only its answer: no status card,
+  notice or error. Root posts, bots and protected channels are never judged,
+  and without Graph history a followed thread stays mention-only. Quoting one
+  of the bot's messages in a channel now counts as mentioning it, and the
+  quoted text reaches the agent in place.
+
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in

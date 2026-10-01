@@ -149,6 +149,15 @@ who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
+An unmentioned reply in a Discord or Teams thread costs one cascade read of
+`thread_participation_scopes`. In a followed thread it joins a quiet-timer
+batch; once the thread goes quiet the shared gates in
+`packages/core/daimon/core/participation_gates.py` run the hourly cap, balance,
+cap and channel budget checks, then the metered classifier. A `respond`
+verdict runs an ordinary turn through `admit()` as the burst's newest author,
+with every notice withheld. Teams also counts a quote of the bot's message as
+a mention.
+
 Discord checks its per-guild in-flight limit before the optional process-wide
 turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
 replies and DMs count against it; an excess requested turn gets a retry notice.
@@ -160,7 +169,7 @@ Discord, Slack and Teams also limit simultaneous chat turns per tenant before ad
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
 `default` clears it and restores the adapter's deployment setting (3 by default).
 The check covers Discord mentions, thread participation and wizard submits,
-Slack mentions, and Teams messages and wakes. It does not limit MCP or routine turns.
+Slack mentions, and Teams messages, wakes and thread participation. It does not limit MCP or routine turns.
 
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -176,8 +185,8 @@ with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice), and Teams `_handle` (plus the
-refusals `handle_message` posts). The continuation dispatchers (Teams uses
+the thread, and on its ephemeral shed notice), and Teams `_handle` and
+thread participation (plus the refusals `handle_message` posts). The continuation dispatchers (Teams uses
 core `continuity/dispatch.py`), which can post skip or responder-changed copy
 outside any turn (from the wake poller or a credential submission), ask the
 same decision right before each post and settle the row skipped without

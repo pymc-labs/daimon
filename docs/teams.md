@@ -29,10 +29,12 @@ is supported; government and China clouds use other Bot Framework hosts.
 
 - **1:1 chat.** Every message is a turn, in the organisation's tenant. It
   counts as a DM for the access policy, so `dm_memory_read_only` applies.
-- **Channels.** Only messages that @mention the bot. Each root post is its own
-  thread and session; replies that @mention it continue that thread. A bare
-  @mention asks about the thread; if the thread cannot be read, the bot says
-  so instead of starting a turn.
+- **Channels.** Messages that @mention the bot or quote one of its messages
+  (Reply on a bot message); the quote reaches the agent in place. Each root
+  post is its own thread and session; replies that address it continue that
+  thread. A bare @mention asks about the thread; if the thread cannot be
+  read, the bot says so instead of starting a turn. A followed thread also
+  gets unprompted replies (below).
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
@@ -92,13 +94,33 @@ Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
 the manifest. A team owner grants it when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
-mention. An existing install needs the updated app package uploaded again
+mention unless their thread is followed. An existing install needs the updated app package uploaded again
 (bump `version`), then accepting the permission when the team updates the
 app. Tenant admins can turn this consent off
 (`Set-MgBetaTeamRscConfiguration -State DisabledForAllApps`); the bot then
 answers without history. A refused, throttled or slow read (10 seconds) never
 fails a turn: it runs without history and the adapter logs one warning with
 the HTTP status and no content.
+
+### Following threads
+
+As on Discord, a thread can be followed: the bot reads replies nobody
+addressed to it and joins in when a small classifier says it can help. Ask
+the agent ("follow this thread", "stop following"); it calls
+`set_thread_participation`, and `get_thread_participation` says what applies.
+Anyone in a channel can follow its threads; a whole channel or the
+organisation needs a listed admin. The deployment default is
+`DAIMON_THREAD_PARTICIPATION__MODE`; `disabled` turns it off for Teams and
+Discord alike.
+
+A burst of replies is judged once, after the thread has been quiet for
+`QUIET_SECONDS`, over the thread read through Graph, and capped per thread
+per hour. The turn runs as the burst's newest author and passes the same
+admission and billing gates as a mention, but posts only its answer: no
+status card or Cancel button, and every refusal, notice and error is only
+logged. Root posts are never judged, the bot's own and other bots' messages
+are ignored, and protected channels are skipped. Without Graph history (the
+consent above) a followed thread stays mention-only.
 
 ### Files
 
