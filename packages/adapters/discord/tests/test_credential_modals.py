@@ -2768,3 +2768,25 @@ async def test_env_file_import_refuses_an_alias_of_a_held_key_and_names_both(
     card = _card_text(_card_edits(interaction)[-1])
     assert "GITHUB_TOKEN would replace GH_TOKEN" in card, "the refusal names both keys"
     assert "secret-b" not in card, "no value on the card"
+
+
+async def test_env_file_with_both_names_of_an_alias_pair_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "an ambiguous file writes nothing"
+    assert persisted is not None and persisted.used_at is None, "a parse refusal spends nothing"
+    sent = _sent_message(interaction)
+    assert "same tool" in sent and "secret-" not in sent

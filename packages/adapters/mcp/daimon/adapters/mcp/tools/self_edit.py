@@ -31,13 +31,17 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
+from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.stores.agent_files import (
     delete_agent_file,
     get_agent_file,
     list_agent_files,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import (
@@ -46,6 +50,7 @@ from daimon.core.stores.agent_repo_binding import (
     set_binding,
 )
 from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, RepoAccessProof
+from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -164,11 +169,13 @@ async def _self_write_file_impl(
         )
     # Add-only, like a member's form: an agent key never overwrites a stored
     # key (the replacement gate is for people) and never adds a name a tool
-    # reads as one already held (GH_TOKEN beside GITHUB_TOKEN). The alias
-    # read and the insert share one transaction, so neither can slip in
-    # between them.
+    # reads as one already held (GH_TOKEN beside GITHUB_TOKEN). The insert's
+    # `ON CONFLICT DO NOTHING` serializes writers of the same name; the
+    # agent's key-set lock, taken before the alias read, serializes writers
+    # of different names in one alias group.
     try:
         async with runtime.session_factory.begin() as session:
+            await lock_agent_keys(session, tenant_id=auth.tenant_id, agent_id=agent_id)
             shadowed = (
                 env_alias_shadowed(
                     key,
@@ -263,6 +270,46 @@ async def _self_list_files_impl(
     return [row.model_copy(update={"content": LISTED_VALUE}) for row in rows]
 
 
+async def _require_member_may_remove(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_id: uuid.UUID, key: str
+) -> None:
+    """Refuse an agent-key delete that `remove_agent_key` would refuse a member.
+
+    An agent key is a member, whoever owns it. Without this, delete-then-add
+    replaces a key a person set (and delete GITHUB_TOKEN, add GH_TOKEN dodges
+    the alias rule), and removal skips the admin gate `remove_agent_key`
+    applies on the built-in agent and on any agent that answers somewhere in
+    the tenant. An agent that no longer resolves fails closed.
+    """
+    agent = await find_agent_by_derived_uuid(
+        runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
+    )
+    refusal = ToolError(
+        f"Removing {key} needs a workspace or server admin: this agent is shared, and "
+        "an agent key acts as a member. Nothing was removed. Ask a person to remove "
+        f"{key} with remove_agent_key."
+    )
+    if agent is None:
+        raise refusal
+    is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    reachable = False
+    if needs_reachability_read("key_remove", is_admin=False, is_daimon_managed=is_daimon_managed):
+        async with runtime.session_factory() as session:
+            reachable = await is_agent_reachable_in_tenant(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_name=agent.name,
+                default=runtime.deployment_default,
+            )
+    outcome = decide_operation(
+        "key_remove",
+        is_admin=False,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+    if outcome != "allow":
+        raise refusal
+
+
 async def _self_delete_file_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -270,6 +317,7 @@ async def _self_delete_file_impl(
     key: str,
 ) -> dict[str, object]:
     agent_id = _require_agent_id(auth)
+    await _require_member_may_remove(runtime, auth, agent_id=agent_id, key=key)
     # delete_agent_file is silently idempotent at the store layer (Pitfall 2).
     async with runtime.session_factory.begin() as session:
         await delete_agent_file(
@@ -627,7 +675,12 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         key: str,
     ) -> dict[str, object]:
-        """Delete a per-agent file by `key`. Idempotent — succeeds whether or not a file existed."""
+        """Delete a per-agent key by `key`. Idempotent — succeeds whether or not it existed.
+
+        Refused on the built-in agent and on any agent that answers somewhere in
+        the workspace: removing a key there takes it from everyone, so a person
+        with admin rights removes it with `remove_agent_key`.
+        """
         return await _self_delete_file_impl(runtime, await _auth(ctx), key=key)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]

@@ -170,6 +170,7 @@ from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     list_agent_files,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
@@ -536,8 +537,12 @@ class EnvCredentialModal(discord.ui.Modal):
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
                 outcome: CredentialRequestOutcome = "applied"
-                # Re-read under the write: an alias that appeared after the
-                # gate above was decided was never put to it.
+                # Re-read under the write, holding the agent's key-set lock: an
+                # alias that appeared after the gate above was decided was
+                # never put to it, and one a concurrent writer is adding waits.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
+                )
                 appeared = shadowed is None and (
                     env_alias_shadowed(
                         consumed_row.target,
@@ -766,6 +771,11 @@ class EnvFileModal(discord.ui.Modal):
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
+                # Held across the read below and the writes after it, so a
+                # concurrent writer of another alias name cannot interleave.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
+                )
                 held = {
                     row.key
                     for row in await list_agent_files(

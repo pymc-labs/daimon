@@ -348,6 +348,9 @@ _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
         + ". An admin can add identity, account, region, path and URL names."
     ),
     "duplicate_name": "{name} is set more than once.",
+    "alias_pair": (
+        "{name} is read by the same tool as another key in this file; keep only one of them."
+    ),
     "value_too_large": "{name} is too long.",
     "too_many_entries": "{name} is past the number of keys I can take at once.",
     "file_too_large": "this line could not be read.",
@@ -370,6 +373,7 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
         + "; an admin can add identity, account, region, path and URL names."
     ),
     "duplicate_name": "The same name is set more than once.",
+    "alias_pair": "The file sets two names one tool reads as the same credential.",
     "value_too_large": "One of the keys is too long.",
     "too_many_entries": "There are more keys in the file than I can take at once.",
 }

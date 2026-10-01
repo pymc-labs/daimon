@@ -1983,3 +1983,61 @@ async def test_env_file_submission_refuses_an_alias_of_a_held_key_and_names_both
     edit = json.dumps(_chat_updates(fake_slack_web_client)[-1])
     assert "GITHUB_TOKEN would replace GH_TOKEN" in edit, "the refusal names both keys"
     assert "secret-b" not in edit, "no value on the card"
+
+
+async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias read before the gate is repeated inside the write transaction."""
+    import daimon.adapters.slack.credential_submissions as submissions_mod
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="GITHUB_TOKEN",
+        agent_id=agent_uuid,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+
+    real = submissions_mod.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ()
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(submissions_mod, "list_turn_key_names", first_read_misses_the_alias)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    assert calls == 2, "the alias must be re-read under the write"
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert [r["key"] for r in rows] == ["GH_TOKEN"], "the late alias blocks the write"
+    assert request_row is not None and request_row.outcome == "stale_replacement"

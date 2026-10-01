@@ -91,6 +91,7 @@ from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     list_agent_files,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
@@ -436,8 +437,13 @@ async def run_env_credential_submission(
             consumed = await credential_requests_store.consume_credential_request(
                 session, token=token, now=now
             )
-            # Re-read under the write: an alias that appeared after the gate
-            # above was decided was never put to it.
+            # Re-read under the write, holding the agent's key-set lock: an
+            # alias that appeared after the gate above was decided was never
+            # put to it, and one a concurrent writer is adding waits.
+            if consumed is not None:
+                await lock_agent_keys(
+                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                )
             appeared = (
                 consumed is not None
                 and shadowed is None
@@ -615,6 +621,9 @@ async def _apply_env_file_entries(
             )
             if consumed is None:
                 return None, (), False, frozenset()
+            # Held across the read below and the writes after it, so a
+            # concurrent writer of another alias name cannot interleave.
+            await lock_agent_keys(session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id)
             existing = {
                 row.key
                 for row in await list_agent_files(

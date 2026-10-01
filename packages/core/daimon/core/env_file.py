@@ -139,6 +139,7 @@ EnvRejection = Literal[
     "reserved_name",
     "not_credential_name",
     "duplicate_name",
+    "alias_pair",
     "value_too_large",
     "too_many_entries",
     "empty",
@@ -152,6 +153,7 @@ _REJECTION_PRIORITY: Final[tuple[EnvRejection, ...]] = (
     "reserved_name",
     "not_credential_name",
     "duplicate_name",
+    "alias_pair",
     "value_too_large",
     "too_many_entries",
 )
@@ -799,6 +801,15 @@ def parse_env_file(text: str, *, member_writable_only: bool = False) -> tuple[En
     for name, numbers in lines_by_name.items():
         if len(numbers) > 1:
             problems["duplicate_name"].extend(EnvProblem(name=name, line=n) for n in numbers)
+
+    # Two names one tool reads as the same credential: whichever the tool
+    # prefers silently wins, so the file is ambiguous. Each later name of a
+    # pair is reported against the earlier one.
+    seen: list[str] = []
+    for entry in entries:
+        if env_alias_shadowed(entry.name, seen) is not None:
+            problems["alias_pair"].append(EnvProblem(name=entry.name, line=entry.line))
+        seen.append(entry.name)
 
     if len(entries) > MAX_ENV_FILE_ENTRIES:
         problems["too_many_entries"].extend(

@@ -732,3 +732,23 @@ def test_tls_key_file_names_are_admin_only(name: str) -> None:
 def test_more_alias_groups(adding: str, held: str) -> None:
     assert env_alias_shadowed(adding, [held]) == held
     assert env_alias_shadowed(held, [adding]) == adding
+
+
+def test_a_file_with_both_names_of_an_alias_pair_is_refused() -> None:
+    """Whichever name the tool prefers would silently win: the file is ambiguous."""
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("OPENAI_API_KEY=a\nGH_TOKEN=b\nGITHUB_TOKEN=c\n")
+    assert caught.value.rejection == "alias_pair"
+    assert [(p.name, p.line) for p in caught.value.problems] == [("GITHUB_TOKEN", 3)]
+
+
+def test_alias_pair_refusal_copy_names_the_key_not_the_value() -> None:
+    from daimon.core.continuity.messages import render_env_import_rejected
+
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n")
+    text = render_env_import_rejected(
+        caught.value.rejection, caught.value.problems, target_name="tester"
+    )
+    assert "GITHUB_TOKEN" in text and "same tool" in text
+    assert "secret-" not in text
