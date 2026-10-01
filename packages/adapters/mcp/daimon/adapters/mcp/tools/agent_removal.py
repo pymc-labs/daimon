@@ -108,6 +108,8 @@ async def _detach_mcp_server_impl(
                 agent_names=_agent_names(agent, agent_name),
                 ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
             )
     outcome = decide_operation(
         "mcp_remove",
@@ -287,6 +289,8 @@ async def _remove_agent_key_impl(
                 agent_names=_agent_names(agent, agent_name),
                 ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
             )
     outcome = decide_operation(
         "key_remove",

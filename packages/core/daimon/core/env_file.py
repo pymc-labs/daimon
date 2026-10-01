@@ -116,6 +116,7 @@ __all__ = [
     "env_alias_shadowed",
     "env_collision_line",
     "env_import_collisions",
+    "env_related_held",
     "env_row_skip_reason",
     "env_shadow_phrase",
     "MEMBER_SECRET_SUFFIX_HINT",
@@ -634,6 +635,22 @@ def env_alias_shadowed(name: str, held: Iterable[str]) -> str | None:
     return _first_held(name, _ALIAS_GROUPS, held_set) or _first_held(
         name, _CREDENTIAL_FAMILIES, held_set
     )
+
+
+def env_related_held(name: str, held: Iterable[str]) -> frozenset[str]:
+    """The held names that are aliases of `name` or members of its family.
+
+    Snapshotted before a write and compared under the key-set lock: a change
+    between the two means someone added or removed a related credential after
+    the replacement gate was decided, so the write must not proceed. An
+    unchanged set — an admin rotating `AWS_SECRET_ACCESS_KEY` beside a stored
+    `AWS_ACCESS_KEY_ID` — is not a conflict.
+    """
+    related: set[str] = set()
+    for group in (*_ALIAS_GROUPS, *_CREDENTIAL_FAMILIES):
+        if name in group:
+            related |= group - {name}
+    return frozenset(related & set(held))
 
 
 def env_shadow_phrase(name: str, held_name: str) -> str:

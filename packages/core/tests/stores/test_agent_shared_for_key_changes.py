@@ -90,3 +90,92 @@ async def test_a_personal_default_is_shared(db_session: AsyncSession) -> None:
 async def test_no_name_at_all_fails_closed(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     assert await _shared(db_session, tenant.id, names=("", ""))
+
+
+# --- routines and live thread sessions ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_enabled_routine_by_someone_else_makes_the_agent_shared(
+    db_session: AsyncSession,
+) -> None:
+    """The scheduler mounts the agent's keys on every fire, for the routine's creator."""
+    from daimon.testing.factories import make_routine
+
+    tenant = await make_tenant(db_session)
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="U_OTHER", agent_id=_MA_ID, agent_name="x"
+    )
+    assert await _shared_as(db_session, tenant.id, platform_user_id="U_ME")
+    assert await _shared_as(db_session, tenant.id), "an unidentified caller owns nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_routine_matched_by_name_counts_too(db_session: AsyncSession) -> None:
+    from daimon.testing.factories import make_routine
+
+    tenant = await make_tenant(db_session)
+    await make_routine(
+        db_session,
+        tenant=tenant,
+        created_by_user_id="U_OTHER",
+        agent_id="ag_other",
+        agent_name="acme",
+    )
+    assert await _shared_as(db_session, tenant.id, platform_user_id="U_ME")
+
+
+@pytest.mark.asyncio
+async def test_the_callers_own_routine_or_a_disabled_one_does_not(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.testing.factories import make_routine
+
+    tenant = await make_tenant(db_session)
+    await make_routine(db_session, tenant=tenant, created_by_user_id="U_ME", agent_id=_MA_ID)
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="U_OTHER", agent_id=_MA_ID, enabled=False
+    )
+    assert not await _shared_as(db_session, tenant.id, platform_user_id="U_ME")
+
+
+@pytest.mark.asyncio
+async def test_another_accounts_live_session_makes_the_agent_shared(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    me = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await make_thread_session(db_session, tenant=tenant, account=other, ma_agent_id=_MA_ID)
+    assert await _shared_as(db_session, tenant.id, account_id=me.id)
+
+
+@pytest.mark.asyncio
+async def test_the_callers_own_live_session_does_not(db_session: AsyncSession) -> None:
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    me = await make_account(db_session, tenant=tenant)
+    await make_thread_session(db_session, tenant=tenant, account=me, ma_agent_id=_MA_ID)
+    assert not await _shared_as(db_session, tenant.id, account_id=me.id)
+    assert await _shared_as(db_session, tenant.id), "an unidentified caller owns nothing"
+
+
+async def _shared_as(
+    db_session: AsyncSession,
+    tenant_id: object,
+    *,
+    account_id: object = None,
+    platform_user_id: str | None = None,
+) -> bool:
+    return await is_agent_shared_for_key_changes(
+        db_session,
+        tenant_id=tenant_id,  # pyright: ignore[reportArgumentType]
+        agent_names=_NAMES,
+        ma_agent_id=_MA_ID,
+        default=DeploymentDefault(),
+        caller_account_id=account_id,  # pyright: ignore[reportArgumentType]
+        caller_platform_user_id=platform_user_id,
+    )

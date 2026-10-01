@@ -134,6 +134,7 @@ from daimon.core.env_file import (
     env_collision_line,
     env_import_collisions,
     env_name_problem,
+    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -411,6 +412,8 @@ async def _decide_key_replacement(
                 agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
                 ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=row.account_id,
+                caller_platform_user_id=row.requester_platform_user_id,
             )
     return decide_operation(
         "key_replace",
@@ -513,13 +516,22 @@ class EnvCredentialModal(discord.ui.Modal):
         # A new name that a tool reads as a key already held (GH_TOKEN beside
         # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
         # gate, decided for this submitter.
-        shadowed: str | None = None
-        if self._row.replaces_updated_at is None:
-            async with self._runtime.sessionmaker() as session:
-                held_names = await list_turn_key_names(
-                    session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
-                )
-            shadowed = env_alias_shadowed(self._row.target, held_names)
+        #
+        # Snapshot the related credentials (aliases and family members) before the
+        # transaction, for every submit. Under the lock the write proceeds only if
+        # that set is unchanged: a related key added or removed after the gate was
+        # decided was never put to it. An unchanged set — rotating
+        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+        async with self._runtime.sessionmaker() as session:
+            held_names = await list_turn_key_names(
+                session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
+            )
+        related_before = env_related_held(self._row.target, held_names)
+        shadowed = (
+            env_alias_shadowed(self._row.target, held_names)
+            if self._row.replaces_updated_at is None
+            else None
+        )
         replacement = (
             await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
             if self._row.replaces_updated_at is not None or shadowed is not None
@@ -544,8 +556,8 @@ class EnvCredentialModal(discord.ui.Modal):
                 await lock_agent_keys(
                     session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
                 )
-                appeared = shadowed is None and (
-                    env_alias_shadowed(
+                appeared = (
+                    env_related_held(
                         consumed_row.target,
                         await list_turn_key_names(
                             session,
@@ -553,7 +565,7 @@ class EnvCredentialModal(discord.ui.Modal):
                             agent_id=consumed_row.agent_id,
                         ),
                     )
-                    is not None
+                    != related_before
                 )
                 if replacement != "allow":
                     # The card promised a replacement this person may no

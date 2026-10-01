@@ -38,7 +38,12 @@ from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import availability_for_request
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
+from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
+    env_alias_shadowed,
+    env_name_problem,
+    env_related_held,
+)
 from daimon.core.mcp_attach import (
     McpConnectDecision,
     McpServerReplaceRefusedError,
@@ -368,6 +373,8 @@ class TeamsCredentialRequests:
                         ),
                         ma_agent_id=str(agent.id),
                         default=self._runtime.deployment_default,
+                        caller_account_id=row.account_id,
+                        caller_platform_user_id=row.requester_platform_user_id,
                     )
         facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
         return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
@@ -385,13 +392,18 @@ class TeamsCredentialRequests:
         # A new name a tool reads as a key already held (GH_TOKEN beside
         # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
         # gate, decided for this submitter.
-        shadowed: str | None = None
-        if row.replaces_updated_at is None:
-            async with self._runtime.sessionmaker() as session:
-                held = await list_turn_key_names(
-                    session, tenant_id=row.tenant_id, agent_id=row.agent_id
-                )
-            shadowed = env_alias_shadowed(row.target, held)
+        #
+        # Snapshot the related credentials (aliases and family members) before the
+        # transaction, for every submit. Under the lock the write proceeds only if
+        # that set is unchanged: a related key added or removed after the gate was
+        # decided was never put to it. An unchanged set — rotating
+        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+        async with self._runtime.sessionmaker() as session:
+            held = await list_turn_key_names(
+                session, tenant_id=row.tenant_id, agent_id=row.agent_id
+            )
+        related_before = env_related_held(row.target, held)
+        shadowed = env_alias_shadowed(row.target, held) if row.replaces_updated_at is None else None
         refuse = (row.replaces_updated_at is not None or shadowed is not None) and (
             await self._replacement_refused(row, agent, is_admin=is_admin)
         )
@@ -410,14 +422,13 @@ class TeamsCredentialRequests:
                     session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
                 )
                 appeared = (
-                    shadowed is None
-                    and env_alias_shadowed(
+                    env_related_held(
                         consumed.target,
                         await list_turn_key_names(
                             session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
                         ),
                     )
-                    is not None
+                    != related_before
                 )
             if consumed is not None and refuse:
                 await store.set_credential_request_outcome(

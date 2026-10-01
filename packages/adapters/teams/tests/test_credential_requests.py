@@ -550,3 +550,94 @@ async def test_a_teams_submit_waits_for_another_adapters_alias_write(
         spent = await peek_credential_request(session, token=row.token)
     assert [r.key for r in rows] == ["GH_TOKEN"], "the Teams alias must not land beside it"
     assert spent is not None and spent.outcome == "stale_replacement"
+
+
+async def _aws_pair(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID) -> datetime:
+    """Store an AWS access key and secret; return the secret's `updated_at`."""
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
+    async with db.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            key="AWS_ACCESS_KEY_ID",
+            content="AKIAEXAMPLE",
+            set_by_account_id=account_id,
+        )
+        secret = await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            key="AWS_SECRET_ACCESS_KEY",
+            content="old-secret",
+            set_by_account_id=account_id,
+        )
+    return secret.updated_at
+
+
+def _admin_runtime(db: async_sessionmaker[AsyncSession]) -> TeamsRuntime:
+    from .conftest import teams_settings
+
+    runtime = _runtime(db)
+    runtime.settings.teams = teams_settings(admins=(AAD_OBJECT_ID,))
+    return runtime
+
+
+async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """The stored AWS_ACCESS_KEY_ID is a family member, not a newly appeared conflict."""
+    stamp = await _aws_pair(db_session_factory, account_id)
+    row = await _request(
+        db_session_factory, account_id, target="AWS_SECRET_ACCESS_KEY", replaces=stamp
+    )
+    async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+        await post_activity(service, _submit(row.token, secret="new-secret"))
+        await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        file = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="AWS_SECRET_ACCESS_KEY"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert file is not None and file.content == "new-secret", "the rotation lands"
+    assert spent is not None and spent.outcome == "applied"
+
+
+async def test_a_family_change_during_an_admin_rotation_is_still_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A session token grafted on between the gate and the write: the rotation is stale."""
+    stamp = await _aws_pair(db_session_factory, account_id)
+    row = await _request(
+        db_session_factory, account_id, target="AWS_SECRET_ACCESS_KEY", replaces=stamp
+    )
+    real = module.list_turn_key_names
+    calls = 0
+
+    async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await put_agent_file(
+                session,
+                tenant_id=TENANT,
+                agent_id=row.agent_id,
+                key="AWS_SESSION_TOKEN",
+                content="grafted",
+                set_by_account_id=None,
+            )
+        return await real(session, **kw)
+
+    with patch.object(module, "list_turn_key_names", family_changes_after_the_gate):
+        async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+            await post_activity(service, _submit(row.token, secret="new-secret"))
+            await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        file = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="AWS_SECRET_ACCESS_KEY"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert file is not None and file.content == "old-secret"
+    assert spent is not None and spent.outcome == "stale_replacement"

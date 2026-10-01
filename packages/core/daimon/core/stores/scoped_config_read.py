@@ -6,7 +6,15 @@ import uuid
 from collections.abc import Collection
 from typing import Literal, cast
 
-from daimon.core._models import Account, ChannelConfig, TenantConfig, ThreadAgentBinding, UserConfig
+from daimon.core._models import (
+    Account,
+    ChannelConfig,
+    Routine,
+    TenantConfig,
+    ThreadAgentBinding,
+    ThreadSession,
+    UserConfig,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -22,7 +30,7 @@ from daimon.core.scope import (
     merge,
 )
 from daimon.core.stores.thread_agent_bindings import get_binding
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -236,20 +244,27 @@ async def is_agent_shared_for_key_changes(
     agent_names: Collection[str],
     ma_agent_id: str,
     default: DeploymentDefault,
+    caller_account_id: uuid.UUID | None = None,
+    caller_platform_user_id: str | None = None,
 ) -> bool:
     """Whether replacing or removing this agent's keys reaches other people.
 
     Wider than `is_agent_reachable_in_tenant`, and checked against EVERY name
     the agent answers to (its display name and its ``daimon_name`` routing
-    name) so a mismatch between them cannot make a shared agent look private:
+    name) so a mismatch between them cannot make a shared agent look private.
+    The agent is shared when any of these holds:
 
     - a channel, tenant or deployment default names it, under any name;
     - a live handoff or setup thread is bound to it (by stable MA id);
-    - it is someone's personal default, under any name.
+    - it is someone's personal default, under any name;
+    - an enabled routine runs it (by MA id, or under any name) that the caller
+      did not create — the scheduler mounts the agent's keys on every fire;
+    - another account has a live thread session with it (by MA id).
 
-    Fails closed: no name at all counts as shared. Used for every key and MCP
-    server replace/remove decision; `is_agent_shared_for_attachments` is the
-    older single-name form of the same rule.
+    The caller's own routines and sessions do not count: changing a key only
+    they use reaches nobody else. A caller the gate cannot identify
+    (`caller_account_id` / `caller_platform_user_id` left None) owns nothing,
+    so every routine and session counts. No name at all fails closed.
     """
     names = {name for name in agent_names if name}
     if not names:
@@ -277,4 +292,26 @@ async def is_agent_shared_for_key_changes(
         .where(Account.tenant_id == tenant_id, UserConfig.agent_name.in_(names))
         .limit(1)
     )
-    return personal is not None
+    if personal is not None:
+        return True
+    routine_stmt = select(Routine.id).where(
+        Routine.tenant_id == tenant_id,
+        Routine.enabled.is_(True),
+        or_(Routine.agent_id == ma_agent_id, Routine.agent_name.in_(names)),
+    )
+    if caller_platform_user_id is not None:
+        routine_stmt = routine_stmt.where(
+            Routine.created_by_user_id.is_distinct_from(caller_platform_user_id)
+        )
+    if await session.scalar(routine_stmt.limit(1)) is not None:
+        return True
+    session_stmt = select(ThreadSession.id).where(
+        ThreadSession.tenant_id == tenant_id,
+        ThreadSession.ma_agent_id == ma_agent_id,
+        ThreadSession.status == "live",
+    )
+    if caller_account_id is not None:
+        session_stmt = session_stmt.where(
+            ThreadSession.account_id.is_distinct_from(caller_account_id)
+        )
+    return await session.scalar(session_stmt.limit(1)) is not None

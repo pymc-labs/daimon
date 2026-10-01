@@ -282,6 +282,8 @@ async def _require_key_replacement_allowed(
                 agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
                 ma_agent_id=str(ma_agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
             )
     outcome = decide_operation(
         "key_replace",

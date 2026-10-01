@@ -183,6 +183,7 @@ async def refuse_if_shared_and_not_admin(
                 agent_names=(entry.name, entry.routing_name),
                 ma_agent_id=entry.ma_agent_id,
                 default=runtime.deployment_default,
+                caller_platform_user_id=str(interaction.user.id),
             )
     outcome = decide_operation(
         "key_replace",

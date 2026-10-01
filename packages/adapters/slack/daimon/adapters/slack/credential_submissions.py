@@ -61,6 +61,7 @@ from daimon.core.env_file import (
     env_collision_line,
     env_import_collisions,
     env_name_problem,
+    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -255,6 +256,8 @@ async def _replacement_refused_at_submit(
                     agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
                     ma_agent_id=str(agent.id),
                     default=runtime.deployment_default,
+                    caller_account_id=row.account_id,
+                    caller_platform_user_id=user_id,
                 )
     outcome = decide_operation(
         "key_replace",
@@ -404,13 +407,22 @@ async def run_env_credential_submission(
     # change underneath it.
     # A new name that a tool reads as a key already held (GH_TOKEN beside
     # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same gate.
-    shadowed: str | None = None
-    if request.replaces_updated_at is None:
-        async with runtime.sessionmaker() as session:
-            held_names = await list_turn_key_names(
-                session, tenant_id=request.tenant_id, agent_id=request.agent_id
-            )
-        shadowed = env_alias_shadowed(request.target, held_names)
+    #
+    # Snapshot the related credentials (aliases and family members) before the
+    # transaction, for every submit. Under the lock the write proceeds only if
+    # that set is unchanged: a related key added or removed after the gate was
+    # decided was never put to it. An unchanged set — rotating
+    # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+    async with runtime.sessionmaker() as session:
+        held_names = await list_turn_key_names(
+            session, tenant_id=request.tenant_id, agent_id=request.agent_id
+        )
+    related_before = env_related_held(request.target, held_names)
+    shadowed = (
+        env_alias_shadowed(request.target, held_names)
+        if request.replaces_updated_at is None
+        else None
+    )
     refuse_replacement = (request.replaces_updated_at is not None or shadowed is not None) and (
         await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
     )
@@ -447,14 +459,13 @@ async def run_env_credential_submission(
                 )
             appeared = (
                 consumed is not None
-                and shadowed is None
-                and env_alias_shadowed(
+                and env_related_held(
                     consumed.target,
                     await list_turn_key_names(
                         session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
                     ),
                 )
-                is not None
+                != related_before
             )
             if consumed is not None and refuse_replacement:
                 await credential_requests_store.set_credential_request_outcome(
