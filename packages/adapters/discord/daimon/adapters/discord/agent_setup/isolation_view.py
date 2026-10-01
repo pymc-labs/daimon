@@ -9,7 +9,7 @@ re-checks Manage Server live; the rules live in `daimon.core.channel_isolation_s
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from typing import Final
 
 import structlog
@@ -19,10 +19,8 @@ from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import is_isolated
-from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
-    ForkAgent,
     set_channel_isolation,
 )
 from daimon.core.errors import DaimonError
@@ -39,10 +37,11 @@ ISOLATE_COPY_LABEL: Final = "Isolate with a copy"
 END_LABEL: Final = "End isolation"
 BACK_LABEL: Final = "◀ Back"
 EXPLAINER: Final = (
-    "-# An isolated channel's own agents answer only there and are hidden everywhere else; "
-    "inside it only they are visible. Its messages are readable only from inside it. "
-    "Isolating needs an agent that answers only here. **Isolate with a copy** makes one "
-    "from the agent answering now when there is none."
+    "-# Isolating seals this channel and pins its own agent to it: the agent answers only "
+    "here and is hidden everywhere else, and inside only the channel's own agents are "
+    "visible. Its messages are readable only from inside it. Isolating needs an agent that "
+    "answers only here. **Isolate with a copy** makes one from the agent answering now when "
+    "there is none."
 )
 
 _Callback = Callable[[discord.Interaction], Awaitable[None]]
@@ -72,23 +71,6 @@ async def load_is_isolated(runtime: DiscordRuntime, *, state: PanelState) -> boo
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=_tenant_id(state))
     return is_isolated(policy, channel_id=str(state.channel_id))
-
-
-def _fork(runtime: DiscordRuntime, tenant_id: uuid.UUID) -> ForkAgent:
-    public_url = runtime.settings.mcp.public_url
-
-    async def fork(source: str, new_name: str) -> Sequence[str]:
-        copy = await fork_agent(
-            runtime.anthropic,
-            runtime.sessionmaker,
-            tenant_id=tenant_id,
-            source_name=source,
-            new_name=new_name,
-            public_url=str(public_url) if public_url is not None else None,
-        )
-        return copy.dropped_skills
-
-    return fork
 
 
 class IsolationView(PanelViewBase):
@@ -133,17 +115,20 @@ class IsolationView(PanelViewBase):
             return
         await interaction.response.defer()
         state, tenant_id = self.state, _tenant_id(self.state)
+        public_url = self.runtime.settings.mcp.public_url
         try:
             change = await set_channel_isolation(
                 self.runtime.anthropic,
                 self.runtime.sessionmaker,
                 tenant_id=tenant_id,
+                platform="discord",
                 channel_id=str(state.channel_id),
                 isolated=isolated,
                 default=self.runtime.deployment_default,
                 actor_account_id=state.account_id,
                 channel_label=state.channel_name,
-                fork=_fork(self.runtime, tenant_id) if copy else None,
+                fork=copy,
+                public_url=str(public_url) if public_url is not None else None,
             )
         except DaimonError as exc:  # a refusal, or a copy that can't be made
             notice = f"-# {exc} Nothing was changed."

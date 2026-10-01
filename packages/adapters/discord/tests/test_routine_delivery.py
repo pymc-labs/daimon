@@ -10,7 +10,7 @@ import discord
 import pytest
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, record_result
@@ -124,7 +124,6 @@ def _poster(
         fetch_channel=fetch,
         open_dm=(dms or _Dms()).open,
         dm_policy=lambda row: DirectMessagePolicy(mode=dm_mode),  # type: ignore[arg-type]
-        deployment_default=DeploymentDefault(agent_name="daimon"),
     )
 
 
@@ -396,15 +395,12 @@ async def test_a_private_thread_the_creator_is_in_is_posted_to(
 
 
 @pytest.mark.parametrize(
-    ("agent", "expected"),
-    [("daimon", "channel_isolated"), ("local", "destination_unavailable")],
-    ids=["outside-agent-posting-in", "own-agent-never-dms"],
+    "agent", ["daimon", "local"], ids=["outside-agent-posting-in", "own-agent"]
 )
 async def test_an_isolated_channels_routine_never_leaves_it(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     agent: str,
-    expected: str,
 ) -> None:
     row = (await _routine(db_session)).model_copy(update={"agent_name": agent})
     await set_fields(
@@ -417,7 +413,11 @@ async def test_an_isolated_channels_routine_never_leaves_it(
     await set_access_policy(
         db_session,
         tenant_id=row.tenant_id,
-        policy=TenantAccessPolicy(isolated_channel_ids=("555",)),
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("555",),
+            isolated_channel_ids=("555",),
+            agent_channel_pins={"local": ("555",)},
+        ),
     )
     await db_session.commit()
     gone = discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
@@ -425,5 +425,5 @@ async def test_an_isolated_channels_routine_never_leaves_it(
 
     outcome = await _poster(db_session_factory, gone, dms=dms)(row)
 
-    assert (outcome.status, outcome.note) == ("skipped", expected)
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     assert dms.sent == [], "the result never goes by DM"

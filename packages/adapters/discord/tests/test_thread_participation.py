@@ -404,7 +404,11 @@ async def test_a_turn_isolation_would_refuse_never_pays_for_the_classifier(
     await set_access_policy(
         db_session,
         tenant_id=tenant.id,
-        policy=TenantAccessPolicy(isolated_channel_ids=(str(PARENT_ID),)),
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=(str(PARENT_ID),),
+            isolated_channel_ids=(str(PARENT_ID),),
+            agent_channel_pins={"local": (str(PARENT_ID),)},
+        ),
     )
     await db_session.commit()
     candidates = _candidates("anyone?")

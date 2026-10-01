@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
-from daimon.core.channel_isolation import load_channel_isolation
+from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -34,7 +34,6 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
 )
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -138,7 +137,6 @@ def make_discord_routine_poster(
     fetch_channel: ChannelFetcher,
     open_dm: DmOpener,
     dm_policy: DmPolicyLookup,
-    deployment_default: DeploymentDefault,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """A poster bound to the bot's channel lookup (cache first, then REST)."""
 
@@ -175,14 +173,7 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         policy = cleared
-        async with sessionmaker() as session:
-            isolation = await load_channel_isolation(
-                session, tenant_id=row.tenant_id, default=deployment_default, policy=policy
-            )
-        if isolation.routine_crosses(row):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason="channel_isolated")
-            return DeliveryOutcome(status="skipped", note="channel_isolated")
-        keep_inside = isolation.keeps_routine_inside(row)
+        keep_inside = keeps_routine_inside(policy, row)
 
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:  # an isolated channel's result never leaves it, not even by DM

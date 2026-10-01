@@ -20,7 +20,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import thread_turn_crosses
+from daimon.core.channel_isolation import is_thread_turn_refused
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.scope import DeploymentDefault
@@ -103,7 +103,7 @@ class ThreadParticipant:
     ) -> bool:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
 
-        The balance, cap, channel budget and isolation gates run here, before the
+        The balance, cap, channel budget, pin and isolation gates run here, before the
         classifier, on the caller the turn would run as: a tenant that could not be
         admitted must not pay for the question of whether to admit it. The call that
         does run is metered to the tenant like any other model spend.
@@ -165,7 +165,7 @@ class ThreadParticipant:
             )
             return False
         async with self._sessionmaker() as session:
-            crosses = await thread_turn_crosses(
+            refused = await is_thread_turn_refused(
                 session,
                 tenant_id=tenant_id,
                 platform=PLATFORM,
@@ -173,9 +173,9 @@ class ThreadParticipant:
                 thread_id=str(thread.id),
                 default=self._deployment_default,
             )
-        if crosses:
+        if refused:
             log.info(
-                "thread_participation.skipped", reason="channel_isolated", thread_id=str(thread.id)
+                "thread_participation.skipped", reason="agent_refused", thread_id=str(thread.id)
             )
             return False
         recent = await self._recent_window(thread, exclude_ids={m.id for m in candidates})
