@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- `add_skill` from chat waits on a confirmation card, which only tool safety shows, so with it off a chat add points to the setup panel's Add skill. Sessions keep the tool settings they were created with, so ones started before this release, or before tool safety was turned on, confirm without a card until they are replaced; start a new thread to pick up the card. Routines and other unattended runs never add a skill.
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 - Routines now run in their channel's environment, then the workspace default, instead of always the deployment default. A channel or workspace `environment_name` already set with `daimon config set` moves those routines onto it from their next fire; `daimon config unset` it first to keep them where they were.
@@ -75,11 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add_skill` or Add skill on the setup panel's agent details (Slack takes a
   paste; attach files in chat). Each add previews the name, description, files
   and any runnable scripts first. The skill becomes that agent's own copy and
-  never touches shared or built-in skills; archives are unpacked safely and
-  size-capped. Built-in agents are refused (fork first); otherwise the rule is
-  the one for skills: server admins, channel admins on agents local to their
-  channels, anyone on agents that answer nowhere. `remove_skill` follows it
-  too. Nothing changes until someone adds a skill.
+  never touches shared or built-in skills, or one a fork shares; archives are
+  unpacked safely and size-capped. A chat add lands only when the person
+  presses Approve on a confirmation card, so it needs tool safety; without it
+  the panel's Add skill is the way in. Built-in agents are refused (fork
+  first); otherwise server admins, channel admins on agents local to their
+  channels, and anyone on agents nobody else uses (no default, thread, routine
+  or queued continuation of someone else's). `remove_skill` follows it too.
+  Nothing changes until someone adds a skill.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

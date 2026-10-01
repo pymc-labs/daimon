@@ -27,8 +27,10 @@ limit gets one in-thread notice and no deliveries until space is freed.
 A `.md` or `.zip` attached in a message reaches `add_skill` as the file link
 Daimon gave the turn. Daimon reads it with the bot token only when the link's
 signature checks and it names this workspace, and refuses a file over the
-skill size cap before downloading it. The setup panel's Add skill form takes a
-paste only, since Slack modals have no file input.
+skill size cap or not named `.md` or `.zip` before downloading it. Adding it
+needs the person's Approve on a confirmation card, which only tool safety
+shows; without it, use the setup panel's Add skill form, which takes a paste
+only, since Slack modals have no file input.
 
 ### Per-user Slack access (optional)
 

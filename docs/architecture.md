@@ -361,16 +361,25 @@ it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
 or a GitHub folder read through the skill-repo fetch. Archives refuse links,
 absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
-uploaded under the agent-scoped title, never the shared library, and a name a
-shared or built-in skill already holds is refused. Its `user_skills` row has
-`source = "upload"`, an origin and the adding account, so no repo sync replaces
-or deletes it, and removing the skill forgets it. `add_skill` previews first
-and adds only when called again with the preview's hash; Details in both setup
-panels has Add skill (Discord takes a paste or a file, Slack a paste). The
-`skill_add` and `skill_remove` operations follow one rule: built-in agents
-never, server admins on any other, channel admins on agents local to their
-channels, anyone on agents that answer nowhere. Uploads of an isolated
-channel's agents are hidden outside it like its other agent-scoped skills.
+uploaded under the agent-scoped title, never the shared library. A name a
+shared or built-in skill already holds, or one that would load under the same
+folder as an attached skill, is refused. Forks share skill ids, so a skill
+another agent also has attached is never versioned; the upload must take a
+new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
+origin is `owner/repo/path@branch`, never the URL as typed) and the adding
+account, so no repo sync replaces, deletes or re-attaches it, and removing the
+skill forgets it. `add_skill` previews first and adds only when called again
+with the preview's hash, which is bound to the target agent, and only after the
+person presses Approve on the confirmation card (below). Without tool safety
+there is no card, so a chat confirm adds nothing and points to Add skill in
+the setup panels' Details (Discord takes a paste or a file, Slack a paste),
+where the person's own submit is the approval. The `skill_add` and
+`skill_remove` operations follow one rule: built-in agents never, server
+admins on any other, channel admins on agents local to their channels, anyone
+on agents nobody else uses. That last test reads the agent's full reach: no
+default, no thread binding, and no routine or queued continuation of anyone
+else's. Uploads of an isolated channel's agents are hidden outside it like its
+other agent-scoped skills.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
@@ -447,7 +456,10 @@ refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
 their `operation_policy` checks), except `add_skill`: its confirming call, the
 one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
-the same card in chat and is refused in a routine unless allowed there. The
+the same card in chat and is always refused in a routine, whatever
+`unattended_writes` allows. Gating is fixed when a session is created, so a
+session started before tool safety was turned on keeps running ungated until
+it is replaced. The
 exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
