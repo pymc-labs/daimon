@@ -181,13 +181,18 @@ def _texts(fake: TeamsApiFake) -> str:
 
 
 def test_a_channel_message_keeps_its_team_for_the_graph_lookup() -> None:
-    activity = MessageActivity.model_validate(_load("channel_media_reply"))
-    inbound = parse_inbound(
-        activity, configured_tenant=ENTRA_TENANT_ID, service_url=activity.service_url
-    )
-    assert isinstance(inbound, TeamsInbound)
-    assert inbound.team_id == "19:team@thread.tacv2"
-    assert inbound.team_group_id is None, "channel messages omit aadGroupId; it is looked up"
+    """As captured, a channel activity names its team's group; one without it is looked up."""
+    for name, group in (
+        ("channel_attachments_reply", TEAM_GROUP_ID),
+        ("channel_media_reply", None),
+    ):
+        activity = MessageActivity.model_validate(_load(name))
+        inbound = parse_inbound(
+            activity, configured_tenant=ENTRA_TENANT_ID, service_url=activity.service_url
+        )
+        assert isinstance(inbound, TeamsInbound)
+        assert inbound.team_id == "19:team@thread.tacv2"
+        assert inbound.team_group_id == group
 
 
 async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains_the_file(
@@ -212,6 +217,24 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     assert all(r.headers["Authorization"] == "Bearer test-bot-token" for r in seen)
     lookups = [r for r in teams_api_fake.requests if "/v3/teams/" in r.url]
     assert lookups, "the group id came from Bot Framework's team details, absent from the activity"
+
+
+async def test_a_channel_reply_whose_activity_names_no_media_is_read_from_graph(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """As captured: Teams sends the bot only the text; the files exist on Graph's copy."""
+    seen: list[httpx.Request] = []
+    [turn] = await _run(
+        db_session_factory, teams_api_fake, _load("channel_attachments_reply"), _graph(seen)
+    )
+
+    message = turn["user_message"]
+    assert len(turn["image_blocks"] or []) == 1, "the hosted image is found on Graph"
+    assert "[attachment] `q3.xlsx` was shared but can't be opened here." in message
+    assert "I couldn't read `q3.xlsx`" in _texts(teams_api_fake), "the person hears it"
+    assert any(r.url.path == f"{CHANNEL_PATH}/{ROOT}/replies/{REPLY}" for r in seen), (
+        "the mentioned message is read from Graph even with no markers in the activity"
+    )
 
 
 async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(
@@ -260,6 +283,16 @@ async def test_without_graph_the_turn_runs_and_the_person_hears_what_was_missed(
         "I couldn't read a pasted image (I can't read this channel's messages), "
         "a shared file (files shared in channels need a 1:1 chat)."
     ) in _texts(teams_api_fake), "never a silent drop"
+
+
+async def test_without_graph_the_agent_knows_a_channel_messages_media_went_unread(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The captured activity names no media, so only the agent is told, not the person."""
+    [turn] = await _run(db_session_factory, teams_api_fake, _load("channel_attachments_reply"))
+
+    assert "images and files could not be read" in turn["user_message"]
+    assert "couldn't read" not in _texts(teams_api_fake), "no notice on every text-only message"
 
 
 async def test_a_bare_mention_runs_over_the_replayed_thread(

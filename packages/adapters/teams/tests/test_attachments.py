@@ -96,7 +96,8 @@ async def test_pasted_image_is_fetched_with_the_bot_token_and_inlined() -> None:
     assert len(prepared.image_blocks) == 1, "the image becomes a vision block"
     assert prepared.image_blocks[0]["source"]["media_type"] == "image/png"  # type: ignore[index]
     assert requests[0].headers["authorization"] == "Bearer bot-token"
-    assert (prepared.prefix, prepared.notice) == ("", None), "nothing to explain"
+    assert "is attached as an image" in prepared.prefix, "the agent knows it was shared"
+    assert prepared.notice is None, "nothing to explain"
 
 
 @pytest.mark.parametrize(

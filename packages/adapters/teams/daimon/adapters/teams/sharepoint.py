@@ -145,7 +145,7 @@ class SharePoint:
         return await self._upload_chunks(_parse(_UploadSession, session).upload_url, content)
 
     async def _upload_chunks(self, upload_url: str, content: bytes) -> DriveItem:
-        url = httpx.URL(upload_url)
+        url = _url(upload_url)
         if not is_sharepoint_host(url):
             raise GraphUnavailable("upload URL is not on SharePoint")
         total = len(content)
@@ -175,7 +175,8 @@ class SharePoint:
 
     async def download_url(self, content_url: str, *, group_id: str) -> str:
         """The pre-authorised download URL of the shared file at `content_url` in the team site."""
-        url = httpx.URL(content_url)
+        # Teams sends the path unencoded: a `#` or `?` there is part of the file's name.
+        url = _url(content_url.replace("#", "%23").replace("?", "%3F"))
         parts = url.path.strip("/").split("/")
         if not is_sharepoint_host(url) or len(parts) < 3 or parts[0] not in ("sites", "teams"):
             raise GraphUnavailable("not a SharePoint site file")
@@ -191,7 +192,7 @@ class SharePoint:
             "GET", f"{GRAPH_ROOT}/drives/{path_segment(drive)}/root:/{path}"
         )
         download = _parse(DriveItem, data).download_url
-        if download is None or not is_sharepoint_host(httpx.URL(download)):
+        if download is None or not is_sharepoint_host(_url(download)):
             raise GraphUnavailable("no SharePoint download URL", status=200)
         return download
 
@@ -220,9 +221,17 @@ class SharePoint:
         return found
 
 
+def _url(value: str) -> httpx.URL:
+    """`value` parsed; Graph's URLs are untrusted, so a malformed one is unavailable."""
+    try:
+        return httpx.URL(value)
+    except httpx.InvalidURL as err:
+        raise GraphUnavailable("not a URL", status=200) from err
+
+
 def _library_path(drives: list[_Drive], file_path: str) -> tuple[str, str] | None:
     for drive in drives:
-        root = httpx.URL(drive.web_url).path.rstrip("/") + "/"
+        root = _url(drive.web_url).path.rstrip("/") + "/"
         if file_path.casefold().startswith(root.casefold()):
             return drive.id, file_path[len(root) :]
     return None
