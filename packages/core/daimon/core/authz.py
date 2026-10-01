@@ -31,17 +31,19 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 
-Nothing here does I/O; the callers load the policy and resolve the agent.
+Nothing here does I/O: the callers load the policy and resolve the agent,
+and decide again at the moment of action (`daimon.core.turn.admission.reauthorize`
+before a session is built; a fresh policy read before every send, form
+submit and OAuth grant).
 
 Scope today: the pin decisions (turn admission, MCP and hub turns, routine
-save and fire, handoff, configuration writes and form submits), the caller
-gates of a platform turn and an MCP turn, pinned sends and direct messages,
-channel and session seal reads, and fork. Still decided outside this module,
-by the same `daimon.core.access_policy` predicates, and moving here next: the
+save and fire, handoff, configuration writes, form submits and the OAuth
+callback), the caller gates of a platform turn and an MCP turn, pinned sends
+and direct messages, channel and session seal reads, and fork. Still decided
+outside this module, by the same `daimon.core.access_policy` predicates: the
 live protection and invoker checks in the scheduler, routine save and
 delivery and turn-reply protection; the admin sealed-read exemption on the
-hub; the OAuth no-request rule; and the shared-agent replace/remove table
-(`daimon.core.operation_policy`).
+hub; and the shared-agent replace/remove table (`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
@@ -114,6 +116,9 @@ class Subject:
 
     is_admin: bool = False
     platform_user_id: str | None = None
+    # The caller holds an agent-scoped key: never exempt as an admin, whoever
+    # minted it, because the key is long-lived and its role may be stale.
+    via_agent_key: bool = False
 
 
 @dataclass(frozen=True)
@@ -312,7 +317,12 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.RUN_AGENT:
-        if subject.is_admin and admin_only_surface and subject.platform_user_id is not None:
+        if (
+            subject.is_admin
+            and admin_only_surface
+            and subject.platform_user_id is not None
+            and not subject.via_agent_key
+        ):
             return ALLOW
         if not agent.present:
             return ALLOW
@@ -330,7 +340,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.CONFIGURE:
-        if subject.is_admin or not policy.agent_channel_pins:
+        if (subject.is_admin and not subject.via_agent_key) or not policy.agent_channel_pins:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
@@ -361,7 +371,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.FORK:
-        if not subject.is_admin:
+        if not subject.is_admin or subject.via_agent_key:
             return _deny("admin_required")
         if _names_pinned(policy, agent.names):
             return _deny("agent_pinned")

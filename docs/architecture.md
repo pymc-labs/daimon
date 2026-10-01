@@ -521,6 +521,37 @@ but them:
 | `fork_agent` of a pinned agent | refused | refused |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 
+The pin, seal, protection, invoker and fork rules are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); the turn pipeline, the
+MCP gates, the channel tools, the routine and handoff tools and the fork
+paths gather their facts and ask it. The hub's admin read of a sealed
+conversation is still decided in `_session_access`, and the scheduler's
+protection and invoker checks in the scheduler itself.
+
+**Decided again at the moment of action.** Admission is a decision about a
+turn that has not run yet, so it is asked again, on the policy as it is
+then, where it matters:
+
+- `bind_session` and the dead-session recovery call
+  `daimon.core.turn.admission.reauthorize` before a session is found,
+  reused, replaced or created. A pin, protection or invoker change since
+  admission refuses the turn there; a seal added since joins the turn's seal
+  ids, so the session is stamped with it and memory mounts read-only.
+- Every channel send, card and direct message reads the policy when it is
+  made, as do the routine fire, the handoff and the form submit checks.
+- The MCP OAuth callback asks the pinned-agent write rule again after the
+  code exchange and before the grant is written to the vault.
+- A published report's reader variant carries its source agent's names
+  (`daimon_reader_source`), so a pin on the source holds for the reader, and
+  publishing a pinned agent's reader needs an admin or an `origin_context_id`
+  from inside its channels.
+- An agent-scoped key is never exempt as an admin inside `authorize`,
+  whoever minted it.
+
+A demoted admin keeps their stored role until their next platform turn
+refreshes it; that is accepted.
+
 On every turn, wherever a pinned agent runs (including an exempt admin turn
 and a member's turn inside its channel), its sends (messages, replies,
 threads and posts, files and cards on Discord, Slack and Teams) reach only:

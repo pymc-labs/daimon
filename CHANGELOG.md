@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Access is decided again at the moment of action, not only when a turn is admitted. Before a session is found, reused, replaced or recreated after a crash, the turn's pin, protection and invoker checks are re-run on the current access policy, so a pin or protection added in between refuses it, and a seal added in between is stamped on the session and makes memory read-only. The MCP OAuth callback checks the pinned-agent rule again after the code exchange, so a pin that lands mid sign-in stores no grant. A published report's reader variant now counts as its source agent for pins, and publishing a pinned agent's reader needs an admin or a request from inside its channels (`publish_report(origin_context_id=…)`). An agent-scoped key is never exempt as an admin, whoever minted it.
 - **Seeded defaults are protected from chat edits.** Skill-repo imports now
   gate like other attachment writes: a member needs an admin on an agent
   that answers for others, and neither the import nor a push resync

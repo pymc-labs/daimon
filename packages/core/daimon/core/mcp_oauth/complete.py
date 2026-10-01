@@ -12,6 +12,7 @@ the browser sees.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -31,6 +32,10 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+class McpOAuthWriteRefusedError(DaimonError):
+    """The access decision refused the grant after the code exchange; nothing was written."""
 
 
 class McpOAuthIncompleteFlowError(DaimonError):
@@ -77,8 +82,15 @@ async def complete_mcp_oauth_flow(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     default: DeploymentDefault,
+    may_write: Callable[[], Awaitable[bool]] | None = None,
 ) -> McpOAuthCompletion:
     """Exchange, store in the requester's vault, attach the server to the agent.
+
+    ``may_write`` is the caller's access decision, asked again after the
+    code exchange and immediately before the grant is written to the vault:
+    the exchange is a network round trip, and a pin added during it must
+    stop the grant from being stored, not only the attach. A refusal raises
+    `McpOAuthWriteRefusedError` with nothing written.
 
     The grant is personal, but the attach is not: repointing a server name the
     agent already declares at another URL redirects every caller. That is
@@ -97,6 +109,8 @@ async def complete_mcp_oauth_flow(
         redirect_uri=flow.redirect_uri,
         resource=flow.resource,
     )
+    if may_write is not None and not await may_write():
+        raise McpOAuthWriteRefusedError
     vault_id = await ensure_agent_mcp_vault(
         anthropic,
         account_id=flow.account_id,
@@ -166,6 +180,7 @@ async def complete_mcp_oauth_flow(
 __all__ = [
     "McpOAuthCompletion",
     "McpOAuthIncompleteFlowError",
+    "McpOAuthWriteRefusedError",
     "complete_mcp_oauth_flow",
     "registered_client",
 ]

@@ -42,6 +42,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
 )
 from daimon.core.tool_safety import trusted_servers_for
+from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -372,7 +373,10 @@ async def _replace_dead_session(
     recovery finds the first one's replacement live and adopts it, and a bind
     sees either the old row or the replacement, never neither.
     """
-    admission = prepared.admission
+    # A recovery can run long after admission: decide the turn again on the
+    # current policy before its successor is created or adopted, and stamp any
+    # seal added since (`reauthorize`).
+    admission = await reauthorize(deps, prepared.admission)
     session_account_id = prepared.session_account_id
     created: CreatedSession | None = None
     try:

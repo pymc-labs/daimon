@@ -77,7 +77,11 @@ async def require_pin_write_access(
         ma_agent = await ma_agent()
     if not authorize(
         policy,
-        subject=Subject(is_admin=False, platform_user_id=auth.platform_user_id),
+        subject=Subject(
+            is_admin=False,
+            platform_user_id=auth.platform_user_id,
+            via_agent_key=auth.agent_id is not None,
+        ),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
         agent=AgentRef.of(*agent_pin_names(ma_agent.name, ma_agent.metadata)),

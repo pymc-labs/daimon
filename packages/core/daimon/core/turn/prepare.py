@@ -58,7 +58,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
-from daimon.core.turn.admission import Admission
+from daimon.core.turn.admission import Admission, reauthorize
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
@@ -558,6 +558,11 @@ async def bind_session_impl(
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
 
     async def _bind() -> PreparedTurn:
+        # Decide the admission again at the moment its session is found,
+        # reused, replaced or created: a pin, seal, protection or invoker
+        # change since `admit()` applies to this turn, and a seal added in
+        # between is stamped on the session (`reauthorize`).
+        current = await reauthorize(deps, admission)
         # Imported here, not at module scope: `session_preparation` imports
         # this module for the types above, and importing it back at module
         # scope would make either module unimportable first. The import is
@@ -587,7 +592,7 @@ async def bind_session_impl(
         # globals when the bind runs, which is what keeps them patchable.
         outcome = await prepare_session_for_turn(
             deps,
-            admission,
+            current,
             ops=SessionOps(
                 read_live_row=get_live_thread_session,
                 create_fresh=create_fresh_session,
