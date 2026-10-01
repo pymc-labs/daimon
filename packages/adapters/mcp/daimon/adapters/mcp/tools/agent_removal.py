@@ -186,6 +186,7 @@ async def _remove_skill_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
 
     titles, _truncated = await resolve_custom_skill_titles(

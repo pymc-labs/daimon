@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import anthropic
 from daimon.adapters.slack.credential_forms import (
     CRED_CALLBACK_PREFIX,
     CredentialSubmissionDecision,
@@ -114,9 +115,19 @@ async def start_mcp_oauth_from_click(
             thread_ts=thread_ts,
         )
         return
-    agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
-    )
+    try:
+        agent = await find_agent_by_derived_uuid(
+            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        )
+    except anthropic.APIError:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="I couldn't verify this agent. Nothing was saved; please try again.",
+            thread_ts=thread_ts,
+        )
+        return
     async with runtime.sessionmaker() as session:
         pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
     if pin_refusal is not None:

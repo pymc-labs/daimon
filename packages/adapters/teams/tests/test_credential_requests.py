@@ -20,6 +20,8 @@ from cryptography.fernet import Fernet
 from daimon.adapters.teams import credential_requests as module
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet
@@ -31,6 +33,7 @@ from daimon.core.posted_controls import (
     WRONG_REQUESTER_MESSAGE,
 )
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -641,3 +644,24 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
         spent = await peek_credential_request(session, token=row.token)
     assert file is not None and file.content == "old-secret"
     assert spent is not None and spent.outcome == "stale_replacement"
+
+
+async def test_a_pinned_agents_form_from_outside_its_channels_is_refused_at_submit(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A pin added after the card was posted still holds when the value is submitted."""
+    row = await _request(db_session_factory, account_id)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("19:other-channel",)}),
+        )
+    async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, dispatch):
+        refused = await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+    assert refused["task"]["value"] == PIN_WRITE_REFUSAL
+    async with db_session_factory() as session:
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
+    assert file is None, "nothing is saved"
+    dispatch.assert_not_awaited()

@@ -11,6 +11,8 @@ admin's; a member inside its channels uses the request tools instead.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -29,10 +31,14 @@ async def require_pin_write_access(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
-    ma_agent: BetaManagedAgentsAgent,
+    ma_agent: BetaManagedAgentsAgent | Callable[[], Awaitable[BetaManagedAgentsAgent]],
     origin: TurnOriginRow | None,
 ) -> None:
-    """Raise unless this caller may change ``ma_agent`` from ``origin``."""
+    """Raise unless this caller may change ``ma_agent`` from ``origin``.
+
+    ``ma_agent`` may be a resolver, called only when the tenant pins anything,
+    for paths that don't otherwise look the agent up.
+    """
     if auth.is_admin:
         return
     async with runtime.session_factory() as session:
@@ -40,6 +46,10 @@ async def require_pin_write_access(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+    if not policy.agent_channel_pins:
+        return
+    if callable(ma_agent):
+        ma_agent = await ma_agent()
     if pin_write_refused(
         policy,
         is_admin=False,

@@ -29,6 +29,10 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools.agent_chat import (
+    _resolve_ma_agent,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -362,6 +366,11 @@ async def _set_repo_binding_impl(
     only from tests that need to inject a mock transport.
     """
     agent_id = _require_agent_id(auth)
+    # An agent key carries no turn origin: on a pinned agent, only an admin's
+    # key may change which repository it reaches.
+    await require_pin_write_access(
+        runtime, auth, ma_agent=lambda: _resolve_ma_agent(runtime, auth), origin=None
+    )
 
     # 1. Mint plaintext PAT via the broker. Deliberately does NOT opt into the
     # operator service default: the minted token is uploaded as a durable MA
@@ -554,6 +563,11 @@ async def _clear_repo_binding_impl(
     row there would drop the only pointer to a token that is still live.
     """
     agent_id = _require_agent_id(auth)
+    # An agent key carries no turn origin: on a pinned agent, only an admin's
+    # key may change which repository it reaches.
+    await require_pin_write_access(
+        runtime, auth, ma_agent=lambda: _resolve_ma_agent(runtime, auth), origin=None
+    )
 
     # Read the binding to capture the ref of the credential to revoke.
     async with runtime.session_factory() as session:

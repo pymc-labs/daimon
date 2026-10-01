@@ -1325,3 +1325,37 @@ async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_d
         )
 
     assert exc_info.value.reason == "agent_pinned_elsewhere"
+
+
+async def test_admit_refuses_an_agent_pinned_by_its_display_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The CLI and the write guard accept a pin on the MA display name; admission
+    must honour the same name."""
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(agent_channel_pins={"Daimon Display": ("rx",)})
+    )
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="Daimon Display",
+            tenant_id=tenant.id,
+            metadata={"daimon_name": "daimon"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id="general",
+            now=_NOW,
+            role=Role.USER,
+        )
+    assert exc_info.value.reason == "agent_pinned_elsewhere"
