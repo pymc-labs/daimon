@@ -3,7 +3,7 @@
 For server admins and operator tokens holding ``tenant:read``, so an
 integration can show a workspace's state without one call per channel. A
 channel is listed when it has its own agent or environment setting, or a
-budget.
+budget. The private channels DM conversations run in are left out.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
 from daimon.core.stores.channel_budgets import list_channel_budgets
+from daimon.core.stores.direct_messages import list_dm_channel_ids
 from daimon.core.stores.domain import FundingMode
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.tenant_ledger import get_balance
@@ -83,11 +84,16 @@ def build_channel_summaries(
     tenant_row: TenantConfigRow | None,
     default: DeploymentDefault,
     budgets: dict[str, ChannelBudgetStatus],
+    dm_channel_ids: set[str],
 ) -> list[ChannelSummary]:
-    """One entry per channel with a setting or a budget, ordered by channel id."""
+    """One entry per channel with a setting or a budget, ordered by channel id.
+
+    A DM's channel gets a config row when the DM starts; it is not a channel
+    of the workspace, so ``dm_channel_ids`` are skipped.
+    """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    for channel_id in sorted(configs.keys() | budgets.keys()):
+    for channel_id in sorted((configs.keys() | budgets.keys()) - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         status = budgets.get(channel_id)
         summaries.append(
@@ -122,6 +128,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             for budget in await list_channel_budgets(session, tenant_id=auth.tenant_id)
             if budget.platform == tenant.platform
         }
+        dm_channel_ids = await list_dm_channel_ids(session, tenant_id=auth.tenant_id)
     default = merge(channel=None, tenant=tenant_row, default=runtime.deployment_default)
     return TenantSummary(
         balance_usd=f"{balance:.2f}",
@@ -132,6 +139,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             tenant_row=tenant_row,
             default=runtime.deployment_default,
             budgets=budgets,
+            dm_channel_ids=dm_channel_ids,
         ),
     )
 

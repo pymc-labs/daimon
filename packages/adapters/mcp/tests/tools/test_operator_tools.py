@@ -28,9 +28,11 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings,
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
+from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
@@ -131,6 +133,56 @@ async def test_tenant_summary_lists_configured_and_budgeted_channels(
     budget = summary.channels[1].budget
     assert budget is not None and (budget.limit_usd, budget.window) == ("5.00", "monthly")
     assert summary.channels[0].admins == ChannelAdmins(role_ids=[], user_ids=[])
+
+
+async def test_tenant_summary_leaves_out_dm_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A DM's channel gets a config row and a dm: binding when it starts, live or since moved."""
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker.begin() as session:
+        for channel_id in ("c1", "dm-live", "dm-moved"):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel_id),
+                tenant_id=tenant.id,
+                agent_name="helper",
+            )
+        for channel_id in ("dm-live", "dm-moved"):
+            await create_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id=channel_id,
+                thread_id=f"dm:{uuid.uuid4()}",
+                responder_ma_agent_id="agent_1",
+                responder_name="helper",
+                kind="handoff",
+            )
+        await start_conversation(
+            session,
+            conversation=DirectMessageRow(
+                platform="discord",
+                route_key="dm-live",
+                external_user_id="u-admin",
+                tenant_id=tenant.id,
+                account_id=auth.account_id,
+                workspace_id=tenant.external_id,
+                channel_id="dm-live",
+                scope_id="dm:live",
+                source_url="https://example.com/c1",
+                context="",
+                memory_read_only=False,
+                history=[],
+                recent_message_ids=[],
+                active_until=None,
+            ),
+            now=datetime.now(UTC),
+        )
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+    assert [c.channel_id for c in summary.channels] == ["c1"], "DM channels are not listed"
 
 
 async def test_operator_without_the_scope_is_refused_by_the_tool_itself(
