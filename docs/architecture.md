@@ -322,15 +322,17 @@ checked: admission, `hand_off_task`, and continuations owed to a DM, which are
 admitted as DM turns. Adding a key, connector token, skill-repo token or repo
 binding to a pinned agent (`request_agent_key`, `request_mcp_token`,
 `request_mcp_oauth`, `request_skill_repo_token`, `request_repo_binding`) or
-pointing it at a public repo (`bind_public_repo`) needs an admin or a request
-made inside one of its channels. The form's submit
+pointing it at a public repo (`bind_public_repo`) needs an admin, a channel
+admin of every channel it is pinned to, or a request made inside one of its
+channels. The form's submit
 (Discord, Slack and Teams) re-checks the rule against the agent as it is now, resolved by its stable id
 and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
 pin added later or a rename still holds; a target that can't be resolved under
 a pin is refused. The direct configuration tools (`update_agent`,
 `attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`,
 and an agent key's `set_repo_binding`/`clear_repo_binding`/`self_write_file`/
-`self_delete_file`) take no turn origin, so on a pinned agent they are an admin's; members inside its channels
+`self_delete_file`) take no turn origin, so on a pinned agent they are an admin's
+or a channel admin's of every pinned channel; members inside its channels
 use the request tools. One guard (`tools/_pin_guard.py`) serves all of them.
 A sign-in (`request_mcp_oauth`) is re-checked when its callback arrives, before
 any grant or attach. Routines are checked against every name of the agent they
@@ -359,7 +361,11 @@ run of it owed to a server admin or another channel's admin
 channels' default agent. A `/dm` conversation counts as the channel it was
 started from. A channel admin binds only a shared agent (managed or
 tenant-wide), one answering nowhere, or one already local to them,
-never another channel's own agent. Managed agents and the tenant default stay with server
+never another channel's own agent. Nobody, server admins included, binds a
+pinned agent as the default of a channel outside its pin. Key and MCP server
+replacements and removals count every place the agent answers, as for anyone:
+a personal default, a routine or a live session elsewhere keeps it from a
+channel admin. Managed agents and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
 included, keep the old grant. Unattended runs are routines and queued wakes
