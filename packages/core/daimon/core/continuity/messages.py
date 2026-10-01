@@ -392,7 +392,11 @@ _ENV_NAMES_SHOWN: Final[int] = 8
 
 
 def render_env_import_rejected(
-    rejection: EnvRejection, problems: Sequence[EnvProblem], *, target_name: str
+    rejection: EnvRejection,
+    problems: Sequence[EnvProblem],
+    *,
+    target_name: str,
+    pasted: bool = False,
 ) -> str:
     """Tell the person their uploaded file was rejected whole, and why.
 
@@ -410,7 +414,8 @@ def render_env_import_rejected(
             lines.append(f"…and {remaining} more.")
     else:
         lines.append(_ENV_FILE_REASONS[rejection])
-    lines.append("Nothing was changed. Upload a corrected file.")
+    # Teams dialogs take a paste, having no file input.
+    lines.append(f"Nothing was changed. {'Paste' if pasted else 'Upload'} a corrected file.")
     return "\n".join(lines)
 
 
