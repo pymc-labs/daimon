@@ -308,7 +308,8 @@ many tenants may redeem it. Each tenant redeems a code at most once.
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
 credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
-with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
+with the admin-only MCP tool `redeem_promo_code`, which is the only way on
+Teams: its `billing` card shows no promo codes. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses

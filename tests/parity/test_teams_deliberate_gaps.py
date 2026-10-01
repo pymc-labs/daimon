@@ -10,14 +10,18 @@ The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; channel history and files need Microsoft Graph; and a dialog's
 password field cannot take a `.env` upload or a repository token. Removing the
-app archives nothing.
+app archives nothing. The `billing` card has no promo code surface: Teams
+admins redeem with the MCP tool `redeem_promo_code`.
 
 No platform parametrization, no database -- this is a scope check.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -30,9 +34,12 @@ from daimon.adapters.mcp.tools.credential_requests import (
     _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
     register_credential_request_tools,
 )
+from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.core.billing_panel import BillingPanelState
 from daimon.core.config import TeamsSettings
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from fastmcp import FastMCP
@@ -103,6 +110,30 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
     assert not teams & hidden, "these need Graph, a non-password input or Discord/Slack DMs"
+
+
+def test_the_teams_billing_card_has_no_promo_code_surface() -> None:
+    """Even with a redeemable code and live timed credit, the card offers neither."""
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    state = BillingPanelState(
+        is_admin=True,
+        caller_user_id="u",
+        caller_spend=0.0,
+        caller_turns=0,
+        caller_cap=None,
+        guild_balance_usd=Decimal("10"),
+        guild_spend=0.0,
+        guild_turns=0,
+        guild_distinct_members=0,
+        member_rows=(),
+        over_cap_count=0,
+        timed_credit=(ActiveTimedCredit(remaining_usd=Decimal("5"), ends_at=now),),
+        has_redeemable_promo_code=True,
+    )
+    card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
+    assert "redeem" not in card.lower() and "timed credit" not in card.lower(), (
+        "Teams has no promo code UI on purpose; if it gains one, replace this record"
+    )
 
 
 def test_removing_the_teams_app_archives_nothing() -> None:
