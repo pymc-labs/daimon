@@ -23,7 +23,7 @@ from .conftest import make_inbound
 
 BOT = "bot-client-id"
 HOSTED = (
-    "https://graph.microsoft.com/v1.0/teams/g/channels/c/messages/100/hostedContents/"
+    "https://graph.microsoft.com/v1.0/teams/g/channels/c/messages/100/replies/101/hostedContents/"
     "aWQ9eF8wLXd1cy1kMS1hYmM=/$value"
 )
 
@@ -61,10 +61,19 @@ def test_html_to_text_keeps_words_names_mentions_and_marks_images() -> None:
     assert "alert" not in text, "script bodies are dropped"
 
 
-def test_channel_media_reads_only_graph_hosted_images_and_names_files() -> None:
+def test_channel_media_reads_only_this_messages_hosted_images_and_names_files() -> None:
+    graph = "https://graph.microsoft.com/v1.0/teams"
+    elsewhere = [
+        "https://evil.example/x/hostedContents/a/$value",
+        f"{graph}/other/channels/c/messages/100/replies/101/hostedContents/a/$value",
+        f"{graph}/g/channels/c/messages/100/replies/102/hostedContents/a/$value",
+        f"{graph}/g/channels/c/messages/100/hostedContents/a/$value",
+        f"{graph}/g/channels/c/messages/100/replies/101/hostedContents/a/b/$value",
+    ]
     html = (
-        f'<p>see <img src="{HOSTED}"></p><img src="https://evil.example/x/hostedContents/a/$value">'
-        '<attachment id="5f1a"></attachment>'
+        f'<p>see <img src="{HOSTED}"></p>'
+        + "".join(f'<img src="{src}">' for src in elsewhere)
+        + '<attachment id="5f1a"></attachment>'
     )
     attachment = {
         "id": "5f1a",
@@ -72,9 +81,12 @@ def test_channel_media_reads_only_graph_hosted_images_and_names_files() -> None:
         "contentUrl": "https://contoso.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx",
         "name": "q3.xlsx",
     }
-    media = channel_media(_msg("101", html, attachments=[attachment]))
+    message = _msg("101", html, attachments=[attachment])
+    media = channel_media(message, group_id="g", channel_id="c", root_id="100")
     shared = SharedFile("q3.xlsx", attachment["contentUrl"])
-    assert media == ChannelMedia(image_urls=(HOSTED,), files=(shared,)), "the file keeps its URL"
+    assert media == ChannelMedia(image_urls=(HOSTED,), files=(shared,)), (
+        "another team's, message's or host's image is never fetched with the app token"
+    )
 
 
 def test_thread_block_orders_drops_noise_and_marks_truncation() -> None:

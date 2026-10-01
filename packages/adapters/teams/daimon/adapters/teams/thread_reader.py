@@ -122,7 +122,7 @@ class ThreadReader:
         except GraphUnavailable as err:
             log.warning("teams.media.unavailable", status=err.status, reason=err.reason)
             return None
-        media = channel_media(message)
+        media = channel_media(message, group_id=group, channel_id=inbound.channel_id, root_id=root)
         if self._files is None or not media.files:
             return media
         return await self._files.resolve(media, group_id=group)

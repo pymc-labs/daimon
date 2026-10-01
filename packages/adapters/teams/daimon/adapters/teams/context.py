@@ -108,21 +108,36 @@ def _files(message: GraphMessage) -> list[SharedFile]:
     ]
 
 
-def channel_media(message: GraphMessage) -> ChannelMedia:
-    """The hosted images (Graph URLs only) and shared files on one message."""
+def channel_media(
+    message: GraphMessage, *, group_id: str, channel_id: str, root_id: str
+) -> ChannelMedia:
+    """The message's own hosted images (on Graph) and its shared files.
+
+    An `<img>` is fetched with the app's token, so only this message's hosted
+    content qualifies, never another team's or message's.
+    """
     images: tuple[str, ...] = ()
     if message.body.content_type == "html":
+        prefix = f"/v1.0/teams/{group_id}/channels/{channel_id}/messages/{root_id}"
+        if message.id != root_id:
+            prefix += f"/replies/{message.id}"
         hosted = (src for src in _parse_html(message.body.content or "").images)
-        images = tuple(src for src in hosted if _is_hosted_content(src))
+        images = tuple(
+            src for src in hosted if _is_hosted_content(src, f"{prefix}/hostedContents/")
+        )
     return ChannelMedia(image_urls=images, files=tuple(_files(message)))
 
 
-def _is_hosted_content(src: str) -> bool:
+def _is_hosted_content(src: str, prefix: str) -> bool:
     try:
         url = httpx.URL(src)
     except httpx.InvalidURL:
         return False
-    return is_graph_url(url) and "/hostedContents/" in url.path and url.path.endswith("/$value")
+    path = url.path  # decoded, as the ids in `prefix` are
+    if not is_graph_url(url) or not path.casefold().startswith(prefix.casefold()):
+        return False
+    content_id, _, tail = path[len(prefix) :].partition("/")
+    return bool(content_id) and tail == "$value"
 
 
 def _render(message: GraphMessage, *, bot_app_id: str) -> list[str]:
