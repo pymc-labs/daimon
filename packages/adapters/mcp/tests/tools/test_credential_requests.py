@@ -2560,7 +2560,7 @@ async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9305", posted=posted)
 
-    with pytest.raises(ToolError, match="admin"):
+    with pytest.raises(ToolError, match="admin") as caught:
         await _request_agent_key_impl(
             runtime,
             auth,
@@ -2571,5 +2571,6 @@ async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
             purpose="a GitHub token",
             channel_id="222",
         )
+    assert "adding 'GITHUB_TOKEN' would replace 'GH_TOKEN'" in str(caught.value)
     assert await _row_count(db_session) == 0
     assert posted == {}

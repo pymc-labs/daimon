@@ -196,17 +196,20 @@ _MEMBER_ALLOW_SUFFIXES: Final[tuple[str, ...]] = (
 )
 #: Suffixes a member never writes: a value under them points the agent's own
 #: tooling somewhere else.
-#: ``*_CLIENT_KEY`` / ``ETCDCTL_KEY`` end in ``_KEY`` but name a TLS key *file*
-#: the tool opens, not a secret value. ``*_FILE`` names a path for the same
-#: reason; it never ends in a secret suffix, so it is admin-only by
-#: construction, and listed here to make that explicit. The ``*_FILE`` names
-#: that make a tool EXECUTE the file are hard-denied instead.
+#: ``*_CLIENT_KEY``, ``*_SSL_KEY``, ``*_TLS_KEY`` and ``ETCDCTL_KEY`` end in
+#: ``_KEY`` but name a TLS key *file* the tool opens, not a secret value.
+#: ``*_FILE`` names a path for the same reason; it never ends in a secret
+#: suffix, so it is admin-only by construction, and listed here to make that
+#: explicit. The ``*_FILE`` names that make a tool EXECUTE the file are
+#: hard-denied instead.
 _MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = (
     "_URL",
     "_HOST",
     "_URI",
     "_ENDPOINT",
     "_CLIENT_KEY",
+    "_SSL_KEY",
+    "_TLS_KEY",
     "_FILE",
 )
 _MEMBER_DENY_EXACT: Final[frozenset[str]] = frozenset({"ETCDCTL_KEY"})
@@ -387,6 +390,8 @@ _HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
         "GODEBUG",
         "FCEDIT",
         "ANSIBLE_VAULT_PASSWORD_FILE",
+        "VIMINIT",
+        "EXINIT",
     }
 )
 #: HARD DENY prefixes.
@@ -581,9 +586,14 @@ def env_name_member_writable(name: str) -> bool:
 #: REPLACEMENT of the held one, and goes through the replacement gate.
 _ALIAS_GROUPS: Final[tuple[frozenset[str], ...]] = (
     frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
-    frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}),
-    frozenset({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}),
+    frozenset({"GITLAB_TOKEN", "GLAB_TOKEN"}),
+    frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}),
+    frozenset(
+        {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}
+    ),
     frozenset({"OPENAI_API_KEY", "OPENAI_KEY"}),
+    frozenset({"FLY_API_TOKEN", "FLY_ACCESS_TOKEN"}),
+    frozenset({"NPM_TOKEN", "NODE_AUTH_TOKEN"}),
     frozenset({"GOOGLE_API_KEY", "GEMINI_API_KEY"}),
     frozenset({"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}),
 )

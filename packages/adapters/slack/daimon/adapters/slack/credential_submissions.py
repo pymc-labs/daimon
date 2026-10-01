@@ -436,11 +436,29 @@ async def run_env_credential_submission(
             consumed = await credential_requests_store.consume_credential_request(
                 session, token=token, now=now
             )
+            # Re-read under the write: an alias that appeared after the gate
+            # above was decided was never put to it.
+            appeared = (
+                consumed is not None
+                and shadowed is None
+                and env_alias_shadowed(
+                    consumed.target,
+                    await list_turn_key_names(
+                        session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                    ),
+                )
+                is not None
+            )
             if consumed is not None and refuse_replacement:
                 await credential_requests_store.set_credential_request_outcome(
                     session, token=token, outcome="write_failed"
                 )
                 state = "refused"
+            elif consumed is not None and appeared:
+                await credential_requests_store.set_credential_request_outcome(
+                    session, token=token, outcome="stale_replacement"
+                )
+                state = "superseded"
             elif consumed is not None:
                 written = await put_agent_file_if_unchanged(
                     session,
@@ -494,14 +512,20 @@ async def run_env_credential_submission(
 
     if state == "refused":
         await edit_posted_card(
-            client, row=consumed, state="refused", refusal="replacement_admin_required"
+            client,
+            row=consumed,
+            state="refused",
+            refusal="replacement_admin_required",
+            replaces=shadowed,
         )
         await post_ephemeral(
             client,
             thread_ts=thread_ts,
             channel_id=channel_id,
             user_id=user_id,
-            text=refusal_text(consumed, state="refused", refusal="replacement_admin_required"),
+            text=refusal_text(
+                consumed, state="refused", refusal="replacement_admin_required", replaces=shadowed
+            ),
         )
         return
     if state == "superseded":

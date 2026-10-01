@@ -354,12 +354,21 @@ def _refusal_content(
     target: str,
     repo_display: str,
     refusal_lines: Sequence[str],
+    replaces: str | None = None,
 ) -> tuple[str, ...]:
     if refusal == "admin_required":
         return (
             f"🛡️ {agent_name}'s working repo was not changed.",
             f"An admin can ask {responder_name} to give {agent_name} access to {repo_display}.",
             "Nothing was saved.",
+        )
+    if refusal == "replacement_admin_required" and replaces is not None:
+        return (
+            f"🛡️ {target} was not added for {agent_name}.",
+            f"Adding {target} would replace {replaces}, which {agent_name}'s tools already "
+            f"read as the same credential. An admin can ask {responder_name} to replace "
+            f"{replaces} on {agent_name}.",
+            f"The existing {replaces} is unchanged.",
         )
     if refusal == "replacement_admin_required":
         return (
@@ -416,13 +425,15 @@ def build_posted_card(
     outcome: ConfigurationChange | None = None,
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
+    replaces: str | None = None,
 ) -> PostedCard:
     """Build the card for one posted control in one state.
 
     `target` is the per-kind subject the request row already carries: the key
     name for `env`, the server name for `mcp`, `owner/repo` for the two repo
     kinds (`repo` overrides it for display when the row holds a full URL), and
-    nothing meaningful for `env_file`.
+    nothing meaningful for `env_file`. `replaces` names the held key an `env`
+    alias would have retargeted, for a `replacement_admin_required` refusal.
 
     Raises `ValueError` for a combination that cannot exist: an outcome state
     without an `outcome`, a `refused` state without a `refusal`, an `mcp`
@@ -493,6 +504,7 @@ def build_posted_card(
             target=target,
             repo_display=repo_display,
             refusal_lines=refusal_lines,
+            replaces=replaces,
         )
     else:
         lines = _superseded_content(
@@ -509,6 +521,7 @@ def card_for_request(
     outcome: ConfigurationChange | None = None,
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
+    replaces: str | None = None,
 ) -> PostedCard:
     """The card for one request row in `state`, rebuilt from the row alone.
 
@@ -534,4 +547,5 @@ def card_for_request(
         outcome=outcome,
         refusal=refusal,
         refusal_lines=refusal_lines,
+        replaces=replaces,
     )

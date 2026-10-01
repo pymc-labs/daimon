@@ -2690,6 +2690,52 @@ async def test_adding_an_alias_of_a_held_key_is_a_replacement_for_the_gate(
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
     assert persisted is not None and persisted.outcome == "write_failed"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN was not added" in card, "the card says the new key was not added"
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in card, "and names both keys"
+    assert "GH_TOKEN was not replaced" not in card
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in _sent_message(interaction)
+
+
+async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias read before the gate is repeated inside the write transaction."""
+    import daimon.adapters.discord.credential_modals as modals_mod
+
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    real = modals_mod.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # The pre-transaction read: nothing held yet.
+            return ()
+        # Someone stored GH_TOKEN in between; the second read is the real one.
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(modals_mod, "list_turn_key_names", first_read_misses_the_alias)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_card_interaction())
+
+    assert calls == 2, "the alias must be re-read under the write"
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement"
 
 
 async def test_env_file_import_refuses_an_alias_of_a_held_key_and_names_both(

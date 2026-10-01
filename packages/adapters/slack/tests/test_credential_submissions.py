@@ -1943,3 +1943,43 @@ async def test_env_submission_alias_of_a_held_key_needs_the_replacement_gate(
         request_row = await peek_credential_request(s, token=token)
     assert [r["key"] for r in rows] == ["ANTHROPIC_API_KEY"], "the alias must not be stored"
     assert request_row is not None and request_row.outcome == "write_failed"
+    edit = _chat_updates(fake_slack_web_client)[-1]
+    assert "Adding ANTHROPIC_AUTH_TOKEN would replace ANTHROPIC_API_KEY" in json.dumps(edit), (
+        "the card names both keys"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_refuses_an_alias_of_a_held_key_and_names_both(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        key="GH_TOKEN",
+        content="the-value-in-use",
+        set_by_account_id=None,
+    )
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+    assert [r["key"] for r in rows] == ["GH_TOKEN"], (
+        "an import that shadows a held key writes nothing"
+    )
+    edit = json.dumps(_chat_updates(fake_slack_web_client)[-1])
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in edit, "the refusal names both keys"
+    assert "secret-b" not in edit, "no value on the card"

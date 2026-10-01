@@ -705,3 +705,30 @@ def test_skip_reason_is_the_assemblers_rule() -> None:
     assert env_row_skip_reason("TAR_OPTIONS", "v") == "reserved_name"
     assert env_row_skip_reason("A-B", "v") == "bad_name"
     assert env_row_skip_reason("API_KEY", "a\0b") == "nul_in_value"
+
+
+@pytest.mark.parametrize("name", ["VIMINIT", "EXINIT"])
+def test_editor_init_commands_are_hard_denied(name: str) -> None:
+    assert env_name_hard_denied(name)
+
+
+@pytest.mark.parametrize("name", ["POSTGRES_SSL_KEY", "MQTT_TLS_KEY"])
+def test_tls_key_file_names_are_admin_only(name: str) -> None:
+    assert not env_name_hard_denied(name)
+    assert env_name_problem(name, is_admin=False) == "not_credential_name"
+    assert env_name_problem(name, is_admin=True) is None
+
+
+@pytest.mark.parametrize(
+    ("adding", "held"),
+    [
+        ("AWS_SECURITY_TOKEN", "AWS_SESSION_TOKEN"),
+        ("GLAB_TOKEN", "GITLAB_TOKEN"),
+        ("FLY_ACCESS_TOKEN", "FLY_API_TOKEN"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        ("NODE_AUTH_TOKEN", "NPM_TOKEN"),
+    ],
+)
+def test_more_alias_groups(adding: str, held: str) -> None:
+    assert env_alias_shadowed(adding, [held]) == held
+    assert env_alias_shadowed(held, [adding]) == adding

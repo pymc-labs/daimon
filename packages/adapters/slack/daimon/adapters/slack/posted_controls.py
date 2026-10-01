@@ -44,6 +44,7 @@ async def edit_posted_card(
     outcome: ConfigurationChange | None = None,
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
+    replaces: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -58,7 +59,12 @@ async def edit_posted_card(
     if row.posted_message_id is None:
         return
     card = card_for_request(
-        row, state=state, outcome=outcome, refusal=refusal, refusal_lines=refusal_lines
+        row,
+        state=state,
+        outcome=outcome,
+        refusal=refusal,
+        refusal_lines=refusal_lines,
+        replaces=replaces,
     )
     try:
         await client.chat_update(  # pyright: ignore[reportUnknownMemberType]

@@ -1228,3 +1228,62 @@ async def test_self_write_file_refuses_every_non_secret_name(
     auth = _auth_identity()
     with pytest.raises(ToolError, match=match):
         await _self_write_file_impl(runtime, auth, key=key, content="v")
+
+
+async def test_self_write_file_never_replaces_a_stored_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent key is a member: it adds keys, it never overwrites one a person set."""
+    from daimon.core.stores.agent_files import get_agent_file, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match="already set"):
+        await _self_write_file_impl(runtime, auth, key="CRM_TOKEN", content="attacker")
+
+    async with committing_sessionmaker() as session:
+        row = await get_agent_file(session, tenant_id=tenant_id, agent_id=agent_id, key="CRM_TOKEN")
+    assert row is not None and row.content == "the-value-in-use", "the stored value is untouched"
+
+
+@pytest.mark.parametrize(
+    ("held", "adding"),
+    [("GH_TOKEN", "GITHUB_TOKEN"), ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")],
+)
+async def test_self_write_file_never_adds_an_alias_of_a_held_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], held: str, adding: str
+) -> None:
+    from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key=held,
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match=f"Adding {adding} would replace {held}"):
+        await _self_write_file_impl(runtime, auth, key=adding, content="attacker")
+
+    async with committing_sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert [r.key for r in rows] == [held], "the alias must not be stored"

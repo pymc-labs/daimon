@@ -31,14 +31,14 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.stores.agent_files import (
     delete_agent_file,
     get_agent_file,
     list_agent_files,
-    put_agent_file,
+    put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import (
     clear_binding,
@@ -46,6 +46,7 @@ from daimon.core.stores.agent_repo_binding import (
     set_binding,
 )
 from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, RepoAccessProof
+from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -161,16 +162,41 @@ async def _self_write_file_impl(
             f"{MEMBER_SECRET_SUFFIX_HINT}; identity, account, region and URL names "
             "need an admin to add them through a form."
         )
+    # Add-only, like a member's form: an agent key never overwrites a stored
+    # key (the replacement gate is for people) and never adds a name a tool
+    # reads as one already held (GH_TOKEN beside GITHUB_TOKEN). The alias
+    # read and the insert share one transaction, so neither can slip in
+    # between them.
     try:
         async with runtime.session_factory.begin() as session:
-            row = await put_agent_file(
+            shadowed = (
+                env_alias_shadowed(
+                    key,
+                    await list_turn_key_names(session, tenant_id=auth.tenant_id, agent_id=agent_id),
+                )
+                if key
+                else None
+            )
+            if shadowed is not None:
+                raise ToolError(
+                    f"Adding {key} would replace {shadowed}, which this agent's tools "
+                    "already read as the same credential. Nothing was saved. Ask a "
+                    f"person to replace {shadowed} through a form."
+                )
+            row = await put_agent_file_if_unchanged(
                 session,
                 tenant_id=auth.tenant_id,
                 agent_id=agent_id,
                 key=key,
                 content=content,
                 set_by_account_id=auth.account_id,
+                expected_updated_at=None,
             )
+            if row is None:
+                raise ToolError(
+                    f"{key} is already set, and an agent cannot replace a stored key. "
+                    f"Nothing was saved. Ask a person to replace {key} through a form."
+                )
     except StoreError as e:
         logger.warning(
             "self_write_file outcome=store_error agent=%s key=%s",
@@ -563,9 +589,12 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key: str,
         content: str,
     ) -> AgentFileRow:
-        """Write or overwrite a per-agent file under `key`.
+        """Add a per-agent key under `key`. Add-only: never replaces a stored key.
 
         Stored in your private agent_files namespace; isolated from other agents.
+        A key that is already set, or a name your tools read as the same
+        credential as one already set (`GITHUB_TOKEN` beside `GH_TOKEN`), is
+        refused; a person replaces those through a form.
         Every entry is exported into your sandbox's `.env`, so `key` must be a
         credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
         `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and

@@ -232,7 +232,11 @@ def _text_input_of[ModalT: discord.ui.Modal](
 
 
 def _env_card_text(
-    row: CredentialRequestRow, *, state: CardState, refusal: RefusalReason | None = None
+    row: CredentialRequestRow,
+    *,
+    state: CardState,
+    refusal: RefusalReason | None = None,
+    replaces: str | None = None,
 ) -> str:
     """The words the env card itself now carries, for the ephemeral to repeat.
 
@@ -251,6 +255,7 @@ def _env_card_text(
             expires_at=row.expires_at,
             token=row.token,
             refusal=refusal,
+            replaces=replaces,
         )
     )
 
@@ -531,11 +536,27 @@ class EnvCredentialModal(discord.ui.Modal):
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
                 outcome: CredentialRequestOutcome = "applied"
+                # Re-read under the write: an alias that appeared after the
+                # gate above was decided was never put to it.
+                appeared = shadowed is None and (
+                    env_alias_shadowed(
+                        consumed_row.target,
+                        await list_turn_key_names(
+                            session,
+                            tenant_id=consumed_row.tenant_id,
+                            agent_id=consumed_row.agent_id,
+                        ),
+                    )
+                    is not None
+                )
                 if replacement != "allow":
                     # The card promised a replacement this person may no
                     # longer make. Spend the request, write nothing.
                     state = "refused"
                     outcome = "write_failed"
+                elif appeared:
+                    state = "superseded"
+                    outcome = "stale_replacement"
                 else:
                     # The precondition IS the card's promise: `None` for a
                     # key the card said was unset, the exact `updated_at` for
@@ -588,9 +609,15 @@ class EnvCredentialModal(discord.ui.Modal):
                 row=consumed_row,
                 state="refused",
                 refusal="replacement_admin_required",
+                replaces=shadowed,
             )
             await interaction.followup.send(
-                _env_card_text(consumed_row, state="refused", refusal="replacement_admin_required"),
+                _env_card_text(
+                    consumed_row,
+                    state="refused",
+                    refusal="replacement_admin_required",
+                    replaces=shadowed,
+                ),
                 ephemeral=True,
             )
             return

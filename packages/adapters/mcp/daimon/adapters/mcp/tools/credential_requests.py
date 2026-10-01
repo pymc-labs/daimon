@@ -252,8 +252,12 @@ async def _require_key_replacement_allowed(
     *,
     ma_agent: BetaManagedAgentsAgent,
     key: str,
+    adding: str | None = None,
 ) -> None:
     """Raise before the mint when this caller may not replace an existing key.
+
+    `adding` is set when `key` is not being overwritten but shadowed: a
+    different name (`adding`) the same tool reads as `key`.
 
     `key_replace` is an attachment operation: an admin is allowed on any
     target (that is the first-run onboarding step), a non-admin is refused on
@@ -278,6 +282,15 @@ async def _require_key_replacement_allowed(
         is_admin=auth.is_admin,
         target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
     )
+    if outcome in ("managed_agent", "needs_admin") and adding is not None:
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
+            f"would replace '{key}', which its tools already read as the same "
+            "credential. That needs a server or workspace admin, and the caller is not "
+            f"one. Nothing changed: the existing '{key}' is still in use and no card "
+            f"was posted. Tell them an admin can ask Daimon to replace '{key}' on "
+            f"'{ma_agent.name}'. Do not ask anyone for the value here and do not retry."
+        )
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
@@ -580,7 +593,7 @@ async def _request_agent_key_impl(
             shadowed = env_alias_shadowed(key, held)
             if shadowed is not None:
                 await _require_key_replacement_allowed(
-                    runtime, auth, ma_agent=ma_agent, key=shadowed
+                    runtime, auth, ma_agent=ma_agent, key=shadowed, adding=key
                 )
     return await _mint_and_post(
         runtime,
