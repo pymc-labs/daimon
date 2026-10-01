@@ -25,6 +25,7 @@ from daimon.core.agent_pins import (
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.stores import credential_requests as store
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
+from daimon.core.stores.agent_files import lock_agent_keys, put_agent_file_if_unchanged
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
@@ -291,3 +292,48 @@ async def test_consumes_of_different_forms_both_land(
 
     results = await asyncio.wait_for(asyncio.gather(consume(first), consume(second)), 10)
     assert all(r is not None and r.used_at is not None for r in results)
+
+
+async def test_consume_does_not_deadlock_with_a_key_writer(
+    db_session: AsyncSession, race_engine: AsyncEngine
+) -> None:
+    # An env consume takes the policy lock, then the agent's key lock; an agent
+    # writing its own file takes the key lock, then inserts a row keyed to the
+    # tenant. The policy lock must not block that insert's foreign-key check.
+    row = await _seed(db_session)
+    factory = async_sessionmaker(race_engine, expire_on_commit=False)
+    consumer_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    writer_locked = asyncio.Event()
+    writer_go = asyncio.Event()
+
+    async def self_write() -> None:
+        async with factory.begin() as session:
+            await lock_agent_keys(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+            writer_locked.set()
+            await writer_go.wait()
+            await put_agent_file_if_unchanged(
+                session,
+                tenant_id=row.tenant_id,
+                agent_id=row.agent_id,
+                key="OTHER_TOKEN",
+                content="x",
+                set_by_account_id=row.account_id,
+                expected_updated_at=None,
+            )
+
+    async def env_consume() -> CredentialRequestRow | None:
+        async with factory.begin() as session:
+            consumer_pid.set_result(await _pid(session))
+            consumed = await consume_form_unless_pinned(
+                session, row=row, agent=_AGENT, now=datetime.now(UTC)
+            )
+            await lock_agent_keys(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+            return consumed
+
+    writing = asyncio.create_task(self_write())
+    await writer_locked.wait()
+    consuming = asyncio.create_task(env_consume())
+    await _until_lock_wait(race_engine, await consumer_pid)
+    writer_go.set()
+    _, consumed = await asyncio.wait_for(asyncio.gather(writing, consuming), 15)
+    assert consumed is not None and consumed.used_at is not None
