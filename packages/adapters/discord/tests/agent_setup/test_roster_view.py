@@ -665,7 +665,6 @@ async def test_concurrent_details_clicks_keep_each_render_bound_to_its_agent(
         coding_targets.append(agent)
 
     monkeypatch.setattr(details_view_module, "open_setup_conversation", capture_setup)
-    monkeypatch.setattr(details_view_module, "is_guild_admin", lambda _interaction: True)
     monkeypatch.setattr(details_view_module, "send_coding_tools_access", capture_coding_tools)
 
     interactions = {name: _clicker(responded=True) for name in ("A", "B")}
