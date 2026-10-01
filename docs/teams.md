@@ -74,6 +74,7 @@ and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
+There are no channel admins: only the listed admins administer a channel.
 
 ### Files
 
