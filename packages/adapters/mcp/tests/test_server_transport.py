@@ -17,8 +17,10 @@ from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
 from daimon.testing.factories import make_account, make_tenant
+from fastmcp import Context, FastMCP
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.applications import Starlette
 from starlette.types import ASGIApp
 
 from .harness import make_jwt
@@ -32,7 +34,7 @@ _SEARCH: dict[str, object] = {
 }
 
 
-def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
+def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> Starlette:
     return create_mcp_app(
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
@@ -82,22 +84,50 @@ async def test_a_call_on_another_instance_with_its_session_id_succeeds(
         assert {"search_tools", "call_tool"} <= tools, "the request must be served in full"
 
 
-async def test_admin_visibility_is_rederived_per_request_without_a_session(
+async def test_admin_visibility_does_not_carry_over_on_a_shared_session_id(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Visibility rules live in session state; stateless, each request must
-    # enable them itself, and an admin's must not reach a member's request.
+    # fastmcp keys the visibility rules by the client's session id header: an
+    # admin's request on it must not widen a member's later request on it.
     admin, member = await _tokens(sessionmaker)
     app = _app(sessionmaker)
 
-    async def found(token: str, session_id: str) -> str:
-        headers = {**INIT_HEADERS, "Authorization": f"Bearer {token}", "Mcp-Session-Id": session_id}
+    async def found(token: str) -> str:
+        headers = {**INIT_HEADERS, "Authorization": f"Bearer {token}", "Mcp-Session-Id": "shared"}
         response = await c.post("/mcp", json=_SEARCH, headers=headers)
         assert response.status_code == 200, response.text
         return str(parse_jsonrpc_response(response)["result"])
 
     async with _client(app) as c:
-        admin_result = await found(admin, "s-admin")
-        member_result = await found(member, "s-member")
+        admin_result = await found(admin)
+        member_result = await found(member)
     assert "archive_agent" in admin_result, "an admin finds admin tools with no initialize"
-    assert "archive_agent" not in member_result, "a member never sees admin tools"
+    assert "archive_agent" not in member_result, "a member never sees an earlier admin's tools"
+
+
+async def test_visibility_rules_do_not_accumulate_on_a_resent_session_id(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    admin, _ = await _tokens(sessionmaker)
+    app = _app(sessionmaker)
+    mcp: FastMCP = app.state.mcp
+
+    @mcp.tool
+    async def count_visibility_rules(ctx: Context) -> int:  # pyright: ignore[reportUnusedFunction]
+        # fastmcp's own state key for the rules enable_components appends.
+        return len(await ctx.get_state("_visibility_rules") or [])
+
+    call: dict[str, object] = {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {"name": "count_visibility_rules", "arguments": {}},
+    }
+    headers = {**INIT_HEADERS, "Authorization": f"Bearer {admin}", "Mcp-Session-Id": "resent"}
+    counts: list[int] = []
+    async with _client(app) as c:
+        for _ in range(3):
+            response = await c.post("/mcp", json=call, headers=headers)
+            assert response.status_code == 200, response.text
+            counts.append(response.json()["result"]["structuredContent"]["result"])
+    assert counts[0] == counts[1] == counts[2], f"rules must not pile up per request: {counts}"
