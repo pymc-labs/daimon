@@ -39,7 +39,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
+    make_account,
     make_channel_budget,
+    make_dm_conversation,
     make_ledger_entry,
     make_tenant,
     make_tenant_config,
@@ -1291,6 +1293,99 @@ async def test_start_dm_refuses_to_move_an_isolated_conversation(
             source_channel_id="chan-1",
             context=[],
         )
+
+
+async def test_a_dm_moved_out_of_an_isolated_channel_leaves_its_agent_inside(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A DM started from C before it was isolated, then moved to another channel,
+    must not take C's agent out of C."""
+    from daimon.core.channel_isolation import load_channel_isolation
+    from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
+
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
+    )
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    await _answer_in(db_session, tenant, "dm-1", "own")
+    account = await make_account(db_session, tenant=tenant)
+    await make_dm_conversation(
+        db_session,
+        tenant=tenant,
+        account_id=account.id,
+        route_key="dm-1",
+        scope_id="dm:old",
+        source_channel_id="chan-1",
+    )
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="dm-1",
+        thread_id="dm:old",
+        responder_ma_agent_id="ag_own",
+        responder_name="own",
+        kind="handoff",
+    )
+    await db_session.commit()
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    moving = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="u1",
+        channel_id="chan-2",
+        now=_NOW,
+        role=Role.USER,
+        is_dm=True,
+        dm_source_channel_id="chan-2",
+    )
+
+    await start_dm(
+        deps,
+        moving,
+        tenant_id=tenant.id,
+        platform="discord",
+        workspace_id="g1",
+        route_key="dm-1",
+        channel_id="dm-1",
+        external_user_id="u1",
+        source_url="https://example.invalid/chan-2",
+        source_channel_id="chan-2",
+        context=[],
+    )
+
+    async with db_session_factory() as session:
+        isolation = await load_channel_isolation(
+            session, tenant_id=tenant.id, default=DeploymentDefault()
+        )
+        old = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="dm-1",
+            thread_id="dm:old",
+        )
+    assert isolation.channel_of("own") == "chan-1", "the moved DM no longer counts for 'own'"
+    assert old is not None and old.deleted, "the move retires the old scope's binding"
+    own_router = resolved_agent_env_router(
+        ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    admission = await admit(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=own_router),
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="u2",
+        channel_id="chan-1",
+        now=_NOW,
+        role=Role.USER,
+    )
+    assert admission.agent.id == "ag_own", "turns in the isolated channel still answer"
 
 
 @pytest.mark.parametrize(

@@ -27,7 +27,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_agent_bindings import create_binding, retire_dm_scopes
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -71,8 +71,8 @@ async def start_dm(
     Caller admits the source with is_dm=True and `dm_source_channel_id` before
     reading history or opening the DM. `source_channel_id` is the parent
     channel `/dm` ran in; the DM's turns count toward its budget. Each move
-    resets the private scope; a prior workspace's physical DM history is never
-    replayed into this one.
+    resets the private scope and retires the old one's binding; a prior
+    workspace's physical DM history is never replayed into this one.
     """
     await require_dm_enabled(deps, tenant_id=tenant_id)
     if admission.isolated:
@@ -120,6 +120,13 @@ async def start_dm(
             responder_name=admission.agent.name,
             creator_account_id=admission.account_id,
             kind="handoff",
+        )
+        await retire_dm_scopes(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            dm_channel_id=channel_id,
+            keep_scope_id=scope_id,
         )
     return conversation
 

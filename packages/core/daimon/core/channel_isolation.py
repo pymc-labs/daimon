@@ -3,8 +3,9 @@
 A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`).
 C's *own agents* are those whose reach stays inside C
 (`daimon.core.agent_reach.AgentReach.stays_inside`): the channel default and
-handed-over threads under C, never the tenant default, and a DM with no
-recorded source counts as outside C. While C is isolated they may not be bound
+handed-over threads under C, never the tenant default. A live DM counts as
+the channel it was started from, outside C without one; a superseded DM scope
+answers nowhere and counts nowhere. While C is isolated they may not be bound
 anywhere else, they are invisible from outside C, and from inside C only
 they are visible. A call is *inside C* when it runs in C or its threads, or
 when the agent executing it is C-local. Everything else is outside every
@@ -180,7 +181,6 @@ def build_channel_isolation(
             thread_parent_channel_ids=thread_parent_channel_ids.get(name, ()),
             dm_origins=dm_origins,
             dm_bindings=dm_bindings,
-            unmapped_dms_outside=True,
         )
         if reach.places or reach.thread_parent_channel_ids:
             answering.add(name)

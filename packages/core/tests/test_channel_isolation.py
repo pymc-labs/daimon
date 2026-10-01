@@ -155,8 +155,8 @@ def test_routines_deliver_only_on_their_agents_side() -> None:
     assert not isolation.keeps_routine_inside(_routine("shared", "c2"))
 
 
-def test_a_dm_without_a_source_takes_an_agent_out_of_its_channel() -> None:
-    def owner(*, source: str | None) -> str | None:
+def test_only_a_live_dm_counts_toward_an_agents_channel() -> None:
+    def owner(*, source: str | None, bound_scope: str = "dm:1") -> str | None:
         return build_channel_isolation(
             {"c1"},
             tenant=None,
@@ -164,11 +164,14 @@ def test_a_dm_without_a_source_takes_an_agent_out_of_its_channel() -> None:
             default=DEFAULT,
             thread_parent_channel_ids={},
             dm_origins=[DmOrigin(channel_id="dm1", scope_id="dm:1", source_channel_id=source)],
-            dm_bindings=[("dm1", "dm:1", "local")],
+            dm_bindings=[("dm1", bound_scope, "local")],
         ).channel_of("local")
 
     assert owner(source="c1") == "c1", "a DM started from the channel is inside it"
-    assert owner(source=None) is None, "an unmapped DM counts as outside the channel"
+    assert owner(source=None) is None, "a live DM without a source counts as outside"
+    assert owner(source="c2", bound_scope="dm:old") == "c1", (
+        "a DM since moved elsewhere no longer answers, so it counts nowhere"
+    )
 
 
 def test_a_viewer_sees_only_its_side_of_the_routing() -> None:

@@ -231,7 +231,11 @@ async def list_handoff_threads(
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[str, str, str]]:
-    """`(dm_channel_id, scope_id, responder_name)` of every private conversation scope."""
+    """`(dm_channel_id, scope_id, responder_name)` of every private conversation scope.
+
+    `start_dm` retires a conversation's old scope when it moves, so this stays
+    about one row per DM channel. A row also marks its channel as a DM.
+    """
     rows = await session.execute(
         select(
             ThreadAgentBinding.parent_channel_id,
@@ -244,6 +248,30 @@ async def list_dm_bindings(
         )
     )
     return [(parent, scope, responder) for parent, scope, responder in rows.tuples()]
+
+
+async def retire_dm_scopes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    dm_channel_id: str,
+    keep_scope_id: str,
+) -> None:
+    """Retire a DM channel's private scopes but `keep_scope_id`, the one a move just started."""
+    await session.execute(
+        update(ThreadAgentBinding)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.platform == platform,
+            ThreadAgentBinding.parent_channel_id == dm_channel_id,
+            ThreadAgentBinding.thread_id.like(f"{DM_SCOPE_PREFIX}%"),
+            ThreadAgentBinding.thread_id != keep_scope_id,
+            ThreadAgentBinding.deleted.is_(False),
+        )
+        .values(deleted=True, updated_at=func.now())
+    )
+    await session.flush()
 
 
 async def update_target(

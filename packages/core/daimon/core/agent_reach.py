@@ -119,17 +119,13 @@ def build_agent_reach(
     grants: Sequence[ChannelAdminsRow] = (),
     dm_origins: Sequence[DmOrigin] = (),
     dm_bindings: Iterable[tuple[str, str, str]] = (),
-    unmapped_dms_outside: bool = False,
 ) -> AgentReach:
     """`grants` are the tenant's channel admin rows, read for requesters' rights.
 
     `dm_bindings` are the tenant's `(dm_channel_id, scope_id, responder_name)` rows.
 
     A place in a DM channel, or a `dm:` scope bound to the agent, counts as the
-    live conversation's source channel, and not at all without one. With
-    `unmapped_dms_outside` (channel isolation) one without a source counts as
-    the DM channel itself, a place outside every channel, so an agent still
-    bound in an old DM is never taken for one channel's own.
+    live conversation's source channel, and not at all without one.
     """
     dm_bindings = tuple(dm_bindings)
     by_channel = {dm.channel_id: dm.origin for dm in dm_origins}
@@ -139,15 +135,14 @@ def build_agent_reach(
     for place in answering_places(agent_name, tenant=tenant, channels=channels, default=default):
         if place.channel_id in dm_channels:
             origin = by_channel.get(place.channel_id)
-            if origin is None and not unmapped_dms_outside:
+            if origin is None:
                 continue
-            if origin is not None:
-                place = AnsweringPlace(tier="channel", channel_id=origin)
+            place = AnsweringPlace(tier="channel", channel_id=origin)
         places[place] = None
     dm_parents = {
-        by_scope.get(scope, channel)
-        for channel, scope, responder in dm_bindings
-        if responder == agent_name and (scope in by_scope or unmapped_dms_outside)
+        by_scope[scope]
+        for _, scope, responder in dm_bindings
+        if responder == agent_name and scope in by_scope
     }
     return AgentReach(
         agent_name=agent_name,
