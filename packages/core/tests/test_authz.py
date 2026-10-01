@@ -2,8 +2,8 @@
 
 Each row names the guard it pins from `formal/access_control/AccessControl.tla`
 (`G_*`), so a rule that drifts from the model fails here by name. Rows record
-the rules as they stand on main; the model's still-open gaps (action-time
-re-checks, the report-reader variant) are not encoded here.
+the rules as they stand on main. Action-time re-checks are covered where they
+happen (`tests/turn/test_reauthorize.py`, the OAuth callback and publish tests).
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ INVOKERS = TenantAccessPolicy(invoker_user_ids=("U_OK",))
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
 BEARER = Subject(is_admin=True, platform_user_id=None)
+AGENT_KEY_ADMIN = Subject(is_admin=True, platform_user_id="U_ADM", via_agent_key=True)
+READER = AgentRef.of("acme-reader", "acme-reader", "acme")
 ACME = AgentRef.of("acme", "acme")
 ACME_DISPLAY = AgentRef.of("acme-config", "Acme Display", "acme-config")
 INSIDE = Place(channel_id="C_ACME", parent_channel_id="C_ACME")
@@ -349,6 +351,116 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         SEALED,
         {"subject": MEMBER, "action": Action.READ_SESSION, "session": SessionFacts()},
         ALLOW,
+    ),
+    # --- Agent keys are never exempt as admins, whoever minted them ---
+    (
+        "G_selfedit_gate admin's agent key configuring a pinned agent",
+        PINNED,
+        {
+            "subject": AGENT_KEY_ADMIN,
+            "action": Action.CONFIGURE,
+            "surface": Surface.CONFIG,
+            "agent": ACME,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "admin_trust admin's agent key on the hub is held to the pin",
+        PINNED,
+        {
+            "subject": AGENT_KEY_ADMIN,
+            "action": Action.RUN_AGENT,
+            "surface": Surface.HUB,
+            "agent": ACME,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "G_fork_admin an admin's agent key cannot fork",
+        TenantAccessPolicy(),
+        {"subject": AGENT_KEY_ADMIN, "action": Action.FORK, "agent": ACME},
+        _deny("admin_required"),
+    ),
+    # --- G_pin_report_reader: a reader variant carries its source's names ---
+    (
+        "G_pin_report_reader a pinned agent's reader off-channel",
+        PINNED,
+        {
+            "subject": MEMBER,
+            "action": Action.RUN_AGENT,
+            "surface": Surface.AGENT_CHAT,
+            "agent": READER,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    # --- Session reads (G_seal_session_read, admin trust model) ---
+    (
+        "admin_trust admin reads another account's sealed channel session from the hub",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
+        },
+        ALLOW,
+    ),
+    (
+        "admin_trust admin never reads another member's private DM",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="D123", owned=False, private=True),
+        },
+        _deny("not_owner"),
+    ),
+    (
+        "admin_trust admin reads their OWN sealed DM-shaped session from the hub",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(
+                channel="D123", owned=True, private=True, seal_ids=frozenset({"C_SEAL"})
+            ),
+        },
+        ALLOW,
+    ),
+    (
+        "admin_trust admin never continues a sealed channel session",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.CONTINUE_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"})),
+        },
+        _deny("sealed"),
+    ),
+    (
+        "G_seal_session_read member never reads another account's session",
+        TenantAccessPolicy(),
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_OPEN", owned=False),
+        },
+        _deny("not_owner"),
+    ),
+    (
+        "admin_trust an admin's agent key gets no hub read exemption",
+        SEALED,
+        {
+            "subject": AGENT_KEY_ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
+        },
+        _deny("not_owner"),
     ),
 ]
 

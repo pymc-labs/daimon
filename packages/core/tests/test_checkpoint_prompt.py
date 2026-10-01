@@ -15,7 +15,6 @@ from daimon.core.checkpoint_prompt import (
     HANDOFF_MAX_BYTES,
     HANDOFF_TOO_LARGE_MARKER,
     build_checkpoint_prompt,
-    checkpoint_archive_listed,
     checkpoint_head_lines,
     checkpoint_too_large_bytes,
     handoff_filename,
@@ -216,19 +215,6 @@ def test_checkpoint_head_lines_returns_none_rather_than_guessing() -> None:
     )
     assert checkpoint_head_lines("3333333333333333333333333333333333333333")[1] is None, (
         "one hash cannot prove HEAD was unchanged"
-    )
-
-
-def test_checkpoint_archive_listed_accepts_a_listing_and_rejects_a_command_echo() -> None:
-    filename = handoff_filename(TRANSFER_ID)
-    listing = f"-rw-r--r-- 1 claude claude 1049089 Sep 13 10:00 /mnt/session/outputs/{filename}"
-    assert checkpoint_archive_listed(listing, filename), "an ls line confirms the archive"
-    echo = f"  tar czf /mnt/session/outputs/{filename} --exclude='*.env' -C / root"
-    assert not checkpoint_archive_listed(echo, filename), (
-        "echoing the command back is not evidence the archive exists"
-    )
-    assert not checkpoint_archive_listed("tar: exiting with failure status", filename), (
-        "a failed run must not read as a listed archive"
     )
 
 

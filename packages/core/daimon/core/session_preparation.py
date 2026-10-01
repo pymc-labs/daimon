@@ -83,7 +83,7 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import SessionAgentMismatch
+from daimon.core.turn.errors import AdmissionDenied, SessionAgentMismatch
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import ContinuityOutcome, FreshSession, PreparedTurn
 from daimon.core.turn.session_identity import check_session_agent
@@ -352,6 +352,10 @@ async def _run_replacement(
             session_id=row.ma_session_id,
             error=str(error),
         )
+        if isinstance(error, AdmissionDenied):
+            # Decided again just before the successor was created: refused,
+            # not a failed preparation to retry.
+            raise error
         return PreparationFailure(reasons=reasons, stage=stage, retry_after=now)
 
     async with deps.sessionmaker() as session, session.begin():
@@ -444,9 +448,11 @@ async def prepare_session_for_turn(
         watermark: str | None,
         reused: bool,
         continuity: ContinuityOutcome,
+        decided: Admission | None = None,
     ) -> PreparedTurn:
+        current = decided or admission
         return PreparedTurn(
-            admission=admission,
+            admission=current,
             ma_session_id=ma_session_id,
             mapping_id=mapping_id,
             watermark=watermark,
@@ -458,7 +464,7 @@ async def prepare_session_for_turn(
                 external_user_id=external_user_id,
                 ma_session_id=ma_session_id,
                 model_id=model_id,
-                channel_id=admission.budget_channel_id,
+                channel_id=current.budget_channel_id,
             ),
             continuity=continuity,
         )
@@ -471,6 +477,8 @@ async def prepare_session_for_turn(
             watermark=None,
             reused=False,
             continuity=continuity,
+            # The admission decided again right before the session was created.
+            decided=fresh.admission,
         )
 
     async with deps.sessionmaker() as db, db.begin():

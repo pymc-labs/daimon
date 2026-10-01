@@ -3182,6 +3182,10 @@
         should answer questions (defaults to this tenant's configured
         agent).
         
+        When the answering agent is pinned to channels, a non-admin may only
+        publish its reader from inside them: pass this turn's
+        ``origin_context_id``.
+        
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
         personal link.
@@ -3237,6 +3241,17 @@
                 'type': 'string',
               }),
             ]),
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'recipients': dict({
             'items': dict({

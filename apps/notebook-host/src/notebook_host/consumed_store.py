@@ -69,11 +69,6 @@ def prune_consumed(records: dict[str, int], *, now: int) -> dict[str, int]:
     return {jti: exp for jti, exp in records.items() if exp > now}
 
 
-def is_consumed(path: Path, jti: str) -> bool:
-    """Whether ``jti`` has already been burned."""
-    return jti in load_consumed(path)
-
-
 def burn_jti(path: Path, jti: str, *, exp: int, now: int) -> bool:
     """Atomically check-and-burn ``jti``. Returns True if this call burned it.
 

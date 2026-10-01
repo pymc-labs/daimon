@@ -24,11 +24,6 @@ def hairline() -> discord.ui.Separator[discord.ui.LayoutView]:
     return discord.ui.Separator()
 
 
-def air_gap() -> discord.ui.Separator[discord.ui.LayoutView]:
-    """Invisible large spacer: visible=False, spacing=discord.SeparatorSpacing.large."""
-    return discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large)
-
-
 def static_view(container: discord.ui.Container[discord.ui.LayoutView]) -> discord.ui.LayoutView:
     """LayoutView wrapping one container with no interactive children.
 

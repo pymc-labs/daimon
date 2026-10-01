@@ -39,6 +39,14 @@ class AdmissionDenied(DaimonError):
         self.reason: AdmissionDenialReason = reason
 
 
+class DmSourceSealedError(DaimonError):
+    """Raised by `reauthorize` when a DM's source channel or thread was sealed since admission.
+
+    The DM path catches it and quarantines the conversation (its copied
+    context and sessions), exactly as when the seal is found before admission.
+    """
+
+
 class MissingTurnConfigError(DaimonError):
     """Raised by `admit()` when the config cascade resolves no agent and/or
     no environment for the channel/tenant/deployment scope.

@@ -35,11 +35,6 @@ from pydantic import (
 
 MAX_SELECT_OPTIONS: Final[int] = 25
 MAX_TOTAL_COMPONENTS: Final[int] = 40
-# Discord's top-level (non-nested) component cap on a single message. Not
-# checked directly by this validator -- the per-step estimate below already
-# accounts for nested rows within MAX_TOTAL_COMPONENTS -- but reserved here
-# as the constant a Screen renderer built on top of this spec must respect.
-MAX_TOP_LEVEL_COMPONENTS: Final[int] = 10
 MAX_BUTTONS_PER_ROW: Final[int] = 5
 MAX_LABEL_CHARS: Final[int] = 80
 MAX_STEPS: Final[int] = 20

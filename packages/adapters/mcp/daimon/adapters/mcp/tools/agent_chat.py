@@ -68,6 +68,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
+    _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
@@ -352,6 +353,7 @@ async def _start_turn_impl(
     bundle: str | None = None,
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
@@ -382,6 +384,11 @@ async def _start_turn_impl(
     and covers the whole session, including later ``continue_turn`` calls.
 
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
+
+    ``recheck`` (``_ctx._admission_recheck``) runs the access decision again
+    immediately before the session is created and again before the message
+    is sent, so a pin or allowlist change saved during the lookups above
+    stops the turn rather than only the next one.
     """
     _require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
@@ -426,6 +433,8 @@ async def _start_turn_impl(
         resources: list[Resource] = [
             {"type": "file", "file_id": claims.file_id, "mount_path": "/bundle.tar.gz"}
         ]
+        if recheck is not None:
+            await recheck()
         session = await create_isolated_session(
             runtime.client,
             agent=ma_agent,
@@ -448,6 +457,8 @@ async def _start_turn_impl(
             else None
         )
 
+        if recheck is not None:
+            await recheck()
         session = await create_session(
             runtime.client,
             agent=ma_agent,
@@ -467,6 +478,8 @@ async def _start_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session.id
         observation.agent_id = str(ma_agent.id)
+    if recheck is not None:
+        await recheck()
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
@@ -494,6 +507,7 @@ async def _continue_turn_impl(
     message: str,
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
@@ -505,12 +519,15 @@ async def _continue_turn_impl(
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
     chat turn's own credential is refused (``_require_outside_chat_turn``).
+    ``recheck`` runs the access decision again immediately before the send.
     """
     _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
+    if recheck is not None:
+        await recheck()
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         handle,
@@ -832,6 +849,7 @@ async def _ask_impl(
     clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -843,9 +861,11 @@ async def _ask_impl(
     the first poll would hand back the previous turn's answer.
     """
     if handle is None:
-        started = await _start_turn_impl(runtime, auth, message, now=now)
+        started = await _start_turn_impl(runtime, auth, message, now=now, recheck=recheck)
     else:
-        started = await _continue_turn_impl(runtime, auth, handle, message, now=now)
+        started = await _continue_turn_impl(
+            runtime, auth, handle, message, now=now, recheck=recheck
+        )
     handle = started["handle"]
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
@@ -949,7 +969,8 @@ def register_agent_chat_tools(
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
     before creating a session or sending an event, including the operator's
     channel pin: a pinned agent is refused here, since an MCP turn runs in no
-    channel. Every other tool —
+    channel. The policy half of that gate runs again right before each
+    session create and message send (``_admission_recheck``). Every other tool —
     including ``cancel_turn`` and ``get_turn_cost`` — stays on bare ``_auth``;
     ``deliver_turn_charts`` is the one exception that performs a bounded
     artifact-store write when optional link delivery is configured.
@@ -957,6 +978,14 @@ def register_agent_chat_tools(
 
     async def pin_names(auth: AuthIdentity) -> tuple[str | None, ...]:
         return agent_pin_names(await _resolve_ma_agent(runtime, auth))
+
+    def recheck_for(auth: AuthIdentity, tool_name: str) -> Callable[[], Awaitable[None]]:
+        async def names() -> tuple[str | None, ...]:
+            return await pin_names(auth)
+
+        return _admission_recheck(
+            auth, sessionmaker=runtime.session_factory, tool_name=tool_name, agent_names=names
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def describe_agent(ctx: Context) -> AgentDescription:  # pyright: ignore[reportUnusedFunction]
@@ -1012,7 +1041,9 @@ def register_agent_chat_tools(
             tool_name="start_turn",
             agent_names=pin_names,
         )
-        return await _start_turn_impl(runtime, auth, message, bundle)
+        return await _start_turn_impl(
+            runtime, auth, message, bundle, recheck=recheck_for(auth, "start_turn")
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def ask(  # pyright: ignore[reportUnusedFunction]
@@ -1033,7 +1064,7 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message, handle=handle)
+            await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck_for(auth, "ask"))
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1055,7 +1086,9 @@ def register_agent_chat_tools(
             tool_name="continue_turn",
             agent_names=pin_names,
         )
-        return await _continue_turn_impl(runtime, auth, handle, message)
+        return await _continue_turn_impl(
+            runtime, auth, handle, message, recheck=recheck_for(auth, "continue_turn")
+        )
 
     @mcp.tool(tags={"agent-chat"}, name="get_my_session")  # pyright: ignore[reportArgumentType]
     async def get_my_session(ctx: Context, handle: str) -> SessionInfo:  # pyright: ignore[reportUnusedFunction]

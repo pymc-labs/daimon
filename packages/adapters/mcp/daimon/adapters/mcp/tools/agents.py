@@ -28,6 +28,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -37,7 +38,7 @@ from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.authz import Action, AgentRef, Subject, authorize
+from daimon.core.authz import Action, authorize, build_agent_ref
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -54,7 +55,6 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
     build_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -840,18 +840,21 @@ async def _fork_agent_impl(
             raise ToolError(
                 "fork_agent: the workspace access policy could not be read; nothing was created."
             ) from exc
-    if (
-        authorize(
-            policy,
-            subject=Subject(is_admin=auth.is_admin, platform_user_id=auth.platform_user_id),
-            action=Action.FORK,
-            agent=AgentRef.of(source.name, source.metadata.get(MA_METADATA_KEY_NAME)),
-        ).reason
-        == "agent_pinned"
-    ):
+    decision = authorize(
+        policy,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        action=Action.FORK,
+        agent=build_agent_ref(source.name, source.metadata),
+    )
+    if decision.reason == "agent_pinned":
         raise ToolError(
             f"fork_agent: {source_name} is pinned to specific channels by an operator, so it "
             "can't be copied. Nothing was created. Do not retry."
+        )
+    if not decision:
+        # Any other refusal (today only a non-admin, already stopped above).
+        raise ToolError(
+            "fork_agent: only a workspace admin can copy an agent. Nothing was created."
         )
     source_ma = await runtime.client.beta.agents.retrieve(source.id)
     params = source_ma.model_dump(mode="json")

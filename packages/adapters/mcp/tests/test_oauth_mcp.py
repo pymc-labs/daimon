@@ -533,3 +533,44 @@ async def test_a_pin_added_between_the_click_and_the_callback_stops_the_connecti
         assert done.status_code == 403 and "pinned" in done.text, done.text
         assert created == [], "no grant is stored"
         assert updates == [], "nothing is attached"
+
+
+async def test_a_pin_added_during_the_code_exchange_stores_no_grant(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Model gap G_oauth_check_before_write: the access rule is asked again after
+    the token exchange and before anything reaches the vault, so a pin that lands
+    while the exchange is in flight stores no grant and attaches nothing."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    flow, tenant_id = await _seed_flow(db_session)
+    await db_session.commit()
+    anthropic, created, updates = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    inner = _notion([])
+
+    async def pin_during_exchange(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and req.url.path == "/token":
+            async with db_session_factory.begin() as session:
+                await set_access_policy(
+                    session,
+                    tenant_id=tenant_id,
+                    policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("C_PINNED",)}),
+                )
+        return await inner.handle_async_request(req)
+
+    app = _app(
+        db_session_factory, anthropic=anthropic, transport=httpx.MockTransport(pin_during_exchange)
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/oauth/mcp/start?state={flow.state}")
+        done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
+
+    assert done.status_code == 403 and "pinned" in done.text, done.text
+    assert created == [], "no grant is stored"
+    assert updates == [], "nothing is attached"

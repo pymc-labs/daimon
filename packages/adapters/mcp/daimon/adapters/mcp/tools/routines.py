@@ -42,8 +42,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -292,7 +291,7 @@ def _check_agent_pin(
     *,
     platform: str,
     agent_name: str,
-    agent_names: tuple[str | None, ...],
+    agent: AgentRef,
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
 ) -> None:
@@ -303,8 +302,9 @@ def _check_agent_pin(
     time, so a thread destination is refused here rather than skipped later.
     The scheduler re-checks at every fire, so a pin added later still holds.
 
-    ``agent_names`` is every name the resolved agent answers to (the supplied
-    name, its MA name and its config name), so a pin on any of them holds.
+    ``agent`` is built by `daimon.core.authz.build_agent_ref` from the
+    resolved agent and the supplied name, so a pin on any name it answers to
+    holds (and a fact added to `AgentRef` reaches this check too).
     """
     target_channel_id: str | None = None
     if kind is not None and destination_id is not None:
@@ -317,7 +317,7 @@ def _check_agent_pin(
         subject=Subject(),
         action=Action.SAVE_ROUTINE,
         surface=Surface.ROUTINE,
-        agent=AgentRef.of(*agent_names),
+        agent=agent,
         place=Place(channel_id=target_channel_id),
     ):
         raise ToolError(
@@ -422,7 +422,7 @@ async def _create_routine_impl(
         policy,
         platform=auth.platform or "",
         agent_name=agent_name,
-        agent_names=(agent_name, *agent_pin_names(match.name, match.metadata)),
+        agent=build_agent_ref(match.name, match.metadata, agent_name),
         kind=destination_kind,
         destination_id=destination_id,
     )
@@ -550,9 +550,8 @@ async def _update_routine_impl(
                 update_policy,
                 platform=auth.platform or "",
                 agent_name=effective_name or effective_agent.name,
-                agent_names=(
-                    effective_name,
-                    *agent_pin_names(effective_agent.name, effective_agent.metadata),
+                agent=build_agent_ref(
+                    effective_agent.name, effective_agent.metadata, effective_name
                 ),
                 kind=effective_kind,
                 destination_id=effective_id,

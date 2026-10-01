@@ -11,6 +11,8 @@ object and conversation ids) for the tenant's own platform. Channels are named b
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -119,3 +121,27 @@ def is_outside_agent_pin(
 
 
 DM_SCOPE_PREFIX = "dm:"
+
+
+def is_dm_source_sealed(
+    policy: TenantAccessPolicy,
+    *,
+    source_channel_id: str | None,
+    source_thread_id: str | None,
+    source_thread_keys: Sequence[str] = (),
+) -> bool:
+    """Whether any recorded source of a DM conversation is sealed now.
+
+    Fails closed: a conversation without recorded provenance (written before
+    it was stored) cannot prove its source unsealed, so any seal in the
+    tenant counts. For a Discord thread the parent can't be recovered from
+    the old source URL.
+    """
+    if not policy.sealed_channel_ids:
+        return False
+    if source_channel_id is None:
+        return True
+    if is_sealed_source(policy, channel_id=source_channel_id, thread_id=source_thread_id):
+        return True
+    sealed = set(policy.sealed_channel_ids)
+    return any(key in sealed for key in source_thread_keys)
