@@ -274,7 +274,10 @@ the place of the key's turns (`mcp_place`) and as the read origin, nowhere
 else, and re-decides both at the moment of action; the seal is read right
 before a session is created, and a conversation opened before its channel was
 sealed can be read but not continued. Keys minted anywhere else are
-unchanged. Operators edit the policy with the CLI:
+unchanged. A server admin mints anywhere; a channel admin of every channel an
+agent is pinned to mints for it only from inside one of those channels, and
+that token is always bound there (`authorize(MINT_CODING_TOKEN)`, through
+`authorize_coding_token`). Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -401,7 +404,8 @@ removals and skill repo connects count as shared, never past it. In `daimon.core
 is `Subject.administered_channel_ids`, filled from the stored grants and never
 `is_admin`: configuring a pinned agent from anywhere is theirs once they
 administer every channel of every pin on it (a pin to no channel stays with
-server admins). A channel admin binds only a shared agent
+server admins), and so is minting it a coding-tools token bound to one of
+those channels (never an unbound one). A channel admin binds only a shared agent
 (managed or tenant-wide), one answering nowhere yet, or one already local
 to them, never another channel's own agent. No chat tool or panel binds a
 pinned agent as the default of a channel outside its pin, for server admins
@@ -584,6 +588,7 @@ but them:
 | Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
 | Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin, or channel admin of every pinned channel) |
 | `fork_agent` of a pinned agent | refused | refused |
+| "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
 
