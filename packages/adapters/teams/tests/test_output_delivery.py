@@ -1,4 +1,4 @@
-"""Output delivery: consent cards in 1:1 chats, notes in channels, the delete contract."""
+"""Output delivery: consent cards in 1:1 chats, log lines in channels, the delete contract."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+import structlog
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
@@ -239,22 +240,20 @@ async def test_a_pending_offer_is_not_sent_twice(
     assert len(harness.sender.activities) == 2, "no second consent card"
 
 
-async def test_channel_outputs_get_a_note_and_are_deleted(
+async def test_channel_outputs_are_logged_not_posted_and_are_deleted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Bots cannot upload into channels: one note per file, then the output is deleted."""
+    """Bots cannot upload into channels and the agent says so itself: no note, a log, a delete."""
     harness = _harness(db_session_factory)
 
-    await harness.delivery.sweep(make_inbound(kind="channel", conversation=THREAD_ID), "sesn_1")
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(kind="channel", conversation=THREAD_ID), "sesn_1")
 
-    assert [(c, a.text) for c, a, _ in harness.sender.sent] == [
-        (
-            THREAD_ID,
-            "I made `data.csv`, but I can't attach files in channels. Ask me in a 1:1 "
-            "chat when you need a file.",
-        )
-    ]
-    assert harness.deletes == ["file_csv"]
+    assert harness.sender.sent == [], "a per-file note would clutter the channel thread"
+    skipped = [e for e in logs if e["event"] == "teams.channel_output.skipped"]
+    assert [e["file_id"] for e in skipped] == ["file_csv"], "each skipped file is logged"
+    assert "filename" not in skipped[0], "the log line carries no file content or name"
+    assert harness.deletes == ["file_csv"], "the listing entry goes, so later sweeps skip it"
 
 
 async def test_oversize_output_in_a_dm_gets_the_limit_notice(

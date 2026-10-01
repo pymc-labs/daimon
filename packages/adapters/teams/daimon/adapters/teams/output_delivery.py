@@ -1,12 +1,15 @@
-"""Session output files to Teams: a consent card in 1:1 chats, a note in channels.
+"""Session output files to Teams: a consent card in 1:1 chats, a log line in channels.
 
 Thin adapter over `sweep_session_outputs`. In a 1:1 chat each file is offered
 with a FileConsentCard and the post defers, so the file stays listed until the
 person accepts (upload, then delete) or declines (delete). The card's context
 round-trips through the client, so it carries only a random token keyed to a
 server-side offer that is checked against the clicker and expires. Bots
-cannot upload into channels without Microsoft Graph, so a channel thread gets
-a short note per file instead, through the sweep's skip path.
+cannot upload into channels without Microsoft Graph. The agent guidance has
+the agent say so in its own reply, so a channel file only goes down the sweep's
+skip path to be logged: a note per file cluttered the thread. The skip still
+deletes the listing entry, which is the delivery ledger; the sandbox keeps its
+copy, so the agent can still read or paste it later.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from daimon.adapters.teams.card_actions import card_actor, submitted_fields
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.media.filenames import display_filename_for, sanitize_title
+from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
     MAX_BYTES_PER_FILE,
     DeliverableFile,
@@ -57,10 +60,10 @@ OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _DECLINED = "Okay, I won't send `{name}`."
-_CHANNEL_SKIP = (
-    "I made `{name}`, but I can't attach files in channels. Ask me in a 1:1 chat when you "
-    "need a file."
-)
+
+
+async def _log_channel_skip(file: SkippedFile) -> None:
+    log.info("teams.channel_output.skipped", file_id=file.file_id, size_bytes=file.size_bytes)
 
 
 class Spawn(Protocol):
@@ -140,24 +143,22 @@ class TeamsOutputDelivery:
                 with contextlib.suppress(Exception):
                     await previous
             channel = inbound.kind == "channel"
+            notice = functools.partial(self._skip_notice, inbound)
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
                 post=functools.partial(self._offer, inbound, session_id),
-                on_skip=functools.partial(self._skip_notice, inbound, channel),
+                on_skip=_log_channel_skip if channel else notice,
                 sleep=self._sleep,
-                # Zero sends every channel file down the skip path: a note, then delete.
+                # Zero sends every channel file down the skip path: a log line, then delete.
                 max_bytes=0 if channel else MAX_BYTES_PER_FILE,
             )
         finally:
             if self._sweeps.get(session_id) is current:
                 self._sweeps.pop(session_id, None)
 
-    async def _skip_notice(self, inbound: TeamsInbound, channel: bool, file: SkippedFile) -> None:
-        text = render_oversize_notice(file)
-        if channel:
-            text = _CHANNEL_SKIP.format(name=sanitize_title(file.filename))
-        await self._say(inbound.conversation_id, inbound.service_url, text)
+    async def _skip_notice(self, inbound: TeamsInbound, file: SkippedFile) -> None:
+        await self._say(inbound.conversation_id, inbound.service_url, render_oversize_notice(file))
 
     async def _offer(self, inbound: TeamsInbound, session_id: str, file: DeliverableFile) -> None:
         """Send a consent card, then defer: the click decides the file's fate."""
