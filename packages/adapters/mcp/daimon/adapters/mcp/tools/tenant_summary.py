@@ -2,8 +2,8 @@
 
 For server admins and operator tokens holding ``tenant:read``, so an
 integration can show a workspace's state without one call per channel. A
-channel is listed when it has its own agent or environment setting, or a
-budget. The private channels DM conversations run in are left out.
+channel is listed when it has its own agent or environment setting, a budget
+or channel admins. The private channels DM conversations run in are left out.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
+from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.channel_budgets import list_channel_budgets
 from daimon.core.stores.direct_messages import list_dm_channel_ids
 from daimon.core.stores.domain import FundingMode
@@ -33,6 +34,7 @@ from fastmcp.exceptions import ToolError
 @dataclass(frozen=True)
 class ChannelAdmins:
     role_ids: list[str]
+    """Discord role ids; always empty on Slack, which has no roles."""
     user_ids: list[str]
 
 
@@ -55,6 +57,7 @@ class ChannelSummary:
     """The environment its sessions run in, resolved the same way."""
     isolated: bool
     admins: ChannelAdmins
+    """Who administers the channel on top of the server admins; both lists empty for nobody."""
     budget: ChannelBudgetSummary | None
 
 
@@ -84,16 +87,17 @@ def build_channel_summaries(
     tenant_row: TenantConfigRow | None,
     default: DeploymentDefault,
     budgets: dict[str, ChannelBudgetStatus],
+    admins: dict[str, ChannelAdmins],
     dm_channel_ids: set[str],
 ) -> list[ChannelSummary]:
-    """One entry per channel with a setting or a budget, ordered by channel id.
+    """One entry per channel with a setting, a budget or admins, ordered by channel id.
 
     A DM's channel gets a config row when the DM starts; it is not a channel
     of the workspace, so ``dm_channel_ids`` are skipped.
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    for channel_id in sorted((configs.keys() | budgets.keys()) - dm_channel_ids):
+    for channel_id in sorted((configs.keys() | budgets.keys() | admins.keys()) - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         status = budgets.get(channel_id)
         summaries.append(
@@ -101,9 +105,9 @@ def build_channel_summaries(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
                 environment_name=resolved.environment_name,
-                # Later isolation and channel-admin features fill these in build_channel_summaries.
+                # A later isolation feature fills this in build_channel_summaries.
                 isolated=False,
-                admins=ChannelAdmins(role_ids=[], user_ids=[]),
+                admins=admins.get(channel_id, ChannelAdmins(role_ids=[], user_ids=[])),
                 budget=_budget_summary(status) if status is not None else None,
             )
         )
@@ -127,6 +131,12 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             for budget in await list_channel_budgets(session, tenant_id=auth.tenant_id)
             if budget.platform == tenant.platform
         }
+        admins = {
+            row.channel_id: ChannelAdmins(role_ids=list(row.role_ids), user_ids=list(row.user_ids))
+            for row in await list_channel_admins(
+                session, tenant_id=auth.tenant_id, platform=tenant.platform
+            )
+        }
         dm_channel_ids = await list_dm_channel_ids(session, tenant_id=auth.tenant_id)
     default = merge(channel=None, tenant=tenant_row, default=runtime.deployment_default)
     return TenantSummary(
@@ -138,6 +148,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             tenant_row=tenant_row,
             default=runtime.deployment_default,
             budgets=budgets,
+            admins=admins,
             dm_channel_ids=dm_channel_ids,
         ),
     )
@@ -148,9 +159,10 @@ def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def get_tenant_summary(ctx: Context) -> TenantSummary:  # pyright: ignore[reportUnusedFunction]
         """Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
 
-        Lists every channel with its own agent or environment setting, or a
-        spending budget, with the agent and environment that apply there and
-        the budget's limit, window and spend (``budget`` is null without one).
-        Money is a decimal string.
+        Lists every channel with its own agent or environment setting, a
+        spending budget or channel admins, with the agent and environment that
+        apply there, the roles and members administering it, and the budget's
+        limit, window and spend (``budget`` is null without one). Money is a
+        decimal string.
         """
         return await _get_tenant_summary_impl(runtime, await _auth(ctx))

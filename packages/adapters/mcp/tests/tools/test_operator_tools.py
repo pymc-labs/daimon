@@ -51,6 +51,7 @@ from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope, scope_tag
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
@@ -160,6 +161,32 @@ async def test_tenant_summary_lists_configured_and_budgeted_channels(
     budget = summary.channels[1].budget
     assert budget is not None and (budget.limit_usd, budget.window) == ("5.00", "monthly")
     assert summary.channels[0].admins == ChannelAdmins(role_ids=[], user_ids=[])
+
+
+async def test_tenant_summary_lists_each_channels_admins(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel with admins and nothing else is listed too."""
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker.begin() as session:
+        await make_channel_budget(session, tenant=tenant, channel_id="c1", limit_usd=Decimal(5))
+        await set_channel_admins(
+            session,
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            channel_id="c2",
+            role_ids=["r1"],
+            user_ids=["u2", "u1"],
+            actor_account_id=auth.account_id,
+        )
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+    assert [(c.channel_id, c.admins) for c in summary.channels] == [
+        ("c1", ChannelAdmins(role_ids=[], user_ids=[])),
+        ("c2", ChannelAdmins(role_ids=["r1"], user_ids=["u1", "u2"])),
+    ], "each channel carries its stored admins, none where nobody was named"
+    assert summary.channels[1].budget is None, "c2 is listed for its admins alone"
 
 
 async def test_tenant_summary_leaves_out_dm_channels(

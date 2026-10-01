@@ -2378,10 +2378,11 @@
       'description': '''
         Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
         
-        Lists every channel with its own agent or environment setting, or a
-        spending budget, with the agent and environment that apply there and
-        the budget's limit, window and spend (``budget`` is null without one).
-        Money is a decimal string.
+        Lists every channel with its own agent or environment setting, a
+        spending budget or channel admins, with the agent and environment that
+        apply there, the roles and members administering it, and the budget's
+        limit, window and spend (``budget`` is null without one). Money is a
+        decimal string.
       ''',
       'parameters': dict({
         'additionalProperties': False,
