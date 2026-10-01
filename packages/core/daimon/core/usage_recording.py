@@ -38,6 +38,17 @@ The column is free text in the schema (no CHECK constraint), so this literal
 is the only gate — keep it closed.
 """
 
+SPEND_LEDGER_REASONS: tuple[str, ...] = (
+    "turn_debit",
+    "checkpoint_debit",
+    "media_debit",
+    "classifier_debit",
+    "thread_naming_debit",
+)
+"""Every debit reason this module writes: model spend, as opposed to clawbacks
+or promo expiries. Timed promo credit is drawn down by exactly these rows, so a
+new debit kind added here must be added to this tuple too."""
+
 
 async def record_turn_usage(
     *,
@@ -89,6 +100,9 @@ async def record_turn_usage(
             delta_usd=-debit,
             reason=reason,
             idempotency_key=f"turn:{managed_session_id}:{event.id}",
+            # The model call's own time, so a debit the sweep writes late still
+            # lands inside the timed promo window the call was made in.
+            occurred_at=event.processed_at,
         )
 
 

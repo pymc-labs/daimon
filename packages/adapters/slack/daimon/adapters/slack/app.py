@@ -41,6 +41,14 @@ from daimon.adapters.slack.attachments import (
     build_skipped_image_prefix,
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
+from daimon.adapters.slack.billing_panel.redeem import (
+    REDEEM_CALLBACK_ID,
+    RedeemDecision,
+    evaluate_redeem_submission,
+    handle_redeem_open,
+    run_redeem_submission,
+)
+from daimon.adapters.slack.billing_panel.views import REDEEM_OPEN_ACTION_ID
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -726,6 +734,34 @@ class SlackApp:
                             log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
 
                     self._spawn(_run_credential_submission())
+            elif cb_id == REDEEM_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _pr_decision = evaluate_redeem_submission(payload)
+                await (
+                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
+                        SocketModeResponse(
+                            envelope_id=req.envelope_id,
+                            payload=_pr_decision.response_payload,
+                        )
+                    )
+                )
+                if _pr_decision.proceed:
+                    _pr_team_info: dict[str, Any] = payload.get("team") or {}
+                    _pr_user_info: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_redeem(
+                        *,
+                        _t: str = str(_pr_team_info.get("id") or ""),
+                        _u: str = str(_pr_user_info.get("id") or ""),
+                        _d: RedeemDecision = _pr_decision,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_redeem_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
+                            )
+
+                    self._spawn(_run_redeem())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -864,6 +900,8 @@ class SlackApp:
                     self._spawn(handle_routine_action(self.runtime, payload))
                 elif action_id == "billing_topup":
                     self._spawn(handle_topup_select(self.runtime, payload))
+                elif action_id == REDEEM_OPEN_ACTION_ID:
+                    self._spawn(handle_redeem_open(self.runtime, payload))
                 elif action_id in (
                     "privacy_delete_open",
                     "privacy_export",

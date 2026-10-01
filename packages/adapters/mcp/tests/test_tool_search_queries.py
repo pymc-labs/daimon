@@ -124,6 +124,7 @@ CASES = [
         frozenset(["set_agent_default"]),
     ),
     SearchCase("who answers in #growth", "explain_agent_resolution", frozenset([])),
+    SearchCase("redeem the promo code SPRING-2026", "redeem_promo_code", frozenset([])),
     SearchCase("make a copy of Daimon I can edit", "fork_agent", frozenset([])),
     SearchCase("create an agent called churn-explorer on Opus", "create_agent", frozenset([])),
     SearchCase("switch research-bot to Opus", "update_agent", frozenset([])),

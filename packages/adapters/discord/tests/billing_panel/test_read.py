@@ -198,6 +198,7 @@ async def test_load_billing_snapshot_regular_view_excludes_other_users(
         caller_user_id=caller,
         is_admin=False,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.is_admin is False, "regular view should set is_admin=False"
@@ -238,6 +239,7 @@ async def test_load_billing_snapshot_admin_view_includes_per_member_breakdown(
         caller_user_id=caller,
         is_admin=True,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.is_admin is True, "admin view should set is_admin=True"
@@ -278,6 +280,7 @@ async def test_load_billing_snapshot_admin_view_top_25_truncation(
         caller_user_id=caller,
         is_admin=True,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert len(state.member_rows) == 25, "should truncate to top-25 spenders"
@@ -318,6 +321,7 @@ async def test_load_billing_snapshot_excludes_null_user_rows_from_guild_total(
         caller_user_id=caller,
         is_admin=True,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.guild_distinct_members == 1, (
@@ -338,6 +342,7 @@ async def test_load_billing_snapshot_regular_view_empty_state(
         caller_user_id="100000000000000001",
         is_admin=False,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.caller_spend == 0.0, "no rows -> zero spend"
@@ -386,6 +391,7 @@ async def test_load_billing_snapshot_uses_derived_tenant_id(
         caller_user_id="100000000000000001",
         is_admin=False,
         since=datetime.now(UTC) - timedelta(days=1),
+        now=datetime.now(UTC),
     )
 
     assert state.guild_balance_usd == Decimal("10000.00"), (
@@ -418,6 +424,7 @@ async def test_load_billing_snapshot_member_view_carries_guild_balance(
         caller_user_id="100000000000000001",
         is_admin=False,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.guild_balance_usd == Decimal("30.00"), (
@@ -449,6 +456,7 @@ async def test_load_billing_snapshot_admin_view_carries_guild_balance(
         caller_user_id="100000000000000001",
         is_admin=True,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.guild_balance_usd == Decimal("75.50"), (
@@ -473,6 +481,7 @@ async def test_load_billing_snapshot_guild_balance_zero_when_no_ledger_rows(
         caller_user_id="100000000000000001",
         is_admin=False,
         since=since,
+        now=datetime.now(UTC),
     )
 
     assert state.guild_balance_usd == Decimal("0"), (

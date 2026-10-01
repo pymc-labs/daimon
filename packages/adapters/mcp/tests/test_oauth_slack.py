@@ -52,6 +52,7 @@ from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -218,6 +219,16 @@ def test_success_html_close_tab_copy() -> None:
     response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
     body = response.body.decode()
     assert "close this tab" in body, "success page should tell the user they can close the tab"
+
+
+def test_success_html_mentions_promo_codes_only_when_one_is_redeemable() -> None:
+    """A deployment without promo codes keeps its install page unchanged."""
+    plain = bytes(_success_html(workspace="Acme", signup_credit=Decimal("5")).body).decode()
+    promo = bytes(
+        _success_html(workspace="Acme", signup_credit=Decimal("5"), promo_codes=True).body
+    ).decode()
+    assert "promo code" not in plain, "no codes, no mention"
+    assert "admins can redeem it in <code>/billing</code>" in promo, "admins are pointed at it"
 
 
 def test_success_html_status_200() -> None:
@@ -522,6 +533,37 @@ async def test_callback_persists_token_and_tenant(
     assert any(t.id == expected_tenant_id for t in slack_tenants), (
         "callback must provision a slack tenant keyed on the team_id"
     )
+
+
+async def test_callback_shows_success_without_promo_line_when_promo_lookup_fails(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed promo code lookup after the install finishes still shows the success page."""
+
+    async def failing_lookup(session: AsyncSession, *, now: datetime) -> bool:
+        raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+
+    monkeypatch.setattr("daimon.adapters.mcp.oauth_slack.has_redeemable_promo_code", failing_lookup)
+    handler = _make_slack_exchange_handler()
+
+    def make_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10.0)  # type: ignore[arg-type]
+
+    app = _build_isolated_slack_app(
+        sessionmaker,
+        settings=_build_slack_settings(),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        client_factory=make_client,
+    )
+    state = mint_state(signing_secret=_SIGNING_SECRET, now=time.time())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/oauth/slack/callback?code={_SLACK_CODE}&state={state}")
+
+    assert r.status_code == 200, f"the finished install should not become an error page: {r.text}"
+    assert _SLACK_TEAM_NAME in r.text, "the success page should name the workspace"
+    assert "promo code" not in r.text, "the promo line should be left out"
 
 
 async def test_callback_reinstall_after_uninstall_unarchives_tenant(

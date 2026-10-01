@@ -18,7 +18,8 @@ bot), daimon stores:
   maps to which Managed Agents session, so conversations can continue across
   messages.
 - **Usage and billing events** — turn counts and credit/usage records used
-  to enforce the operator's configured usage limits.
+  to enforce the operator's configured usage limits. Promo code redemptions
+  record which account redeemed; a privacy deletion clears that link.
 - **Security audit metadata** — authenticated main-JWT MCP tool names, authorization outcomes,
   reason codes, timestamps and tenant/account/platform-user/agent identifiers.
   Tool arguments, messages, credentials and response bodies are excluded. These

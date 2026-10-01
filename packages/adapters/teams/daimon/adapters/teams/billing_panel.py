@@ -142,7 +142,8 @@ class BillingPanel:
         return await guarded(self._act(ctx.activity), toast(FAILED), "teams.billing.failed")
 
     async def _panel(self, tenant_id: uuid.UUID, user_id: str, is_admin: bool) -> AdaptiveCard:
-        since = month_start(datetime.now(UTC))
+        now = datetime.now(UTC)
+        since = month_start(now)
         async with self._runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
@@ -150,6 +151,7 @@ class BillingPanel:
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
+                now=now,
             )
         return panel_card(state, since=since)
 

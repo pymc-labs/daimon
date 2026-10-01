@@ -256,6 +256,66 @@ daimon tenants cap discord GUILD_ID 5.00 --user PLATFORM_USER_ID
 The default row applies to everyone without an override. A zero cap blocks
 all turns; the cap gate applies even without Stripe.
 
+## Promo codes
+
+An operator can hand out credit as a code that a tenant admin redeems. Nothing
+is visible until some code can be redeemed: only then does `/billing` show
+admins a **Redeem code** button, and the Discord ready message and the Slack
+install page point them at it.
+
+```sh
+daimon promo create --amount 20                    # prints a generated code once
+daimon promo create --amount 50 --timed \
+  --starts 2026-06-01T09:00Z --ends 2026-06-03T18:00Z --max-redemptions 40
+daimon promo list
+daimon promo redemptions CODE_ID
+daimon promo revoke CODE_ID
+```
+
+Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
+cannot be shown again. Generated codes are 20 Crockford base32 characters in
+dash-separated groups of five; matching ignores case, spaces and dashes, and
+reads O as 0 and I or L as 1. `--code` sets a chosen code of at least 12
+characters instead. `--amount` is at most $999,999.99. `--redeem-from` and
+`--redeem-until` bound when it can be redeemed, and `--max-redemptions` how
+many tenants may redeem it. Each tenant redeems a code at most once.
+
+- **Credit** codes add a `promo_credit` ledger entry at once, keyed
+  `promo:{code_id}:{tenant_id}`. It is ordinary credit and never expires.
+- **Timed** codes grant their amount only between `--starts` and `--ends`.
+  Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
+  code redeemed before its start is granted by the scheduler when the window
+  opens (same key). At the first scheduler tick after the window closes, a
+  `promo_expiry` entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes
+  what was not spent, so spend after the window comes from ordinary credit
+  only. Spend inside a window draws on timed credit first, the credit that
+  ends earliest first, then on ordinary credit. A window that opens and closes
+  while the scheduler is down expires without a grant.
+- **Late spend.** Every turn debit stores `occurred_at`, the model call's own
+  time, so a call the [sweep](#the-tables) records after the window closed
+  still counts as spend inside it. Fifteen minutes after the close a
+  `promo_expiry_refund` entry, keyed
+  `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
+  never more than the expiry removed. Until then late spend is debited twice,
+  once itself and once inside the expiry, so for up to about fifteen minutes
+  the balance can read low or negative, or hit the balance gate, until the
+  refund lands. Spend recorded later counts as ordinary spend: after a grant's
+  reconcile, spend recorded inside its window is still charged to that grant
+  first, as far as it had credit left, even where it overlaps a later grant
+  that is still open. That part is paid from ordinary credit and never
+  credited twice.
+
+The balance is still `SUM(delta_usd)` and the gates never read promo state:
+timed credit only changes what the ledger holds. `/billing` shows live timed
+credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
+with the admin-only MCP tool `redeem_promo_code`, which is the only way on
+Teams: its `billing` card shows no promo codes. Refusals are one of
+`invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
+`already_redeemed` and `throttled`; five refusals in 15 minutes pause a
+tenant's attempts, which are serialized per tenant so parallel guesses
+cannot slip past. Revoking stops new redemptions only: redeemed credit,
+including timed credit not yet started, stays.
+
 ## The tables
 
 | Table | Holds |
@@ -265,10 +325,14 @@ all turns; the cap gate applies even without Stripe.
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
+| `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
+| `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
-`trial`, `topup`, `manual_credit`, `turn_debit`, `checkpoint_debit`, `media_debit`,
+`trial`, `topup`, `manual_credit`, `promo_credit`, `promo_expiry`,
+`promo_expiry_refund`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 

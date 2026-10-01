@@ -75,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepaid Discord and Slack turn footers show the remaining balance.
 - Operators can set a tenant's concurrent chat-turn cap with
   `daimon tenants turn-cap`, or clear it to use the deployment default.
+- **Promo codes.** Operators create credit or timed codes with `daimon promo`,
+  and admins redeem them from `/billing` on Discord and Slack or with the MCP
+  tool `redeem_promo_code`. Timed credit is spent first inside its window and
+  the unspent rest expires when it closes; spend dated inside the window is
+  credited back if it is recorded within 15 minutes of the close. Nothing is
+  visible until a code can be redeemed: only then do the Redeem code button
+  and the join-message lines appear. Turn debits now store the model call's
+  time as `occurred_at`.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,

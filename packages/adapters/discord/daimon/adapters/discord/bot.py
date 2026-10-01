@@ -69,6 +69,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
+from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
     get_turn_cap,
@@ -334,13 +335,15 @@ def _build_welcome_embed(bot_display_name: str) -> discord.Embed:
     return embed
 
 
-def _build_ready_embed() -> discord.Embed:
-    """Terminal success follow-up. Pure — no I/O."""
-    return discord.Embed(
-        title="✅ Ready",
-        description="Mention me anywhere, or run `/agent-setup`.",
-        color=theme.COLOR_GREEN,
-    )
+def _build_ready_embed(*, promo_codes: bool = False) -> discord.Embed:
+    """Terminal success follow-up. Pure — no I/O.
+
+    ``promo_codes``: some code is redeemable now, so point admins at /billing.
+    """
+    description = "Mention me anywhere, or run `/agent-setup`."
+    if promo_codes:
+        description += "\nHave a promo code? Admins can redeem it in `/billing`."
+    return discord.Embed(title="✅ Ready", description=description, color=theme.COLOR_GREEN)
 
 
 def _build_snag_embed() -> discord.Embed:
@@ -744,7 +747,20 @@ class DaimonBot(commands.Bot):
                     clear_reason=True,
                 )
                 if not was_ready:
-                    await self._post_to_guild(guild, _build_ready_embed())
+                    try:
+                        async with self.runtime.sessionmaker() as session:
+                            promo_codes = await has_redeemable_promo_code(
+                                session, now=datetime.now(UTC)
+                            )
+                    except SQLAlchemyError as exc:
+                        # The guild is ready; a failed lookup only drops the promo line.
+                        log.warning(
+                            "guild_seed_promo_lookup_failed",
+                            tenant_id=str(tenant_id),
+                            error=str(exc),
+                        )
+                        promo_codes = False
+                    await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
                 if was_ready:

@@ -38,11 +38,13 @@ from daimon.core.slack_oauth import (
     mint_state,
     verify_state,
 )
+from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
 from daimon.core.stores.tenants import set_provision_status
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -356,8 +358,11 @@ def _success_html(
     workspace: str,
     signup_credit: Decimal,
     display_name: str = "daimon",
+    promo_codes: bool = False,
 ) -> HTMLResponse:
     """Branded success page (Page 2 per UI-SPEC).
+
+    ``promo_codes``: some code is redeemable now, so point admins at /billing.
 
     `workspace` is the `team.name` from the Slack OAuth response —
     attacker-influenceable, so it is HTML-escaped before interpolation.
@@ -365,12 +370,17 @@ def _success_html(
     safe = html.escape(workspace, quote=False)
     credit = _format_credit(signup_credit)
     safe_name = html.escape(display_name, quote=False)
+    promo = (
+        "<p>have a promo code? admins can redeem it in <code>/billing</code>.</p>\n"
+        if promo_codes
+        else ""
+    )
     body = f"""
 <h1>installed in {safe}</h1>
 <p>next: @mention <code>@{safe_name}</code> in a channel you have invited it to,
 or run <code>/agent-setup</code> to see who answers where and set up an agent with Daimon.</p>
 <p>you get {credit} of credit on us.</p>
-<p class="dim">you can close this tab and head back to Slack.</p>
+{promo}<p class="dim">you can close this tab and head back to Slack.</p>
 """
     return _page(title="daimon installed", state_bar="", body_html=body)
 
@@ -690,6 +700,15 @@ def build_oauth_slack_routes(
             key=f"install:slack:{team_id}",
             message=f"New install: Slack {result.team_name or team_id} ({team_id})",
         )
+        try:
+            async with sessionmaker() as s:
+                promo_codes = await has_redeemable_promo_code(s, now=datetime.now(UTC))
+        except SQLAlchemyError as exc:
+            # The install is done; a failed lookup only drops the promo line.
+            logger.warning(
+                "slack install promo code lookup failed", team_id=team_id, error=str(exc)
+            )
+            promo_codes = False
 
         return _success_html(
             workspace=result.team_name or team_id,
@@ -697,6 +716,7 @@ def build_oauth_slack_routes(
             display_name=settings.slack.bot_display_name
             if settings.slack is not None
             else "daimon",
+            promo_codes=promo_codes,
         )
 
     async def connect_handler(request: Request) -> Response:

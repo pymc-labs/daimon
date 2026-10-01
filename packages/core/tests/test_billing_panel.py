@@ -18,15 +18,19 @@ from daimon.core.billing_panel import (
     load_billing_snapshot,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.promo_codes import build_promo_code_terms
+from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import usage_events
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _CALLER_ID = "U_CALLER"
 _OTHER_ID = "U_OTHER"
 _SINCE = datetime(2025, 1, 1, tzinfo=UTC)
+_NOW = datetime(2025, 1, 15, tzinfo=UTC)
 _CHECKOUT_URL = "https://checkout.example/abc"
 
 
@@ -67,7 +71,12 @@ async def test_load_billing_snapshot_member_reads_only_caller_data(
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
     state = await load_billing_snapshot(
-        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=False, since=_SINCE
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id=_CALLER_ID,
+        is_admin=False,
+        since=_SINCE,
+        now=_NOW,
     )
 
     assert state.is_admin is False, "a member gets the member snapshot"
@@ -83,7 +92,12 @@ async def test_load_billing_snapshot_admin_sorts_members_by_spend(
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
     state = await load_billing_snapshot(
-        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True, since=_SINCE
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id=_CALLER_ID,
+        is_admin=True,
+        since=_SINCE,
+        now=_NOW,
     )
 
     assert state.is_admin is True, "an admin gets the admin snapshot"
@@ -109,7 +123,12 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncS
     await db_session.commit()
 
     state = await load_billing_snapshot(
-        db_session, tenant_id=tenant.id, platform_user_id="U_MANY_000", is_admin=True, since=_SINCE
+        db_session,
+        tenant_id=tenant.id,
+        platform_user_id="U_MANY_000",
+        is_admin=True,
+        since=_SINCE,
+        now=_NOW,
     )
 
     assert len(state.member_rows) == 25, "member rows are capped at 25"
@@ -120,7 +139,12 @@ async def test_load_billing_snapshot_empty_period_is_well_formed(db_session: Asy
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BILLING_EMPTY")
     await db_session.commit()
     state = await load_billing_snapshot(
-        db_session, tenant_id=tenant.id, platform_user_id="U_EMPTY", is_admin=False, since=_SINCE
+        db_session,
+        tenant_id=tenant.id,
+        platform_user_id="U_EMPTY",
+        is_admin=False,
+        since=_SINCE,
+        now=_NOW,
     )
 
     assert (state.caller_spend, state.caller_turns, state.member_rows) == (0.0, 0, ()), (
@@ -192,3 +216,53 @@ async def test_create_checkout_refuses_without_mcp_settings() -> None:
     async with httpx.AsyncClient() as client:
         with pytest.raises(DaimonError, match="DAIMON_MCP__PUBLIC_URL"):
             await create_checkout(client, settings=settings, account_id=uuid.uuid4(), amount=10)
+
+
+async def test_load_billing_snapshot_flags_a_redeemable_code_for_admins_only(
+    db_session: AsyncSession,
+) -> None:
+    """The redeem button's flag is set only for an admin, and only once a code exists."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PROMO")
+
+    async def snapshot(is_admin: bool) -> bool:
+        state = await load_billing_snapshot(
+            db_session,
+            tenant_id=tenant.id,
+            platform_user_id=_CALLER_ID,
+            is_admin=is_admin,
+            since=_SINCE,
+            now=_NOW,
+        )
+        return state.has_redeemable_promo_code
+
+    assert not await snapshot(True), "no code should mean no redeem button"
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
+    assert await snapshot(True), "a redeemable code should show the redeem button to admins"
+    assert not await snapshot(False), "members never get the redeem button"
+
+
+async def test_load_billing_snapshot_hides_redemption_when_the_lookup_fails(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed promo lookup hides the button and leaves the rest of the read working."""
+
+    async def failing_lookup(session: AsyncSession, *, now: datetime) -> bool:
+        await session.execute(text("SELECT 1/0"))  # aborts the surrounding transaction
+        return True
+
+    monkeypatch.setattr("daimon.core.billing_panel.has_redeemable_promo_code", failing_lookup)
+    tenant_id = await _tenant_with_usage(db_session)
+
+    state = await load_billing_snapshot(
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id=_CALLER_ID,
+        is_admin=True,
+        since=_SINCE,
+        now=_NOW,
+    )
+
+    assert state.is_admin and not state.has_redeemable_promo_code, (
+        "a failed lookup should still load the admin panel, without the redeem button"
+    )

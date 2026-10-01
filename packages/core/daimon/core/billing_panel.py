@@ -13,11 +13,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import structlog
 from daimon.core.billing import month_start as month_start
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.promo_credit import ActiveTimedCredit, get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
+from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
     cost_for_tenant_since,
@@ -27,7 +30,10 @@ from daimon.core.stores.usage_events import (
     turn_count_for_user_in_tenant_since,
     turns_by_user_in_tenant_since,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+log = structlog.get_logger(__name__)
 
 # Any other amount is refused: each must match a configured Stripe price.
 TOPUP_AMOUNTS = (10, 25, 50, 100)
@@ -60,11 +66,29 @@ class BillingPanelState:
     guild_distinct_members: int
     member_rows: tuple[MemberRow, ...]  # sorted, capped at MEMBER_CAP
     over_cap_count: int  # spending members beyond MEMBER_CAP
+    # Live timed promo credit (both views), soonest-ending first; empty without promo codes
+    timed_credit: tuple[ActiveTimedCredit, ...] = ()
+    # Some promo code is redeemable now (admin view only); gates the redeem button
+    has_redeemable_promo_code: bool = False
 
 
 def member_label(user_id: str) -> str:
     """`User XXXX` from the id's last four characters; chat adapters keep no name cache."""
     return f"User {user_id[-4:]}" if len(user_id) >= 4 else "<unknown user>"
+
+
+async def _has_redeemable_promo_code_or_false(session: AsyncSession, *, now: datetime) -> bool:
+    """Whether a promo code is redeemable now; False when the lookup fails.
+
+    Named boundary: a failed lookup only hides the redeem button. It runs in a
+    savepoint, so the rest of the snapshot still reads.
+    """
+    try:
+        async with session.begin_nested():
+            return await has_redeemable_promo_code(session, now=now)
+    except SQLAlchemyError as exc:
+        log.warning("billing_panel.promo_code_lookup_failed", error=str(exc))
+        return False
 
 
 async def load_billing_snapshot(
@@ -74,8 +98,12 @@ async def load_billing_snapshot(
     platform_user_id: str,
     is_admin: bool,
     since: datetime,
+    now: datetime,
 ) -> BillingPanelState:
-    """The caller's spend, turns and cap plus the balance; tenant totals only for an admin."""
+    """The caller's spend, turns and cap plus the balance; tenant totals only for an admin.
+
+    ``now`` is when live timed promo credit is measured.
+    """
     state = BillingPanelState(
         is_admin=False,
         caller_user_id=platform_user_id,
@@ -94,6 +122,7 @@ async def load_billing_snapshot(
         guild_distinct_members=0,
         member_rows=(),
         over_cap_count=0,
+        timed_credit=tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now)),
     )
     if not is_admin:
         return state
@@ -121,6 +150,7 @@ async def load_billing_snapshot(
         guild_distinct_members=len(user_ids),
         member_rows=tuple(rows[:MEMBER_CAP]),
         over_cap_count=max(0, len(rows) - MEMBER_CAP),
+        has_redeemable_promo_code=await _has_redeemable_promo_code_or_false(session, now=now),
     )
 
 

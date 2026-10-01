@@ -61,7 +61,7 @@ the agent. None of them runs an agent turn.
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
-| `billing` | Your usage this month; admins also see totals, top spenders and top-ups. |
+| `billing` | Your usage this month; admins also see totals, top spenders and top-ups. No promo codes: admins redeem with the MCP tool `redeem_promo_code`. |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's

@@ -12,13 +12,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import structlog
 from daimon.adapters.discord.billing_panel.state import (
     BillingPanelState,
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
+from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
     cost_for_tenant_since,
@@ -28,6 +31,7 @@ from daimon.core.stores.usage_events import (
     turn_count_for_user_in_tenant_since,
     turns_by_user_in_tenant_since,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -35,6 +39,8 @@ from discord import Interaction
 from discord.ext import commands
 
 BotInteraction = Interaction[commands.Bot]
+
+_log = structlog.get_logger()
 
 _TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
 
@@ -71,6 +77,19 @@ def _resolve_member_name(guild: discord.Guild | None, user_id: str) -> str:
     return "<unknown user>"
 
 
+async def _has_redeemable_promo_code_best_effort(session: AsyncSession, *, now: datetime) -> bool:
+    """Whether a promo code is redeemable now; False when the lookup fails.
+
+    Runs in a savepoint so a failed lookup leaves the session usable.
+    """
+    try:
+        async with session.begin_nested():
+            return await has_redeemable_promo_code(session, now=now)
+    except SQLAlchemyError as exc:
+        _log.warning("promo_code_lookup_failed", error=str(exc))
+        return False
+
+
 async def load_billing_snapshot(
     session: AsyncSession,
     *,
@@ -79,6 +98,7 @@ async def load_billing_snapshot(
     caller_user_id: str,
     is_admin: bool,
     since: datetime,
+    now: datetime,
 ) -> BillingPanelState:
     """Read everything needed to render /billing for a single invocation.
 
@@ -107,6 +127,7 @@ async def load_billing_snapshot(
         user_id=caller_user_id,
     )
     guild_balance = await get_balance(session, tenant_id=tenant_id)
+    timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))
 
     if not is_admin:
         return BillingPanelState(
@@ -121,9 +142,11 @@ async def load_billing_snapshot(
             guild_distinct_members=0,
             member_rows=(),
             over_cap_count=0,
+            timed_credit=timed_credit,
         )
 
     # Admin path
+    has_redeemable = await _has_redeemable_promo_code_best_effort(session, now=now)
     guild_spend = await cost_for_tenant_since(
         session,
         tenant_id=tenant_id,
@@ -177,4 +200,6 @@ async def load_billing_snapshot(
         guild_distinct_members=len(all_user_ids),
         member_rows=capped,
         over_cap_count=over_cap_count,
+        timed_credit=timed_credit,
+        has_redeemable_promo_code=has_redeemable,
     )

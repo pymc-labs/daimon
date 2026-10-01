@@ -66,6 +66,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -501,6 +502,18 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Grant opened timed promo windows, expire closed ones, credit back late spend.
+
+    Runs after the usage sweep, so late debits are on the ledger first.
+    Idempotent; boundary catch so a DB failure retries on the next tick.
+    """
+    try:
+        await settle_promo_credit(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.promo_credit_settle.failed")
+
+
 def _validate_mcp_settings(settings: Settings) -> None:
     """Single-tenant deployments require both ``settings.mcp.jwt_secret`` and
     ``settings.mcp.public_url`` so each routine fire can bind the daimon-mcp
@@ -637,6 +650,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
                 sm=sm,
@@ -669,6 +683,7 @@ async def run(
                 await _sweep_slack_event_dedup(sm)
                 await _sweep_retired_turn_card_intents(sm)
                 await _sweep_hub_oauth_kv(sm)
+                await _settle_promo_credit(sm)
                 await _drain_github_push_resync(
                     engine=engine,
                     sm=sm,

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 89 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 90 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -150,6 +150,14 @@ Notebook MCP tools.
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (frees its host port). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
+
+## `promo_codes`
+
+Promo code tools: redeem an operator-issued code for the caller's server or workspace.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `redeem_promo_code` | admin only | Redeem a promo code for credit on this server or workspace. |
 
 ## `propagation`
 

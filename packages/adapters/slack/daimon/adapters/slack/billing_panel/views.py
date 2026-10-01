@@ -7,7 +7,7 @@ the chat-neutral ones in daimon.core.billing_panel.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
@@ -21,9 +21,28 @@ from daimon.core.billing_panel import (
     spend_over_cap,
 )
 
+REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
+
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
 # ---------------------------------------------------------------------------
+
+
+def slack_time(moment: datetime) -> str:
+    """A moment every reader sees in their own timezone, with a UTC fallback."""
+    fallback = f"{moment.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+    return f"<!date^{int(moment.timestamp())}^{{date_short_pretty}} {{time}}|{fallback}>"
+
+
+def _timed_credit_lines(state: BillingPanelState) -> str:
+    """One line per live timed promo credit, prefixed with a newline; empty when none."""
+    lines = [
+        f"\n⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {slack_time(c.ends_at)}"
+        for c in state.timed_credit[:3]
+    ]
+    if len(state.timed_credit) > 3:
+        lines.append(f"\n⏳ {len(state.timed_credit) - 3} more timed credits")
+    return "".join(lines)
 
 
 def build_loading_view() -> dict[str, Any]:
@@ -84,7 +103,10 @@ def build_billing_container(
         blocks.append({"type": "divider"})
 
         # Server credit
-        credit_line = f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
+        credit_line = (
+            f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
+            f"{_timed_credit_lines(state)}"
+        )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
         # Top spenders
@@ -127,23 +149,24 @@ def build_billing_container(
                     "description": {"type": "plain_text", "text": description_text},
                 }
             )
-        blocks.append({"type": "divider"})
-        blocks.append(
+        elements: list[dict[str, Any]] = [
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "static_select",
-                        "action_id": "billing_topup",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "💳 Top up server credit…",
-                        },
-                        "options": topup_options,
-                    }
-                ],
+                "type": "static_select",
+                "action_id": "billing_topup",
+                "placeholder": {"type": "plain_text", "text": "💳 Top up server credit…"},
+                "options": topup_options,
             }
-        )
+        ]
+        if state.has_redeemable_promo_code:
+            elements.append(
+                {
+                    "type": "button",
+                    "action_id": REDEEM_OPEN_ACTION_ID,
+                    "text": {"type": "plain_text", "text": "🎟️ Redeem code"},
+                }
+            )
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "actions", "elements": elements})
 
     else:
         # Member (non-admin) branch
@@ -176,7 +199,20 @@ def build_billing_container(
         credit_line = (
             f"🏦 *Server credit*\n"
             f"{fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
+            f"{_timed_credit_lines(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
     return blocks
+
+
+def build_billing_view(
+    state: BillingPanelState, *, now: datetime, since: datetime
+) -> dict[str, Any]:
+    """The /billing modal around ``build_billing_container``."""
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Billing"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": build_billing_container(state, now=now, since=since),
+    }

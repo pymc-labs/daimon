@@ -81,6 +81,10 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # per-tenant isolation is enforced at request time by the hub middleware
     # rather than by a column.
     "hub_oauth_kv": "OAuthProxy login state keyed by (collection, key); tenant lives in the token claims, not the row",
+    # Promo codes are created by the operator for the whole deployment and hold
+    # no tenant data; each tenant's use of one is a promo_redemptions row, which
+    # carries tenant_id.
+    "promo_codes": "deployment-level operator codes; per-tenant redemptions carry tenant_id",
 }
 
 

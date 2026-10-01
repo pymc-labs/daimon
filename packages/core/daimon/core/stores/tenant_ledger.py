@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores.domain import TenantLedgerRow
-from sqlalchemy import func, select
+from sqlalchemy import DateTime, func, select
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +33,14 @@ async def insert_entry(
     idempotency_key: str,
     payment_event_id: str | None = None,
     payment_intent: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> bool:
-    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted."""
+    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted.
+
+    ``occurred_at`` dates the entry by when it happened (a model call's own
+    time) rather than when it was written; the database clock is the default.
+    """
+    dated = {} if occurred_at is None else {"occurred_at": occurred_at}
     stmt = (
         pg_insert(TenantLedger)
         .values(
@@ -42,6 +50,7 @@ async def insert_entry(
             idempotency_key=idempotency_key,
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
+            **dated,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
     )
@@ -68,6 +77,37 @@ async def get_prepaid_balance(session: AsyncSession, *, tenant_id: uuid.UUID) ->
         .group_by(Tenant.id)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_spend_by_interval(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    bounds: Sequence[datetime],
+    reasons: Sequence[str],
+) -> list[Decimal]:
+    """Positive spend per interval ``[bounds[i], bounds[i+1])``, one scan of the tenant's rows.
+
+    ``bounds`` must be sorted. Only rows whose reason is in ``reasons`` count.
+    """
+    if len(bounds) < 2:
+        return []
+    thresholds = pg_array(list(bounds), type_=DateTime(timezone=True))
+    bucket = func.width_bucket(TenantLedger.occurred_at, thresholds).label("bucket")
+    stmt = (
+        select(bucket, func.sum(-TenantLedger.delta_usd))
+        .where(
+            TenantLedger.tenant_id == tenant_id,
+            TenantLedger.reason.in_(reasons),
+            TenantLedger.occurred_at >= bounds[0],
+            TenantLedger.occurred_at < bounds[-1],
+        )
+        .group_by(bucket)
+    )
+    spend = [Decimal("0")] * (len(bounds) - 1)
+    for index, total in (await session.execute(stmt)).tuples():
+        spend[int(index) - 1] = Decimal(total)
+    return spend
 
 
 async def get_clawed_back_total(session: AsyncSession, *, payment_intent: str) -> Decimal:
