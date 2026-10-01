@@ -524,7 +524,7 @@ async def test_fire_gates_on_and_attributes_to_the_routine_channel(
         assert fetched.last_error == "channel_budget_exceeded"
         return
     assert fetched.last_error is None
-    assert calls[0]["channel_id"] == "chan-9"
+    assert calls[0]["budget_channel_id"] == "chan-9"
     factory = calls[0]["usage_record_factory"]
     assert callable(factory)
     partial = factory("sess_abc", "claude-opus-4-7")

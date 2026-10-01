@@ -72,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there or were made there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
-  channel from this release on.
+  channel from this release on, and sessions carry it as
+  `daimon_budget_channel`.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

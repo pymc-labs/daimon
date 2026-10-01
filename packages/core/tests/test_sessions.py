@@ -20,7 +20,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.credential_requests import mint_request_token
-from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT, MA_METADATA_KEY_CHANNEL
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CHANNEL,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.sessions import create_session
@@ -623,9 +627,17 @@ async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
     assert stamped == expected
 
 
-@pytest.mark.parametrize("channel_id", [None, "chan-1"], ids=["dm-unstamped", "channel-stamped"])
-async def test_create_session_stamps_the_channel_only_when_given(channel_id: str | None) -> None:
-    """``channel_id`` becomes ``daimon_channel``, which the usage sweep attributes spend to."""
+@pytest.mark.parametrize(
+    "budget_channel_id", [None, "chan-1"], ids=["unbudgeted", "budget-stamped"]
+)
+async def test_create_session_stamps_the_budget_channel_apart_from_the_seal_origin(
+    budget_channel_id: str | None,
+) -> None:
+    """``budget_channel_id`` becomes ``daimon_budget_channel`` and never ``daimon_channel``.
+
+    A DM is budgeted to the channel it was moved from without running there, so
+    the stamp the seal reads must stay absent.
+    """
     captured_bodies: list[dict[str, Any]] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -645,11 +657,14 @@ async def test_create_session_stamps_the_channel_only_when_given(channel_id: str
         agent=_make_agent(anthropic_id="ag_ch"),
         environment=_make_env(anthropic_id="env_ch"),
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
-        channel_id=channel_id,
+        budget_channel_id=budget_channel_id,
     )
 
     metadata = captured_bodies[0]["metadata"]
-    assert metadata.get(MA_METADATA_KEY_CHANNEL) == channel_id, metadata
+    assert metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL) == budget_channel_id, metadata
+    assert MA_METADATA_KEY_CHANNEL not in metadata, (
+        f"a budget stamp must not place the session in a channel's seal; got {metadata!r}"
+    )
 
 
 async def test_create_session_omits_metadata_when_account_and_tenant_both_none() -> None:

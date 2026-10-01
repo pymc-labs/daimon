@@ -212,7 +212,10 @@ Discord and Slack only; Teams has none.
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
   pre-markup usage `/billing` totals. Debits carry the parent channel, so a
-  thread counts toward its channel.
+  thread counts toward its channel. A session records it in its own
+  `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
+  reads; it is kept apart from `daimon_channel`, where the conversation runs,
+  so a DM counts toward its source channel without being placed in it.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing

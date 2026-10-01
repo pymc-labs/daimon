@@ -232,7 +232,7 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
-        channel_id=admission.channel_id,
+        budget_channel_id=admission.channel_id,
         origin_channel_id=admission.origin_channel_id,
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),

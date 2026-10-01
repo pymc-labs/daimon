@@ -417,7 +417,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
-            channel_id=row.channel_id,
+            budget_channel_id=row.channel_id,
         )
 
         if row.destination_kind is None:
