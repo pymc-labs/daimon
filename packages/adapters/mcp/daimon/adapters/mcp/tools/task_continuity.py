@@ -26,6 +26,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.access_policy import is_outside_agent_pin, origin_pin_location
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -190,7 +191,10 @@ async def _hand_off_task_impl(
         origin_responder_ma_agent_id=origin.responder_ma_agent_id,
         destination_pinned_elsewhere=is_outside_agent_pin(
             policy,
-            agent_names=(destination_name,),
+            agent_names=(
+                destination_name,
+                *agent_pin_names(destination.name, destination.metadata),
+            ),
             channel_id=pin_channel,
             parent_channel_id=pin_parent,
         ),

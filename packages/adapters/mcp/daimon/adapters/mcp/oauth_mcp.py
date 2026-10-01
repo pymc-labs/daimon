@@ -30,12 +30,16 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
+from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.continuity.messages import ConfigurationChange
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_oauth import complete_mcp_oauth_flow, prepare_authorization
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow, Role
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
@@ -45,7 +49,13 @@ Handler = Callable[[Request], Awaitable[Response]]
 HttpClientFactory = Callable[[], httpx.AsyncClient]
 
 _ErrorKind = Literal[
-    "expired", "unconfigured", "discovery_failed", "exchange_failed", "declined", "agent_gone"
+    "pinned",
+    "expired",
+    "unconfigured",
+    "discovery_failed",
+    "exchange_failed",
+    "declined",
+    "agent_gone",
 ]
 _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
     "expired": (
@@ -73,6 +83,12 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
         "Sign-in was cancelled",
         "Nothing was connected. Ask the agent again whenever you want to connect it.",
         200,
+    ),
+    "pinned": (
+        "Not connected: this agent is pinned",
+        "An operator pinned this agent to its own channels, so connections to it can only "
+        "be added from a conversation inside them, or by an admin. Nothing was connected.",
+        403,
     ),
     "agent_gone": (
         "Signed in, but the agent is gone",
@@ -170,6 +186,13 @@ def build_oauth_mcp_routes(
             if request_row is not None:
                 await _settle(request_row, outcome="declined", state="refused")
             return _error_page("declined")
+        # A flow started before a pin (or a rename) must not finish after it:
+        # re-check the agent as it is now before any grant, stamp or attach.
+        if await _pinned_refusal(flow, request_row):
+            log.info("mcp_oauth.refused_pinned", mcp_server_url=flow.mcp_server_url)
+            if request_row is not None:
+                await _settle(request_row, outcome="declined", state="refused")
+            return _error_page("pinned")
         try:
             async with http_client_factory() as http:
                 completion = await complete_mcp_oauth_flow(
@@ -207,6 +230,30 @@ def build_oauth_mcp_routes(
             await _settle(request_row, outcome="applied", state="applied")
         agent_name = request_row.target_name if request_row is not None else None
         return _success_page(server_name=flow.server_name, agent_name=agent_name or "The agent")
+
+    async def _pinned_refusal(
+        flow: McpOAuthFlowRow, request_row: CredentialRequestRow | None
+    ) -> bool:
+        """Whether the pinned-agent write rule refuses finishing this flow now."""
+        try:
+            agent = await find_agent_by_derived_uuid(
+                runtime.client, tenant_id=flow.tenant_id, agent_id=flow.agent_id
+            )
+        except anthropic.APIError:
+            agent = None
+        async with runtime.session_factory() as session:
+            if request_row is not None:
+                return await request_pin_refusal(session, row=request_row, agent=agent) is not None
+            # No originating request to place it: under any pin, fail closed
+            # unless the requester is an admin now.
+            try:
+                policy = await load_access_policy(session, tenant_id=flow.tenant_id)
+            except AccessPolicyUnreadable:
+                return True
+            if not policy.agent_channel_pins:
+                return False
+            account = await get_account(session, flow.account_id)
+            return account is None or account.role is not Role.ADMIN
 
     async def _settle(
         row: CredentialRequestRow,

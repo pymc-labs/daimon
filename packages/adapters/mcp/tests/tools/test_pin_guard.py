@@ -30,6 +30,8 @@ from daimon.adapters.mcp.tools.repo_binding import (
 )
 from daimon.adapters.mcp.tools.self_edit import (
     _clear_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
+    _self_delete_file_impl,  # pyright: ignore[reportPrivateUsage]
+    _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
     _set_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
@@ -152,7 +154,9 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
             )
 
 
-@pytest.mark.parametrize("tool", ["set_repo_binding", "clear_repo_binding"])
+@pytest.mark.parametrize(
+    "tool", ["set_repo_binding", "clear_repo_binding", "self_write_file", "self_delete_file"]
+)
 async def test_an_agent_key_cannot_rebind_a_pinned_agents_repo(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -172,8 +176,12 @@ async def test_an_agent_key_cannot_rebind_a_pinned_agents_repo(
             await _set_repo_binding_impl(
                 runtime, auth, repo_url="https://github.com/evil/repo", default_branch="main"
             )
-        else:
+        elif tool == "clear_repo_binding":
             await _clear_repo_binding_impl(runtime, auth)
+        elif tool == "self_write_file":
+            await _self_write_file_impl(runtime, auth, key="CRM_TOKEN", content="evil")
+        else:
+            await _self_delete_file_impl(runtime, auth, key="CRM_TOKEN")
 
 
 async def test_bind_public_repo_refuses_a_member_outside_a_pinned_agents_channels(

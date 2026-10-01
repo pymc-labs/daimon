@@ -157,6 +157,9 @@ async def _self_write_file_impl(
     content: str,
 ) -> AgentFileRow:
     agent_id = _require_agent_id(auth)
+    await require_pin_write_access(
+        runtime, auth, ma_agent=lambda: _resolve_ma_agent(runtime, auth), origin=None
+    )
     # An agent key is always a member here, so the value's name must be one a
     # member may write: a credential name, never a tool-control or redirect
     # name. The store enforces the hard-deny layer again under this.
@@ -328,6 +331,9 @@ async def _self_delete_file_impl(
     key: str,
 ) -> dict[str, object]:
     agent_id = _require_agent_id(auth)
+    await require_pin_write_access(
+        runtime, auth, ma_agent=lambda: _resolve_ma_agent(runtime, auth), origin=None
+    )
     await _require_member_may_remove(runtime, auth, agent_id=agent_id, key=key)
     # delete_agent_file is silently idempotent at the store layer (Pitfall 2).
     async with runtime.session_factory.begin() as session:

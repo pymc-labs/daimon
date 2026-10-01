@@ -324,9 +324,13 @@ and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
 pin added later or a rename still holds; a target that can't be resolved under
 a pin is refused. The direct configuration tools (`update_agent`,
 `attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`,
-and an agent key's `set_repo_binding`/`clear_repo_binding`) take no turn
-origin, so on a pinned agent they are an admin's; members inside its channels
+and an agent key's `set_repo_binding`/`clear_repo_binding`/`self_write_file`/
+`self_delete_file`) take no turn origin, so on a pinned agent they are an admin's; members inside its channels
 use the request tools. One guard (`tools/_pin_guard.py`) serves all of them.
+A sign-in (`request_mcp_oauth`) is re-checked when its callback arrives, before
+any grant or attach. Routines are checked against every name of the agent they
+run (at save and at every fire, after the scheduler self-heals to a replacement
+agent), and so is `hand_off_task`'s destination.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
