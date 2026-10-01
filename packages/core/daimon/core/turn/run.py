@@ -15,7 +15,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import anthropic as _anthropic
 import structlog
@@ -42,11 +42,12 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
 )
 from daimon.core.tool_safety import trusted_servers_for
-from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.admission import Admission, reauthorize
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
+from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
     InterruptSource,
@@ -282,6 +283,8 @@ class _Replacement:
     previous_session: str | None
     adopted: bool
     """True when another turn had already replaced the dead session."""
+    admission: Admission | None = None
+    """The admission as decided again for the replacement (`reauthorize`)."""
 
 
 _ORPHAN_ARCHIVE_TIMEOUT_S = 5.0
@@ -399,6 +402,17 @@ async def _replace_dead_session(
             await mark_dead(db, id=dead_mapping_id)
 
             if live is not None and live.id != dead_mapping_id:
+                # The lock wait above can be long: decide again before adopting
+                # another turn's replacement. A pin raises `AdmissionDenied`; a
+                # seal added since makes this turn wait, since the adopted
+                # session may mount memory writable (rolls back the dead-mark).
+                current = await reauthorize(deps, admission)
+                if current.origin_seal_ids != admission.origin_seal_ids:
+                    raise SessionBusyError(
+                        pending_reasons=("seal",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
+                admission = current
                 snapshot = live.effective_config
                 return _Replacement(
                     ma_session_id=live.ma_session_id,
@@ -409,6 +423,7 @@ async def _replace_dead_session(
                     transfer_kind=live.transfer_kind or "history",
                     previous_session=None,
                     adopted=True,
+                    admission=admission,
                 )
 
             # Whose conversation it was, for the quoted block's `from` attribute:
@@ -469,6 +484,7 @@ async def _replace_dead_session(
         transfer_kind=loss_transfer_kind,
         previous_session=previous_session,
         adopted=False,
+        admission=created.admission or admission,
     )
 
 
@@ -734,7 +750,7 @@ async def run_prepared_turn_impl(
                 external_user_id=external_user_id,
                 ma_session_id=new_session_id,
                 model_id=recovery.model_id,
-                channel_id=prepared.admission.budget_channel_id,
+                channel_id=(recovery.admission or prepared.admission).budget_channel_id,
             )
 
             log.info(

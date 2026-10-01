@@ -225,6 +225,28 @@ async def create_ma_session(
             own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
             tenant_seals_anything=bool(policy.sealed_channel_ids),
         )
+    if predecessor_session_id is not None:
+        # The predecessor lookup above awaits MA: decide again after it, so a
+        # pin or seal saved during it applies to the successor being built.
+        admission = await reauthorize(deps, admission)
+        seal |= admission.origin_seal_ids
+    built = admission
+
+    async def fence() -> None:
+        # `create_session` awaits vault, credential, file and repository work
+        # before `sessions.create`; decide once more immediately before it.
+        # A pin raises `AdmissionDenied`; a seal the session was not built
+        # with makes the turn wait and be prepared again read-only.
+        current = await reauthorize(deps, built)
+        if (
+            current.origin_seal_ids != built.origin_seal_ids
+            or current.memory_read_only != built.memory_read_only
+        ):
+            raise SessionBusyError(
+                pending_reasons=("seal",),
+                retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+            )
+
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
@@ -249,6 +271,7 @@ async def create_ma_session(
         origin_channel_id=admission.origin_channel_id,
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
+        before_create=fence,
     )
 
     has_repo = any(

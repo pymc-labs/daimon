@@ -83,7 +83,7 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, SessionAgentMismatch
+from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionAgentMismatch
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import ContinuityOutcome, FreshSession, PreparedTurn
 from daimon.core.turn.session_identity import check_session_agent
@@ -352,7 +352,7 @@ async def _run_replacement(
             session_id=row.ma_session_id,
             error=str(error),
         )
-        if isinstance(error, AdmissionDenied):
+        if isinstance(error, AdmissionDenied | DmSourceSealedError):
             # Decided again just before the successor was created: refused,
             # not a failed preparation to retry.
             raise error

@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass
 
 import anthropic as anthropic_pkg
 import httpx
+import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
@@ -34,6 +34,8 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 
 class McpOAuthWriteRefusedError(DaimonError):
@@ -114,8 +116,12 @@ async def complete_mcp_oauth_flow(
         redirect_uri=flow.redirect_uri,
         resource=flow.resource,
     )
-    if may_write is not None and not await may_write():
-        raise McpOAuthWriteRefusedError
+
+    async def still_allowed() -> None:
+        if may_write is not None and not await may_write():
+            raise McpOAuthWriteRefusedError
+
+    await still_allowed()
     vault_id = await ensure_agent_mcp_vault(
         anthropic,
         account_id=flow.account_id,
@@ -132,8 +138,7 @@ async def complete_mcp_oauth_flow(
     async with hold_agent_vault_lock(
         session_factory, account_id=flow.account_id, agent_id=flow.agent_id
     ):
-        if may_write is not None and not await may_write():
-            raise McpOAuthWriteRefusedError
+        await still_allowed()
         credential_id = await put_mcp_oauth_credential(
             anthropic,
             vault_id=vault_id,
@@ -143,6 +148,7 @@ async def complete_mcp_oauth_flow(
             token_endpoint=flow.token_endpoint,
             resource=flow.resource,
             now=now,
+            before_write=still_allowed,
         )
     # The grant is in this person's vault now, which is what makes them
     # connected: their sessions mount the server, nobody else's do. Stamped
@@ -162,10 +168,7 @@ async def complete_mcp_oauth_flow(
         session_factory, tenant_id=flow.tenant_id, agent_id=flow.agent_id
     ):
         if may_write is not None and not await may_write():
-            # A pin landed after the grant was written: withdraw it, so a
-            # refused sign-in leaves no grant behind as well as no attach.
-            with suppress(anthropic_pkg.APIError):
-                await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
             raise McpOAuthWriteRefusedError
         decision = await decide_mcp_connect(
             session_factory,
@@ -178,16 +181,44 @@ async def complete_mcp_oauth_flow(
             default=default,
             shares_token=False,
         )
-        attached = await attach_mcp_server_to_agent(
-            anthropic,
-            agent.id,
-            server_name=flow.server_name,
-            url=flow.mcp_server_url,
-            replace_allowed=decision.replace_allowed,
-        )
+        try:
+            attached = await attach_mcp_server_to_agent(
+                anthropic,
+                agent.id,
+                server_name=flow.server_name,
+                url=flow.mcp_server_url,
+                replace_allowed=decision.replace_allowed,
+                before_update=still_allowed,
+            )
+        except McpOAuthWriteRefusedError:
+            await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
+            raise
     return McpOAuthCompletion(
         vault_id=vault_id, credential_id=credential_id, ma_agent_id=attached.id
     )
+
+
+async def _withdraw_grant(anthropic: AsyncAnthropic, *, credential_id: str, vault_id: str) -> None:
+    """Remove a grant written before the sign-in was refused; retry once, log a failure.
+
+    A pin landed after the grant was written, so a refused sign-in must leave
+    no grant behind as well as no attach. A failed delete is logged by id
+    (never the credential) so an operator can remove it.
+    """
+    for attempt in (1, 2):
+        try:
+            await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            return
+        except anthropic_pkg.NotFoundError:
+            return
+        except anthropic_pkg.APIError as exc:
+            if attempt == 2:
+                _log.error(
+                    "mcp_oauth.refused_grant_withdraw_failed",
+                    credential_id=credential_id,
+                    vault_id=vault_id,
+                    error_type=type(exc).__name__,
+                )
 
 
 __all__ = [
