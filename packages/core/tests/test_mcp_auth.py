@@ -14,7 +14,14 @@ import datetime as dt
 import uuid
 
 import jwt as pyjwt
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_internal_mcp_token, mint_jwt
+import pytest
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.mcp_auth import (
+    coding_token_channel,
+    mint_agent_mcp_token,
+    mint_internal_mcp_token,
+    mint_jwt,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Agent tokens are minted with a TTL, and the tests below mint them at a fixed
@@ -374,3 +381,50 @@ async def test_mint_agent_mcp_token_writes_row_readable_by_get_mcp_token(
         "row.agent_id must equal str(agent_id) (A2 — stringified derived UUID)"
     )
     assert row.revoked_at is None, "freshly minted token row must not be revoked"
+
+
+async def test_mint_agent_mcp_token_binds_the_row_not_the_jwt(db_session: AsyncSession) -> None:
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"e" * 32
+    token = await mint_agent_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        label=None,
+        secret=secret,
+        now=dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC),
+        platform="discord",
+        channel_id="c-1",
+    )
+
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+    assert set(decoded) == {"sub", "agent_id", "jti", "exp"}, "the binding is never a claim"
+    row = await get_mcp_token(db_session, jti=uuid.UUID(decoded["jti"]))
+    assert row is not None
+    assert (row.platform, row.channel_id) == ("discord", "c-1")
+
+
+_PINS = TenantAccessPolicy(
+    agent_channel_pins={"acme": ("c-acme",)}, sealed_channel_ids=("c-sealed",)
+)
+
+
+@pytest.mark.parametrize(
+    ("names", "channel_id", "expected"),
+    [
+        (("acme",), "c-acme", "c-acme"),
+        (("acme",), "c-other", None),
+        (("other",), "c-sealed", "c-sealed"),
+        (("acme",), "c-sealed", "c-sealed"),
+        (("other",), "c-acme", None),
+        (("acme",), None, None),
+    ],
+    ids=["pinned-inside", "pinned-outside", "sealed", "sealed-outside-pin", "unpinned", "dm"],
+)
+def test_coding_token_channel_binds_only_sealed_or_pinned_channels(
+    names: tuple[str | None, ...], channel_id: str | None, expected: str | None
+) -> None:
+    assert coding_token_channel(_PINS, agent_names=names, channel_id=channel_id) == expected

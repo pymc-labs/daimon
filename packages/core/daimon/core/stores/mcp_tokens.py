@@ -33,12 +33,16 @@ async def create_mcp_token_row(
     agent_id: str,
     label: str | None,
     created_at: datetime,
+    platform: str | None = None,
+    channel_id: str | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
     The caller (mint_agent_mcp_token) generates jti and passes it in so
     the JWT payload and the DB row share the same value. created_at is also
     injected (injected-clock convention per guideline:architecture).
+    `platform` and `channel_id` name the channel the token is bound to, both or
+    neither.
     """
     orm = McpToken(
         jti=jti,
@@ -47,6 +51,8 @@ async def create_mcp_token_row(
         agent_id=agent_id,
         label=label,
         created_at=created_at,
+        platform=platform,
+        channel_id=channel_id,
     )
     session.add(orm)
     await session.flush()

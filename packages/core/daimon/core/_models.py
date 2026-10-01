@@ -1395,6 +1395,9 @@ class McpToken(Base):
     """
 
     __tablename__ = "mcp_tokens"
+    __table_args__ = (
+        CheckConstraint("(platform IS NULL) = (channel_id IS NULL)", name="ck_mcp_tokens_channel"),
+    )
 
     jti: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -1416,6 +1419,10 @@ class McpToken(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The channel the token was minted in, whose calls then run inside it; both
+    # NULL for a token bound to no channel.
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):

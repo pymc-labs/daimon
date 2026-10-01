@@ -22,6 +22,7 @@ import json
 import uuid
 
 import jwt as pyjwt
+from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -121,6 +122,8 @@ async def mint_agent_mcp_token(
     secret: bytes,
     now: dt.datetime,
     ttl_days: int = 90,
+    platform: str | None = None,
+    channel_id: str | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -136,9 +139,14 @@ async def mint_agent_mcp_token(
 
     `ttl_days` defaults to 90 days (long-lived, revoked via revoke_mcp_token
     rather than token rotation).
+
+    `platform` and `channel_id` bind the token to the channel it was minted in
+    (`coding_token_channel`). They live on the row only, never in the JWT, so
+    the verifier reads the binding from the database like the revocation.
     """
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
+    assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     await create_mcp_token_row(
         session,
@@ -148,6 +156,8 @@ async def mint_agent_mcp_token(
         agent_id=str(agent_id),
         label=label,
         created_at=now,
+        platform=platform,
+        channel_id=channel_id,
     )
     exp = int((now + dt.timedelta(days=ttl_days)).timestamp())
     return pyjwt.encode(
@@ -160,6 +170,30 @@ async def mint_agent_mcp_token(
         secret,
         algorithm="HS256",
     )
+
+
+def coding_token_channel(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+) -> str | None:
+    """The channel a coding-tool token minted in `channel_id` is bound to, or None.
+
+    `channel_id` is where the panel was opened (a thread's parent channel).
+    The token is bound there when the channel is sealed, or when the agent is
+    pinned and the channel is inside its pin: those are the places where an
+    agent key from outside every channel could not reach what the channel's
+    own turns do. Anywhere else the token stays unbound, as before.
+    """
+    if channel_id is None:
+        return None
+    if channel_id in policy.sealed_channel_ids:
+        return channel_id
+    pinned = any(name is not None and name in policy.agent_channel_pins for name in agent_names)
+    if pinned and not is_outside_agent_pin(policy, agent_names=agent_names, channel_id=channel_id):
+        return channel_id
+    return None
 
 
 def token_jti(token: str) -> uuid.UUID:
