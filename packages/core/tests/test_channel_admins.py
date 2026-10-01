@@ -104,7 +104,7 @@ def _channel(channel_id: str, agent: str) -> ChannelConfigRow:
 def test_agent_reach_is_local_only_inside_the_given_channels() -> None:
     default = DeploymentDefault(agent_name="daimon")
     reach = build_agent_reach(
-        "helper",
+        ("helper",),
         tenant=None,
         channels=[_channel("c1", "helper"), _channel("c2", "other")],
         default=default,
@@ -115,10 +115,10 @@ def test_agent_reach_is_local_only_inside_the_given_channels() -> None:
     assert not reach.is_local_to({"c1"}, platform_user_id="u1"), "c3 is outside"
 
     tenant = TenantConfigRow(tenant_id=TENANT, agent_name="helper")
-    wide = build_agent_reach("helper", tenant=tenant, channels=[], default=default)
+    wide = build_agent_reach(("helper",), tenant=tenant, channels=[], default=default)
     assert wide.is_tenant_wide, "the tenant default is tenant-wide"
     assert not wide.is_local_to({"c1"}, platform_user_id="u1"), "tenant-wide is never local"
-    fallthrough = build_agent_reach("daimon", tenant=None, channels=[], default=default)
+    fallthrough = build_agent_reach(("daimon",), tenant=None, channels=[], default=default)
     assert not fallthrough.is_local_to({"c1"}, platform_user_id="u1"), (
         "the deployment default is tenant-wide"
     )
@@ -130,7 +130,7 @@ def test_only_a_stronger_requesters_unattended_run_makes_an_agent_not_local() ->
 
     def local(creator: UnattendedRequester) -> bool:
         reach = build_agent_reach(
-            "helper",
+            ("helper",),
             tenant=None,
             channels=[_channel("c1", "helper")],
             default=default,
@@ -157,16 +157,16 @@ def test_agent_reach_counts_a_dm_as_the_channel_it_started_from() -> None:
     live = DmOrigin(channel_id="dm1", scope_id="dm:live", source_channel_id="c1")
     legacy = DmOrigin(channel_id="dm2", scope_id="dm:legacy", source_channel_id=None)
     reach = build_agent_reach(
-        "helper",
+        ("helper",),
         tenant=None,
         channels=[_channel("dm1", "helper"), _channel("dm2", "helper"), _channel("dm3", "helper")],
         default=default,
         dm_origins=[live, legacy],
         dm_bindings=[
-            ("dm1", "dm:live", "helper"),
-            ("dm1", "dm:old", "helper"),
-            ("dm3", "dm:gone", "helper"),
-            ("dm2", "dm:legacy", "other"),
+            ("dm1", "dm:live", "helper", "agent_1"),
+            ("dm1", "dm:old", "helper", "agent_1"),
+            ("dm3", "dm:gone", "helper", "agent_1"),
+            ("dm2", "dm:legacy", "other", "agent_2"),
         ],
     )
     assert reach.channel_ids == {"c1", "dm2"}, (

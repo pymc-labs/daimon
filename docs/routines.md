@@ -91,6 +91,11 @@ The platform surfaces differ, and the difference is deliberate:
   directly rather than going through the MCP tool, because the Slack
   interaction carries the real user id while an agent's token does not
   (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`).
+- **Teams** `routines` (1:1 chat) matches Slack: admins create through a
+  dialog, and the panel writes the row the same way
+  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
+  shared rules (glyph, label, ordering, admin-or-creator) live in
+  `daimon.core.routines`.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -297,10 +302,10 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 ## Who may do what
 
-| Action | MCP | Discord | Slack |
+| Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
-| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator |
+| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
@@ -332,7 +337,7 @@ There is no retry, no backoff, no failure counter and no disable-after-N. A
 failed run writes `last_error` and clears `last_result_tail`; a successful one
 does the reverse. Both columns are overwritten every run, so `last_error is
 not null` means exactly "the most recent run failed" — which is what the
-Discord and Slack panels render.
+Discord, Slack and Teams panels render.
 
 The next slot was already stamped at claim time, before the outcome was known,
 so a failing routine simply waits for its next slot and tries again, forever,
@@ -360,11 +365,13 @@ the six `DAIMON_SCHEDULER__*` settings in
 
 Per run, four gates still apply — the tenant's invoker allowlist, checked
 against the creator, the tenant's credit balance, the per-person monthly cap
-and, for a routine with a `channel_id`, that channel's budget. See
-[billing.md](billing.md#channel-budgets). A run refused by a budget records
+and, for a routine with a `channel_id`, that channel's budget, checked last,
+after the agent's channel pin. See [billing.md](billing.md#channel-budgets).
+A run refused by a budget records
 `channel_budget_exceeded` and the routine fires again at its next slot. A
 Discord thread destination saved before channel budgets existed has no
-`channel_id` until its destination is set again. Taking someone off the allowlist stops
+`channel_id` until its destination is set again. Taking someone off the
+allowlist stops
 their routines at the next fire; the routine stays enabled and records
 `invoker_not_allowed`. A fire has no live platform role, so only the stored
 admin role exempts the creator.

@@ -147,6 +147,13 @@ def test_opener_tells_an_admin_what_only_an_admin_can_do() -> None:
     ), "an admin is told they can route channels, and that the starting agent is forked, not edited"
 
 
+def test_opener_without_a_mention_ends_at_the_role_line() -> None:
+    opener = build_setup_opener(
+        target_display=None, bot_mention=None, is_admin=True, admin_noun="an admin"
+    )
+    assert opener.endswith(_ADMIN_ROLE_LINE), "a 1:1 chat needs no how-to-reply line"
+
+
 def test_opener_uses_the_platform_name_for_an_admin() -> None:
     opener = build_setup_opener(
         target_display=None,

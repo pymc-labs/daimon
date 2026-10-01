@@ -27,8 +27,8 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.routines_panel.read import load_routines
-from daimon.adapters.slack.routines_panel.state import RoutinesPanelState, picker_label
+from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
+from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import (
     build_content_view,
     build_create_routine_modal,
@@ -42,6 +42,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.routines import can_manage_routine, routine_label
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
@@ -83,7 +84,10 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
-                session, runtime.anthropic, tenant_id=tenant_id
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                viewer_user_id=await routines_viewer(client, user_id=user_id),
             )
         state = RoutinesPanelState(
             rows=entries,
@@ -188,10 +192,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     return
                 # T-82-06: authority check at click time (TOCTOU-safe).
                 is_admin = await resolve_is_admin(client, user_id=user_id)
-                is_creator = (
-                    row.created_by_user_id is not None and row.created_by_user_id == user_id
-                )
-                if not (is_admin or is_creator):
+                if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel_id or user_id,
                         user=user_id,
@@ -211,7 +212,10 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # Re-render after successful write.
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
-                    session, runtime.anthropic, tenant_id=tenant_id
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,
@@ -243,8 +247,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # Authority gate before showing the confirm modal (re-checked at
             # submit for TOCTOU safety). Admin OR creator.
             is_admin = await resolve_is_admin(client, user_id=user_id)
-            is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
-            if not (is_admin or is_creator):
+            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
@@ -261,7 +264,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     channel_id=channel_id,
                     routine_id=routine_id_str,
                     root_view_id=view_id,
-                    label=picker_label(row),
+                    label=routine_label(row),
                 ),
             )
 
@@ -282,8 +285,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # agent's own output from a scheduled run and routinely carries
             # business data, so reading it is not a lesser act than pausing.
             is_admin = await resolve_is_admin(client, user_id=user_id)
-            is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
-            if not (is_admin or is_creator):
+            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
@@ -308,7 +310,10 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
         elif action_value == "refresh":
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
-                    session, runtime.anthropic, tenant_id=tenant_id
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,

@@ -123,6 +123,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -175,12 +176,16 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
-from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    build_handoff_notice,
+    render_turn_origin,
+    turn_origin,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -270,24 +275,6 @@ def _collect_files(events: list[dict[str, Any]]) -> list[SlackFile]:
     contribute nothing.
     """
     return [cast(SlackFile, f) for event in events for f in event.get("files", [])]
-
-
-def _build_session_state(continuity: ContinuityOutcome) -> SessionState:
-    """Turn a bind's `ContinuityOutcome` into the `<turn_controls>` fact block.
-
-    `lost` is derived from `transfer_kind` rather than carried on
-    `ContinuityOutcome` directly: a replacement's own transfer degrade ladder
-    (full/transcript/history) already says exactly what did not survive, and
-    repeating that vocabulary here is what keeps `render_turn_origin`'s
-    honesty instruction ("say what is missing before continuing") accurate.
-    """
-    if continuity.transfer_kind == "transcript":
-        lost: tuple[str, ...] = ("working files",)
-    elif continuity.transfer_kind == "history":
-        lost = ("working files", "earlier conversation")
-    else:
-        lost = ()
-    return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
 
 
 class SlackApp:
@@ -2011,7 +1998,7 @@ class SlackApp:
             # path so a plain turn's controls are byte-identical to before
             # this existed.
             session_state = (
-                _build_session_state(prepared.continuity)
+                prepared.continuity.session_state()
                 if prepared.continuity.state != "continued"
                 else None
             )
@@ -2562,8 +2549,11 @@ class SlackApp:
             thread_id=thread_id,
             role=role,
             now=datetime.now(UTC),
+            # A continuation owed to a private DM conversation is a DM turn:
+            # outside every pin, with the DM memory rule.
+            is_dm=thread_id.startswith(DM_SCOPE_PREFIX),
         )
-        # A timer runs only as the agent it was set with; a thread rerouted in
+        # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
             reason=row.reason,
@@ -2571,6 +2561,7 @@ class SlackApp:
             target_name=row.target_name,
             admitted_ma_agent_id=follow_admission.agent.id,
             admitted_name=follow_admission.agent.name,
+            asking_ma_agent_id=from_ma_agent_id,
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
         follow_prepared = await bind_session(
@@ -2642,26 +2633,13 @@ class SlackApp:
                 )
                 await _at_session.commit()
 
-        transfer_kind = follow_prepared.continuity.transfer_kind
-        workspace: Literal["transferred", "transcript_only", "history_only"]
-        not_carried: tuple[str, ...]
-        if transfer_kind == "full":
-            workspace, not_carried = "transferred", ()
-        elif transfer_kind == "transcript":
-            workspace, not_carried = "transcript_only", ("working files",)
-        else:
-            workspace, not_carried = (
-                "history_only",
-                ("working files", "earlier conversation"),
-            )
         handoff_notice = (
-            HandoffNotice(
-                from_name=from_name or "the previous agent",
-                from_ma_agent_id=from_ma_agent_id or "",
+            build_handoff_notice(
+                from_name=from_name,
+                from_ma_agent_id=from_ma_agent_id,
                 requested_by=f"<@{row.requester_external_user_id}>",
                 requested_work=seed_user_message,
-                workspace=workspace,
-                not_carried=not_carried,
+                transfer_kind=follow_prepared.continuity.transfer_kind,
             )
             if row.reason == "task_handoff"
             else None

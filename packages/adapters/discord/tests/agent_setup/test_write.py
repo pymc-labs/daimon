@@ -18,7 +18,6 @@ from daimon.adapters.discord.agent_setup.write import (
     call_reconcile_for_panel,
     create_blank_agent,
     load_tenant_roster,
-    mask_tail,
     replace_agent_resources_for_panel,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -61,16 +60,6 @@ def _agent_dict(
         name=name,
         metadata=metadata,
     ).model_dump(mode="json")
-
-
-def test_mask_tail_short_input_returns_stars_only() -> None:
-    assert mask_tail("abc") == "****", "inputs shorter than 4 must not leak any trailing chars"
-    assert mask_tail("") == "****", "empty input must mask to plain stars"
-
-
-def test_mask_tail_long_input_returns_last_four() -> None:
-    assert mask_tail("ghp_1234567890") == "****7890", "last 4 chars are the display mask"
-    assert mask_tail("abcd") == "****abcd", "exactly-4-char input may show all four"
 
 
 @pytest.mark.asyncio
@@ -602,6 +591,9 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
     assert reconcile_calls == [], (
         "create must raise before reconcile when another owner holds the name"
     )
+
+
+# ----- Plan 04: kick_off_skill_sync -----
 
 
 @pytest.mark.asyncio

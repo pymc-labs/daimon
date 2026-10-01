@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import uuid
-from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, cast
 
@@ -17,6 +17,8 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING, isolation_refusal
 from daimon.core.config import load_settings
+from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger, tenant_user_caps
@@ -50,7 +52,10 @@ access_policy_app = typer.Typer(
 tenants_app.add_typer(access_policy_app, name="access-policy")
 
 
-_VALID_PLATFORMS = ("discord", "cli", "slack")
+_VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
+_ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# A Teams channel thread is its channel id plus ";messageid=<root post>".
+_TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
 
 
 def _validate_platform(value: str) -> Platform:
@@ -517,10 +522,11 @@ def tenants_access_policy_set_command(
         list[str] | None,
         typer.Option(
             help=(
-                "AGENT=CHANNEL_ID: replace every pin with these; the named agent runs only "
-                "in these channels and the threads under them (repeatable; repeat an agent "
-                "for more channels). Refused if it would drop an existing agent's pin "
-                "unless --replace-pins is given."
+                "AGENT=CHANNEL_ID: replace the whole pin map with these. Each named agent's "
+                "channels are rewritten to exactly the ones given; the agent runs only there "
+                "and in the threads under them (repeatable; repeat an agent for more "
+                "channels). Refused if it would drop an unnamed agent's pin unless "
+                "--replace-pins is given. To onboard a client, use --add-pin-agent."
             )
         ),
     ] = None,
@@ -537,8 +543,10 @@ def tenants_access_policy_set_command(
         list[str] | None,
         typer.Option(
             help=(
-                "AGENT or AGENT=CHANNEL_ID: drop that agent's whole pin, or one channel "
-                "from it, keeping every other pin (repeatable)."
+                "AGENT or AGENT=CHANNEL_ID: drop that agent's whole pin (bare AGENT; the "
+                "agent then runs anywhere), or one channel from it, keeping every other pin "
+                "(repeatable). Removing an agent's last channel this way is refused: use "
+                "the bare form to unpin it."
             )
         ),
     ] = None,
@@ -546,7 +554,9 @@ def tenants_access_policy_set_command(
         bool,
         typer.Option(
             "--replace-pins",
-            help="Let --pin-agent drop pins of agents it does not name.",
+            help=(
+                "Let --pin-agent drop pins of agents it does not name, or --clear drop every pin."
+            ),
         ),
     ] = False,
     clear: Annotated[
@@ -560,7 +570,11 @@ def tenants_access_policy_set_command(
     stored value. To empty one field, --clear and set the rest again. Pins
     are the exception: --add-pin-agent and --remove-pin-agent edit the stored
     pins in place, and --pin-agent refuses to drop another agent's pin
-    without --replace-pins. The resulting policy is printed.
+    without --replace-pins. An unpinned agent runs anywhere, so every way of
+    dropping a pin is explicit: a bare --remove-pin-agent AGENT, or
+    --replace-pins with --pin-agent or --clear. Pin names must be agents of
+    the tenant. The resulting policy is printed, with a line for every agent
+    left unpinned.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -600,10 +614,13 @@ def _parse_agent_pins(
     if not pins:
         raise typer.BadParameter("agent_channel_pins: pass at least one AGENT=CHANNEL_ID")
     parsed: dict[str, list[str]] = {}
-    pattern = r"[0-9]{15,21}" if platform == "discord" else r"[CGD][A-Z0-9]+"
+    whole: set[str] = set()
+    # A Slack DM (D…) is never a workspace channel an agent can be pinned to.
+    pattern = r"[0-9]{15,21}" if platform == "discord" else r"[CG][A-Z0-9]+"
     for value in pins:
         name, sep, channel = (part.strip() for part in value.partition("="))
         if channel_optional and name and not sep:
+            whole.add(name)
             parsed.setdefault(name, [])
             continue
         if not sep or not name or not channel:
@@ -615,7 +632,40 @@ def _parse_agent_pins(
         parsed.setdefault(name, [])
         if channel not in parsed[name]:
             parsed[name].append(channel)
+    mixed = sorted(name for name in whole if parsed[name])
+    if mixed:
+        raise typer.BadParameter(
+            f"agent_channel_pins: {', '.join(mixed)} named both bare (whole pin) and with a "
+            "channel; pass one form per agent"
+        )
     return {name: tuple(ids) for name, ids in parsed.items()}
+
+
+def _pin_name_key(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold()
+
+
+def _check_pin_names(names: set[str], agent_names: set[str]) -> None:
+    """Refuse a pin on a name no agent of the tenant carries.
+
+    Pins are matched by exact name at every turn, so a typo, a different case
+    or a look-alike Unicode form would pin nothing and leave the real agent
+    running anywhere. A name that only matches after NFKC and case folding is
+    refused with the exact name to use.
+    """
+    by_key = {_pin_name_key(agent): agent for agent in agent_names}
+    for name in sorted(names):
+        if name in agent_names:
+            continue
+        near = by_key.get(_pin_name_key(name))
+        if near is not None:
+            raise typer.BadParameter(
+                f"agent_channel_pins: no agent is named {name!r}; did you mean {near!r}? "
+                "Pins match the exact name. Nothing was changed."
+            )
+        raise typer.BadParameter(
+            f"agent_channel_pins: this workspace has no agent named {name!r}. Nothing was changed."
+        )
 
 
 def _merge_pins(
@@ -626,10 +676,18 @@ def _merge_pins(
 ) -> dict[str, tuple[str, ...]]:
     """Apply --add-pin-agent then --remove-pin-agent to the stored pins.
 
-    Pins of agents named by neither are kept exactly. Removing an agent's
-    last channel removes its pin, and removing a pin that isn't there is
-    refused rather than ignored, so a typo can't pass for a change.
+    Pins of agents named by neither are kept exactly. Removing a pin that
+    isn't there is refused rather than ignored, so a typo can't pass for a
+    change, and so is removing an agent's last channel by name: that would
+    unpin it (fail open), which only the bare AGENT form may do. An agent
+    named in both lists is refused as ambiguous.
     """
+    both = sorted(set(add) & set(remove))
+    if both:
+        raise typer.BadParameter(
+            f"agent_channel_pins: {', '.join(both)} named in both --add-pin-agent and "
+            "--remove-pin-agent; make one change per agent"
+        )
     merged = {name: list(ids) for name, ids in current.items()}
     for name, ids in add.items():
         channels = merged.setdefault(name, [])
@@ -645,9 +703,14 @@ def _merge_pins(
             raise typer.BadParameter(
                 f"agent_channel_pins: {name!r} is not pinned to {', '.join(missing)}"
             )
-        merged[name] = [channel for channel in merged[name] if channel not in ids]
-        if not merged[name]:
-            del merged[name]
+        remaining = [channel for channel in merged[name] if channel not in ids]
+        if not remaining:
+            raise typer.BadParameter(
+                f"agent_channel_pins: that would remove {name!r}'s last channel and leave it "
+                f"running anywhere. To unpin it, pass --remove-pin-agent {name} on its own. "
+                "Nothing was changed."
+            )
+        merged[name] = remaining
     return {name: tuple(ids) for name, ids in merged.items()}
 
 
@@ -682,11 +745,15 @@ async def tenants_access_policy_set(
         if ids is not None:
             if not ids:
                 raise typer.BadParameter(f"{field}: pass at least one non-empty id")
+            if validated_platform == "teams" and field == "protected_category_ids":
+                raise typer.BadParameter(f"{field}: Teams has no categories, got {ids[0]!r}")
             for value in ids:
                 cleaned = value.strip()
                 pattern = (
                     r"[0-9]{15,21}"
                     if validated_platform == "discord"
+                    else (_ENTRA_OBJECT_ID if field == "invoker_user_ids" else _TEAMS_CHANNEL_ID)
+                    if validated_platform == "teams"
                     else r"[UW][A-Z0-9]+"
                     if field == "invoker_user_ids"
                     # A Slack thread is sealed on its own as channel_id:thread_ts.
@@ -711,8 +778,8 @@ async def tenants_access_policy_set(
             "--pin-agent replaces every pin; use it alone, or edit pins with "
             "--add-pin-agent / --remove-pin-agent"
         )
-    if replace_pins and pin_agent is None:
-        raise typer.BadParameter("--replace-pins only applies to --pin-agent")
+    if replace_pins and pin_agent is None and not clear:
+        raise typer.BadParameter("--replace-pins only applies to --pin-agent or --clear")
     pins_to_add = (
         _parse_agent_pins(add_pin_agent, platform=validated_platform)
         if add_pin_agent is not None
@@ -732,18 +799,51 @@ async def tenants_access_policy_set(
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
     isolated = cast("tuple[str, ...] | None", changes.get("isolated_channel_ids"))
+    named = set(pins_to_add) | set(
+        cast("dict[str, tuple[str, ...]]", changes.get("agent_channel_pins", {}))
+    )
+    if named:
+        agents = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
+        _check_pin_names(
+            named,
+            {agent.name for agent in agents}
+            | {
+                name
+                for agent in agents
+                if (name := agent.metadata.get(MA_METADATA_KEY_NAME)) is not None
+            },
+        )
+    before: dict[str, tuple[str, ...]] = {}
     previous: TenantAccessPolicy | None = None
     async with rt.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
-            with suppress(AccessPolicyUnreadable):
+            try:
                 previous = await load_access_policy(session, tenant_id=tenant_id)
+                before = previous.agent_channel_pins
+            except AccessPolicyUnreadable:
+                # --clear is the way out of an unreadable row, but the row may
+                # hold pins nobody can list: ask for --replace-pins all the same.
+                if not replace_pins:
+                    raise typer.BadParameter(
+                        "the stored policy can't be read, so its pins can't be listed; "
+                        "pass --replace-pins with --clear to drop it anyway. Nothing was "
+                        "changed."
+                    ) from None
+                before = {}
+            if before and not replace_pins:
+                raise typer.BadParameter(
+                    "--clear would drop every pin and leave "
+                    f"{', '.join(sorted(before))} running anywhere. Pass --replace-pins "
+                    "to clear them too. Nothing was changed."
+                )
             await clear_access_policy(session, tenant_id=tenant_id)
             policy = OPEN_ACCESS_POLICY
         else:
             # An unreadable stored row raises here rather than being overwritten
             # blind; --clear is the way out of that state.
             current = previous = await load_access_policy(session, tenant_id=tenant_id)
+            before = current.agent_channel_pins
             if isolated:
                 await _require_isolatable(
                     rt, console, session, tenant_id=tenant_id, current=current, isolated=isolated
@@ -767,3 +867,6 @@ async def tenants_access_policy_set(
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
     _warn_ended_isolation(previous, policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)
+    if not as_json:
+        for name in sorted(set(before) - set(policy.agent_channel_pins)):
+            console.print(f"  {name} is now UNPINNED (runs anywhere)")

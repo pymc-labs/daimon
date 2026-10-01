@@ -105,7 +105,7 @@ def test_parse_scope_channel_slack() -> None:
 
 def test_parse_scope_unknown_platform_raises() -> None:
     with pytest.raises(typer.BadParameter):
-        _parse_scope("tenant:teams/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
+        _parse_scope("tenant:matrix/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
     with pytest.raises(typer.BadParameter):
         # "cli" is deliberately not scope-addressable — bare `tenant` already is the local tenant
         _parse_scope("tenant:cli/local", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())

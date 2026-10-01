@@ -90,6 +90,7 @@ TAG_LABELS: dict[str, str] = {
     "channel-admin": "channel admins too",
     "discord": "Discord callers",
     "slack": "Slack callers",
+    "teams": "Teams callers",
 }
 UNTAGGED_LABEL = "all callers"
 
@@ -318,8 +319,8 @@ def _header(total: int, hub_total: int) -> list[str]:
         *tag_lines,
         "",
         *_wrap(
-            "A CLI token matches no platform tag, so it sees neither the Discord nor "
-            "the Slack tools. An agent token is narrowed to the agent-chat tools alone "
+            "A CLI token matches no platform tag, so it sees none of the Discord, "
+            "Slack or Teams tools. An agent token is narrowed to the agent-chat tools alone "
             "— everything else is disabled for it, admin tools included."
         ),
         "",

@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal
+from typing import Final
 
 from daimon.core.continuity.wakes import cancel_wake
 from daimon.core.errors import DaimonError
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     count_pending_timer_rows,
     get_continuation,
@@ -90,7 +90,7 @@ async def schedule_timer(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
-    platform: Literal["discord", "slack"],
+    platform: ChatPlatform,
     parent_channel_id: str,
     thread_id: str,
     requester_account_id: uuid.UUID,

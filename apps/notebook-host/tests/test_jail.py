@@ -30,12 +30,13 @@ def test_get_slug_paths_performs_no_filesystem_access(tmp_path: Path) -> None:
     assert not missing.exists(), "get_slug_paths must not touch the filesystem"
 
 
-def test_ensure_slug_jail_creates_all_four_dirs_at_mode_0700(tmp_path: Path) -> None:
-    """ensure_slug_jail creates root/data/workspace/home, each mode 0700."""
+def test_ensure_slug_jail_creates_a_host_owned_root_and_0700_subdirs(tmp_path: Path) -> None:
+    """The root is the host's (0711); data/workspace/home/tmp are 0700."""
     from notebook_host.jail import ensure_slug_jail
 
     paths = ensure_slug_jail(tmp_path, "abc")
-    for d in (paths.root, paths.data, paths.workspace, paths.home):
+    assert paths.root.stat().st_mode & 0o777 == 0o711
+    for d in (paths.data, paths.workspace, paths.home, paths.tmp):
         assert d.is_dir(), f"{d} should exist and be a directory"
         assert d.stat().st_mode & 0o777 == 0o700, f"{d} should be mode 0700"
 
@@ -364,7 +365,10 @@ def test_data_dir_slug_tree_and_registry_modes_match_the_documented_target(tmp_p
     assert SLUG_TREE_MODE == 0o700, (
         "the documented slug tree mode constant must be unchanged at 0700"
     )
-    for d in (paths.root, paths.data, paths.workspace, paths.home):
+    assert paths.root.stat().st_mode & 0o777 == 0o711, (
+        "the slug root is the host's: traversable, not writable, by the jail uid"
+    )
+    for d in (paths.data, paths.workspace, paths.home, paths.tmp):
         assert d.stat().st_mode & 0o777 == 0o700, (
             f"{d} must remain the real 0700 isolation boundary"
         )

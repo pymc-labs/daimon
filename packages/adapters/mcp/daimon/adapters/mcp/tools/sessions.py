@@ -22,7 +22,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools._pagination import Page
-from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
+from daimon.adapters.mcp.tools._session_access import (
+    require_session_outside_seals,
+    session_belongs_to_caller,
+    sessions_outside_seals,
+)
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -96,7 +100,11 @@ def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIden
 
 
 async def _verify_caller_owns_session(
-    runtime: McpRuntime, auth: AuthIdentity, session_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session_id: str,
+    *,
+    origin_context_id: str | None = None,
 ) -> BetaManagedAgentsSession:
     """Retrieve a session and assert this caller opened it.
 
@@ -111,7 +119,9 @@ async def _verify_caller_owns_session(
 
     Raises ``ToolError("session not found")`` for every rejection — the same
     message used for a genuinely missing session, so neither existence nor
-    ownership is leaked.
+    ownership is leaked. A session of the caller's own that ran in a sealed
+    channel is then refused unless ``origin_context_id`` names a turn inside
+    that channel: the transcript holds everything the seal keeps in.
     """
     s = await runtime.client.beta.sessions.retrieve(session_id)
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
@@ -121,6 +131,7 @@ async def _verify_caller_owns_session(
     caller = await load_caller_isolation(runtime, auth, agents=agents)
     if not caller.sees_agent(agent):
         raise ToolError("session not found")
+    await require_session_outside_seals(runtime, auth, s, origin_context_id=origin_context_id)
     return s
 
 
@@ -129,6 +140,7 @@ async def _list_sessions_impl(
     auth: AuthIdentity,
     page: str | None,
     agent_name: str | None,
+    origin_context_id: str | None = None,
 ) -> list[SessionInfo]:
     if agent_name is not None:
         agent = await find_agent_by_daimon_tag(
@@ -139,30 +151,44 @@ async def _list_sessions_impl(
         list_kwargs: dict[str, Any] = {"agent_id": agent.id}
         if page is not None:
             list_kwargs["page"] = page
-        results: list[SessionInfo] = []
+        owned: list[BetaManagedAgentsSession] = []
         async for s in runtime.client.beta.sessions.list(**list_kwargs):
             if _session_belongs_to_caller(s, auth):
-                results.append(SessionInfo.from_ma(s))
-        return results
+                owned.append(s)
+        visible = await sessions_outside_seals(
+            runtime, auth, owned, origin_context_id=origin_context_id
+        )
+        return [SessionInfo.from_ma(s) for s in visible]
 
     # Unfiltered: drain across every tenant agent. Cross-agent cursors are
     # not coherent, so we ignore the caller's `page` arg in this branch.
     del page
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     caller = await load_caller_isolation(runtime, auth, agents=agents)
-    drained: list[SessionInfo] = []
+    owned_all: list[BetaManagedAgentsSession] = []
     for agent in filter(caller.sees_agent, agents):
         async for s in runtime.client.beta.sessions.list(agent_id=agent.id):
             if _session_belongs_to_caller(s, auth):
-                drained.append(SessionInfo.from_ma(s))
+                owned_all.append(s)
+    drained = [
+        SessionInfo.from_ma(s)
+        for s in await sessions_outside_seals(
+            runtime, auth, owned_all, origin_context_id=origin_context_id
+        )
+    ]
     drained.sort(key=lambda r: r.created_at, reverse=True)
     return drained
 
 
 async def _get_session_impl(
-    runtime: McpRuntime, auth: AuthIdentity, session_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session_id: str,
+    origin_context_id: str | None = None,
 ) -> SessionInfo:
-    s = await _verify_caller_owns_session(runtime, auth, session_id)
+    s = await _verify_caller_owns_session(
+        runtime, auth, session_id, origin_context_id=origin_context_id
+    )
     return SessionInfo.from_ma(s)
 
 
@@ -173,8 +199,11 @@ async def _list_session_events_impl(
     page: str | None,
     limit: int | None,
     order: Literal["asc", "desc"] | None,
+    origin_context_id: str | None = None,
 ) -> Page[SessionEventOut]:
-    await _verify_caller_owns_session(runtime, auth, session_id)
+    await _verify_caller_owns_session(
+        runtime, auth, session_id, origin_context_id=origin_context_id
+    )
     list_kwargs: dict[str, Any] = {}
     if page is not None:
         list_kwargs["page"] = page
@@ -197,14 +226,27 @@ def register_sessions_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         page: str | None = None,
         agent_name: str | None = None,
+        origin_context_id: str | None = None,
     ) -> list[SessionInfo]:
-        """List sessions in the tenant pool. ``agent_name`` narrows to one agent."""
-        return await _list_sessions_impl(runtime, await _auth(ctx), page, agent_name)
+        """List your sessions in the tenant pool. ``agent_name`` narrows to one agent.
+
+        Conversations from a sealed channel are listed only when
+        ``origin_context_id`` is this turn's origin inside that channel.
+        """
+        return await _list_sessions_impl(
+            runtime, await _auth(ctx), page, agent_name, origin_context_id
+        )
 
     @mcp.tool
-    async def get_session(ctx: Context, session_id: str) -> SessionInfo:  # pyright: ignore[reportUnusedFunction]
-        """Look up a session by id (tenant-scoped)."""
-        return await _get_session_impl(runtime, await _auth(ctx), session_id)
+    async def get_session(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, session_id: str, origin_context_id: str | None = None
+    ) -> SessionInfo:
+        """Look up one of your sessions by id (tenant-scoped).
+
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+        """
+        return await _get_session_impl(runtime, await _auth(ctx), session_id, origin_context_id)
 
     @mcp.tool
     async def list_session_events(  # pyright: ignore[reportUnusedFunction]
@@ -213,8 +255,13 @@ def register_sessions_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         page: str | None = None,
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
+        origin_context_id: str | None = None,
     ) -> Page[SessionEventOut]:
-        """List events for a session (SDK pass-through, single page)."""
+        """List events for one of your sessions (SDK pass-through, single page).
+
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+        """
         return await _list_session_events_impl(
-            runtime, await _auth(ctx), session_id, page, limit, order
+            runtime, await _auth(ctx), session_id, page, limit, order, origin_context_id
         )

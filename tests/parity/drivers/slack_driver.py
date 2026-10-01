@@ -76,7 +76,7 @@ from daimon.adapters.slack.credential_requests import (
     run_mcp_credential_submission,
 )
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -84,7 +84,6 @@ from daimon.core.config import (
     SlackSettings,
 )
 from daimon.core.credential_requests import SLACK_ACTION_ID
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_resolver import new_resolver_cache
@@ -96,13 +95,14 @@ from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard, read_slack_card
-from .protocol import PanelAction, parity_account_id
+from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, read_slack_view
 
 _SLACK_API_BASE = "https://slack.com/api"
@@ -467,7 +467,7 @@ class SlackDriver:
             runtime,
             auth,
             name=name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=name),
+            expected_ma_agent_id=await pin_agent(runtime.client, tenant_id=tenant_id, name=name),
         )
 
     async def fork_agent(
@@ -487,7 +487,9 @@ class SlackDriver:
             auth,
             source_name=source_name,
             new_name=new_name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=source_name),
+            expected_ma_agent_id=await pin_agent(
+                runtime.client, tenant_id=tenant_id, name=source_name
+            ),
         )
 
     async def purge_account(
@@ -615,9 +617,7 @@ class SlackDriver:
         # The tools refuse to mint for an agent they cannot pin by MA id, and
         # take that id off the origin's configuration target when the caller
         # passes none -- so the origin names the agent this card is for.
-        agents = await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
-        if not agents:
-            raise AssertionError(f"the router serves no agent named {agent_name!r}")
+        agent_id = await pin_agent(anthropic, tenant_id=tenant_id, name=agent_name)
         now = datetime.now(UTC)
         async with sessionmaker.begin() as session:
             origin = await create_origin(
@@ -629,7 +629,7 @@ class SlackDriver:
                 thread_id=_POSTED_MESSAGE_TS,
                 responder_ma_agent_id="ag_parity_responder",
                 responder_name="Daimon",
-                configuration_target_ma_agent_id=agents[0].id,
+                configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
                 expires_at=now + timedelta(minutes=30),
@@ -648,7 +648,7 @@ class SlackDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             elif kind == "env_file":
                 await _request_agent_key_impl(
@@ -660,7 +660,7 @@ class SlackDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             elif kind == "mcp":
                 if mcp_server_url is None:
@@ -674,7 +674,7 @@ class SlackDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             else:
                 raise NotImplementedError(
@@ -1109,21 +1109,6 @@ class SlackDriver:
 
     def captured_views(self) -> list[CapturedView]:
         return list(self._views)
-
-
-async def _pin_agent(runtime: McpRuntime, *, tenant_id: uuid.UUID, name: str) -> str:
-    """The MA id the tool must be handed to act on `name`.
-
-    `resolve_setup_agent` refuses a platform call that names an agent without
-    pinning its identity, which is the whole point of the guard: a namesake
-    recreated since the caller last looked must not be adopted silently. A
-    real turn passes the id off the roster it just listed; this does the same
-    read.
-    """
-    agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=name)
-    if not agents:
-        raise AssertionError(f"the router serves no agent named {name!r}")
-    return agents[0].id
 
 
 async def _no_dispatch() -> None:

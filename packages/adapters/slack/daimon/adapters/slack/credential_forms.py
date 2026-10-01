@@ -34,7 +34,7 @@ from daimon.core.posted_controls import (
     CardKind,
     CardState,
     RefusalReason,
-    build_posted_card,
+    card_for_request,
     card_text,
     expired_message,
 )
@@ -92,34 +92,15 @@ def refusal_text(
     *,
     state: CardState,
     refusal: RefusalReason | None = None,
+    replaces: str | None = None,
 ) -> str:
     """The ephemeral copy for a refused submission: the card's own words.
 
-    Built from the same `build_posted_card` call the edit beside it makes, for
+    Built by the same `card_for_request` call the edit beside it makes, for
     the reason `expired_refusal` is: the ephemeral and the card it sits next
     to must not describe one refusal two different ways.
     """
-    repo_display: str | None = None
-    branch: str | None = None
-    if row.kind in _REPO_KINDS:
-        repo_url, branch, _path = split_skill_repo_target(row.target)
-        repo_display = normalize_owner_repo(repo_url)
-    return card_text(
-        build_posted_card(
-            kind=cast("CardKind", row.kind),
-            state=state,
-            agent_name=row.target_name or "the agent",
-            responder_name=row.responder_name or "Daimon",
-            target=row.target,
-            requester_platform_user_id=row.requester_platform_user_id,
-            expires_at=row.expires_at,
-            token=row.token,
-            mcp_server_url=row.mcp_server_url,
-            repo=repo_display,
-            branch=branch,
-            refusal=refusal,
-        )
-    )
+    return card_text(card_for_request(row, state=state, refusal=refusal, replaces=replaces))
 
 
 def _modal_title(kind: CredentialRequestKind, target: str) -> str:

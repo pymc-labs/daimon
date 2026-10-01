@@ -7,7 +7,8 @@ platform's own serializer: Discord's components-v2 payload
 POST carries) or Slack's Block Kit list. Both renderers draw the same four
 slots in the same order — headline, facts, buttons, footer — so one reader
 per platform, returning one shared `CapturedCard`, is enough, and the
-scenarios themselves stay platform-agnostic.
+scenarios themselves stay platform-agnostic. Teams draws the same slots as an
+Adaptive Card.
 
 State comes back from `classify_card_state`, which reads the headline's
 leading emoji and is deliberately lossy in two places (a `received` card
@@ -28,7 +29,13 @@ from typing import Any
 
 from daimon.core.posted_controls import RECEIVED_FOOTER, CardState, classify_card_state
 
-__all__ = ["CapturedCard", "read_discord_card", "read_slack_card", "walk_components"]
+__all__ = [
+    "CapturedCard",
+    "read_discord_card",
+    "read_slack_card",
+    "read_teams_card",
+    "walk_components",
+]
 
 #: The second line of `cards._superseded_content`, and the only line no other
 #: ⚠️ card writes — a `partial` card's facts come from
@@ -156,3 +163,30 @@ def read_slack_card(blocks: object) -> CapturedCard:
             label: dict[str, Any] = element.get("text") or {}
             labels.append(str(label.get("text") or ""))
     return _build(headline=headline, facts=facts, footer=footer, button_labels=tuple(labels))
+
+
+def read_teams_card(card: object) -> CapturedCard:
+    """Read a card off the Adaptive Card `build_adaptive_card` produced.
+
+    The headline is the first TextBlock, each fact a subtle one after it, the
+    buttons one ActionSet and the footer the one small TextBlock.
+    """
+    if not isinstance(card, dict):
+        raise ValueError(f"expected an Adaptive Card, got {type(card).__name__}")
+    body: list[dict[str, Any]] = [b for b in card.get("body") or [] if isinstance(b, dict)]  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    texts = [b for b in body if b.get("type") == "TextBlock"]
+    if not texts:
+        raise ValueError("a posted card always renders its headline")
+    small = [str(b.get("text")) for b in texts[1:] if b.get("size") == "Small"]
+    facts = tuple(str(b.get("text")) for b in texts[1:] if b.get("size") != "Small")
+    labels: list[str] = []
+    for block in body:
+        if block.get("type") == "ActionSet":
+            actions: list[dict[str, Any]] = block.get("actions") or []
+            labels.extend(str(action.get("title") or "") for action in actions)
+    return _build(
+        headline=str(texts[0].get("text")),
+        facts=facts,
+        footer=small[0] if small else None,
+        button_labels=tuple(labels),
+    )

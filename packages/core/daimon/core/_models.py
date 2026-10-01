@@ -2134,6 +2134,13 @@ class TaskContinuation(Base):
             "available_at",
             postgresql_where=text("available_at IS NOT NULL"),
         ),
+        # Agent reach reads the wakes still owed to an agent.
+        Index(
+            "task_continuations_waiting_idx",
+            "tenant_id",
+            "target_name",
+            postgresql_where=text("status IN ('pending', 'claimed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2280,10 +2287,14 @@ class DirectMessageConversation(Base):
     )
     workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # The parent channel `/dm` ran in; the DM's spend counts toward its budget.
-    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The parent channel (and thread) /dm was run in; re-checked against seals
+    # each turn, and the DM's spend counts toward that channel's budget.
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Slack: channel:thread_ts of every copied message, so later thread seals match.
+    source_thread_keys: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     context: Mapped[str] = mapped_column(Text, nullable=False)
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

@@ -13,9 +13,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from daimon.adapters.slack.routines_panel.read import _PICKER_CAP, load_routines
+from daimon.adapters.slack.routines_panel.read import load_routines
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
+from daimon.core.routines import PANEL_CAP
 from daimon.core.stores.routines import create_routine, record_result, set_last_fired_at
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
@@ -116,7 +117,7 @@ async def test_load_routines_returns_entries_with_correct_glyphs_for_all_4_state
     fake_anthropic = build_fake_anthropic(make_fake_ma_handler())
     async with db_session_factory() as session:
         entries, over_cap_count, _ = await load_routines(
-            session, fake_anthropic, tenant_id=tenant_id
+            session, fake_anthropic, tenant_id=tenant_id, viewer_user_id=None
         )
 
     assert over_cap_count == 0, "4 routines should not exceed the 25-entry cap"
@@ -143,7 +144,7 @@ async def test_load_routines_caps_at_25_and_reports_over_cap_count(
 ) -> None:
     """load_routines caps entries at 25 and returns the remainder as over_cap_count."""
     tenant_id = await _seed_tenant(db_session, workspace_id="T_ROUTINES_CAP")
-    total = _PICKER_CAP + 3  # 28 routines
+    total = PANEL_CAP + 3  # 28 routines
 
     for i in range(total):
         await create_routine(
@@ -161,11 +162,44 @@ async def test_load_routines_caps_at_25_and_reports_over_cap_count(
     fake_anthropic = build_fake_anthropic(make_fake_ma_handler())
     async with db_session_factory() as session:
         entries, over_cap_count, _ = await load_routines(
-            session, fake_anthropic, tenant_id=tenant_id
+            session, fake_anthropic, tenant_id=tenant_id, viewer_user_id=None
         )
 
-    assert len(entries) == _PICKER_CAP, f"load_routines must cap entries at {_PICKER_CAP}"
+    assert len(entries) == PANEL_CAP, f"load_routines must cap entries at {PANEL_CAP}"
     assert over_cap_count == 3, "over_cap_count must equal the number of entries beyond the cap"
+
+
+@pytest.mark.asyncio
+async def test_load_routines_shows_a_member_only_their_own_routines(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another member's routine label and trigger are their (often a client's) work."""
+    tenant_id = await _seed_tenant(db_session, workspace_id="T_ROUTINES_OWN")
+    for creator in ("U_ME", "U_ACME", None):
+        await create_routine(
+            db_session,
+            tenant_id=tenant_id,
+            created_by_user_id=creator,
+            agent_id="a1",
+            agent_name="Agent",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message=f"routine of {creator}",
+        )
+    await db_session.flush()
+
+    fake_anthropic = build_fake_anthropic(make_fake_ma_handler())
+    async with db_session_factory() as session:
+        mine, _, _ = await load_routines(
+            session, fake_anthropic, tenant_id=tenant_id, viewer_user_id="U_ME"
+        )
+        every, _, _ = await load_routines(
+            session, fake_anthropic, tenant_id=tenant_id, viewer_user_id=None
+        )
+
+    assert [e.label for e in mine] == ["routine of U_ME"]
+    assert len(every) == 3, "an admin sees every routine"
 
 
 # ---------------------------------------------------------------------------

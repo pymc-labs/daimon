@@ -154,6 +154,20 @@ def hide_across_isolation(answering: AnsweringMap, viewer: IsolationViewer) -> A
     )
 
 
+def routed_agent_names(answering_map: AnsweringMap) -> frozenset[str]:
+    """Every agent some tier routes to, anywhere in the install.
+
+    The deployment default counts only while no workspace default has taken
+    the fall-through away from it.
+    """
+    names = {answer.agent_name for answer in answering_map.channel_overrides}
+    if answering_map.tenant_default is not None:
+        names.add(answering_map.tenant_default.agent_name)
+    if answering_map.deployment_default and not answering_map.tenant_consumes_fallthrough:
+        names.add(answering_map.deployment_default)
+    return frozenset(names)
+
+
 async def load_answering_map(
     session: AsyncSession,
     *,

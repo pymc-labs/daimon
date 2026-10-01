@@ -13,8 +13,10 @@ from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec
+from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -312,3 +314,41 @@ async def test_shared_gate_refusal_uses_followup_when_already_acked() -> None:
     interaction.response.send_message.assert_not_called()
     interaction.followup.send.assert_called_once()
     assert interaction.followup.send.call_args.kwargs.get("ephemeral") is True
+
+
+async def test_both_gates_let_a_channel_admin_edit_an_agent_local_to_their_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Locality reaches the panel gates as it reaches Slack's: own channel yes, server default no."""
+    guild_id = 222006
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(guild_id))
+        await set_channel_admins(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="500",
+            role_ids=[],
+            user_ids=["2"],
+            actor_account_id=None,
+        )
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="500"),
+            tenant_id=tenant.id,
+            agent_name="local-bot",
+            mode="agent",
+        )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        deployment_default=DeploymentDefault(agent_name="wide-bot"),
+    )
+    for gate in (refuse_if_reachable_and_not_admin, refuse_if_shared_and_not_admin):
+        local = await gate(
+            _member_interaction(guild_id=guild_id), runtime=runtime, entry=_entry("local-bot")
+        )
+        wide = await gate(
+            _member_interaction(guild_id=guild_id), runtime=runtime, entry=_entry("wide-bot")
+        )
+        assert local is False, f"{gate.__name__}: the agent answers only in the admin's channel"
+        assert wide is True, f"{gate.__name__}: the server default stays with server admins"

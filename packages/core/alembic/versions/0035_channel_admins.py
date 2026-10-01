@@ -5,6 +5,8 @@ top of the server or workspace admins. No row means nobody extra, so existing
 tenants behave exactly as before. `accounts.platform_role_ids` is refreshed on
 every chat turn like `accounts.role`, so MCP calls can match a role grant
 without a live platform lookup; it starts empty.
+`task_continuations_waiting_idx` serves agent reach's read of the wakes still
+owed to an agent.
 
 downgrade: destructive
 """
@@ -15,8 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0034_channel_admins"
-down_revision: str | None = "0033_channel_budgets"
+revision: str = "0035_channel_admins"
+down_revision: str | None = "0034_channel_budgets"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -64,8 +66,15 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("platform IN ('discord', 'slack')", name="ck_channel_admins_platform"),
     )
+    op.create_index(
+        "task_continuations_waiting_idx",
+        "task_continuations",
+        ["tenant_id", "target_name"],
+        postgresql_where=sa.text("status IN ('pending', 'claimed')"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("task_continuations_waiting_idx", table_name="task_continuations")
     op.drop_table("channel_admins")
     op.drop_column("accounts", "platform_role_ids")

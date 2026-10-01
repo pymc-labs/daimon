@@ -17,7 +17,12 @@ from daimon.adapters.discord.checks import (
     member_role_ids,
     require_registered_guild,
 )
-from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
+from daimon.core.direct_messages import (
+    reply_to_dm,
+    require_dm_enabled,
+    require_unsealed_source,
+    start_dm,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -25,7 +30,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
-from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -33,12 +38,33 @@ from discord import app_commands
 from discord.ext import commands
 
 log = structlog.get_logger(__name__)
+_CONVERSATION_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
 
 def _error_text(exc: Exception, fallback: str) -> str:
     if isinstance(exc, AdmissionDenied) and exc.reason == "channel_budget_exceeded":
         return "Sorry, " + CHANNEL_BUDGET_NOTICE
     return str(exc) if isinstance(exc, DaimonError) else fallback
+
+
+_DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
+    "agent_pinned_elsewhere": (
+        "This channel's agent only runs in the channels an operator pinned it to, "
+        "so it can't continue in a DM."
+    ),
+    "invoker_not_allowed": (
+        "You aren't on this workspace's list of people who can start a turn. An admin can add you."
+    ),
+    "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
+    "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
+    "channel_budget_exceeded": "Sorry, " + CHANNEL_BUDGET_NOTICE,
+}
+
+
+def _dm_denial_message(exc: AdmissionDenied) -> str:
+    """Person-facing copy for a /dm refused at admission (the raw reason is a code)."""
+    return _DM_DENIAL_COPY.get(exc.reason, "This conversation can't be moved to a DM.")
 
 
 class DirectMessageCog(commands.Cog):
@@ -100,6 +126,7 @@ class DirectMessageCog(commands.Cog):
                 dm_source_channel_id=source_channel_id,
                 now=datetime.now(UTC),
             )
+            require_unsealed_source(admission)
             messages = [message async for message in channel.history(limit=12)]
             context = [
                 TranscriptTurn(
@@ -109,7 +136,9 @@ class DirectMessageCog(commands.Cog):
                     text=f"{message.author.display_name}: {message.content}",
                 )
                 for message in reversed(messages)
-                if message.content
+                # System notices (thread created, pins, joins) are not the
+                # conversation, and a thread-created notice names the thread.
+                if message.content and message.type in _CONVERSATION_TYPES
             ]
             dm_channel = await member.create_dm()
             source_url = f"https://discord.com/channels/{guild.id}/{channel.id}"
@@ -121,9 +150,10 @@ class DirectMessageCog(commands.Cog):
                 workspace_id=str(guild.id),
                 route_key=str(dm_channel.id),
                 channel_id=str(dm_channel.id),
-                source_channel_id=source_channel_id,
                 external_user_id=str(member.id),
                 source_url=source_url,
+                source_channel_id=source_channel_id,
+                source_thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 context=context,
             )
             await dm_channel.send(
@@ -140,8 +170,12 @@ class DirectMessageCog(commands.Cog):
             SQLAlchemyError,
         ) as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
-            message = _error_text(
-                exc, "Couldn't open the conversation. Check that your DMs are open and retry."
+            message = (
+                _dm_denial_message(exc)
+                if isinstance(exc, AdmissionDenied)
+                else str(exc)
+                if isinstance(exc, DaimonError)
+                else "Couldn't open the conversation. Check that your DMs are open and retry."
             )
             await interaction.followup.send(message, ephemeral=True)
 

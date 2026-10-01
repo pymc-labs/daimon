@@ -27,6 +27,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from notebook_host.files import write_private_file
+
 _log = logging.getLogger(__name__)
 
 _REGISTRY_MODE = 0o600
@@ -73,15 +75,11 @@ def save_pids(path: Path, records: dict[str, PidRecord]) -> None:
 
     The rename is atomic on the same filesystem, so a host crash mid-write
     leaves either the old file or the new — never a truncated file. The tmp
-    file is locked to ``_REGISTRY_MODE`` (0600) before that rename, not
-    after — no window where a freshly written pids file is world-readable.
+    file is created at ``_REGISTRY_MODE`` (0600) with ``O_EXCL | O_NOFOLLOW``
+    (``files.write_private_file``), so it is never readable by another uid.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     payload = {slug: rec.model_dump() for slug, rec in records.items()}
-    tmp.write_text(json.dumps(payload, indent=2))
-    os.chmod(tmp, _REGISTRY_MODE)
-    os.replace(tmp, path)
+    write_private_file(path, json.dumps(payload, indent=2).encode(), mode=_REGISTRY_MODE)
 
 
 def _pid_alive(pid: int) -> bool:

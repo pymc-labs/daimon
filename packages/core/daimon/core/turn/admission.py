@@ -31,7 +31,6 @@ from daimon.core.access_policy import (
     is_invoker_allowed,
     is_isolated,
     is_outside_agent_pin,
-    is_sealed,
     is_write_protected,
 )
 from daimon.core.billing import is_over_cap
@@ -67,12 +66,23 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # The channel or thread itself is sealed (DM memory policy aside). Callers
+    # that copy content out of the channel, such as /dm, must refuse.
+    source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
+    # The channel and thread the turn runs in, and every sealed id that seals
+    # them (the channel and a thread sealed on its own): stamped on the session
+    # so the transcript tools can apply the seal to it
+    # (`daimon.core.session_seal.origin_stamp`).
+    origin_channel_id: str | None = None
+    origin_thread_id: str | None = None
+    origin_seal_ids: frozenset[str] = frozenset()
     # Parent channel the turn's spend is attributed to; in a DM, the channel it
-    # was moved from, or None.
-    channel_id: str | None = None
+    # was moved from, or None. Apart from `origin_channel_id`, which drives the
+    # seal: a DM is budgeted to its source channel but never runs there.
+    budget_channel_id: str | None = None
     # Turn from an isolated channel or a thread under one: its conversation
     # must not move anywhere else (see `daimon.core.channel_isolation`).
     isolated: bool = False
@@ -277,10 +287,13 @@ async def admit_impl(
     # what its credentials reach. It runs after the cascade because it depends
     # on which agent answers, and it checks both the cascade's name and the
     # agent's own, so a handed-off thread (resolved by id) is covered too. A DM
-    # has no channel, so it is outside every pin. Admins get no exemption. ---
-    if is_outside_agent_pin(
+    # has no channel, so it is outside every pin. Admins are trusted and exempt
+    # only in a DM, where the reply reaches no one else; in a channel or
+    # thread other members would see it, so the pin holds for them too. The
+    # role is the adapter's live one, never a stored role. ---
+    if not (is_dm and role is Role.ADMIN) and is_outside_agent_pin(
         policy,
-        agent_names=(config.agent_name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
         channel_id=None if is_dm else (thread_id or channel_id),
         parent_channel_id=None if is_dm else channel_id,
     ):
@@ -331,12 +344,21 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
+    # Every id that seals the turn: its channel, and the thread sealed on its
+    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
+    # them are recorded, so unsealing one later leaves the others holding.
+    seal_ids = frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
+    )
+    source_sealed = bool(seal_ids)
     memory_read_only = (
-        is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
-        # A Slack thread is sealed on its own as channel_id:thread_ts.
-        or (thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids)
-        or (is_dm and policy.dm_memory_read_only)
-        or setup_inside_isolated
+        source_sealed or (is_dm and policy.dm_memory_read_only) or setup_inside_isolated
     )
 
     return Admission(
@@ -344,9 +366,17 @@ async def admit_impl(
         isolated=is_isolated(
             policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id
         ),
+        source_sealed=source_sealed,
+        origin_channel_id=channel_id,
+        origin_thread_id=thread_id,
+        origin_seal_ids=seal_ids,
+        # Every DM-admitted session is private: the transcript tools never open
+        # it to anyone but its own execution grant, admins included. /dm
+        # replaces this with its execution-specific grant.
+        private_dm_id=(thread_id or channel_id) if is_dm else None,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
-        channel_id=budget_channel_id,
+        budget_channel_id=budget_channel_id,
     )

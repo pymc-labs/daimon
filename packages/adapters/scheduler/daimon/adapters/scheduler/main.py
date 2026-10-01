@@ -35,7 +35,13 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin, is_write_protected
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    is_invoker_allowed,
+    is_outside_agent_pin,
+    is_write_protected,
+)
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_isolation import load_channel_isolation
@@ -212,6 +218,8 @@ async def _build_fire(
             # stored role is the only admin signal a fire has. Unreadable
             # policy fails closed.
             direct_post: DirectPost = "allowed"
+            fire_policy: TenantAccessPolicy | None = None
+            fire_channel_id: str | None = None
             try:
                 policy = await load_access_policy(s, tenant_id=row.tenant_id)
             except AccessPolicyUnreadable:
@@ -225,6 +233,8 @@ async def _build_fire(
                 # a channel's category, so when the policy protects either,
                 # the agent is not invited to post directly at all.
                 target = delivery_target(row, platform=platform)
+                fire_policy = policy
+                fire_channel_id = target.channel_id if target is not None else None
                 if target is not None:
                     if is_write_protected(policy, channel_id=target.channel_id):
                         direct_post = "protected"
@@ -280,27 +290,6 @@ async def _build_fire(
                 await record_result(s, row.id, tail=None, error="balance_depleted")
             return
 
-        # Admission gate: the budget of the channel the routine posts to, after
-        # the cap (run_one_tick) and balance gates. No channel, no budget gate.
-        if await is_over_channel_budget(
-            sessionmaker=sm,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=row.channel_id,
-            now=datetime.now(UTC),
-        ):
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
-            log.info(
-                "routine.skipped.over_channel_budget",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-                channel_id=row.channel_id,
-            )
-            async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
-            return
-
         # Bind routine context now; headless_runner calls the factory once
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
@@ -343,6 +332,47 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
+        # The pin is checked again on the agent that will actually run, by
+        # every name a pin can be keyed by, after self-healing may have picked
+        # a replacement: the saved routine name alone can miss a pin on the
+        # display name or a rename.
+        if fire_policy is not None and fire_policy.agent_channel_pins:
+            ran = await client.beta.agents.retrieve(resolved_agent_id)
+            if is_outside_agent_pin(
+                fire_policy,
+                agent_names=(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
+                channel_id=fire_channel_id,
+            ):
+                log.info(
+                    "routine.skipped.invoker_policy",
+                    routine_id=str(row.id),
+                    tenant_id=str(row.tenant_id),
+                    reason="agent_pinned_elsewhere",
+                )
+                async with sm() as pin_s, pin_s.begin():
+                    await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
+                return
+        # Admission gate: the routine's channel budget, after the cap (run_one_tick),
+        # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
+        # billed to (the destination's parent, else where the routine was made).
+        if await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+            log.info(
+                "routine.skipped.over_channel_budget",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                channel_id=row.channel_id,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+            return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
@@ -397,7 +427,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
-            channel_id=row.channel_id,
+            budget_channel_id=row.channel_id,
         )
 
         if row.destination_kind is None:
@@ -568,7 +598,9 @@ async def run(
 
     engine = _engine_override or build_engine(str(settings.database.url))
     sm = build_session_factory(
-        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
     )
 
     client = (

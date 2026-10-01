@@ -18,7 +18,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_resolver import ResolverCache
@@ -33,7 +33,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.tenants import set_provision_status
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.testing import (
     DEFAULT_MODEL_ID,
     ma_agent,

@@ -6,9 +6,8 @@ after this migration carry one, so existing rows count toward no channel.
 `routines.channel_id` is the channel a routine's spend is attributed to,
 backfilled from destinations whose channel is known without a platform call
 (a channel, or a Slack thread's channel).
-`direct_message_conversations.source_channel_id` is the parent channel a DM
-was moved from with `/dm`; its turns count toward that channel. Rows written
-before this migration stay NULL.
+A DM's turns count toward `direct_message_conversations.source_channel_id`
+(added by `0032_dm_source_ids`), the parent channel it was moved from.
 
 `channel_budgets` holds at most one budget per (tenant, platform, channel).
 No row means no budget, so nothing is gated until an admin sets one.
@@ -21,8 +20,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
 
-revision = "0033_channel_budgets"
-down_revision = "0032_promo_codes"
+revision = "0034_channel_budgets"
+down_revision = "0033_promo_codes"
 branch_labels = None
 depends_on = None
 
@@ -70,10 +69,6 @@ def upgrade() -> None:
         "tenant_ledger",
         ["tenant_id", "channel_id", "occurred_at"],
         postgresql_where=sa.text("channel_id IS NOT NULL"),
-    )
-    op.add_column(
-        "direct_message_conversations",
-        sa.Column("source_channel_id", sa.Text(), nullable=True),
     )
     op.add_column("routines", sa.Column("channel_id", sa.Text(), nullable=True))
     op.execute("UPDATE routines SET channel_id = destination_id WHERE destination_kind = 'channel'")
@@ -139,7 +134,6 @@ def downgrade() -> None:
     _replace_outcome_reasons(_OUTCOME_REASONS_BEFORE)
     op.drop_table("channel_budgets")
     op.drop_column("routines", "channel_id")
-    op.drop_column("direct_message_conversations", "source_channel_id")
     op.drop_index("tenant_ledger_tenant_channel_idx", table_name="tenant_ledger")
     op.drop_column("tenant_ledger", "channel_id")
     op.drop_column("usage_events", "channel_id")

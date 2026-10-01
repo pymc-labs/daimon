@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from daimon.core._models import Account, UserConfig
 from daimon.core.stores.accounts import (
     account_exists,
@@ -13,7 +14,7 @@ from daimon.core.stores.accounts import (
     get_account,
     get_account_with_tenant,
 )
-from daimon.core.stores.domain import AccountIdentityRow, AccountRow
+from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Platform
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,25 +154,31 @@ async def test_get_account_with_tenant_returns_identity_for_discord_account(
     assert row.platform_user_id == "user-77", "platform_user_id must come from PlatformPrincipal"
 
 
-async def test_get_account_with_tenant_returns_identity_for_slack_account(
-    db_session: AsyncSession,
+@pytest.mark.parametrize(
+    ("platform", "workspace_id", "user_id"),
+    [
+        ("slack", "T_WS_1", "U_SLACK_1"),
+        # Teams: the Entra directory tenant and the user's Entra object id.
+        ("teams", "0f9e8d7c-0000-4000-8000-000000000001", "a1b2c3d4-0000-4000-8000-000000000002"),
+    ],
+)
+async def test_get_account_with_tenant_returns_identity_for_chat_accounts(
+    db_session: AsyncSession, platform: Platform, workspace_id: str, user_id: str
 ) -> None:
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_WS_1")
+    tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     account = Account(tenant_id=tenant.id, role="user")
     db_session.add(account)
     await db_session.flush()
     await make_platform_principal(
-        db_session, platform="slack", external_id="U_SLACK_1", tenant=tenant, account=account
+        db_session, platform=platform, external_id=user_id, tenant=tenant, account=account
     )
     await db_session.flush()
 
     row = await get_account_with_tenant(db_session, account_id=account.id)
 
-    assert row is not None, "should find the slack account"
-    assert row.platform == "slack", "platform must come from tenant"
-    assert row.platform_user_id == "U_SLACK_1", (
-        "platform_user_id must resolve for slack tenants, not only discord"
-    )
+    assert row is not None
+    assert (row.platform, row.external_id) == (platform, workspace_id), "from the tenant"
+    assert row.platform_user_id == user_id, "must resolve for every chat platform, not only discord"
 
 
 async def test_get_account_with_tenant_ignores_principal_of_different_platform(

@@ -13,7 +13,7 @@ from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, TurnOriginRow
 from daimon.core.stores.thread_agent_bindings import get_binding, update_target
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
 from fastmcp import Context, FastMCP
@@ -25,7 +25,7 @@ async def require_turn_origin(
     auth: AuthIdentity,
     origin_context_id: str | None,
 ) -> TurnOriginRow:
-    if not origin_context_id or auth.platform not in ("discord", "slack"):
+    if not origin_context_id or auth.platform not in CHAT_PLATFORMS:
         raise ToolError("Use the origin_context_id from this active platform turn.")
     try:
         origin_id = uuid.UUID(origin_context_id)
@@ -63,7 +63,7 @@ async def resolve_setup_agent(
 
     An agent the caller's channel isolation hides resolves as missing.
     """
-    if require_identity and auth.platform in ("discord", "slack") and expected_ma_agent_id is None:
+    if require_identity and auth.platform in CHAT_PLATFORMS and expected_ma_agent_id is None:
         raise ToolError(
             "Pass expected_ma_agent_id from the selected target or list_agents before acting. "
             "Which current agent should I configure? Nothing was changed."

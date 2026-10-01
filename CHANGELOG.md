@@ -9,18 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- `fork_agent` is admin-only, refuses to copy an agent pinned to channels, and a fork now starts with no credentials: no GitHub access, repo binding or proof of access, and no agent-wide MCP token. MCP servers that only work with a stored token are left off the copy. Previously any member could fork another project's agent and walk off with its repo access and connector tokens. `daimon agents fork` copies the same way.
+- Admins are trusted: pins and seals protect members and channels, not admins. An admin is exempt from an agent's channel pin in a DM (Teams personal chats included) and in their own hub turns (`ask`, `start_turn`, `continue_turn`), where the reply reaches only them, and may list and read anyone's sealed conversations from the hub; continuing a sealed channel conversation from the hub is refused for everyone ("continue it in its channel"). Credential and configuration tools on a pinned agent are open to an admin's chat turn. Pins still hold for admins in channels, threads, handoffs and routines, and `fork_agent` still refuses a pinned source. On every turn, wherever a pinned agent runs, its sends on Discord, Slack and Teams reach only its pinned channels, the requester's own DM with daimon (Slack IM or Teams personal chat), and direct messages to the requester. Every DM session is stamped private, so admins never read another member's DM (Slack, Teams or `/dm`) from the hub. A hub caller counts as an admin by the account's stored role, which the person's next platform turn refreshes. Agent-scoped keys and tokens with no platform user are never admins, and a pin now binds a signed bearer with no platform user too (previously it skipped admission entirely). A DM closed because its source channel was sealed now says so plainly. `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` can be stored as agent keys by anyone; every other `GIT_*` name is still refused.
+- Each marimo notebook now requires its own access token. The link the host returns carries it, and a notebook's code can no longer open another notebook by curling its localhost port or reusing a slug it read from `ps`. Scratch notebooks are read-only apps; the editor needs `create_notebook_upload_url(editable=True)` on a deployment that sets `DAIMON_NOTEBOOK__ALLOW_EDITABLE`, and switching a slug between read-only and editor issues a new link. The host also needs its own `DAIMON_NOTEBOOK__ALLOW_EDITABLE` to serve an editor, and `PUT /admin/notebooks/{slug}` is read-only unless it asks for `editable`. The host kills every process of a notebook's uid before reusing or respawning it, quarantines a uid it can't clear, and deletes the uid's files in `/tmp` and `/dev/shm`. Jailed notebooks run with no-new-privileges, a process cap and a private `TMPDIR`, and switching a slug between editor and read-only wipes its home and workspace. Tokens are kept out of marimo's log and redacted from the host's logs, marimo is pinned exactly, and the host refuses to boot with plain-http links off localhost. With `DAIMON_NOTEBOOK__ORIGIN_BASE` (wildcard DNS and TLS), each notebook gets its own origin, `https://<label>.<origin_base>/`, and the host routes by Host, refuses cross-origin requests and WebSockets, and keeps cookies host-only. Without it, notebooks share one origin, so a public host admits a single tenant, named in the bot's upload token. Over https, notebook cookies are `__Host-` prefixed and `Secure`, and HSTS is sent. The slug root is owned by the host and the host never follows a symlink the notebook planted when it chowns, writes or logs. httpx request logs are silenced and every log line is redacted after formatting. The Fly example sets up per-notebook origins.
+- `/dm` now refuses in a sealed channel or a Discord thread under one, before reading any history. It used to copy the last 12 messages into a DM that sits outside the seal. On Slack, a thread sealed on its own is dropped from the copied history instead. An existing DM whose source channel, thread or (on Slack) any copied thread is sealed later ends on its next message: the conversation and its copied context are deleted and its sessions retired. DMs started before this release end as soon as the workspace seals anything. Run migration `0032_dm_source_ids` before deploying.
+- The Slack `/routines` panel lists only your own routines unless you are an admin. `daimon agents fork` refuses a pinned source and leaves token-backed MCP servers off the copy, like the chat tool. The unused panel fork helpers and credential-copy stores are removed, and member-facing copy no longer points members at `fork_agent`, which is admin-only.
+- Cross-agent protection is complete only for pinned agents: pin every client project agent. `decide_handoff` now requires the caller's admin status and the channel's agent explicitly.
+- Pins can no longer be dropped by accident: removing an agent's last channel by id, naming an agent in both add and remove, mixed remove forms, unknown or look-alike agent names, Slack DM ids and `--clear` without `--replace-pins` are refused, and every newly unpinned agent is printed. Members can't add keys or connectors to a pinned agent from outside its channels (checked at request and at submit). DM conversations are outside every pin for handoffs and continuations, and `/dm` refusals show readable copy.
+- `fork_agent` is admin-only, refuses to copy an agent pinned to channels, and a fork now starts with no credentials: no GitHub access, repo binding or proof of access, and no agent-wide MCP token. MCP servers that only work with a stored token are left off the copy. Previously any member could fork another project's agent and walk off with its repo access and connector tokens.
 - A member can no longer operate another project's agent from outside its channels. MCP and hub turns (`start_turn`, `ask`, `continue_turn`, new or resumed) refuse a pinned agent. `hand_off_task` to an agent other than the channel's own, and `create_routine`/`update_routine` for an agent other than the one you are talking to or the destination channel's, now need an admin. Routines are listed and read only by their creator and admins.
 - Operators can pin an agent to named channels (`daimon tenants access-policy set --add-pin-agent AGENT=CHANNEL_ID`, `--remove-pin-agent AGENT[=CHANNEL_ID]`). Pin edits keep every other agent's pin, and `--pin-agent`, which replaces the whole map, refuses to drop an unnamed agent's pin without `--replace-pins`. A pinned agent refuses turns anywhere else, including DMs and threads handed to it from other channels, and its routines must post into a pinned channel. Agents without a pin are unchanged.
+- Agent keys are no longer stored in plaintext by default. Without `DAIMON_CRYPTO__KEYS`, saving one is refused (`request_agent_key` refuses before posting a form, and the form says why) unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true` opts in for local development. The session factory logs `agent_env.encryption_keys_missing` at error level at startup.
+- New `daimon crypto verify` (fails when keys are missing, any agent key is stored in plaintext, or an encrypted key can't be decrypted with the current keys; counts per tenant only) and `daimon crypto encrypt-plaintext` (encrypts legacy plaintext rows in place).
+- `self_read_file` and `self_list_files` no longer return any agent key value, only keys and metadata; the sandbox `.env` still carries them.
+- Credential submissions no longer log any part of tokens, PATs or credential request tokens.
+- Make the mounted agent `.env` inert under `set -a; source`: any value bash would expand, substitute or split is now single-quoted (double-quoted only when it holds a line break), so a key value such as `$(curl …)` set by any member no longer runs code in the agent's sandbox.
+- Refuse key *names* that are themselves a capability, in two structural layers rather than a fixed list. Hard-denied for everyone (including admins), and filtered out of the mounted file even for rows stored earlier: any name that controls an interpreter, archiver, loader, locale, package manager, git, an HTTP client or a CA bundle, or that redirects an SDK's own traffic — recognised by exact names plus prefix/suffix classes (`*_OPTIONS`, `*OPTS`, `*_COMMAND`, `*STARTUP`, `*RC`, `*_PATH`/`PATH`, `*_PROXY`, `*_CONFIG`, `*_PRELOAD`, `*_BASE_URL`, `*_ENDPOINT`, `*_INDEX_URL`, `LD_*`, `GIT_*`, `LC_*`, …). This closes `TAR_OPTIONS`, `BASH_ENV`, `PYTHONSTARTUP`, `GIT_SSH_COMMAND`, `LESSOPEN` and their kind as cross-agent execution routes. Non-admin members may additionally only add a *secret* name — `^[A-Z][A-Z0-9_]{1,63}$` ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_PASSPHRASE` or `_PAT` (plus `GH_TOKEN`/`GITHUB_TOKEN` and bare words like `TOKEN`) — never an identity or targeting name (`*_USER`, `*_ID`, `*_EMAIL`, `*_ORG`, `*_PROJECT`, `*_REGION` …) or a `*_URL`/`*_HOST`; an admin may add any name that is not hard-denied. Language and build loaders (`R_*`, `JULIA_*`, `LUA_INIT*`, `JUPYTER_*`, `PYTEST_PLUGINS`, `*FLAGS`, `CC`/`LD`, `CMAKE_*`), libc and TLS controls (`GLIBC_TUNABLES`, `MALLOC_*`, `OPENSSL_*`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSLKEYLOGFILE`), config directories (`XDG_*`, `*_CONFIG_DIR`, `GNUPGHOME`, `PG*FILE`) and endpoint overrides (`AWS_ENDPOINT_URL*`, `GH_HOST`, `GITHUB_API_URL`, `CLOUDSDK_API_ENDPOINT_OVERRIDES_*`, `TF_CLI_*`, `HELM_*`, `CONDA_*`, `BUNDLE_*`, `POETRY_*`) are hard-denied; `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `UV_PUBLISH_TOKEN` and `DOCKER_PASSWORD` are exempt as opaque secrets. `self_write_file` now stores only secret-named keys (every key it writes is exported into the sandbox `.env`), so it no longer accepts file-like keys such as `config.yaml`. Enforced at `request_agent_key`, the Discord and Slack forms and uploads, and `self_write_file`; the store and the `.env` assembler apply the hard-deny layer under all of them.
+- Session transcript tools now honour sealed channels. `list_sessions`, `get_session` and `list_session_events`, agent chat's session tools (`list_my_sessions`, `get_my_session`, `list_events`, `continue_turn`, `ask` with a handle, and the rest), and the hub's equivalents no longer list, return or continue a conversation that ran in a sealed channel unless the call comes from a turn inside that channel. New sessions record their channel and thread; older channel sessions are hidden outside their own thread while the tenant seals anything. Agent chat's `start_turn`, `ask` and `continue_turn` also refuse a chat turn's own credential, so a sealed turn can't open or continue another session. A conversation that ran sealed stays sealed after an unseal, including a session that replaces it (transcript, checkpoint, bundle, handoff or recovery), and its own thread can still read it.
+- Connecting an MCP server through `request_mcp_token` or `request_mcp_oauth` can no longer replace one the agent already has unless an admin does it, when the agent is shared (a default somewhere) or defaults-managed. Replacing means repointing an existing server name at another URL, or pasting a new token for a URL that already has the agent-wide token. Checked when the card is requested, again against the person submitting, and once more by the attach itself. New server names are unchanged for members. A pasted MCP token is published as the agent-wide credential only after the server is attached and re-checked, under one per-agent lock that the OAuth callback, `attach_mcp_server` and `update_agent` also take, so no other session can mirror a refused token. A failed attach now stores nothing.
+- Key names: hard-deny more exec-on-env names (`*_RSH`, `*PASSCOMMAND`, `SVN_SSH`, `CONFIG_SITE`, `GCC_EXEC_PREFIX`, `CCACHE_PREFIX`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTDOC`, `COR_PROFILER*`, `CORECLR_*`, `DOTNET_ADDITIONAL_DEPS`, `LUA_PATH*`/`LUA_CPATH*`, `CLOUDSDK_PYTHON`, `COVERAGE_PROCESS_START`/`COVERAGE_RCFILE`, `NODE_REPL_EXTERNAL_MODULE`, `PYENV_VERSION`, `LESSKEYIN`/`LESSKEY_SYSTEM`/`LESSEDIT`/`MANROFFOPT`, `AS`/`NM`/`RANLIB`/`STRIP`/`FC`/`MAKE`/`MAKESHELL`, `GOINSECURE`/`GONOPROXY`/`GODEBUG`, `FCEDIT`, `ANSIBLE_VAULT_PASSWORD_FILE`). Path-valued names — `*_FILE`, `*_CLIENT_KEY`, `ETCDCTL_KEY` — are admin-only. Adding a name a tool reads as the same credential as one already stored (`GH_TOKEN`/`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, `AWS_SESSION_TOKEN`/`AWS_SECURITY_TOKEN`, `OPENAI_API_KEY`/`OPENAI_KEY`, `GOOGLE_API_KEY`/`GEMINI_API_KEY`, `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN`) now counts as replacing it: single keys go through the replacement gate and `.env` imports refuse it, naming both keys. The keys a turn is told about no longer include rows the mount skipped. `self_write_file` is add-only: an agent key can no longer overwrite a stored key or add an alias of one. `self_delete_file` is refused on the built-in agent and on any agent reachable in the workspace (as `remove_agent_key` is for members), so delete-then-add can no longer replace a key. Key writers take a per-agent lock before reading key names, so two concurrent writers can no longer add both names of an alias pair, and a `.env` file that contains both names of a pair is refused. Teams key submits now apply the same alias gate, in-transaction re-check and per-agent lock as Discord and Slack. Key and MCP-server replace and remove decisions (`remove_agent_key`, `detach_mcp_server`, MCP replacement, the setup wizard, every key form and `self_delete_file`) now treat an agent as shared when any of its names (display or `daimon_name`) is a channel, tenant or deployment default, when a live handoff or setup thread is bound to it, when it is anyone's personal default, when an enabled routine someone else created runs it, or when another account has a live session with it. Admins can again rotate one key of a stored AWS family; a related key added or removed after the gate still makes the write stale. The AWS access key, secret and session token are a credential family rather than aliases: a fresh agent may import them together, and adding to a stored family counts as a replacement. Alias groups also cover `GITLAB_TOKEN`/`GLAB_TOKEN`, `FLY_API_TOKEN`/`FLY_ACCESS_TOKEN`, `NPM_TOKEN`/`NODE_AUTH_TOKEN`, `AWS_SECURITY_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, and are re-checked inside the write; the refusal names both keys. `VIMINIT`/`EXINIT` are hard-denied; `*_SSL_KEY`/`*_TLS_KEY` are admin-only.
 - Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
 
 ### Upgrade notes
 
+- Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` accepts uploads from the first tenant only and refuses tokens that name no tenant, so upgrade the bot with it; set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve several tenants.
+- Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). After setting keys, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+- Agents whose keys hold shell metacharacters get a re-quoted `.env` once, so those sessions pick up a fresh mount on their next turn. Keys already stored under a hard-denied or non-identifier name stop being exported (an admin-set `DATABASE_URL` still mounts — only tool-control names are dropped); each skipped name is logged as `credential_env.row_skipped` and still shows in `list_agent_keys` so it can be removed or re-added under another name. If you suspect a name like `TAR_OPTIONS` or `LD_PRELOAD` was set on a shared agent before this release, refresh that agent's sessions and rotate any credential the agent could have reached.
+- Audit what members set up before the cross-agent fixes: `list_routines` as an admin for routines whose agent is not the one their destination channel answers with, and thread handoff bindings to agents from other projects. These keep working until removed.
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 
 ### Added
 
+- Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
+  channels, with an in-place status card, author-only Cancel, per-thread
+  queueing, feedback buttons and restart recovery. The configured Entra
+  organisation is provisioned at boot. The 1:1 chat offers `help`, `new`,
+  `setup` (with setup conversations), `routines`, `memory`, `privacy` and
+  `billing`; admins are listed in
+  `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
+  reach the agent, output files are delivered with file consent cards, and
+  `send_message`, `create_thread`, task handoffs and timers work from Teams
+  turns; the wake poller runs handoffs and timers across restarts.
+  Agent keys, MCP tokens and MCP sign-ins are collected privately through
+  Teams dialogs, and with tool safety on, attached-tool writes wait on an
+  Approve/Deny card only the requester can answer. A turn that ends early
+  explains why with the termination notice. Protected channels get no
+  replies, notices or tool posts. Tenant turn caps, agent pins, key-name
+  rules, prepaid balance footers and spend-limit alerts match Slack.
+  Builds on #220 by @jchu96. See `docs/teams.md`.
 - Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
 
 - Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
@@ -37,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there or were made there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
-  channel from this release on.
+  channel from this release on, and sessions carry it as
+  `daimon_budget_channel`.
 - **Channel admins.** Server and workspace admins can name the roles and
   members who run a channel, with `set_channel_admins`, `list_channel_admins`
   and `clear_channel_admins`, from Who answers where in the setup panel, or
@@ -45,7 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in channels they run (instructions, skills, keys, MCP servers, repos)
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
-  admins. Slack grants are by member only.
+  admins. Slack grants are by member only. A routine or wake set up by someone
+  with more rights keeps the agent out of a channel admin's hands, and so do
+  a personal default or live session elsewhere for key and MCP server changes.
+  An admin of every channel an agent is pinned to may change it from outside
+  them. Nobody can make a pinned agent the default of a channel outside its pin.
   Nothing changes until a channel admin is named.
 - **Channel isolation.** Server admins can isolate a channel whose default
   agent answers only there, with `set_channel_isolation`, from Who answers
@@ -71,10 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Promo codes.** Operators create credit or timed codes with `daimon promo`,
   and admins redeem them from `/billing` on Discord and Slack or with the MCP
   tool `redeem_promo_code`. Timed credit is spent first inside its window and
-  the unspent rest expires when it closes; spend recorded late but dated inside
-  the window is credited back. Nothing is visible until a code can be
-  redeemed: only then do the Redeem code button and the join-message lines
-  appear. Turn debits now store the model call's time as `occurred_at`.
+  the unspent rest expires when it closes; spend dated inside the window is
+  credited back if it is recorded within 15 minutes of the close. Nothing is
+  visible until a code can be redeemed: only then do the Redeem code button
+  and the join-message lines appear. Turn debits now store the model call's
+  time as `occurred_at`.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,
@@ -181,7 +223,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("remind me in two hours"). A timer runs in the thread it was set in, as the
   person who asked for it, and goes through the wake queue. A cancelled timer
   never fires, and a timer whose thread now answers to a different agent is
-  skipped with a notice instead of running under that agent. Migration
+  skipped with a notice instead of running under that agent. Handoffs and
+  applied private input are now skipped the same way. Migration
   `0029_feat084_timers` adds the `timer` reason; deploy it and timer-aware
   Discord, Slack and MCP builds before anyone can create timers (see
   `docs/architecture.md`). Downgrading it deletes all timer rows.
@@ -267,6 +310,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The checkout landing pages no longer tell every payer to return to Discord.
+- Continuity notices (workspace loss, fresh start, a failed preparation, a new
+  responder, a timer that did not run) say "here" and "ask again" instead of
+  "this thread" and "mention me", so they read right in a chat without threads.
 - **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
   $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
   its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
@@ -427,6 +474,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Sentry's event scrubber checks nested values, so a token inside a dict local,
+  such as request headers, no longer ships with an error event.
+- Slack top-ups sent the checkout route an internal admin token for the
+  clicking account. They now send a plain account token, as Discord does;
+  the route only needs the account.
 - Text daimon quotes from outside the request now arrives marked as data:
   replayed thread and channel messages on Discord and Slack sit inside
   `trust="untrusted"` envelopes, YouTube transcripts come back wrapped, and

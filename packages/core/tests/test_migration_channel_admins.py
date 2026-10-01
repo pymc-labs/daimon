@@ -1,4 +1,4 @@
-"""The channel admins migration adds an empty table and an empty role-id column."""
+"""The channel admins migration adds an empty table, a role-id column and a wake index."""
 
 import importlib.util
 from pathlib import Path
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0034_channel_admins.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0035_channel_admins.py"
     spec = importlib.util.spec_from_file_location("migration_channel_admins", path)
     assert spec and spec.loader, "the migration file loads"
     migration = importlib.util.module_from_spec(spec)
@@ -44,10 +44,21 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
         )
         return found.first() is not None
 
+    async def waiting_index_exists() -> bool:
+        found = await db_session.execute(
+            text(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() "
+                "AND indexname = 'task_continuations_waiting_idx'"
+            )
+        )
+        return found.first() is not None
+
     await conn.run_sync(run("downgrade"))
     assert not await table_exists(), "downgrade drops channel_admins"
+    assert not await waiting_index_exists(), "downgrade drops the waiting wakes index"
     await conn.run_sync(run("upgrade"))
     assert await table_exists(), "upgrade recreates channel_admins"
+    assert await waiting_index_exists(), "upgrade adds the waiting wakes index"
 
     role_ids = await db_session.execute(
         text("SELECT platform_role_ids FROM accounts WHERE id = :id"), {"id": account.id}

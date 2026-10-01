@@ -55,6 +55,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
 from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -190,7 +191,8 @@ async def refuse_if_shared_and_not_admin_for_request(
             "repo_bind",
             tenant_id=tenant_id,
             platform="discord",
-            agent_name=agent.name,
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             caller=channel_admin_caller(interaction.user),
             is_daimon_managed=is_daimon_managed,

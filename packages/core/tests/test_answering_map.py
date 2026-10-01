@@ -9,7 +9,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from daimon.core.answering_map import build_answering_map, load_answering_map
+from daimon.core.answering_map import (
+    AnsweringMap,
+    ChannelAnswer,
+    TenantAnswer,
+    build_answering_map,
+    load_answering_map,
+    routed_agent_names,
+)
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -196,3 +203,17 @@ async def test_load_answering_map_folds_real_config_rows_and_setup_conversations
         "the setup conversation must carry the agent it is setting up"
     )
     assert not answering.setup_threads_truncated, "one conversation is not a truncated listing"
+
+
+def test_routed_agent_names_drops_the_deployment_default_behind_a_workspace_default() -> None:
+    """A workspace default takes the fall-through, so the deployment default reaches nobody."""
+    overrides = (ChannelAnswer(channel_id="c1", agent_name="alpha"),)
+    with_tenant = AnsweringMap(
+        channel_overrides=overrides,
+        tenant_default=TenantAnswer(agent_name="beta"),
+        deployment_default="daimon",
+        tenant_consumes_fallthrough=True,
+    )
+    without_tenant = AnsweringMap(channel_overrides=overrides, deployment_default="daimon")
+    assert routed_agent_names(with_tenant) == {"alpha", "beta"}, "deployment default is shadowed"
+    assert routed_agent_names(without_tenant) == {"alpha", "daimon"}, "it answers with no tenant"

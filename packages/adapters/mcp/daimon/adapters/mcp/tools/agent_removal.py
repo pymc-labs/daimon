@@ -27,6 +27,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _build_agent_info,  # pyright: ignore[reportPrivateUsage]
@@ -35,7 +36,7 @@ from daimon.adapters.mcp.tools.agents import (
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
@@ -61,6 +62,12 @@ class RemoveEnvCredentialResult(BaseModel):
     (the delete is idempotent, so the call still succeeds either way)."""
 
 
+def _agent_names(agent: BetaManagedAgentsAgent, requested: str) -> tuple[str, ...]:
+    """Every name `agent` may be configured under: the one asked for, its MA
+    display name and its ``daimon_name`` routing name."""
+    return (requested, agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""))
+
+
 async def _detach_mcp_server_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -78,6 +85,7 @@ async def _detach_mcp_server_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     # `mcp_remove` sits in `decide_operation`'s attachment family, not the spec
     # family `_reject_system_agent` enforces: the token form attaches a server
     # to the seeded agent for any member, and the defaults reconciler unions
@@ -89,7 +97,12 @@ async def _detach_mcp_server_impl(
     # still needs an admin to undo, because the removal reaches everyone.
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = await reachability.target_facts(
-        runtime, auth, "mcp_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
+        runtime,
+        auth,
+        "mcp_remove",
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
@@ -160,7 +173,10 @@ async def _remove_skill_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=agent_name, agent=agent
+    )
 
     titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=[agent], tenant_id=auth.tenant_id
@@ -250,9 +266,18 @@ async def _remove_agent_key_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    # Every name the agent answers to, live thread bindings and personal
+    # defaults: a removal followed by a fresh add is a replacement, so it
+    # needs the same wide check `key_replace` uses.
     facts = await reachability.target_facts(
-        runtime, auth, "key_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
+        runtime,
+        auth,
+        "key_remove",
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":

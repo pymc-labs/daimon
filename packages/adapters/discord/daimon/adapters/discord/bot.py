@@ -2027,7 +2027,7 @@ class DaimonBot(commands.Bot):
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
-        # A timer runs only as the agent it was set with; a thread rerouted in
+        # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
             reason=row.reason,
@@ -2035,6 +2035,7 @@ class DaimonBot(commands.Bot):
             target_name=row.target_name,
             admitted_ma_agent_id=admission.agent.id,
             admitted_name=admission.agent.name,
+            asking_ma_agent_id=from_ma_agent_id,
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
@@ -2546,7 +2547,7 @@ class DaimonBot(commands.Bot):
                         markup=self.runtime.settings.billing.markup,
                         max_input_chars=naming.max_input_chars,
                         timeout_seconds=naming.timeout_seconds,
-                        channel_id=admission.channel_id,
+                        channel_id=admission.budget_channel_id,
                     )
             thread = await message.create_thread(
                 name=thread_name,

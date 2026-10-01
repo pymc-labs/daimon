@@ -26,6 +26,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
@@ -69,13 +70,6 @@ def validate_model_id(model: str) -> str | None:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
         return f"Model `{model}` is not allowed. Choose one of: {allowed}"
     return None
-
-
-def mask_tail(secret: str) -> str:
-    """Display-only mask. Never call from a logger that records `secret` plain."""
-    if len(secret) < 4:
-        return "****"
-    return f"****{secret[-4:]}"
 
 
 def _build_roster_entry(
@@ -137,7 +131,13 @@ def _build_roster_entry(
         )
     except ValidationError as err:
         raise DaimonError(f"Cannot rebuild AgentSpec for {agent.name!r}: {err}") from err
-    return RosterEntry(name=agent.name, model=agent.model.id, spec=spec, ma_agent_id=str(agent.id))
+    return RosterEntry(
+        name=agent.name,
+        model=agent.model.id,
+        spec=spec,
+        ma_agent_id=str(agent.id),
+        routing_name=str((agent.metadata or {}).get(MA_METADATA_KEY_NAME) or ""),
+    )
 
 
 async def _build_custom_skill_title_map(
@@ -461,7 +461,7 @@ async def store_inline_pat(
     )
     async with runtime.sessionmaker.begin() as session:
         await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
-    _log.info("repo_auth.pat_stored", masked=mask_tail(plaintext_pat))
+    _log.info("repo_auth.pat_stored")
     return f"inline-pat:{agent_id}"
 
 

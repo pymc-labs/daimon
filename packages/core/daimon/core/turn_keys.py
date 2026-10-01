@@ -37,6 +37,7 @@ from collections.abc import Sequence
 from xml.sax.saxutils import quoteattr
 
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.env_file import env_row_skip_reason
 from daimon.core.session_snapshot import hash_env_bytes
 from daimon.core.stores.agent_files import list_agent_files
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,14 +81,16 @@ async def list_mounted_key_names(
     cannot read — returns `()`.
 
     A session that froze no hash mounted no `.env` at all, so it has nothing
-    to name either.
+    to name either. Rows `assemble_env_bytes` leaves out are never named.
     """
     if env_sha256 is None:
         return ()
     rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
     if not rows or hash_env_bytes(assemble_env_bytes(rows)) != env_sha256:
         return ()
-    return tuple(row.key for row in rows)
+    # A row the assembler leaves out (hard-denied name, NUL value) is not in the
+    # mounted file; naming it would promise the model a key it cannot read.
+    return tuple(row.key for row in rows if env_row_skip_reason(row.key, row.content) is None)
 
 
 def render_keys_element(names: Sequence[str]) -> str:

@@ -19,6 +19,7 @@ owner so a process that lost its lease can change nothing.
 from __future__ import annotations
 
 import uuid as _uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -583,15 +584,25 @@ async def count_pending_timer_rows(
 
 
 async def list_waiting_requesters(
-    session: AsyncSession, *, tenant_id: _uuid.UUID, target_name: str
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    target_names: Collection[str],
+    target_ma_agent_id: str | None = None,
 ) -> list[UnattendedRequester]:
-    """Who queued the pending or claimed wakes that will run `target_name` unattended."""
+    """Who queued the pending or claimed wakes that will run the agent unattended.
+
+    A wake counts when it targets any of `target_names` or `target_ma_agent_id`.
+    """
     rows = await session.execute(
         select(TaskContinuation.requester_external_user_id, Account.role, Account.platform_role_ids)
         .outerjoin(Account, Account.id == TaskContinuation.requester_account_id)
         .where(
             TaskContinuation.tenant_id == tenant_id,
-            TaskContinuation.target_name == target_name,
+            or_(
+                TaskContinuation.target_name.in_(target_names),
+                TaskContinuation.target_ma_agent_id == target_ma_agent_id,
+            ),
             TaskContinuation.status.in_(("pending", "claimed")),
         )
         .distinct()

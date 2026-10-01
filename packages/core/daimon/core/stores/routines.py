@@ -14,7 +14,7 @@ companion `advance_stale` call recovers those plus any rows whose
 from __future__ import annotations
 
 import uuid as _uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -119,9 +119,16 @@ async def list_routines_for_tenant(
 
 
 async def list_routine_creators(
-    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, agent_name: str
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    agent_names: Collection[str],
+    agent_id: str | None = None,
 ) -> list[UnattendedRequester]:
-    """Who made the routines that run `agent_name`, paused ones included.
+    """Who made the routines that run the agent, paused ones included.
+
+    A routine counts when it names any of `agent_names` or runs `agent_id`.
 
     A routine with no recorded creator never fires and is left out; a creator
     with no account yet fires as a plain member.
@@ -139,7 +146,7 @@ async def list_routine_creators(
         .outerjoin(Account, Account.id == PlatformPrincipal.account_id)
         .where(
             Routine.tenant_id == tenant_id,
-            Routine.agent_name == agent_name,
+            or_(Routine.agent_name.in_(agent_names), Routine.agent_id == agent_id),
             Routine.created_by_user_id.is_not(None),
         )
         .distinct()

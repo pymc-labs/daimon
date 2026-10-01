@@ -15,11 +15,9 @@ is limited to the account that minted the token.
 from __future__ import annotations
 
 import datetime as dt
-import json
 import uuid
 from typing import Any, Final
 
-import jwt as pyjwt
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.panel_views import ACTION_REVOKE_TOKEN
@@ -32,7 +30,7 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.mcp_auth import coding_tool_config, mint_agent_mcp_token, token_jti
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from slack_sdk.web.async_client import AsyncWebClient
@@ -76,18 +74,8 @@ def render_coding_tools_message(
     The fallback text deliberately carries no token — it is what Slack shows in
     a notification preview.
     """
-    key_name = f"daimon-{agent_name}"
-    config = {
-        key_name: {
-            "url": public_url,
-            "headers": {"Authorization": f"Bearer {jwt}"},
-        }
-    }
-    mcp_json_block = json.dumps(config, indent=2)
-    cli_oneliner = (
-        f'claude mcp add --transport http "{key_name}" '
-        f'"{public_url}" '
-        f'--header "Authorization: Bearer {jwt}"'
+    cli_oneliner, mcp_json_block = coding_tool_config(
+        agent_name=agent_name, public_url=public_url, jwt=jwt
     )
     blocks: list[dict[str, Any]] = [
         {
@@ -201,7 +189,7 @@ async def handle_coding_tools_click(
             secret=jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
         )
-    jti = _jti_of(token)
+    jti = token_jti(token)
     log.info(
         "slack.coding_tools.minted",
         team_id=team_id,
@@ -288,17 +276,3 @@ async def _resolve_actor_account_id(
             tenant_id=tenant_id,
         )
     return principal.account_id
-
-
-def _jti_of(token: str) -> uuid.UUID:
-    """The jti of a token this process just signed.
-
-    Decoded without verifying the signature because the token was minted one
-    statement earlier; the registry row is the authority on revocation.
-    """
-    claims: dict[str, object] = pyjwt.decode(  # pyright: ignore[reportAssignmentType]
-        token, options={"verify_signature": False}
-    )
-    raw = claims.get("jti")
-    assert isinstance(raw, str), "a minted agent token always carries a jti claim"
-    return uuid.UUID(raw)

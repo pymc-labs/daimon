@@ -19,7 +19,7 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import build_turn_router
-from .drivers.protocol import PlatformDriver
+from .drivers.protocol import PlatformDriver, platform_ids
 
 
 async def test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row(
@@ -27,8 +27,9 @@ async def test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id = "900002001"
-    user_id = "555000112"
+    workspace_id, user_id, channel_id = platform_ids(
+        driver.param_id, workspace=900002001, user=555000112, channel=100001
+    )
 
     tenant = await make_tenant(
         db_session, platform=cast(Platform, driver.param_id), workspace_id=workspace_id
@@ -41,7 +42,7 @@ async def test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row(
         router=router,
         tenant_id=tenant.id,
         workspace_id=workspace_id,
-        channel_id="100001",
+        channel_id=channel_id,
         user_id=user_id,
         text="hello",
     )

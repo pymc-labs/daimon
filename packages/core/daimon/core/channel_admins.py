@@ -5,7 +5,8 @@ adds role ids and user ids for one channel; no row adds nobody, so a tenant
 that never configures one behaves exactly as before. Role ids are the ones the
 member held on their last chat turn (`accounts.platform_role_ids`): Discord has
 roles, Slack has none, so a Slack grant is by user id only (Discord-only roles,
-recorded in tests/parity/test_channel_admin_roles_discord_only.py).
+recorded in tests/parity/test_channel_admin_roles_discord_only.py). Teams has
+no channel admins (tests/parity/test_teams_deliberate_gaps.py).
 """
 
 from __future__ import annotations
@@ -13,11 +14,15 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Iterable, Sequence
+from typing import Final
 
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
+
+CHANNEL_ADMIN_PLATFORMS: Final = ("discord", "slack")
+"""The platforms a channel can have its own admins on."""
 
 MAX_CHANNEL_ADMIN_IDS = 25
 """Per list and channel; matches the largest Discord or Slack multi-select."""
@@ -124,13 +129,16 @@ async def load_administered_channel_ids(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
 ) -> frozenset[str]:
     """Shell half of `administered_channel_ids`: read this tenant's grants."""
-    if caller.platform_user_id is None and not caller.role_ids:
+    if platform not in CHANNEL_ADMIN_PLATFORMS or (
+        caller.platform_user_id is None and not caller.role_ids
+    ):
         return frozenset()
     grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
     return administered_channel_ids(caller, grants)
 
 
 __all__ = [
+    "CHANNEL_ADMIN_PLATFORMS",
     "MAX_CHANNEL_ADMIN_IDS",
     "MAX_LISTED_MENTIONS",
     "ChannelAdminCaller",

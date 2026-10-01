@@ -26,6 +26,7 @@ typo is silent — check the spelling here.
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
+- [Teams](#teams)
 - [GitHub](#github)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -88,7 +89,7 @@ Set DAIMON_TABLE_RENDERING to a JSON object.
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`
 
-URL rendered on the Discord and Slack privacy panels' Policy button. Override via
+URL rendered on the privacy panels' Policy button. Override via
 DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
 
 ### `DAIMON_DEFAULTS_ROOT`
@@ -475,6 +476,75 @@ Port for the Slack process's liveness endpoint. Must not collide with the mcp pr
 (8080), the discord process (8081), or the scheduler process (8082) — all process groups
 share one host.
 
+## Teams
+
+Read from `daimon.core.config.TeamsSettings`. Prefix `DAIMON_TEAMS__`.
+
+Microsoft Teams adapter config.
+
+Optional so non-Teams deployments boot unchanged — the block is ``None`` when no
+``DAIMON_TEAMS__*`` env vars are present. Mirrors ``SlackSettings``.
+
+``client_id`` / ``client_secret`` / ``tenant_id`` are the Entra app registration the Bot
+Framework posts activities to; ``port`` is the HTTP ingress the SDK's FastAPI adapter
+binds (``/api/messages`` plus the ``/healthz`` / ``/readyz`` endpoints served by the
+same listener); ``enabled`` gates ``/api/messages`` without taking the process down.
+
+This whole block is optional: it stays unset until at least one of its variables is set,
+and the features that read it are inactive while it is.
+
+### `DAIMON_TEAMS__CLIENT_ID`
+
+`str` · **required**
+
+Entra (Azure AD) app registration client ID the Teams bot authenticates as — also the
+audience inbound Bot Framework JWTs are validated against.
+
+### `DAIMON_TEAMS__CLIENT_SECRET`
+
+`SecretStr` · **required** · secret
+
+Entra app registration client secret, used to mint Bot Framework tokens for outbound
+sends.
+
+### `DAIMON_TEAMS__TENANT_ID`
+
+`str` · **required**
+
+Entra tenant ID the app registration lives in. A single-tenant bot only answers
+activities whose conversation and channel-data tenant both equal this value.
+
+### `DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Maximum number of agent turns a single Teams tenant may have in flight at once. Caps one
+noisy tenant from starving others on the shared Anthropic key.
+
+### `DAIMON_TEAMS__PORT`
+
+`int` · optional · default `3978`
+
+Port for the Teams process's HTTP ingress and health endpoints (/api/messages, /healthz,
+/readyz). The Bot Framework messaging endpoint must be configured to reach this
+listener.
+
+### `DAIMON_TEAMS__ENABLED`
+
+`bool` · optional · default `True`
+
+When False, /api/messages answers 503 while the health endpoints stay live — the process
+keeps running so ingress can be re-enabled without a redeploy.
+
+### `DAIMON_TEAMS__ADMIN_USER_IDS`
+
+`tuple[str, ...]` · optional · default unset
+
+Entra object IDs of the people who administer this deployment from Teams. Teams exposes
+no admin role to bots, so this list is the admin check: admins get the admin role in
+turns, create routines, replace shared keys, top up and see everyone's usage. Everyone
+else is a regular user.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.
@@ -553,17 +623,26 @@ Read from `daimon.core.config.CryptoSettings`. Prefix `DAIMON_CRYPTO__`.
 MultiFernet keys for at-rest token encryption.
 
 A single deployment ships one key; rotation means prepending a new key. Each key must be
-a Fernet.generate_key()-style base64-urlsafe 32-byte string. Empty default lets
-deployments without any encrypted credentials boot without crypto config.
+a Fernet.generate_key()-style base64-urlsafe 32-byte string. A deployment without keys
+still boots, but refuses to save agent keys unless `allow_plaintext` opts into plaintext
+storage for local development.
 
 ### `DAIMON_CRYPTO__KEYS`
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Agent
-environment values encrypt when keys are configured; without keys they remain plaintext.
-The first key encrypts new values; older keys remain valid for decrypting existing
-ciphertext during rotation.
+Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
+save agent keys: without keys, saving an agent environment value is refused unless
+`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
+decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
+plaintext rows remain.
+
+### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
+
+`bool` · optional · default `False`
+
+Store agent environment values (agent keys) in plaintext when no `keys` are configured.
+For local development only: with this off and no keys, every agent key write is refused.
 
 ## Credentials
 
@@ -638,6 +717,15 @@ ceiling still applies as defense-in-depth).
 
 Per-upload byte budget signed into notebook upload tokens. 1 MiB mirrors the notebook
 host's own ceiling, which is enforced independently as a second layer of defense.
+
+### `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+
+`bool` · optional · default `False`
+
+Let `create_notebook_upload_url(editable=True)` publish the marimo code editor. Anyone
+holding an editor link can run arbitrary code on the notebook host, and any member or
+prompt-injected agent can ask for one, so this stays off unless every notebook on the
+host belongs to one client. Off: scratch notebooks are always read-only.
 
 ## Report Host
 
@@ -942,9 +1030,10 @@ A standalone service in `apps/notebook-host`, deployed and configured separately
 the daimon processes. It is not part of `docker-compose.yml`.
 
 This service shares the `DAIMON_NOTEBOOK__` prefix with a block on daimon's own
-Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear
-twice on this page — once for the service and once for the daimon side that calls it.
-They are read by different processes; a single shared env file would set both.
+Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
+`DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear twice on this page — once for the service and
+once for the daimon side that calls it. They are read by different processes; a single
+shared env file would set both.
 
 No field in this model carries a `Field(description=...)`, so this section lists types
 and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
@@ -1029,6 +1118,22 @@ inline comments.
 ### `DAIMON_NOTEBOOK__ALLOW_UNJAILED_SPAWN`
 
 `bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ORIGIN_BASE`
+
+`str | None` · optional · default unset
+
+### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
+
+`'https' | 'http'` · optional · default `https`
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 

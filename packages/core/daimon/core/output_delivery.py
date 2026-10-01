@@ -4,7 +4,9 @@ The sweep polls the session's Files API listing, downloads each downloadable
 entry, hands it to an injected ``post`` callable, and deletes the listing
 entry only after the post succeeded. Because a posted file leaves the listing,
 the listing itself is the delivery ledger: it only ever holds undelivered
-work, so there is no dedup state, no clock heuristic, and no age cutoff.
+work, so there is no dedup state, no clock heuristic, and no age cutoff. A
+poster whose delivery finishes later (a consent prompt) raises
+``OutputDeliveryDeferred`` and deletes the entry itself when it is done.
 
 Polling uses a settle floor rather than a naive "no new ids means done" rule.
 MA's indexing lag is ~5s from the file WRITE, not from session idle — a file
@@ -33,13 +35,15 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.errors import DaimonError
+from daimon.core.media.filenames import sanitize_title
 
 _log = structlog.get_logger(__name__)
 
 _MA_BETA = "managed-agents-2026-04-01"
 
-# Public: the Slack skip notice quotes this limit to the user.
+# Public: the skip notice quotes this limit to the user.
 MAX_BYTES_PER_FILE = 20 * 1024 * 1024
+_MIB = 1024 * 1024
 
 _POLL_DELAYS_S = (0.0, 2.0, 4.0, 8.0)
 _MIN_SETTLE_S = 6.0
@@ -70,6 +74,23 @@ class OutputPostingUnavailable(DaimonError):
 
     Aborts the sweep; nothing is deleted.
     """
+
+
+class OutputDeliveryDeferred(DaimonError):
+    """The poster handed the file to a later step (a consent prompt, say).
+
+    The sweep leaves it listed and moves on; that step deletes it with
+    :func:`delete_output_file` once the file is delivered or declined.
+    """
+
+
+def render_oversize_notice(skipped: SkippedFile) -> str:
+    """The chat notice for an output over the per-file delivery cap."""
+    return (
+        f"I couldn't attach `{sanitize_title(skipped.filename)}` — it is "
+        f"{skipped.size_bytes / _MIB:.1f} MiB, over the "
+        f"{MAX_BYTES_PER_FILE // _MIB} MiB delivery limit."
+    )
 
 
 async def _poll_until_settled(
@@ -114,7 +135,13 @@ async def _poll_until_settled(
     return seen
 
 
-async def _delete_listing_entry(
+async def download_output_file(anthropic_client: AsyncAnthropic, file_id: str) -> bytes:
+    """The bytes of one session output file."""
+    response = await anthropic_client.beta.files.download(file_id, betas=[_MA_BETA])
+    return await response.read()
+
+
+async def delete_output_file(
     anthropic_client: AsyncAnthropic, *, session_id: str, file_id: str
 ) -> None:
     """Delete a listing entry after its post won; failure to delete is logged, not raised."""
@@ -174,7 +201,7 @@ async def sweep_session_outputs(
             # Snapshot-at-first-write means a 0-byte entry can never gain
             # content; it is permanent noise unless deleted.
             _log.info("output_delivery.skipped_empty", session_id=session_id, file_id=meta.id)
-            await _delete_listing_entry(anthropic_client, session_id=session_id, file_id=meta.id)
+            await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
             continue
 
         try:
@@ -196,22 +223,21 @@ async def sweep_session_outputs(
                             size_bytes=meta.size_bytes,
                         )
                     )
-                await _delete_listing_entry(
-                    anthropic_client, session_id=session_id, file_id=meta.id
-                )
+                await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
                 continue
 
-            response = await anthropic_client.beta.files.download(meta.id, betas=[_MA_BETA])
-            content = await response.read()
             await post(
                 DeliverableFile(
                     file_id=meta.id,
                     filename=meta.filename,
                     mime_type=meta.mime_type,
                     size_bytes=meta.size_bytes,
-                    content=content,
+                    content=await download_output_file(anthropic_client, meta.id),
                 )
             )
+        except OutputDeliveryDeferred:
+            _log.info("output_delivery.deferred", session_id=session_id, file_id=meta.id)
+            continue
         except OutputPostingUnavailable:
             _log.warning("output_delivery.aborted", session_id=session_id, file_id=meta.id)
             raise
@@ -224,7 +250,7 @@ async def sweep_session_outputs(
             )
             continue
 
-        await _delete_listing_entry(anthropic_client, session_id=session_id, file_id=meta.id)
+        await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
         posted += 1
         _log.info(
             "output_delivery.posted",

@@ -8,6 +8,7 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -54,6 +55,7 @@ async def send_direct_message_impl(
             "an isolated channel's own agent posts only inside that channel, so it can't "
             "send direct messages. Tell the caller. Do not retry."
         )
+    await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)
     chunks = [content[i : i + 1900] for i in range(0, len(content), 1900)]
     ids: list[str] = []
     if auth.platform == "discord":
