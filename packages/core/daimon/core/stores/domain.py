@@ -239,6 +239,7 @@ class ThreadSessionRow(BaseModel):
     account_id: uuid.UUID | None
     ma_session_id: str
     ma_agent_id: str | None = None
+    channel_id: str | None = None
     watermark_message_id: str | None
     status: str
     created_at: datetime

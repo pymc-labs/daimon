@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Iterable, Sequence
-from typing import Final
+from typing import Final, NamedTuple
 
 from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin
 from daimon.core.channel_admins import (
@@ -126,6 +126,12 @@ class AgentReach(BaseModel):
             and not self.has_unplaced_run
             and self.channel_ids <= frozenset(channel_ids)
         )
+
+    def is_held_back_by_unplaced_runs(self, channel_ids: Collection[str]) -> bool:
+        """Whether runs in no recorded channel are all that keep it outside `channel_ids`."""
+        return self.has_unplaced_run and self.model_copy(
+            update={"has_unplaced_run": False}
+        ).stays_inside(channel_ids)
 
     def runs_unattended_beyond(
         self, channel_ids: Collection[str], *, platform_user_id: str | None
@@ -291,6 +297,13 @@ async def load_agent_reach(
     )
 
 
+class _Locality(NamedTuple):
+    is_local: bool
+    # Why a reachable agent is not local, when that is the reason; both False when local.
+    held_back_by_unattended_run: bool = False
+    held_back_by_unplaced_run: bool = False
+
+
 async def _caller_locality(
     session: AsyncSession,
     *,
@@ -302,13 +315,13 @@ async def _caller_locality(
     caller: ChannelAdminCaller,
     caller_account_id: uuid.UUID | None,
     caller_platform_user_id: str | None,
-) -> tuple[bool, bool]:
-    """`(local, held_back_by_unattended_run)`; both False without a grant, reading no reach."""
+) -> _Locality:
+    """All False without a grant, reading no reach."""
     administered = await load_administered_channel_ids(
         session, tenant_id=tenant_id, platform=platform, caller=caller
     )
     if not administered:
-        return False, False
+        return _Locality(is_local=False)
     reach = await load_agent_reach(
         session,
         tenant_id=tenant_id,
@@ -319,9 +332,15 @@ async def _caller_locality(
         caller_account_id=caller_account_id,
         caller_platform_user_id=caller_platform_user_id,
     )
-    local = reach.is_local_to(administered, platform_user_id=caller.platform_user_id)
-    beyond = reach.runs_unattended_beyond(administered, platform_user_id=caller.platform_user_id)
-    return local, beyond and not local
+    if reach.is_local_to(administered, platform_user_id=caller.platform_user_id):
+        return _Locality(is_local=True)
+    return _Locality(
+        is_local=False,
+        held_back_by_unattended_run=reach.runs_unattended_beyond(
+            administered, platform_user_id=caller.platform_user_id
+        ),
+        held_back_by_unplaced_run=reach.is_held_back_by_unplaced_runs(administered),
+    )
 
 
 async def is_agent_local_to_caller(
@@ -341,7 +360,7 @@ async def is_agent_local_to_caller(
     so a tenant with no channel admins pays one indexed read and nothing else.
     `caller_account_id` leaves the caller's own live sessions out; None counts them.
     """
-    local, _ = await _caller_locality(
+    locality = await _caller_locality(
         session,
         tenant_id=tenant_id,
         platform=platform,
@@ -352,7 +371,7 @@ async def is_agent_local_to_caller(
         caller_account_id=caller_account_id,
         caller_platform_user_id=caller.platform_user_id,
     )
-    return local
+    return locality.is_local
 
 
 async def may_bind_as_channel_default(
@@ -474,7 +493,7 @@ async def load_target_facts(
         caller_platform_user_id=caller_platform_user_id,
     )
     unplaceable = operation in KEY_CHANGE_OPERATIONS and ma_agent_id is None
-    local, held_back = (
+    locality = (
         await _caller_locality(
             session,
             tenant_id=tenant_id,
@@ -487,13 +506,14 @@ async def load_target_facts(
             caller_platform_user_id=caller_platform_user_id,
         )
         if reachable and not unplaceable
-        else (False, False)
+        else _Locality(is_local=False)
     )
     return TargetFacts(
         is_daimon_managed=is_daimon_managed,
         is_reachable_in_tenant=reachable,
-        is_local_to_caller_channels=local,
-        runs_unattended_beyond_caller=held_back,
+        is_local_to_caller_channels=locality.is_local,
+        runs_unattended_beyond_caller=locality.held_back_by_unattended_run,
+        has_unplaced_run=locality.held_back_by_unplaced_run,
     )
 
 

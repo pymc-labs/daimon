@@ -1,6 +1,8 @@
-"""The channel admins migration adds an empty table, a role-id column and a wake index."""
+"""The channel admins migration adds an empty table, a role-id column, a wake index and
+the channel each thread session runs for."""
 
 import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -56,9 +58,35 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
     await conn.run_sync(run("downgrade"))
     assert not await table_exists(), "downgrade drops channel_admins"
     assert not await waiting_index_exists(), "downgrade drops the waiting wakes index"
+    for ma_session_id in ("sess_spent", "sess_quiet"):
+        await db_session.execute(
+            text(
+                "INSERT INTO thread_sessions (tenant_id, platform, thread_id, ma_session_id) "
+                "VALUES (:tenant, 'slack', '1700000000.000100', :sess)"
+            ),
+            {"tenant": tenant.id, "sess": ma_session_id},
+        )
+    for event_id, channel_id, occurred_at in (
+        ("e1", "c-old", datetime(2026, 1, 1, tzinfo=UTC)),
+        ("e2", "c-new", datetime(2026, 2, 1, tzinfo=UTC)),
+        ("e3", None, datetime(2026, 3, 1, tzinfo=UTC)),
+    ):
+        await db_session.execute(
+            text(
+                "INSERT INTO usage_events (tenant_id, managed_session_id, event_id, channel_id, "
+                "occurred_at) VALUES (:tenant, 'sess_spent', :event, :channel, :at)"
+            ),
+            {"tenant": tenant.id, "event": event_id, "channel": channel_id, "at": occurred_at},
+        )
     await conn.run_sync(run("upgrade"))
     assert await table_exists(), "upgrade recreates channel_admins"
     assert await waiting_index_exists(), "upgrade adds the waiting wakes index"
+    channels = await db_session.execute(
+        text("SELECT ma_session_id, channel_id FROM thread_sessions ORDER BY ma_session_id")
+    )
+    assert channels.tuples().all() == [("sess_quiet", None), ("sess_spent", "c-new")], (
+        "a session takes its latest attributed spend's channel; one with none stays unknown"
+    )
 
     role_ids = await db_session.execute(
         text("SELECT platform_role_ids FROM accounts WHERE id = :id"), {"id": account.id}

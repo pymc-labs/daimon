@@ -288,6 +288,7 @@ async def insert_mapping(
         account_id=session_account_id,
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
+        channel_id=admission.budget_channel_id,
         effective_config=snapshot,
         identity_fingerprint=fingerprint_identity(snapshot),
         mutable_fingerprint=fingerprint_mutable(snapshot),

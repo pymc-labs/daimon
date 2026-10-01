@@ -440,7 +440,9 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     deps = _deps(sessionmaker=db_session_factory, router=router)
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
-    admission = _admission(account_id=account.id, agent=agent, env=env)
+    admission = dataclasses.replace(
+        _admission(account_id=account.id, agent=agent, env=env), budget_channel_id="c-parent"
+    )
     prepared = _prepared_turn(
         deps=deps,
         admission=admission,
@@ -486,6 +488,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     assert live.ma_session_id == outcome.ma_session_id, (
         "the live row's session id must be the new one"
     )
+    assert live.channel_id == "c-parent", "the new row records the channel the turn runs for"
 
     async with db_session_factory() as s:
         rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)

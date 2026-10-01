@@ -435,6 +435,10 @@ class ThreadSession(Base):
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The channel the session runs for, recorded at creation: a thread's parent,
+    # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
+    # when unknown; agent reach then counts the session as possibly anywhere.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:

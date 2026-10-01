@@ -96,6 +96,9 @@ class TargetFacts(BaseModel):
     # Why a channel admin's agent is not local: an unattended run owed to someone
     # with wider rights. Explains a refusal; decisions never read it.
     runs_unattended_beyond_caller: bool = False
+    # Or another member's conversation or routine in a channel never recorded,
+    # which could be anywhere. Explains a refusal too.
+    has_unplaced_run: bool = False
 
 
 def _decide_operation(

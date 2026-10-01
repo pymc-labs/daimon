@@ -576,35 +576,59 @@ async def _unrouted_key_facts(db_session: AsyncSession, tenant_id, user_id: str,
 async def test_another_accounts_live_session_counts_by_its_channel(
     db_session: AsyncSession,
 ) -> None:
-    """An agent answering nowhere can still run in a rerouted thread's live session."""
+    """An agent answering nowhere can still run in other members' live sessions."""
     tenant = await make_tenant(db_session)
     await _grant(db_session, tenant.id, "c2", "u2")
     await _grant(db_session, tenant.id, "c9", "u9")
     member = await make_account(db_session, tenant=tenant)
     live = await make_thread_session(
-        db_session, tenant=tenant, account=member, thread_id="t1", ma_agent_id="agent_x"
+        db_session,
+        tenant=tenant,
+        account=member,
+        thread_id="t1",
+        ma_agent_id="agent_x",
+        channel_id="c2",
     )
+    assert (await _unrouted_key_facts(db_session, tenant.id, "u2")).is_local_to_caller_channels, (
+        "c2's admin holds the agent whose only run is recorded in c2"
+    )
+    own = await _unrouted_key_facts(db_session, tenant.id, "u5", account_id=member.id)
+    assert not own.is_reachable_in_tenant, "the session's own member reaches nobody else"
 
+    dormant = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=await make_account(db_session, tenant=tenant),
+        thread_id="t2",
+        ma_agent_id="agent_x",
+    )
     unknown = await _unrouted_key_facts(db_session, tenant.id, "u2")
     assert unknown.is_reachable_in_tenant and not unknown.is_local_to_caller_channels, (
-        "a session whose channel is unknown could run anywhere"
+        "a second session whose channel is unknown could run anywhere"
     )
+    assert unknown.has_unplaced_run, "the unknown channel is the reason the refusal names"
+
     await make_usage_event(
-        db_session, tenant=tenant, managed_session_id=live.ma_session_id, channel_id="c2"
+        db_session, tenant=tenant, managed_session_id=dormant.ma_session_id, channel_id="c2"
+    )
+    assert (await _unrouted_key_facts(db_session, tenant.id, "u2")).is_local_to_caller_channels, (
+        "a session with no recorded channel is placed by its spend"
     )
     elsewhere = await _unrouted_key_facts(db_session, tenant.id, "u9")
     assert elsewhere.is_reachable_in_tenant and not elsewhere.is_local_to_caller_channels, (
         "the admin of an unrelated channel never takes over a session running in c2"
     )
-    assert (await _unrouted_key_facts(db_session, tenant.id, "u2")).is_local_to_caller_channels, (
-        "c2's admin holds the agent whose only run is in c2"
-    )
+    assert not elsewhere.has_unplaced_run, "every run is placed, so that is not the reason"
     plain = await _unrouted_key_facts(db_session, tenant.id, "u5")
     assert plain.is_reachable_in_tenant and not plain.is_local_to_caller_channels, (
         "a plain member stays refused"
     )
-    own = await _unrouted_key_facts(db_session, tenant.id, "u5", account_id=member.id)
-    assert not own.is_reachable_in_tenant, "the session's own member reaches nobody else"
+    await make_usage_event(
+        db_session, tenant=tenant, managed_session_id=live.ma_session_id, channel_id="c3"
+    )
+    assert not (
+        await _unrouted_key_facts(db_session, tenant.id, "u2")
+    ).is_local_to_caller_channels, "spend in c3 counts beside the channel recorded at creation"
 
 
 async def test_other_peoples_routines_count_by_their_channel(db_session: AsyncSession) -> None:

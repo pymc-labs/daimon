@@ -6,7 +6,10 @@ tenants behave exactly as before. `accounts.platform_role_ids` is refreshed on
 every chat turn like `accounts.role`, so MCP calls can match a role grant
 without a live platform lookup; it starts empty.
 `task_continuations_waiting_idx` serves agent reach's read of the wakes still
-owed to an agent.
+owed to an agent. `thread_sessions.channel_id` records the channel a session
+runs for when it is created, so agent reach places it without waiting for its
+spend; older rows take their latest spend's channel (a Slack thread id is the
+bare thread ts, so it never names one).
 
 downgrade: destructive
 """
@@ -72,9 +75,24 @@ def upgrade() -> None:
         ["tenant_id", "target_name"],
         postgresql_where=sa.text("status IN ('pending', 'claimed')"),
     )
+    op.add_column("thread_sessions", sa.Column("channel_id", sa.Text(), nullable=True))
+    op.execute(
+        """
+        UPDATE thread_sessions AS ts SET channel_id = latest.channel_id
+        FROM (
+            SELECT DISTINCT ON (tenant_id, managed_session_id)
+                tenant_id, managed_session_id, channel_id
+            FROM usage_events
+            WHERE channel_id IS NOT NULL
+            ORDER BY tenant_id, managed_session_id, occurred_at DESC
+        ) AS latest
+        WHERE latest.tenant_id = ts.tenant_id AND latest.managed_session_id = ts.ma_session_id
+        """
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("thread_sessions", "channel_id")
     op.drop_index("task_continuations_waiting_idx", table_name="task_continuations")
     op.drop_table("channel_admins")
     op.drop_column("accounts", "platform_role_ids")
