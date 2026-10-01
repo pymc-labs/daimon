@@ -1155,6 +1155,113 @@ def test_log_formatter_redacts_tracebacks_too() -> None:
     assert "EXC-tok" not in out, "exception text is redacted as well"
 
 
+def test_every_host_registry_is_private_from_the_moment_its_tmp_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A jailed uid polling data_dir/<registry>.tmp must never be able to open it."""
+    from notebook_host import admin, jail
+    from notebook_host.blogs_store import BlogRecord, save_blogs
+    from notebook_host.config import load_settings
+    from notebook_host.consumed_store import save_consumed
+    from notebook_host.pids_store import PidRecord, save_pids
+
+    # The worst mode each tmp file had at any point: before any chmod/fchmod
+    # (the mode it was created with) and at the rename.
+    seen: dict[str, int] = {}
+    real_replace, real_chmod, real_fchmod = os.replace, os.chmod, os.fchmod
+
+    def note(name: str, mode: int) -> None:
+        seen[name] = seen.get(name, 0) | (mode & 0o777)
+
+    def spy_replace(src: Any, dst: Any, *a: Any, **k: Any) -> None:
+        note(Path(dst).name, os.stat(src, follow_symlinks=False).st_mode)
+        real_replace(src, dst, *a, **k)
+
+    def spy_chmod(path: Any, mode: int, *a: Any, **k: Any) -> None:
+        name = Path(path).name
+        if name.endswith(".tmp"):
+            note(name, os.stat(path, follow_symlinks=False).st_mode)
+        real_chmod(path, mode, *a, **k)
+
+    def spy_fchmod(fd: int, mode: int) -> None:
+        note(f"fd:{os.readlink(f'/proc/self/fd/{fd}')}", os.fstat(fd).st_mode)
+        real_fchmod(fd, mode)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    monkeypatch.setattr(os, "chmod", spy_chmod)
+    monkeypatch.setattr(os, "fchmod", spy_fchmod)
+    old = os.umask(0o022)
+    try:
+        save_blogs(tmp_path / "blogs.json", {"b": BlogRecord(slug="b", created_at=1.0)})
+        save_pids(tmp_path / "pids.json", {"b": PidRecord(slug="b", pid=1, port=1, started_at=1)})
+        save_consumed(tmp_path / "consumed.json", {"j": 1})
+        jail.save_uid_registry(tmp_path / "uids.json", {"b": 100000})
+        jail.get_or_create_slug_uid(tmp_path / "uids.json", "c", start=100000, end=100009)
+        monkeypatch.setenv("DAIMON_NOTEBOOK__DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+        admin._admit_tenant(load_settings(_env_file=None), "t-1")  # pyright: ignore[reportPrivateUsage]
+    finally:
+        os.umask(old)
+    expected = {
+        "blogs.json",
+        "pids.json",
+        "consumed.json",
+        "uids.json",
+        "uids.json.cursor",
+        "tenant.json",
+    }
+    assert expected <= set(seen), seen
+    assert all(mode & 0o077 == 0 for mode in seen.values()), (
+        f"a tmp file was group/world-readable at some point: {seen}"
+    )
+
+
+def test_host_process_runs_with_a_private_umask(monkeypatch: pytest.MonkeyPatch) -> None:
+    import notebook_host.__main__ as entry
+
+    monkeypatch.setattr(entry, "load_settings", lambda: unittest.mock.MagicMock(host_port=1))
+    monkeypatch.setattr(entry, "create_app", lambda _s: object())
+    monkeypatch.setattr(entry.uvicorn, "run", lambda *_a, **_k: None)
+    old = os.umask(0o022)
+    try:
+        entry.main()
+        assert os.umask(0o022) == 0o077
+    finally:
+        os.umask(old)
+
+
+def test_legacy_slug_root_is_emptied_of_unknown_entries_before_it_opens_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host import jail
+
+    data_dir = tmp_path / "nbs"
+    paths = jail.ensure_slug_jail(data_dir, "s")
+    paths.root.chmod(0o700)  # a legacy, uid-owned root
+    (paths.root / "leak.txt").write_text("secret")
+    (paths.root / "leak.txt").chmod(0o644)
+    (paths.root / ".notebook.py.tmp").write_text("stale")
+    (paths.root / "junkdir").mkdir()
+    root_modes: list[int] = []
+    real = jail._secure_file  # pyright: ignore[reportPrivateUsage]
+
+    def spy(path: Path, **kw: Any) -> None:
+        root_modes.append(paths.root.stat().st_mode & 0o777)
+        real(path, **kw)
+
+    monkeypatch.setattr(jail, "_secure_file", spy)
+    jail.ensure_slug_jail(data_dir, "s")
+    assert root_modes and all(m == 0o700 for m in root_modes), (
+        "the legacy root stays closed until its files are checked"
+    )
+    names = sorted(p.name for p in paths.root.iterdir())
+    assert names == ["data", "home", "tmp", "workspace"], names
+    assert paths.root.stat().st_mode & 0o777 == 0o711
+    root_modes.clear()
+    jail.ensure_slug_jail(data_dir, "s")
+    assert all(m == 0o711 for m in root_modes), "a converted root is never closed again"
+
+
 # --- origin-mode cookie hardening and tenant fail-closed ---------------------------
 
 

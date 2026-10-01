@@ -55,6 +55,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from notebook_host.files import write_private_file
+
 _log = logging.getLogger(__name__)
 
 SLUG_TREE_MODE = 0o700
@@ -110,7 +112,7 @@ def lock_data_dir_root(data_dir: Path) -> None:
 def lock_registry_file(path: Path) -> None:
     """Chmod an existing host-owned registry file to ``_REGISTRY_MODE``. No-op if absent.
 
-    The stores lock their tmp file before the atomic rename, so a file this
+    The stores create their tmp file at 0600 before the atomic rename, so a file this
     host has written is already correct. This exists for the files a host
     *inherits* — a registry created by a release that predates the jail keeps
     its old default-umask mode (0644) until something happens to rewrite it,
@@ -180,7 +182,22 @@ def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> Sl
     """
     paths = get_slug_paths(data_dir, slug)
     data_dir.mkdir(parents=True, exist_ok=True)
-    _secure_dir(paths.root, SLUG_ROOT_MODE, owner=(os.geteuid(), os.getegid()))
+    # Order matters for a tree from an older release, whose root the jail uid
+    # owned: take the root over at 0700 first, so nothing inside becomes
+    # traversable by other uids before it has been checked.
+    host = (os.geteuid(), os.getegid())
+    try:
+        st = paths.root.lstat()
+        converted = (
+            stat.S_ISDIR(st.st_mode)
+            and (st.st_uid, st.st_gid) == host
+            and stat.S_IMODE(st.st_mode) == SLUG_ROOT_MODE
+        )
+    except FileNotFoundError:
+        converted = False
+    # An already-converted root stays 0711: a live marimo reaches its
+    # notebook through it (workspace/notebook.py -> ../notebook.py).
+    _secure_dir(paths.root, SLUG_ROOT_MODE if converted else 0o700, owner=host)
     # Older releases created these 0644 under a 0700 uid-owned root, where the
     # uid could also have hard-linked the log to a host registry. The root is
     # traversable now, so each must be a single-link regular file at 0600.
@@ -188,7 +205,25 @@ def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> Sl
     _secure_file(paths.log, owner=(os.geteuid(), os.getegid()))
     for d in (paths.data, paths.workspace, paths.home, paths.tmp):
         _secure_dir(d, SLUG_TREE_MODE, owner=(uid, uid) if uid is not None else None)
+    # Anything else in the root (a stale tmp, whatever the uid left there when
+    # it owned the root) has no business being reachable: remove it.
+    known = {
+        p.name
+        for p in (paths.notebook, paths.log, paths.data, paths.workspace, paths.home, paths.tmp)
+    }
+    for entry in os.scandir(paths.root):
+        if entry.name not in known:
+            remove_path(paths.root / entry.name)
+    _chmod_dir_nofollow(paths.root, SLUG_ROOT_MODE)
     return paths
+
+
+def _chmod_dir_nofollow(path: Path, mode: int) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
 
 
 def _secure_dir(path: Path, mode: int, *, owner: tuple[int, int] | None) -> None:
@@ -196,7 +231,7 @@ def _secure_dir(path: Path, mode: int, *, owner: tuple[int, int] | None) -> None
     remove_path(path, keep_real_dir=True)
     with contextlib.suppress(FileExistsError):
         path.mkdir()
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         if owner is not None:
             os.fchown(fd, *owner)
@@ -218,7 +253,7 @@ def _secure_file(path: Path, *, owner: tuple[int, int] | None) -> None:
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         path.unlink()
         return
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         after = os.fstat(fd)
         if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) or after.st_nlink != 1:
@@ -254,29 +289,11 @@ def write_file_nofollow(
 ) -> None:
     """Atomically write ``path`` as root without following any link an attacker planted.
 
-    The tmp file is created ``O_CREAT | O_EXCL | O_NOFOLLOW`` next to ``path``
-    (a stale one is unlinked first, never opened), written and chowned through
-    its fd, then renamed over ``path``; a rename replaces a symlink at the
-    destination rather than writing through it.
+    See ``files.write_private_file``: the tmp is created ``O_EXCL |
+    O_NOFOLLOW`` at ``mode`` and renamed over ``path``, which replaces a
+    symlink at the destination rather than writing through it.
     """
-    tmp = path.with_name(f".{path.name}.tmp")
-    remove_path(tmp)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-    try:
-        try:
-            view = memoryview(content)
-            while view:
-                view = view[os.write(fd, view) :]
-            if owner_uid is not None:
-                os.fchown(fd, owner_uid, owner_uid)
-            os.fchmod(fd, mode)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+    write_private_file(path, content, owner_uid=owner_uid, mode=mode)
 
 
 def open_log_nofollow(path: Path) -> int:
@@ -425,7 +442,7 @@ def kill_uid_processes(
 SHARED_TEMP_DIRS: tuple[Path, ...] = (Path("/tmp"), Path("/dev/shm"))
 
 
-def remove_uid_files(uid: int, *, roots: tuple[Path, ...] = SHARED_TEMP_DIRS) -> None:
+def remove_uid_files(uid: int, *, roots: tuple[Path, ...] | None = None) -> None:
     """Delete everything ``uid`` owns under the host-wide temp dirs.
 
     A notebook's TMPDIR is inside its own slug tree, but code can still write
@@ -435,7 +452,7 @@ def remove_uid_files(uid: int, *, roots: tuple[Path, ...] = SHARED_TEMP_DIRS) ->
     """
     if os.geteuid() not in (0, uid):
         return
-    for root in roots:
+    for root in SHARED_TEMP_DIRS if roots is None else roots:
         if not root.is_dir() or root.is_symlink():
             continue
         # fwalk descends through directory fds, and every stat, unlink and
@@ -504,15 +521,11 @@ def load_uid_registry(path: Path) -> dict[str, int]:
 def save_uid_registry(path: Path, records: dict[str, int]) -> None:
     """Atomically rewrite the uid registry (tmp + rename), same idiom as save_pids.
 
-    The tmp file is locked to ``_REGISTRY_MODE`` (0600) before the rename, not
-    after — so there is never a window where a freshly written or rewritten
-    registry is briefly world-readable under the default umask.
+    The tmp file is created at ``_REGISTRY_MODE`` (0600) with ``O_EXCL |
+    O_NOFOLLOW`` (``files.write_private_file``), so it is never readable by
+    another uid under any umask.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(records, indent=2))
-    os.chmod(tmp, _REGISTRY_MODE)
-    os.replace(tmp, path)
+    write_private_file(path, json.dumps(records, indent=2).encode(), mode=_REGISTRY_MODE)
 
 
 def allocate_uid(
@@ -559,10 +572,7 @@ def get_or_create_slug_uid(path: Path, slug: str, *, start: int, end: int) -> in
     uid = allocate_uid(registry, slug, start=start, end=end, after=after)
     registry[slug] = uid
     save_uid_registry(path, registry)
-    tmp = cursor.with_suffix(".tmp")
-    tmp.write_text(str(uid))
-    os.chmod(tmp, _REGISTRY_MODE)
-    os.replace(tmp, cursor)
+    write_private_file(cursor, str(uid).encode(), mode=_REGISTRY_MODE)
     return uid
 
 

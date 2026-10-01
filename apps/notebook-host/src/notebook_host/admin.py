@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -198,11 +197,7 @@ def _admit_tenant(settings: Settings, tenant: str | None) -> None:
         if not isinstance(owner, str):
             raise _tenant_claim_unusable()
     if owner is None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"tenant": tenant}))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+        write_file_nofollow(path, json.dumps({"tenant": tenant}).encode(), owner_uid=None)
         return
     if not hmac.compare_digest(str(owner), tenant):
         raise HTTPException(

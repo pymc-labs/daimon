@@ -151,7 +151,7 @@ def test_atomic_write_cleans_tmp_on_partial_failure(
         assert Path(str(src)).exists(), "tmp must exist before os.replace is called"
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(admin_module.os, "replace", failing_replace)
+    monkeypatch.setattr(os, "replace", failing_replace)
 
     with pytest.raises(OSError, match="No space left on device"):
         admin_module._atomic_write_bytes(target, b"x" * 10)  # pyright: ignore[reportPrivateUsage]
@@ -162,7 +162,7 @@ def test_atomic_write_cleans_tmp_on_partial_failure(
         f"failed write must clean its .tmp orphan; found leftover: {tmp_artifacts}"
     )
     # Sanity: restoring os.replace and retrying lets the write succeed.
-    monkeypatch.setattr(admin_module.os, "replace", real_replace)
+    monkeypatch.setattr(os, "replace", real_replace)
     admin_module._atomic_write_bytes(target, b"recovered")  # pyright: ignore[reportPrivateUsage]
     assert target.read_bytes() == b"recovered"
 

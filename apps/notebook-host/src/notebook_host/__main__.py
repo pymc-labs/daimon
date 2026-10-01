@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
 
 import uvicorn
@@ -33,6 +34,9 @@ def uvicorn_log_config() -> dict[str, Any]:
 
 
 def main() -> None:
+    # Belt and braces: everything the host creates is private unless it says
+    # otherwise. The stores already create their files 0600 (write_private_file).
+    os.umask(0o077)
     settings = load_settings()
     app = create_app(settings)
     uvicorn.run(

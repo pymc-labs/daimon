@@ -13,10 +13,11 @@ is treated as empty rather than fatal, and writes are atomic (tmp + rename).
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from pydantic import BaseModel
+
+from notebook_host.files import write_private_file
 
 _REGISTRY_MODE = 0o600
 """Explicit mode for blogs.json. It lists every blog's slug and its marimo
@@ -64,15 +65,12 @@ def load_blogs(path: Path) -> dict[str, BlogRecord]:
 def save_blogs(path: Path, records: dict[str, BlogRecord]) -> None:
     """Atomically rewrite the registry (tmp + rename on the same filesystem).
 
-    The tmp file is locked to ``_REGISTRY_MODE`` (0600) before the rename,
-    not after — no window where a freshly written registry is world-readable.
+    Written through ``files.write_private_file``: the tmp file is created at
+    ``_REGISTRY_MODE`` (0600) with ``O_EXCL | O_NOFOLLOW``, so it is never
+    readable by another uid, even for the moment before the rename.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     payload = {slug: rec.model_dump() for slug, rec in records.items()}
-    tmp.write_text(json.dumps(payload, indent=2))
-    os.chmod(tmp, _REGISTRY_MODE)
-    os.replace(tmp, path)
+    write_private_file(path, json.dumps(payload, indent=2).encode(), mode=_REGISTRY_MODE)
 
 
 def register_blog(path: Path, record: BlogRecord) -> None:
