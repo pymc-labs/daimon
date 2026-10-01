@@ -1,6 +1,7 @@
 """Pure safety and scheduling checks for the staging rehearsal script."""
 
 from argparse import Namespace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from scripts.hackathon_load_rehearsal import (
     DiscordREST,
     _defaults_root,  # pyright: ignore[reportPrivateUsage]
     _discord_phase,  # pyright: ignore[reportPrivateUsage]
+    _message_time,  # pyright: ignore[reportPrivateUsage]
     _percentile,  # pyright: ignore[reportPrivateUsage]
     _require_discord_model,  # pyright: ignore[reportPrivateUsage]
     arrival_offsets,
@@ -90,6 +92,18 @@ def test_discord_percentiles_handle_empty_and_small_samples() -> None:
     assert _percentile([], 0.95) == "n/a"
     assert _percentile([1, 3, 5], 0.5) == "3.00"
     assert _percentile([1, 3, 5], 0.95) == "4.80"
+
+
+def test_discord_final_uses_edit_time_and_first_uses_creation_time() -> None:
+    started = datetime(2026, 10, 1, tzinfo=UTC)
+    message: dict[str, object] = {
+        "timestamp": (started + timedelta(seconds=2)).isoformat(),
+        "edited_timestamp": (started + timedelta(seconds=15)).isoformat(),
+    }
+    assert _message_time(message, started) == 2
+    assert _message_time(message, started, latest=True) == 15
+    message["edited_timestamp"] = None
+    assert _message_time(message, started, latest=True) == 2
 
 
 def test_discord_model_requirement_rejects_staging_mismatch() -> None:

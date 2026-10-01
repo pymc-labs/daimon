@@ -447,6 +447,7 @@ class DiscordResult:
     thread_id: str | None = None
     first_s: float | None = None
     final_s: float | None = None
+    turn_s: float | None = None
     status: str = "timeout"
     attachments: int = 0
 
@@ -499,8 +500,9 @@ class DiscordREST:
         raise RuntimeError(f"Discord rate limit persisted: {method} {route}")
 
 
-def _snowflake_time(message: dict[str, object], started: datetime) -> float:
-    return max(0.0, (datetime.fromisoformat(str(message["timestamp"])) - started).total_seconds())
+def _message_time(message: dict[str, object], started: datetime, *, latest: bool = False) -> float:
+    timestamp = (message.get("edited_timestamp") if latest else None) or message["timestamp"]
+    return max(0.0, (datetime.fromisoformat(str(timestamp)) - started).total_seconds())
 
 
 async def _discord_watch(
@@ -516,6 +518,7 @@ async def _discord_watch(
 
     result = DiscordResult(message_id)
     deadline = time.monotonic() + 180
+    outcome_seen = False
     while time.monotonic() < deadline:
         await asyncio.sleep(2)
         if result.thread_id is None:
@@ -545,18 +548,18 @@ async def _discord_watch(
                 bot_messages.append(item)
         if bot_messages:
             first = min(bot_messages, key=lambda item: str(item["id"]))
-            result.first_s = _snowflake_time(first, started)
-            for item in bot_messages:
-                content = str(item.get("content") or "")
-                if "too many chats" in content or "at capacity" in content:
-                    result.status = "shed"
-                    result.final_s = _snowflake_time(item, started)
-                    return result
-                if content or item.get("attachments"):
-                    result.final_s = max(result.final_s or 0, _snowflake_time(item, started))
+            result.first_s = _message_time(first, started)
+            result.final_s = max(_message_time(item, started, latest=True) for item in bot_messages)
             result.attachments = sum(
                 len(cast(list[object], item.get("attachments") or [])) for item in bot_messages
             )
+            if any(
+                "too many chats" in str(item.get("content") or "")
+                or "at capacity" in str(item.get("content") or "")
+                for item in bot_messages
+            ):
+                result.status = "shed"
+                return result
         if result.thread_id:
             async with sm() as session:
                 outcomes = await list_for_tenant(session, tenant_id, limit=200)
@@ -570,11 +573,13 @@ async def _discord_watch(
             )
             if done is not None:
                 result.status = str(done.reason)
-                # The outcome may be written just before Discord posts the final reply.
-                if result.final_s is None:
-                    await asyncio.sleep(2)
+                result.turn_s = max(0.0, (done.ended_at - started).total_seconds())
+                # Read Discord once more after the outcome to catch final edits and replies.
+                if not outcome_seen:
+                    outcome_seen = True
                     continue
-                return result
+                if result.final_s is not None:
+                    return result
     return result
 
 
@@ -684,13 +689,15 @@ async def _discord_phase(
         for row in results:
             print(
                 f"Discord {row.message_id}: thread={row.thread_id or 'none'} "
-                f"first={row.first_s} final={row.final_s} status={row.status} "
+                f"first={row.first_s} final={row.final_s} turn={row.turn_s} "
+                f"status={row.status} "
                 f"attachments={row.attachments}",
                 flush=True,
             )
         for name, values in (
             ("first", [r.first_s for r in results if r.first_s is not None]),
             ("final", [r.final_s for r in results if r.final_s is not None]),
+            ("turn", [r.turn_s for r in results if r.turn_s is not None]),
         ):
             print(
                 f"Discord {name} p50={_percentile(values, 0.5)}s p95={_percentile(values, 0.95)}s",
