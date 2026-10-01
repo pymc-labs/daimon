@@ -130,8 +130,14 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "never call it or create_file_upload_url for a file" in teams, (
         "Teams send_message refuses files; the agent must not reach for the Discord path"
     )
+    assert "follow the `files` attribute on `<channel>`" in teams, (
+        "whether a channel takes files depends on the team's SharePoint grant"
+    )
+    assert "saves each output to the channel's Files and links it" in teams, (
+        "with access, outputs are delivered as links, so the agent may reference them"
+    )
     assert "no file can be attached" in teams and "never promise one" in teams, (
-        "a channel cannot take files at all"
+        "without access a channel cannot take files at all"
     )
     assert "Say so once in your reply" in teams, (
         "the adapter no longer posts a note per file, so the reply carries the message"

@@ -14,6 +14,9 @@
 #    API, which authorizes on the app registration itself, and reads channel
 #    messages through Microsoft Graph under the resource-specific consent
 #    below, which a team owner grants when installing the app in a team.
+#    Channel files optionally need the Graph application permission
+#    Sites.Selected plus a grant per team site (docs/teams.md); this
+#    manifest stays the same.
 # 2. Azure portal → Create a resource → Azure Bot:
 #      - Type of App: Single Tenant; point it at the registration above.
 #      - Configuration → Messaging endpoint:

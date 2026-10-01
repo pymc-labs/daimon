@@ -62,6 +62,11 @@ def bound_request_id() -> str:
     return rid if isinstance(rid, str) and rid else uuid.uuid4().hex
 
 
+# (timed out, failed) events per kind of edit to a shown answer.
+_PREFIX_EVENTS = ("teams.turn.answer_prefix_timed_out", "teams.turn.answer_prefix_failed")
+_SUFFIX_EVENTS = ("teams.turn.answer_suffix_timed_out", "teams.turn.answer_suffix_failed")
+
+
 class TeamsSender(Protocol):
     """The slice of `microsoft_teams.apps.App` a turn needs. A set `id` edits."""
 
@@ -122,8 +127,10 @@ class TeamsTurnLifecycle:
         # A continuity notice that belongs above the answer it explains.
         self.answer_prefix: str | None = None
         self.answer_prefix_applied = False
-        # The first answer message as sent (text, is_last), for `prepend_revealed_answer`.
-        self._revealed: tuple[str, bool] | None = None
+        # Each answer message as on screen, id -> (text, is_last), for later edits.
+        self._shown: dict[str, tuple[str, bool]] = {}
+        # Edits of a shown answer, from the turn and the output sweep, one at a time.
+        self._answer_edits = asyncio.Lock()
 
     @property
     def message_id(self) -> str | None:
@@ -236,9 +243,9 @@ class TeamsTurnLifecycle:
                 if index == 0:
                     current = self._message_id = await self._edit(message, current)
                     replaced = self.card_closed = True
-                    self._revealed = (chunk, is_last)
                 else:
                     current = await self._send(message, message_id=None)
+                self._shown[current] = (chunk, is_last)
             self.final_message_id = current
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
@@ -271,22 +278,34 @@ class TeamsTurnLifecycle:
         False when no answer was shown, the notice would overflow the first
         message, or the edit fails; the caller then sends it on its own.
         """
-        if self._revealed is None or self._message_id is None:
-            return False
-        chunk, is_last = self._revealed
-        updated = f"{notice}\n\n{chunk}"
-        if len(updated) > card.TEAMS_LIMIT:
-            return False
-        message = card.answer_message(updated, is_last=is_last)
-        try:
-            await self._edit(message, self._message_id)
-        except _TIMEOUTS:
-            log.warning("teams.turn.answer_prefix_timed_out", exc_info=True)  # may have landed
-        except TEAMS_SEND_ERRORS:
-            log.warning("teams.turn.answer_prefix_failed", exc_info=True)
-            return False
-        self._revealed = (updated, is_last)
-        return True
+        return await self._amend(
+            self._message_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
+        )
+
+    async def append_to_answer(self, text: str) -> bool:
+        """Edit `text` in below the answer's last message; False if it cannot go there."""
+        return await self._amend(
+            self.final_message_id, lambda shown: f"{shown}\n\n{text}", _SUFFIX_EVENTS
+        )
+
+    async def _amend(
+        self, message_id: str | None, change: Callable[[str], str], events: tuple[str, str]
+    ) -> bool:
+        async with self._answer_edits:
+            if message_id is None or (shown := self._shown.get(message_id)) is None:
+                return False
+            updated = change(shown[0])
+            if len(updated) > card.TEAMS_LIMIT:
+                return False
+            try:
+                await self._edit(card.answer_message(updated, is_last=shown[1]), message_id)
+            except _TIMEOUTS:
+                log.warning(events[0], exc_info=True)  # may have landed
+            except TEAMS_SEND_ERRORS:
+                log.warning(events[1], exc_info=True)
+                return False
+            self._shown[message_id] = (updated, shown[1])
+            return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         if (limit := spend_limit_error(err)) is not None:

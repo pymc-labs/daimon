@@ -274,6 +274,32 @@ async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() ->
     assert not await lifecycle.prepend_revealed_answer("I lost the workspace.")
 
 
+async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer() -> None:
+    """Prefix and links land on the same message, each edit keeping the other."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("Saved to this channel's files:\n- [a](u)")
+    final = sender.activities[-1]
+    assert final.id == "m-1", "the answer is edited, nothing new is posted"
+    assert final.text == (
+        "I lost the workspace.\n\nThe posterior mean is 3.\n\nSaved to this channel's files:\n- [a](u)"
+    )
+    assert final.channel_data is not None and final.channel_data.feedback_loop is not None
+
+
+async def test_file_links_that_would_overflow_the_last_message_are_refused() -> None:
+    """Over the Teams limit the caller sends the links as their own message instead."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
+
+    assert not await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert len(sender.sent) == 2, "no edit was tried"
+
+
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)

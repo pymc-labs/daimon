@@ -111,18 +111,62 @@ the HTTP status and no content.
   that uses a tool offers the file again.
 - **Channels.** Teams sends a channel message's pasted images and files only
   inside its HTML, so the bot reads the message from Graph and passes its
-  images to the agent. Files shared in a channel live in SharePoint, which no
-  team-scoped permission reaches, so the bot names them and tells the person
-  it could not open them; without Graph access it says the same of images.
-  Posting a file to a channel needs SharePoint access too. The agent guidance
-  tells the agent so, and to say it once in its reply. A file it writes to its
-  outputs anyway is logged (`teams.channel_output.skipped`, no name or
+  images to the agent. Files live in the team's SharePoint site, which no
+  team-scoped permission reaches: they work only in teams whose site an admin
+  granted (below). There, a shared file reaches the agent as a short-lived
+  download link, and each file the agent writes is uploaded to the channel's
+  Files tab (never overwriting) and linked below its answer, or in one message
+  when the answer has no room. Elsewhere, or when Graph refuses, the bot names
+  a shared file and tells the person it could not open it, and an output is
+  logged (`teams.channel_output.skipped` or `.upload_failed`, no name or
   content) and dropped from the delivery listing; the agent's own copy stays
-  in its workspace.
+  in its workspace. The turn context tells the agent which case applies
+  (`files="available"` or `"unavailable"`), learned from the last folder
+  lookup or upload and rechecked every 10 minutes while unavailable.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
 every redirect hop is re-checked (Graph reads follow none).
+
+### Channel files (optional)
+
+Grant the app `Sites.Selected`, which reaches only the sites granted to it,
+then grant each team's site. The manifest does not change and no restart is
+needed.
+
+1. Entra portal → App registrations → the bot's app → API permissions → Add
+   a permission → Microsoft Graph → Application permissions →
+   `Sites.Selected` → Grant admin consent.
+2. Find the team's site id. The group id is in the team's link (team → ⋯ →
+   Get link to team → `groupId=`). As an admin in Graph Explorer:
+   `GET https://graph.microsoft.com/v1.0/groups/{group-id}/sites/root`, or by
+   URL, `GET https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Marketing`.
+   The `id` reads `contoso.sharepoint.com,{site-guid},{web-guid}`.
+3. Grant the app write on that site. The caller needs `Sites.FullControl.All`
+   (consent it in Graph Explorer as a SharePoint or global admin):
+
+   ```http
+   POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
+   Content-Type: application/json
+
+   {"roles": ["write"],
+    "grantedToIdentities": [{"application": {"id": "<DAIMON_TEAMS__CLIENT_ID>", "displayName": "daimon"}}]}
+   ```
+
+   Or in PowerShell:
+
+   ```powershell
+   Connect-MgGraph -Scopes Sites.FullControl.All
+   $site = Invoke-MgGraphRequest GET "v1.0/groups/<group-id>/sites/root"
+   New-MgSitePermission -SiteId $site.id -BodyParameter @{
+     roles = @("write")
+     grantedToIdentities = @(@{ application = @{ id = "<DAIMON_TEAMS__CLIENT_ID>"; displayName = "daimon" } })
+   }
+   ```
+
+Standard channels only: private and shared channels keep files in a site of
+their own, where outputs are not uploaded. Removing the site permission
+(`DELETE /sites/{site-id}/permissions/{id}`) returns the team to names only.
 
 ### Keys and sign-ins
 
@@ -172,7 +216,8 @@ different agent posts a notice instead of running. A deployment with
 
 Reactions, the agent's own channel-reading tools (`read_channel`,
 `read_thread`, `search_messages`, `get_message`, `list_channels` and
-`parse_link` are hidden from Teams turns), files in channels, file posting
+`parse_link` are hidden from Teams turns), files in channels whose site is
+not granted and in private or shared channels, file posting
 through `send_message`, and private inputs a password field cannot take: `.env`
 uploads, multi-line secrets, and repository or skill-repository tokens.
 Also Discord and Slack only: `send_direct_message`, `/dm` conversations,

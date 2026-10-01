@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import structlog
 from daimon.adapters.teams.attachments import ChannelMedia
+from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.context import (
     CHANNEL_BACKFILL_LIMIT,
     HistoryBlock,
@@ -34,10 +35,18 @@ def root_id(conversation_id: str) -> str | None:
 class ThreadReader:
     """Graph reads of the thread a message is in, for the bot `bot_app_id`."""
 
-    def __init__(self, graph: GraphClient, teams: TeamGroups, *, bot_app_id: str) -> None:
+    def __init__(
+        self,
+        graph: GraphClient,
+        teams: TeamGroups,
+        *,
+        bot_app_id: str,
+        files: ChannelFiles | None = None,
+    ) -> None:
         self._graph = graph
         self._teams = teams
         self._bot_app_id = bot_app_id
+        self._files = files
 
     @property
     def token(self) -> GraphToken:
@@ -76,7 +85,10 @@ class ThreadReader:
             return None
 
     async def read_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
-        """The mentioned message's hosted images and files, or None if unreadable."""
+        """The mentioned message's hosted images and files, or None if unreadable.
+
+        Shared files get a download URL when the team's site is granted.
+        """
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
             return None
@@ -88,4 +100,5 @@ class ThreadReader:
         except GraphUnavailable as err:
             log.warning("teams.media.unavailable", status=err.status, reason=err.reason)
             return None
-        return channel_media(message)
+        media = channel_media(message)
+        return await self._files.resolve(media) if self._files and media.files else media

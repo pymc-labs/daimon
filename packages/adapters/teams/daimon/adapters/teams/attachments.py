@@ -81,11 +81,20 @@ class InboundFile:
 
 
 @dataclass(frozen=True)
+class SharedFile:
+    """A file shared in a channel: its SharePoint URL, and a download URL once resolved."""
+
+    name: str
+    content_url: str | None = None
+    download_url: str | None = None
+
+
+@dataclass(frozen=True)
 class ChannelMedia:
-    """What a channel message carries per Graph: hosted image URLs and shared file names."""
+    """What a channel message carries per Graph: hosted image URLs and shared files."""
 
     image_urls: tuple[str, ...] = ()
-    file_names: tuple[str, ...] = ()
+    files: tuple[SharedFile, ...] = ()
 
 
 class _EmbeddedCounter(HTMLParser):
@@ -228,7 +237,12 @@ def _resolve_embedded(
     if media is None:
         return [f for f in files if f not in embedded], embedded
     kept = [InboundFile("graph_image", "image", url) for url in media.image_urls]
-    kept += [InboundFile("unreachable", sanitize_title(name)) for name in media.file_names]
+    kept += [
+        InboundFile("shared_file", sanitize_title(f.name), f.download_url)
+        if f.download_url
+        else InboundFile("unreachable", sanitize_title(f.name))
+        for f in media.files
+    ]
     return kept, []
 
 

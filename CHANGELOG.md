@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a team owner grants at install: upload the updated app package again. A
   refused or slow read never fails a turn, which then runs without history.
 
+- **Teams channels can take files, once an admin grants the team's site.**
+  With the Graph application permission `Sites.Selected` and a write grant on
+  a team's SharePoint site, files shared in its channels reach the agent as
+  download links, and files the agent writes are uploaded to the channel's
+  Files tab and linked below its answer, or in one message. The turn tells
+  the agent whether this works there. Without a grant, or when Graph refuses,
+  channels behave as before. The manifest is unchanged; `docs/teams.md` has
+  the grant steps.
+
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in

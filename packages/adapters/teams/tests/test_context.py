@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from xml.sax.saxutils import quoteattr
 
-from daimon.adapters.teams.attachments import ChannelMedia
+from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.context import (
     channel_block,
     channel_media,
@@ -70,7 +70,8 @@ def test_channel_media_reads_only_graph_hosted_images_and_names_files() -> None:
         "name": "q3.xlsx",
     }
     media = channel_media(_msg("101", html, attachments=[attachment]))
-    assert media == ChannelMedia(image_urls=(HOSTED,), file_names=("q3.xlsx",))
+    shared = SharedFile("q3.xlsx", attachment["contentUrl"])
+    assert media == ChannelMedia(image_urls=(HOSTED,), files=(shared,)), "the file keeps its URL"
 
 
 def test_thread_block_orders_drops_noise_and_marks_truncation() -> None:

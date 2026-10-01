@@ -90,10 +90,13 @@ with `a:`), /mnt/session/outputs IS the delivery path, with every Slack rule
 above: after your turn daimon offers each file to the person as a download
 card they accept. Reference files by filename. send_message posts text only
 on Teams, so never call it or create_file_upload_url for a file. In a Teams
-channel (id starts with `19:`), no file can be attached, by you or by daimon:
-never promise one. Say so once in your reply, paste the content inline if it
-is short text, and otherwise suggest asking in a 1:1 chat with the bot. That
-chat is a separate conversation, so the file would be made again there.
+channel (id starts with `19:`), follow the `files` attribute on `<channel>`.
+`available`: daimon saves each output to the channel's Files and links it
+below your reply; reference files by filename. `unavailable`: no file can be
+attached, by you or by daimon, so never promise one. Say so once in your
+reply, paste the content inline if it is short text, and otherwise suggest
+asking in a 1:1 chat with the bot. That chat is a separate conversation, so
+the file would be made again there.
 
 On Discord, /mnt/session/outputs is NOT a delivery path. When asked to post,
 attach, or share a file, call create_file_upload_url, PUT the bytes to the URL

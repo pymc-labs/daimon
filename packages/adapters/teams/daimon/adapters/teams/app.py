@@ -24,6 +24,7 @@ import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
     CHANNEL_POINTER,
     CommandContext,
@@ -210,6 +211,7 @@ class TeamsApp:
         commands: Mapping[str, CommandHandler],
         bot_token: BotToken,
         reader: ThreadReader | None = None,
+        channel_files: ChannelFiles | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -223,7 +225,11 @@ class TeamsApp:
         self._bot_token = bot_token
         # Channel history and media through Graph; None replays nothing.
         self._reader = reader
-        self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self.spawn)
+        # Channel files through SharePoint; None leaves channels without files.
+        self._channel_files = channel_files
+        self.outputs = TeamsOutputDelivery(
+            runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
+        )
         self.credentials = TeamsCredentialRequests(
             runtime=runtime,
             sender=self._sender,
@@ -795,6 +801,7 @@ class TeamsApp:
                 is_admin=self._role(inbound) is Role.ADMIN,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
+                channel_files=await self._files_reachable(inbound),
             )
             message = render(history=history)
 
@@ -824,7 +831,8 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            sweep = self.outputs.sweep(inbound, outcome.ma_session_id)
+            append = holder[-1].append_to_answer
+            sweep = self.outputs.sweep(inbound, outcome.ma_session_id, append=append)
             self.spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
         if outcome.continuity.state == "replaced_after_loss":
@@ -845,6 +853,11 @@ class TeamsApp:
             await self._say(
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
             )
+
+    async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
+        if inbound.kind != "channel":
+            return None
+        return self._channel_files is not None and await self._channel_files.is_available(inbound)
 
     async def _history(
         self, inbound: TeamsInbound, *, watermark: str | None, skip_ids: frozenset[str]

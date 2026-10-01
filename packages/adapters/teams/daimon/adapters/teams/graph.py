@@ -4,15 +4,16 @@ Three parts: the app token (MSAL, behind `GraphToken`, caches it per scope),
 `TeamGroups` (the team's Entra group id Graph addresses it by, looked up once
 per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
-`ChannelMessage.Read.Group`, granted by a team owner at install, covers every
-call here. Each read is one page: a long thread is marked truncated rather
-than paged inside a turn. Any failure (no consent, throttling, a timeout, an
+`ChannelMessage.Read.Group`, granted by a team owner at install, covers the
+message reads here; `sharepoint` sends its file calls through `send`. Each
+read is one page: a long thread is marked truncated rather than paged inside a
+turn. Any failure (no consent, throttling, a timeout, an
 odd body) raises `GraphUnavailable`, whose fields carry no message content.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from urllib.parse import quote
 
 import httpx
@@ -22,7 +23,7 @@ from pydantic.alias_generators import to_camel
 
 GRAPH_HOST = "graph.microsoft.com"
 GRAPH_SCOPE = f"https://{GRAPH_HOST}/.default"
-_ROOT = f"https://{GRAPH_HOST}/v1.0"
+GRAPH_ROOT = f"https://{GRAPH_HOST}/v1.0"
 # Graph's ceiling for `$top` on replies and channel messages.
 MAX_PAGE = 50
 # History is a nicety; a slow Graph must not hold the turn long.
@@ -65,6 +66,7 @@ class GraphAttachment(_Model):
     id: str | None = None
     content_type: str | None = None
     name: str | None = None
+    content_url: str | None = None
 
 
 class GraphMessage(_Model):
@@ -90,7 +92,7 @@ def is_graph_url(url: httpx.URL) -> bool:
     return url.scheme == "https" and url.host == GRAPH_HOST
 
 
-def _segment(value: str) -> str:
+def path_segment(value: str) -> str:
     # Ids go in one path segment each, so a `/` or `..` in one cannot move the request.
     return quote(value, safe="")
 
@@ -127,7 +129,7 @@ class GraphClient:
         self.token = token
 
     def _channel(self, group_id: str, channel_id: str) -> str:
-        return f"{_ROOT}/teams/{_segment(group_id)}/channels/{_segment(channel_id)}"
+        return f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/channels/{path_segment(channel_id)}"
 
     async def get_message(
         self, group_id: str, channel_id: str, message_id: str, *, root_id: str | None = None
@@ -135,14 +137,14 @@ class GraphClient:
         """A root post, or with `root_id` a reply under it."""
         path = f"{self._channel(group_id, channel_id)}/messages/"
         if root_id is not None and root_id != message_id:
-            path += f"{_segment(root_id)}/replies/"
-        return _parse(GraphMessage, await self._get(path + _segment(message_id)))
+            path += f"{path_segment(root_id)}/replies/"
+        return _parse(GraphMessage, await self._get(path + path_segment(message_id)))
 
     async def list_replies(
         self, group_id: str, channel_id: str, root_id: str, *, top: int = MAX_PAGE
     ) -> GraphPage:
         """The newest `top` replies to `root_id`, newest first."""
-        url = f"{self._channel(group_id, channel_id)}/messages/{_segment(root_id)}/replies"
+        url = f"{self._channel(group_id, channel_id)}/messages/{path_segment(root_id)}/replies"
         return _parse(GraphPage, await self._get(url, top=top))
 
     async def list_channel_messages(
@@ -153,7 +155,22 @@ class GraphClient:
         return _parse(GraphPage, await self._get(url, top=top))
 
     async def _get(self, url: str, *, top: int | None = None) -> object:
-        target = httpx.URL(url, params={"$top": str(min(top, MAX_PAGE))} if top else None)
+        return await self.send(
+            "GET", url, params={"$top": str(min(top, MAX_PAGE))} if top else None
+        )
+
+    async def send(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, str] | None = None,
+        body: object = None,
+        content: bytes | None = None,
+        timeout: float = GRAPH_TIMEOUT_S,
+    ) -> object:
+        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply."""
+        target = httpx.URL(url, params=params)
         if not is_graph_url(target):
             raise GraphUnavailable("not a Graph URL")
         try:
@@ -163,15 +180,21 @@ class GraphClient:
         if not token:
             raise GraphUnavailable("no token")
         try:
-            response = await self._http.get(
+            headers = {"Authorization": f"Bearer {token}"}
+            if content is not None:
+                headers["Content-Type"] = "application/octet-stream"
+            response = await self._http.request(
+                method,
                 target,
-                headers={"Authorization": f"Bearer {token}"},
+                headers=headers,
+                json=body,
+                content=content,
                 follow_redirects=False,
-                timeout=GRAPH_TIMEOUT_S,
+                timeout=timeout,
             )
         except httpx.HTTPError as err:
             raise GraphUnavailable(type(err).__name__) from err
-        if response.status_code != 200:
+        if response.status_code not in (200, 201):
             raise GraphUnavailable("http error", status=response.status_code)
         try:
             return response.json()

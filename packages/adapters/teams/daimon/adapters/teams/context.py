@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from xml.sax.saxutils import escape, quoteattr
 
 import httpx
-from daimon.adapters.teams.attachments import ChannelMedia
+from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.graph import GraphMessage, GraphPage, is_graph_url
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.untrusted import untrusted_block
@@ -99,8 +99,12 @@ def _body_text(message: GraphMessage) -> str:
     return html_to_text(content) if message.body.content_type == "html" else content.strip()
 
 
-def _files(message: GraphMessage) -> list[str]:
-    return [a.name or "file" for a in message.attachments if a.content_type in _FILE_TYPES]
+def _files(message: GraphMessage) -> list[SharedFile]:
+    return [
+        SharedFile(a.name or "file", a.content_url)
+        for a in message.attachments
+        if a.content_type in _FILE_TYPES
+    ]
 
 
 def channel_media(message: GraphMessage) -> ChannelMedia:
@@ -109,7 +113,7 @@ def channel_media(message: GraphMessage) -> ChannelMedia:
     if message.body.content_type == "html":
         hosted = (src for src in _parse_html(message.body.content or "").images)
         images = tuple(src for src in hosted if _is_hosted_content(src))
-    return ChannelMedia(image_urls=images, file_names=tuple(_files(message)))
+    return ChannelMedia(image_urls=images, files=tuple(_files(message)))
 
 
 def _is_hosted_content(src: str) -> bool:
@@ -141,8 +145,8 @@ def _render(message: GraphMessage, *, bot_app_id: str) -> list[str]:
     )
     if not files:
         return [f"<message{attrs}>{escape(text)}</message>"]
-    # Channel files live in SharePoint, which this app cannot read: names only.
-    shared = [f'<attachment name={quoteattr(name)} fetchable="false"/>' for name in files]
+    # Names only: only the mentioned message's files are looked up in SharePoint.
+    shared = [f'<attachment name={quoteattr(f.name)} fetchable="false"/>' for f in files]
     return [
         f"<message{attrs}>",
         escape(text),
@@ -213,9 +217,16 @@ def render_user_message(
     keys: str,
     prefix: str,
     history: HistoryBlock | None,
+    channel_files: bool | None = None,
 ) -> str:
-    """Host facts and any replayed history, then the person's escaped words."""
-    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>'
+    """Host facts and any replayed history, then the person's escaped words.
+
+    `channel_files` is whether a file saved now reaches the channel; None in a chat.
+    """
+    files = ""
+    if channel_files is not None:
+        files = f' files="{"available" if channel_files else "unavailable"}"'
+    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}{files}/>'
     query = (
         f"<user_query author_id={quoteattr(inbound.user_id)} "
         f'is_admin="{str(is_admin).lower()}">{escape(inbound.text)}</user_query>'

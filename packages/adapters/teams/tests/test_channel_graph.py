@@ -1,4 +1,4 @@
-"""Channel turns over Microsoft Graph: replayed history, pasted images, unreachable files.
+"""Channel turns over Microsoft Graph: replayed history, pasted images, shared files.
 
 Activities go through the real `/api/messages` route; Graph is a `MockTransport` on the
 runtime's HTTP client, Bot Framework the `TeamsApiFake`, and the turn is patched.
@@ -93,8 +93,39 @@ MEDIA_MESSAGE = _graph_message(
 )
 
 
-def _graph(seen: list[httpx.Request]) -> httpx.AsyncClient:
-    """Graph answering the fixtures' thread: a root post, two replies, the media message."""
+SITE_ID = "example.sharepoint.com,2c1f0a9e-0000-4000-8000-000000000001,7d3b-web"
+DOWNLOAD_URL = (
+    "https://example.sharepoint.com/sites/team/_layouts/15/download.aspx?UniqueId=q3&tempauth=x"
+)
+# What Graph answers once an admin granted the app the team's site (`Sites.Selected`).
+GRANTED_SITE = {
+    f"/v1.0/teams/{TEAM_GROUP_ID}/channels/19:channel-1@thread.tacv2/filesFolder": {
+        "id": "01FOLDER",
+        "name": "General",
+        "parentReference": {"driveId": "b!drive-1"},
+    },
+    "/v1.0/sites/example.sharepoint.com:/sites/team": {"id": SITE_ID},
+    f"/v1.0/sites/{SITE_ID}/drives": {
+        "value": [
+            {
+                "id": "b!drive-1",
+                "webUrl": "https://example.sharepoint.com/sites/team/Shared%20Documents",
+            }
+        ]
+    },
+    "/v1.0/drives/b!drive-1/root:/q3.xlsx": {
+        "id": "01Q3",
+        "name": "q3.xlsx",
+        "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
+    },
+}
+
+
+def _graph(seen: list[httpx.Request], *, site: dict[str, Any] | None = None) -> httpx.AsyncClient:
+    """Graph answering the fixtures' thread: a root post, two replies, the media message.
+
+    `site` adds SharePoint answers by path; without it the team's files are refused.
+    """
     replies = {
         "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(chatMessage)",
         "value": [
@@ -114,6 +145,8 @@ def _graph(seen: list[httpx.Request]) -> httpx.AsyncClient:
             return httpx.Response(200, json=MEDIA_MESSAGE)
         if path == httpx.URL(HOSTED).path:
             return httpx.Response(200, content=_png(), headers={"Content-Type": "image/png"})
+        if site and path in site:
+            return httpx.Response(200, json=site[path])
         return httpx.Response(404)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -156,6 +189,7 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     )
 
     message = turn["user_message"]
+    assert 'files="unavailable"/>' in message, "the agent is told channel files do not work"
     assert '<thread_history source="teams" trust="untrusted">' in message
     assert "Q3 release plan" in message and "the numbers are in the sheet" in message
     assert "describe these attachments</message>" not in message, "the trigger is not history"
@@ -168,6 +202,21 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     assert all(r.headers["Authorization"] == "Bearer test-bot-token" for r in seen)
     lookups = [r for r in teams_api_fake.requests if "/v3/teams/" in r.url]
     assert lookups, "the group id came from Bot Framework's team details, absent from the activity"
+
+
+async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    seen: list[httpx.Request] = []
+    graph = _graph(seen, site=GRANTED_SITE)
+    [turn] = await _run(db_session_factory, teams_api_fake, _load("channel_media_reply"), graph)
+
+    message = turn["user_message"]
+    assert 'files="available"/>' in message, "the agent learns this channel takes files"
+    assert "`q3.xlsx`, shared by the user with this message" in message
+    assert DOWNLOAD_URL in message, "the pre-authorised SharePoint link, for the sandbox to fetch"
+    assert "q3.xlsx" not in _texts(teams_api_fake), "nothing to apologise for"
+    assert {r.url.host for r in seen} == {"graph.microsoft.com"}, "resolved through Graph only"
 
 
 async def test_without_graph_the_turn_runs_and_the_person_hears_what_was_missed(

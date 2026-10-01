@@ -9,11 +9,11 @@ anything; `packages/adapters/teams/tests/test_boot_sweep.py` asserts that.
 The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; a turn replays its channel thread through Microsoft Graph,
-but the agent's own channel-reading tools stay hidden, and files shared in a
-channel stay unreachable, because no team-scoped Graph permission reaches the
-SharePoint they live in; and a dialog's password field cannot take a `.env`
-upload or a repository token. Removing the
-app archives nothing. The `billing` card has no promo code surface: Teams
+but the agent's own channel-reading tools stay hidden; files in a channel
+work only once a tenant admin grants the app the team's SharePoint site
+(`Sites.Selected`), because no team-scoped permission reaches it; and a
+dialog's password field cannot take a `.env` upload or a repository token.
+Removing the app archives nothing. The `billing` card has no promo code surface: Teams
 admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
 Discord and Slack only, so the card shows no channel budget either. So are
 channel admins: only the listed admins administer a Teams channel. A Teams
@@ -49,7 +49,12 @@ from daimon.adapters.mcp.tools.credential_requests import (
     register_credential_request_tools,
 )
 from daimon.adapters.teams import card as teams_card
-from daimon.adapters.teams.attachments import ChannelMedia, InboundFile, prepare_attachments
+from daimon.adapters.teams.attachments import (
+    ChannelMedia,
+    InboundFile,
+    SharedFile,
+    prepare_attachments,
+)
 from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
@@ -68,6 +73,7 @@ from pydantic import SecretStr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TENANT = "00000000-0000-0000-0000-000000000001"
+CONTENT_URL = "https://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx"
 
 
 def test_teams_refuses_group_chats() -> None:
@@ -132,15 +138,15 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     )
 
 
-def test_teams_asks_no_file_permission_so_channel_files_stay_unreachable() -> None:
+def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     granted = manifest["authorization"]["permissions"]["resourceSpecific"]
     assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group"], (
-        "channel messages only; if a file permission is added, replace this record"
+        "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
     )
 
 
-async def test_a_teams_channel_file_is_named_and_explained_never_fetched() -> None:
+async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no request for a channel file: {request.url.host}")
 
@@ -153,12 +159,12 @@ async def test_a_teams_channel_file_is_named_and_explained_never_fetched() -> No
             [InboundFile("embedded_file", "file")],
             bot_token=token,
             service_url=None,
-            channel_media=ChannelMedia(file_names=("q3.xlsx",)),
+            channel_media=ChannelMedia(files=(SharedFile("q3.xlsx", CONTENT_URL),)),
             graph_token=token,
         )
     assert (
         prepared.notice == "I couldn't read `q3.xlsx` (files shared in channels need a 1:1 chat)."
-    ), "Teams channel files are unreachable on purpose; if they become readable, replace this"
+    ), "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
 
 
 def test_the_teams_billing_card_has_no_promo_code_surface() -> None:
