@@ -40,9 +40,10 @@ def test_validate_operator_terms_refuses_ceiling_without_promo_create() -> None:
         )
 
 
-@pytest.mark.parametrize("ttl_days", [0, 366])
+@pytest.mark.parametrize("ttl_days", [0, 91])
 def test_validate_operator_terms_refuses_ttl_out_of_range(ttl_days: int) -> None:
-    with pytest.raises(OperatorTokenError, match="ttl"):
+    """At most 90 days: a demoted admin's token stops at its expiry at the latest."""
+    with pytest.raises(OperatorTokenError, match="ttl must be 1 to 90 days"):
         validate_operator_terms(
             scopes=frozenset({"tenant:read"}), ttl_days=ttl_days, max_issued_usd=None
         )
@@ -53,6 +54,21 @@ def test_validate_operator_terms_refuses_non_positive_ceiling() -> None:
         validate_operator_terms(
             scopes=frozenset({"promo:create"}), ttl_days=30, max_issued_usd=Decimal("0")
         )
+
+
+@pytest.mark.parametrize("ceiling", ["10.005", "0.001"])
+def test_validate_operator_terms_refuses_a_ceiling_finer_than_cents(ceiling: str) -> None:
+    with pytest.raises(OperatorTokenError, match="whole cents"):
+        validate_operator_terms(
+            scopes=frozenset({"promo:create"}), ttl_days=30, max_issued_usd=Decimal(ceiling)
+        )
+
+
+@pytest.mark.parametrize("ceiling", ["250", "10.50", "10.500", "1E+3"])
+def test_validate_operator_terms_accepts_a_ceiling_in_cents(ceiling: str) -> None:
+    validate_operator_terms(
+        scopes=frozenset({"promo:create"}), ttl_days=90, max_issued_usd=Decimal(ceiling)
+    )
 
 
 def test_issue_refusal_allows_anything_without_a_ceiling() -> None:

@@ -22,7 +22,9 @@ OPERATOR_SCOPES: tuple[OperatorScope, ...] = get_args(OperatorScope)
 DEPLOYMENT_SCOPES: frozenset[OperatorScope] = frozenset({"promo:create"})
 """Scopes that act beyond the token's tenant."""
 
-MAX_TTL_DAYS = 365
+MAX_TTL_DAYS = 90
+"""The admin check reads a stored role that only a platform turn refreshes,
+so a short life bounds how long a demoted admin's token can outlast them."""
 
 
 class OperatorTokenError(ValueError):
@@ -62,6 +64,9 @@ def validate_operator_terms(
         raise OperatorTokenError("an issuing ceiling needs the promo:create scope")
     if not max_issued_usd.is_finite() or max_issued_usd <= 0:
         raise OperatorTokenError("the issuing ceiling must be a positive dollar amount")
+    exponent = max_issued_usd.normalize().as_tuple().exponent
+    if not isinstance(exponent, int) or exponent < -2:
+        raise OperatorTokenError("the issuing ceiling must be whole cents (2 decimal places)")
 
 
 def issue_refusal(
