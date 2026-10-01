@@ -13,7 +13,9 @@ password field cannot take a `.env` upload or a repository token. Removing the
 app archives nothing. The `billing` card has no promo code surface: Teams
 admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
 Discord and Slack only, so the card shows no channel budget either. So are
-channel admins: only the listed admins administer a Teams channel.
+channel admins: only the listed admins administer a Teams channel. A Teams
+answer carries no usage line (agent, time, tokens, cost, balance) where the
+finished Discord or Slack card has one; spend is on the `billing` card.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -42,6 +44,7 @@ from daimon.adapters.mcp.tools.credential_requests import (
     _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
     register_credential_request_tools,
 )
+from daimon.adapters.teams import card as teams_card
 from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
@@ -247,3 +250,11 @@ async def test_a_teams_key_request_cannot_ask_for_a_env_upload() -> None:
             purpose="several keys",
             channel_id="19:c@thread.tacv2",
         )
+
+
+def test_a_teams_answer_carries_no_usage_line() -> None:
+    message = teams_card.answer_message("The posterior mean is 3.", is_last=True)
+    assert message.text == "The posterior mean is 3.", "the answer alone, no usage footer"
+    assert message.channel_data is not None and message.channel_data.feedback_loop is not None, (
+        "the last part still asks for feedback"
+    )

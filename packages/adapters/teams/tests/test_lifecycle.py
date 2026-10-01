@@ -7,26 +7,26 @@ import dataclasses
 import json
 import uuid
 from collections.abc import Callable
-from decimal import Decimal
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 import structlog
 from anthropic import RateLimitError
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMessageEvent,
+    BetaManagedAgentsTextBlock,
+)
 from daimon.adapters.teams import card
 from daimon.adapters.teams import lifecycle as lifecycle_module
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
-from daimon.core.stores import tenant_ledger
-from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_tenant
 from microsoft_teams.api import MessageActivityInput, SentActivity
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
@@ -52,8 +52,6 @@ async def _posted(
         conversation_id=CONVERSATION_ID,
         service_url=SERVICE_URL,
         cancel_key="key-1",
-        agent_name="daimon",
-        model_id="claude-test",
         clock=clock or Clock(),
         request_id=request_id,
         **kw,
@@ -86,7 +84,40 @@ async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -
     assert len(sender.sent) == 2 and sender.activities[1].id == "m-1"
 
 
-async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
+def _card_body(sender: FakeSender, index: int) -> list[dict[str, Any]]:
+    return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"]
+
+
+async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock)
+    message: Any = BetaManagedAgentsAgentMessageEvent(
+        id="evt_1",
+        type="agent.message",
+        processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=[BetaManagedAgentsTextBlock(type="text", text="Checking\nthe files.")],
+    )
+    await lifecycle.on_sse_event(message)
+    read = ToolUseBlock(
+        kind="tool_use", id="t1", type="agent.tool_use", name="read", input={}, status="complete"
+    )
+    bash = ToolUseBlock(kind="tool_use", id="t2", type="agent.tool_use", name="bash", input={})
+    clock.now += 65
+    await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
+
+    headline, tools, draft, _actions = _card_body(sender, -1)
+    assert headline["text"] == "**Working** · 1m 5s", "a running tool makes the turn Working"
+    assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
+    assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
+    assert (draft["text"], draft["isSubtle"]) == ("Checking the files.", True), "draft on one line"
+
+    clock.now += 5
+    finished = dataclasses.replace(bash, status="complete")
+    await lifecycle.on_render(TurnState(content=[read, finished], finished_tool_ids=("t1", "t2")))
+    assert _card_body(sender, -1)[0]["text"] == "**Thinking** · 1m 10s", "no tool runs any more"
+
+
+async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     lifecycle.answer_prefix = "Picked up where we left off."
@@ -94,36 +125,12 @@ async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
 
     final = sender.activities[-1]
     assert final.id == "m-1"
-    assert final.text is not None
-    assert final.text.startswith("Picked up where we left off.\n\nThe posterior mean is 3.")
-    assert "daimon · " in final.text
+    assert final.text == "Picked up where we left off.\n\nThe posterior mean is 3.", (
+        "the answer alone, as on Discord and Slack"
+    )
     assert final.channel_data is not None and final.channel_data.feedback_loop is not None
     assert lifecycle.answer_prefix_applied
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
-
-
-async def test_the_footer_shows_a_prepaid_balance_only(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session, platform="teams")
-        await tenant_ledger.insert_entry(
-            session,
-            tenant_id=tenant.id,
-            delta_usd=Decimal("12.50"),
-            reason="test",
-            idempotency_key=f"test:{tenant.id}",
-        )
-    sender = FakeSender()
-    lifecycle = await _posted(sender, sessionmaker=db_session_factory, tenant_id=tenant.id)
-    await lifecycle.on_terminal_success(_answer("done"))
-    assert "· $12.50 left" in _card_json(sender, -1)
-
-    async with db_session_factory.begin() as session:
-        await set_funding_mode(session, tenant_id=tenant.id, funding_mode="operator_funded")
-    lifecycle = await _posted(sender, sessionmaker=db_session_factory, tenant_id=tenant.id)
-    await lifecycle.on_terminal_success(_answer("done"))
-    assert "left" not in _card_json(sender, -1)
 
 
 async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,7 +160,7 @@ async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatc
     } in logs
 
 
-async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() -> None:
+async def test_a_long_answer_overflows_into_new_messages_with_feedback_last() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     paragraph = "word " * 1000
@@ -243,8 +250,10 @@ async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     final = sender.activities[-1]
     assert final.id == "m-1" and final.text is not None
-    assert final.text.startswith("I lost the workspace.\n\nThe posterior mean is 3.")
-    assert "daimon · " in final.text, "the footer stays on a single-message answer"
+    assert final.text == "I lost the workspace.\n\nThe posterior mean is 3."
+    assert final.channel_data is not None and final.channel_data.feedback_loop is not None, (
+        "the feedback buttons stay on a single-message answer"
+    )
 
 
 async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
@@ -275,7 +284,7 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
     lifecycle = await _posted(sender)
     tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
     await lifecycle.on_terminal_success(TurnState(content=[tool]))
-    assert "✅ daimon" in _card_json(sender, -1)
+    assert _card_text(sender, -1) == card.TOOLS_DONE_NOTICE, "a tool-only turn closes plainly"
 
 
 def _card_text(sender: FakeSender, index: int) -> str:
@@ -292,7 +301,7 @@ async def test_failure_closes_the_card_with_the_termination_notice_once() -> Non
     assert len(sender.sent) == 2, "the card closes once"
     text = _card_text(sender, 1)
     assert text.startswith("❌ Agent service error: "), "the notice replaces the raw error"
-    assert "\n\nRequest id: rid-1\n\ndaimon · " in text, "one paragraph per line, rid kept"
+    assert text.endswith("\n\nRequest id: rid-1"), "one paragraph per line, rid last"
     assert lifecycle.card_closed
 
 
@@ -305,7 +314,7 @@ async def test_a_notice_that_fails_to_build_falls_back_to_the_raw_error() -> Non
     error = TurnError(kind="upstream", message="overloaded")
     await lifecycle.on_terminal_failure(TurnState(error=error), error)
 
-    assert _card_text(sender, 1).startswith("❌ overloaded · daimon"), "the card still closes"
+    assert _card_text(sender, 1) == "❌ overloaded", "the card still closes"
 
 
 def test_an_oversized_notice_fits_the_teams_limit_and_keeps_the_request_id() -> None:
@@ -313,10 +322,10 @@ def test_an_oversized_notice_fits_the_teams_limit_and_keeps_the_request_id() -> 
     assert notice is not None
     huge = dataclasses.replace(notice, cause="x" * 10_000)
 
-    text = card.termination_text(huge, footer="daimon · 1s")
+    text = card.termination_text(huge)
 
     assert len(text) <= card.TEAMS_LIMIT, "Teams rejects an oversized message"
-    assert text.endswith("…\n\nRequest id: rid-1\n\ndaimon · 1s"), "clipped before the tail"
+    assert text.endswith("…\n\nRequest id: rid-1"), "clipped before the tail"
 
 
 class _HungSender:
