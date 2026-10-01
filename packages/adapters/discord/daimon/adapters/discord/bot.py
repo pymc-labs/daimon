@@ -50,7 +50,11 @@ from daimon.adapters.discord.vision import (
 )
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
-from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
+from daimon.core.continuity.continuation import (
+    ContinuationDecision,
+    check_wake_responder,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -1987,7 +1991,10 @@ class DaimonBot(commands.Bot):
                 thread_id=row.thread_id,
                 account_id=row.requester_account_id,
             )
-        from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            asking_ma_agent_id = await load_asking_agent_id(
+                session, row, live_ma_agent_id=from_ma_agent_id
+            )
         from_name = (
             predecessor.effective_config.agent_name
             if predecessor is not None and predecessor.effective_config is not None
@@ -2028,7 +2035,7 @@ class DaimonBot(commands.Bot):
             target_name=row.target_name,
             admitted_ma_agent_id=admission.agent.id,
             admitted_name=admission.agent.name,
-            asking_ma_agent_id=from_ma_agent_id,
+            asking_ma_agent_id=asking_ma_agent_id,
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
