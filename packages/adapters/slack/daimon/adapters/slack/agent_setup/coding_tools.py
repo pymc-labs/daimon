@@ -9,7 +9,9 @@ never leaves the ephemeral.
 Minting is admin-gated and the gate is re-resolved after the ack, never read
 from the rendered view: the button is visible to every member (hiding is not
 gating) and a member's click gets an explanation instead of silence. Revoking
-is limited to the account that minted the token.
+is limited to the account that minted the token. Pressed in a sealed channel,
+or in one the agent is pinned to, the token is bound to that channel
+(`coding_token_channel`) and its calls run there.
 """
 
 from __future__ import annotations
@@ -29,8 +31,16 @@ from daimon.adapters.slack.agent_setup.read import (
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import coding_tool_config, mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import (
+    coding_token_channel,
+    coding_tool_config,
+    mint_agent_mcp_token,
+    token_jti,
+)
+from daimon.core.roster import RosterAgent
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from slack_sdk.web.async_client import AsyncWebClient
@@ -61,7 +71,12 @@ def _needs_admin_message(agent_name: str) -> str:
 
 
 def render_coding_tools_message(
-    *, agent_name: str, public_url: str, jwt: str, jti: uuid.UUID
+    *,
+    agent_name: str,
+    public_url: str,
+    jwt: str,
+    jti: uuid.UUID,
+    channel_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Build the ephemeral's fallback text and blocks for one minted token.
 
@@ -72,10 +87,15 @@ def render_coding_tools_message(
     file.
 
     The fallback text deliberately carries no token — it is what Slack shows in
-    a notification preview.
+    a notification preview. `channel_id` names the channel a bound token runs in.
     """
     cli_oneliner, mcp_json_block = coding_tool_config(
         agent_name=agent_name, public_url=public_url, jwt=jwt
+    )
+    bound = (
+        f"\nIt runs in <#{channel_id}>, under that channel's pins, seal and budget."
+        if channel_id is not None
+        else ""
     )
     blocks: list[dict[str, Any]] = [
         {
@@ -84,7 +104,7 @@ def render_coding_tools_message(
                 "type": "mrkdwn",
                 "text": (
                     f"*Use `{escape_mrkdwn(agent_name)}` from your coding tools* — "
-                    "token shown once, copy it now."
+                    f"token shown once, copy it now.{bound}"
                 ),
             },
         },
@@ -176,6 +196,18 @@ async def handle_coding_tools_click(
         )
         return
 
+    try:
+        bound_channel_id = await _bound_channel(
+            runtime, tenant_id=tenant_id, channel_id=channel_id or None, target=target
+        )
+    except AccessPolicyUnreadable:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id or user_id,
+            user_id=user_id,
+            text=POLICY_UNREADABLE_REFUSAL,
+        )
+        return
     account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target.ma_agent_id)
     async with runtime.sessionmaker() as session, session.begin():
@@ -187,6 +219,8 @@ async def handle_coding_tools_click(
             label=agent_name,
             secret=jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
+            platform="slack" if bound_channel_id is not None else None,
+            channel_id=bound_channel_id,
         )
     jti = token_jti(token)
     log.info(
@@ -194,11 +228,16 @@ async def handle_coding_tools_click(
         team_id=team_id,
         agent_name=agent_name,
         jti=str(jti),
+        bound_channel_id=bound_channel_id,
         # The token value itself is never logged.
     )
 
     text, blocks = render_coding_tools_message(
-        agent_name=agent_name, public_url=public_url, jwt=token, jti=jti
+        agent_name=agent_name,
+        public_url=public_url,
+        jwt=token,
+        jti=jti,
+        channel_id=bound_channel_id,
     )
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id or user_id,
@@ -249,6 +288,19 @@ async def handle_revoke_token_click(
         return
     log.info("slack.coding_tools.revoked", jti=str(jti))
     await _respond(runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True)
+
+
+async def _bound_channel(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, channel_id: str | None, target: RosterAgent
+) -> str | None:
+    """The channel a token minted here is bound to; the agent is read only under a pin."""
+    async with runtime.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    names: tuple[str | None, ...] = (target.name,)
+    if channel_id is not None and policy.agent_channel_pins:
+        agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
+        names = (target.name, *agent_pin_names(agent.name, agent.metadata))
+    return coding_token_channel(policy, agent_names=names, channel_id=channel_id)
 
 
 async def _respond(
