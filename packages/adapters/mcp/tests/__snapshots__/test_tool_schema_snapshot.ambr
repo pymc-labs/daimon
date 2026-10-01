@@ -174,7 +174,10 @@
           
           Other people's conversations with the same daimon are not listed and
           their handles are not accepted; nor are conversations from a sealed
-          channel, which can only be read from inside it.
+          channel, which can only be read from inside it. A workspace admin also
+          sees everyone's channel conversations with this daimon, sealed ones
+          included, and can read them with ``get_session``/``list_events``, but
+          can't continue a sealed one from here.
         ''',
         'parameters': dict({
           'additionalProperties': False,

@@ -656,3 +656,132 @@ async def test_unsealing_the_thread_keeps_the_parent_seal(world: _World) -> None
             await _list_session_events_impl(
                 world.runtime(), world.auth(), "ses_thread", None, None, None, origin
             )
+
+
+# --- a pin binds a signed bearer with no platform user too ------------------
+
+
+def _bearer_app(world: _World) -> Any:
+    return create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(_SECRET.decode()), public_url=HttpUrl("https://x/mcp")
+            ),
+            _env_file=None,  # type: ignore[call-arg]  # isolate from repo .env
+        ),
+        sessionmaker=world.sessionmaker,
+        anthropic=world.runtime().client,
+    )
+
+
+async def _bearer(world: _World, role: Role) -> str:
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+
+    tenant = await get_tenant(world.db, world.tenant_id)
+    assert tenant is not None
+    account = await make_account(world.db, tenant=tenant)
+    await set_role(world.db, account.id, role)
+    await world.db.commit()
+    world.add_session("ses_headless")
+    world.sessions["ses_headless"]["metadata"]["daimon_account"] = str(account.id)
+    return mint_jwt(
+        account_id=account.id,
+        secret=_SECRET,
+        now=dt.datetime.now(dt.UTC),
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+    )
+
+
+async def _pin(world: _World, agent: str) -> None:
+    await set_access_policy(
+        world.db,
+        tenant_id=world.tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={agent: (_SEALED,)}),
+    )
+    await world.db.commit()
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("continue_turn", {"handle": "ses_headless", "message": "run despite the pin"}),
+        ("ask", {"handle": "ses_headless", "message": "run despite the pin"}),
+    ],
+    ids=["continue_turn", "ask-resume"],
+)
+async def test_a_signed_bearer_with_no_platform_user_is_held_to_a_pin(
+    world: _World, role: Role, tool: str, arguments: dict[str, object]
+) -> None:
+    """No platform user skips billing, not security: the pin still applies, admins too."""
+    token = await _bearer(world, role)
+    await _pin(world, "acme-project")
+
+    result = await call_mcp_tool(_bearer_app(world), token=token, name=tool, arguments=arguments)
+
+    assert result["result"].get("isError"), result
+    assert "pinned this agent" in str(result)
+    assert world.sent == [], "a refused turn must never reach the session"
+
+
+async def test_a_signed_bearer_new_turn_on_a_pinned_agent_is_refused(world: _World) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    token = await _bearer(world, Role.ADMIN)
+    await _pin(world, "acme-project")
+    create = AsyncMock(side_effect=AssertionError("a pinned agent must not start"))
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        result = await call_mcp_tool(
+            _bearer_app(world), token=token, name="start_turn", arguments={"message": "hi"}
+        )
+
+    assert result["result"].get("isError") and "pinned this agent" in str(result), result
+    create.assert_not_awaited()
+
+
+async def test_a_signed_bearer_runs_an_unpinned_agent(world: _World) -> None:
+    token = await _bearer(world, Role.USER)
+    await _pin(world, "another-agent")
+
+    result = await call_mcp_tool(
+        _bearer_app(world),
+        token=token,
+        name="continue_turn",
+        arguments={"handle": "ses_headless", "message": "go"},
+    )
+
+    assert not result["result"].get("isError"), result
+    assert world.sent == ["ses_headless"]
+
+
+async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: _World) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import text
+
+    token = await _bearer(world, Role.USER)
+    await world.db.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) "
+            "VALUES (:t, CAST('{\"bogus\": true}' AS jsonb)) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET policy = EXCLUDED.policy"
+        ),
+        {"t": world.tenant_id},
+    )
+    await world.db.commit()
+
+    create = AsyncMock(side_effect=AssertionError("an unreadable policy must not start"))
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        result = await call_mcp_tool(
+            _bearer_app(world), token=token, name="start_turn", arguments={"message": "go"}
+        )
+
+    assert result["result"].get("isError"), result
+    assert "access settings can't be read" in str(result), result
+    create.assert_not_awaited()
+    assert world.sent == []

@@ -234,8 +234,10 @@ can't be read. Each read or follow-up requires the calling turn's origin to be
 inside every recorded id, whatever the current policy, and judges the channel
 and thread against the current policy as a channel read would: the main MCP
 server's session tools take the calling turn's `origin_context_id`, claimable
-only by a chat turn's own credential; agent-chat keys and the hub run outside
-every channel, so they never list, read or continue a sealed conversation.
+only by a chat turn's own credential; agent-chat keys run outside every
+channel, so they never list, read or continue a sealed conversation, and the
+hub does the same for members. A workspace admin may list and read any sealed
+conversation from the hub, but continue none (see [Trust model](#trust-model)).
 Sealing a channel later covers its existing sessions, and unsealing never
 releases a session that ran sealed -- only that thread, when the thread was
 sealed on its own. A session from before the stamp that a thread ran on
@@ -264,9 +266,10 @@ daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 A pinned agent runs only in its listed channels and the threads under them.
 The pin is keyed by agent name and checked against both the cascade's name and
 the agent's own metadata name, so a thread handed to the agent by id is
-covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a DM
-included, and admins get no exemption: the pin exists because of what the
-agent's credentials reach, not who is asking. `hand_off_task` refuses to bring
+covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a
+member's DM included. Admins are exempt only where the reply reaches no one
+else -- their own DM and hub turns -- and even there the agent's channel sends
+reach only its pinned channels (see [Trust model](#trust-model)). `hand_off_task` refuses to bring
 a pinned agent into another channel before anything is written. A pinned
 agent's routine must post straight into a pinned channel (a channel
 destination, not a thread or none), because the scheduler cannot resolve a
@@ -484,6 +487,58 @@ Third-party MCP tool results travel from Managed Agents straight to the model
 without passing through daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").
 
+## Trust model
+
+Admins are trusted; pins and seals protect members and channels. An agent pin
+(`agent_channel_pins`) and a sealed channel (`sealed_channel_ids`) exist to
+keep one client's context away from other people -- members of other
+channels, and anyone reading where an agent posts -- not to restrict a
+workspace admin. So an admin is exempt only where the output reaches no one
+but them:
+
+| Surface | Members | Admins |
+| --- | --- | --- |
+| Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |
+| DM (`admit(is_dm=True)`, Teams personal chats included) | pinned agent refused | pin exempt |
+| Hub `ask` / `start_turn` / `continue_turn` | pinned agent refused | pin exempt |
+| Hub `list_my_sessions` / `get_session` / `list_events` on a sealed conversation | refused | allowed, anyone's |
+| Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
+| Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin) |
+| `fork_agent` of a pinned agent | refused | refused |
+| Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
+
+On every turn, wherever a pinned agent runs (including an exempt admin turn
+and a member's turn inside its channel), its sends (messages, replies,
+threads and posts, files and cards on Discord, Slack and Teams) reach only:
+its pinned channels and threads under them; the requester's own 1:1 DM with
+daimon (a Slack IM whose user is the requester, or a Teams personal chat the
+requester is in); and direct messages to the requester. Its context never
+lands in another channel or another person's DM. A session that ran in a DM
+(a Slack IM, a Teams personal chat, or a `/dm` conversation) is private:
+admins never read it from the hub.
+
+Continuing a sealed channel conversation from the hub stays refused for admins
+because a follow-up would join the channel's own conversation, which the
+channel goes on reusing. Branching a private copy for the admin is a possible
+follow-up.
+
+Who counts as an admin:
+
+- In admission (DMs), the live role the adapter passes for this turn.
+- For credential and configuration tools, a chat turn's credential, whose
+  `is_admin` reads the account's stored role -- recorded from the platform by
+  that turn's admission, and as current as the person's last platform turn
+  when the same vault token is reused by their hub or routine sessions. The
+  operator's own internal token is trusted too; an agent-scoped key never.
+- In the hub, the account's stored role. The hub has no live platform role,
+  so a demotion or promotion takes effect on the person's next Discord, Slack
+  or Teams turn in that workspace, which records the platform's current role.
+
+Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
+user are never admins on these surfaces, whatever role their account holds or
+who minted them. A pin binds a bearer with no platform user too: such callers
+skip billing, not admission.
+
 ## Tenancy and isolation
 
 One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is
@@ -521,7 +576,9 @@ serializes every value so bash cannot expand or execute it, and
 stored. Names that control an interpreter, archiver, loader, locale, package
 manager, git, an HTTP client or a CA bundle, or that redirect an SDK's own
 endpoint (`TAR_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`,
-`*_BASE_URL`, …) are hard-denied for everyone and dropped from the mount even
+`*_BASE_URL`, …) are hard-denied for everyone (the four git commit-identity
+names `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and
+`GIT_COMMITTER_EMAIL` excepted) and dropped from the mount even
 if stored earlier; a non-admin member may additionally add only a secret
 name (ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`,
 `_PASSPHRASE` or `_PAT` — never an identity, region or `*_URL`/`*_HOST`

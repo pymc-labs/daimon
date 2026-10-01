@@ -1312,7 +1312,14 @@ async def _seal_and_expect_quarantine(
         )
     events_before = len(sent)
     sessions_before = len(created)
-    with pytest.raises(DaimonError, match="now sealed"):
+    with pytest.raises(
+        DaimonError,
+        match=(
+            r"This DM was started from a channel that is now private to its members, so it "
+            r"was closed to keep that channel's messages in\. Run /dm again from the channel "
+            r"you want to talk about\."
+        ),
+    ):
         await _reply(deps, route, message_id="2")
     assert len(sent) == events_before, "no turn may run with the sealed context"
     assert len(created) == sessions_before

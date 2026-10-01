@@ -61,8 +61,9 @@ SEALED_SOURCE_MESSAGE = (
 
 
 SEALED_SINCE_MESSAGE = (
-    "Where this conversation came from is now sealed, so it has ended and its copied "
-    "context was removed. Run /dm in an unsealed channel to start a new one."
+    "This DM was started from a channel that is now private to its members, so it was "
+    "closed to keep that channel's messages in. Run /dm again from the channel you want "
+    "to talk about."
 )
 
 
