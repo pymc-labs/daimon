@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import signal
 import sys
+from typing import cast
 
 import structlog
 from daimon.adapters.slack.app import SlackApp
@@ -20,9 +21,11 @@ from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
+from daimon.core.runtime_health import runtime_health
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 log = structlog.get_logger()
 
@@ -112,7 +115,13 @@ async def main() -> None:
                     log.error("slack.boot_sweep_crashed", exc_info=task.exception())
 
             sweep_task.add_done_callback(_on_sweep_done)
-            await stop.wait()  # released by _shutdown after drain completes
+            async with runtime_health(
+                "slack",
+                cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),
+                settings.observability.health_interval_s,
+                lambda: (sum(app._inflight.values()), max(app._inflight.values(), default=0)),  # pyright: ignore[reportPrivateUsage]
+            ):
+                await stop.wait()  # released by _shutdown after drain completes
         finally:
             health_server.close()
             await health_server.wait_closed()

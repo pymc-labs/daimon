@@ -20,6 +20,7 @@ typo is silent — check the spelling here.
 - [Anthropic](#anthropic)
 - [CLI](#cli)
 - [Logging](#logging)
+- [Observability](#observability)
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
@@ -166,6 +167,17 @@ Read from `daimon.core.config.LogSettings`. Prefix `DAIMON_LOG__`.
 `'DEBUG' | 'INFO' | 'WARNING' | 'ERROR'` · optional · default `INFO`
 
 Minimum log level emitted by the structured logger.
+
+## Observability
+
+Read from `daimon.core.config.ObservabilitySettings`. Prefix `DAIMON_OBSERVABILITY__`.
+
+### `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`
+
+`float` · optional · default `30`
+
+Seconds between runtime.health structured log lines from each long-running process.
+Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable.
 
 ## Ops
 

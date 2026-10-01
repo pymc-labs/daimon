@@ -168,6 +168,7 @@ source_modules = [
     "daimon.core.routine_delivery",
     "daimon.core.routines",
     "daimon.core.routing_facts",
+    "daimon.core.runtime_health",
     "daimon.core.scheduler",
     "daimon.core.scope",
     "daimon.core.session_compat",

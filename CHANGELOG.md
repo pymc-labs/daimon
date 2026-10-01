@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
-
+- Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
   channels, with an in-place status card, author-only Cancel, per-thread
   queueing, feedback buttons and restart recovery. The configured Entra

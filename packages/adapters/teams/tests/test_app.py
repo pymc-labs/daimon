@@ -56,12 +56,6 @@ def _app(
     )
 
 
-async def _holding_a_slot(teams: TeamsApp) -> None:
-    async with asyncio.timeout(5):
-        while not teams._inflight.get(TENANT):
-            await asyncio.sleep(0.01)
-
-
 async def test_messages_during_a_turn_queue_and_run_once_per_author(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -150,14 +144,16 @@ async def test_the_tenant_cap_sheds_a_new_thread(
 ) -> None:
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=1)
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        started.set()
         await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
-        await _holding_a_slot(teams)
+        async with asyncio.timeout(5):
+            await started.wait()
         await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first
@@ -178,14 +174,16 @@ async def test_a_tenant_turn_cap_override_beats_the_deployment_cap(
         await set_turn_cap(session, tenant_id=TENANT, cap=1)
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=3)
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        started.set()
         await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
-        await _holding_a_slot(teams)
+        async with asyncio.timeout(5):
+            await started.wait()
         await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first

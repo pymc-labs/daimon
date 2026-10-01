@@ -73,6 +73,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     render_routine_controls,
 )
+from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -640,37 +641,40 @@ async def run(
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             return 0
 
-        while not stop_event.is_set():
-            await run_one_tick(
-                now=datetime.now(UTC),
-                sm=sm,
-                caps=caps,
-                fire=fire,
-                max_age=timedelta(seconds=scheduler_settings.max_age_s),
-                max_concurrent_fires=scheduler_settings.max_concurrent_fires,
-                dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
-                dispatcher=dispatcher,
-            )
-            await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(
-                client, sm, markup=settings.billing.markup, watermark=usage_watermark
-            )
-            await _sweep_wizard_sessions(sm)
-            await _sweep_slack_event_dedup(sm)
-            await _sweep_retired_turn_card_intents(sm)
-            await _sweep_hub_oauth_kv(sm)
-            await _drain_github_push_resync(
-                engine=engine,
-                sm=sm,
-                client=client,
-                settings=settings,
-                fernet=push_resync_fernet,
-            )
-            await _drain_github_installation_reconciliations(sm=sm, settings=settings)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=scheduler_settings.tick_interval_s
+        async with runtime_health(
+            "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
+        ):
+            while not stop_event.is_set():
+                await run_one_tick(
+                    now=datetime.now(UTC),
+                    sm=sm,
+                    caps=caps,
+                    fire=fire,
+                    max_age=timedelta(seconds=scheduler_settings.max_age_s),
+                    max_concurrent_fires=scheduler_settings.max_concurrent_fires,
+                    dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                    dispatcher=dispatcher,
                 )
+                await _sweep_pending_files(client, sm)
+                await _sweep_headless_usage(
+                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
+                )
+                await _sweep_wizard_sessions(sm)
+                await _sweep_slack_event_dedup(sm)
+                await _sweep_retired_turn_card_intents(sm)
+                await _sweep_hub_oauth_kv(sm)
+                await _drain_github_push_resync(
+                    engine=engine,
+                    sm=sm,
+                    client=client,
+                    settings=settings,
+                    fernet=push_resync_fernet,
+                )
+                await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=scheduler_settings.tick_interval_s
+                    )
 
         return 0
     finally:

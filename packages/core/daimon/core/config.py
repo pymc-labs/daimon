@@ -81,6 +81,17 @@ class LogSettings(BaseModel):
     )
 
 
+class ObservabilitySettings(BaseModel):
+    health_interval_s: float = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Seconds between runtime.health structured log lines from each long-running process. "
+            "Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable."
+        ),
+    )
+
+
 class OpsSettings(BaseModel):
     alert_webhook_url: SecretStr | None = Field(
         default=None,
@@ -1062,6 +1073,7 @@ class Settings(BaseSettings):
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
