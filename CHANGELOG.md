@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Access is decided again at the moment of action, not only when a turn is admitted. Before a session is found, reused, replaced or recreated after a crash, the turn's pin, protection and invoker checks are re-run on the current access policy, so a pin or protection added in between refuses it, and a seal added in between is stamped on the session and makes memory read-only. The check runs again right before a replacement session is created after a workspace transfer, and agent-chat and hub turns re-check right before they create a session or send a message, resumed sessions included. A DM is closed if its source channel was sealed since the turn started. The MCP OAuth callback checks the pinned-agent rule after the code exchange, again before the grant is saved and again before the server is attached, so a pin that lands mid sign-in stores no grant and attaches nothing. An admin reading their own DM sessions from the hub reads them as before. `daimon agents rekey-guild-ownership` keeps a report reader's link to its source agent. A published report's reader variant now counts as its source agent for pins, and publishing a pinned agent's reader needs an admin or a request from inside its channels (`publish_report(origin_context_id=…)`). An agent-scoped key is never exempt as an admin, whoever minted it.
 - **Seeded defaults are protected from chat edits.** Skill-repo imports now
   gate like other attachment writes: a member needs an admin on an agent
   that answers for others, and neither the import nor a push resync
@@ -108,10 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admins. Slack grants are by member only. A routine or wake set up by someone
   with more rights keeps the agent out of a channel admin's hands, and so do a
   personal default, someone else's live session or routine in another channel
-  or in no known one, and, for key and MCP server changes, answering nowhere.
-  An admin of every channel an agent is pinned to may change it from outside
-  them, and from the hub may list and read the sealed conversations of the
-  channels they run, as a server admin may of any; DMs stay private. No chat
+  or in no known one, and, for key, MCP server and skill repo changes,
+  answering nowhere. Connecting a skill repo now counts an agent as shared
+  wherever a key change does (someone's personal default, a bound thread, or
+  another member's routine or live session) on Discord and Slack too, as it
+  already did over MCP. An admin of every channel an agent is pinned to may
+  change it from outside them, and from the hub may list and read the sealed
+  conversations of the channels they run, as a server admin may of any, when
+  every seal on one lies in those channels; DMs stay private. No chat
   tool or panel can make a pinned agent the default of a channel outside its
   pin; the operator CLI still can. Nothing changes until a channel admin is
   named.

@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from typing import Final
 
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, build_subject
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
@@ -153,11 +153,10 @@ async def load_stored_subject(
     login. A server admin's grants are not read; they need none.
     """
     account = await get_account(session, account_id)
-    if account is None:
-        return Subject(platform_user_id=platform_user_id)
-    if account.role is Role.ADMIN:
-        return Subject(is_admin=True, platform_user_id=platform_user_id)
-    return Subject(
+    if account is None or account.role is Role.ADMIN:
+        return build_subject(is_admin=account is not None, platform_user_id=platform_user_id)
+    return build_subject(
+        is_admin=False,
         platform_user_id=platform_user_id,
         administered_channel_ids=await load_administered_channel_ids(
             session,

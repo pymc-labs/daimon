@@ -9,6 +9,7 @@ alone would have let these through.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,7 +40,6 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin
@@ -83,7 +83,9 @@ async def _pinned(
     return runtime, tenant.id
 
 
-def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
+def _member(
+    tenant_id: uuid.UUID, *, is_admin: bool = False, administered: Collection[str] = ()
+) -> AuthIdentity:
     """A chat turn's credential: its role was checked live at admission."""
     return AuthIdentity(
         account_id=uuid.uuid4(),
@@ -93,6 +95,7 @@ def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
         platform_user_id="42",
         chat_agent_id=uuid.uuid4(),
         is_admin=is_admin,
+        administered_channel_ids=frozenset(administered),
     )
 
 
@@ -251,7 +254,10 @@ async def test_the_guard_lets_an_admin_through(
 async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_an_origin(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A direct tool has no origin; the admin of the pin's channel may still use it."""
+    """A direct tool has no origin; the admin of the pin's channel may still use it.
+
+    The grants are the verifier's read of the stored ones (`test_verifier.py`).
+    """
     runtime, tenant_id = await _pinned(db_session, db_session_factory)
     agent = ma_agent(
         id=_AGENT_ID,
@@ -259,30 +265,14 @@ async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_a
         tenant_id=tenant_id,
         metadata={"daimon_name": "acme-config"},
     )
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        channel_id="C_OTHER",
-        role_ids=[],
-        user_ids=["42"],
-        actor_account_id=None,
-    )
-    await db_session.commit()
     with pytest.raises(ToolError, match="pinned this agent"):
-        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+        await require_pin_write_access(
+            runtime, _member(tenant_id, administered={"C_OTHER"}), ma_agent=agent, origin=None
+        )
 
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        channel_id="C_ACME",
-        role_ids=[],
-        user_ids=["42"],
-        actor_account_id=None,
+    await require_pin_write_access(
+        runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
     )
-    await db_session.commit()
-    await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
     agent_key = AuthIdentity(
         account_id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -290,6 +280,7 @@ async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_a
         platform="discord",
         platform_user_id="42",
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
+        administered_channel_ids=frozenset({"C_ACME"}),
     )
     with pytest.raises(ToolError, match="pinned this agent"):
         await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
@@ -303,16 +294,6 @@ async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
 ) -> None:
     """Both exemptions read stored roles, so both need a chat turn's fresh credential."""
     runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        channel_id="C_ACME",
-        role_ids=[],
-        user_ids=["42"],
-        actor_account_id=None,
-    )
-    await db_session.commit()
     agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
     login = AuthIdentity(
         account_id=uuid.uuid4(),
@@ -321,6 +302,7 @@ async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
         platform="discord",
         platform_user_id="42",
         is_admin=is_admin,
+        administered_channel_ids=frozenset() if is_admin else frozenset({"C_ACME"}),
     )
     with pytest.raises(ToolError, match="pinned this agent"):
         await require_pin_write_access(runtime, login, ma_agent=agent, origin=None)
@@ -335,19 +317,12 @@ async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
         tenant_id=tenant_id,
         policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME", "C_OPS")}),
     )
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        channel_id="C_ACME",
-        role_ids=[],
-        user_ids=["42"],
-        actor_account_id=None,
-    )
     await db_session.commit()
     agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
     with pytest.raises(ToolError, match="pinned this agent"):
-        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+        await require_pin_write_access(
+            runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
+        )
 
 
 @pytest.mark.parametrize(

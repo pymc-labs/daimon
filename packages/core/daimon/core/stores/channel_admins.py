@@ -93,28 +93,24 @@ async def delete_channel_admins(
     return cast(CursorResult[Any], result).rowcount > 0
 
 
-async def has_channel_admin_grant(
+async def list_administered_channel_ids(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
     role_ids: Sequence[str],
-) -> bool:
-    """True when the member administers at least one channel, by user id or role."""
-    stmt = select(
-        select(ChannelAdmin.channel_id)
-        .where(
-            ChannelAdmin.tenant_id == tenant_id,
-            ChannelAdmin.platform == platform,
-            or_(
-                ChannelAdmin.user_ids.contains([platform_user_id]),
-                ChannelAdmin.role_ids.overlap(list(role_ids)),
-            ),
-        )
-        .exists()
+) -> frozenset[str]:
+    """The channels whose grant names the member, by user id or role."""
+    stmt = select(ChannelAdmin.channel_id).where(
+        ChannelAdmin.tenant_id == tenant_id,
+        ChannelAdmin.platform == platform,
+        or_(
+            ChannelAdmin.user_ids.contains([platform_user_id]),
+            ChannelAdmin.role_ids.overlap(list(role_ids)),
+        ),
     )
-    return bool((await session.execute(stmt)).scalar_one())
+    return frozenset((await session.execute(stmt)).scalars())
 
 
 async def remove_user_from_channel_admins(

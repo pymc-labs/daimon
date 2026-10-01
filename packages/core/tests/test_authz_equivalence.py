@@ -1,7 +1,7 @@
 """`authorize` decides exactly as the checks it replaced did.
 
 Each `_old_*` function below is the decision a caller made before the checks
-were routed through `daimon.core.authz.authorize`, copied verbatim from the
+were routed through `daimon.core.authz.authorize`, reconstructed, with their predicates unchanged, from the
 code it replaced (I/O and refusal copy stripped, the policy predicates
 unchanged). Every test runs the old and new decisions over a grid of pin maps,
 agent names (including empty and missing names, and a display name that
@@ -84,7 +84,7 @@ ORIGINS: list[tuple[str | None, str | None]] = [
     ("C3", "dm:abc"),
 ]
 
-# --- the old decisions, verbatim from the replaced code -------------------------
+# --- the old decisions, reconstructed with their predicates unchanged -------------------------
 
 
 def _old_origin_pin_location(

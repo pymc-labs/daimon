@@ -13,18 +13,23 @@ inside its channels uses the request tools instead.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.reachability import channel_admin_caller
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
-    agent_pin_names,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
-from daimon.core.channel_admins import load_administered_channel_ids
+from daimon.core.authz import (
+    Action,
+    Place,
+    Surface,
+    authorize,
+    build_agent_ref,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -81,23 +86,15 @@ async def require_pin_write_access(
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()
-    administered: frozenset[str] = frozenset()
-    if trusted:
-        async with runtime.session_factory() as session:
-            administered = await load_administered_channel_ids(
-                session,
-                tenant_id=auth.tenant_id,
-                platform=auth.platform or "",
-                caller=channel_admin_caller(auth),
-            )
+    subject = mcp_subject(auth)
+    if not trusted:
+        subject = replace(subject, administered_channel_ids=frozenset())
     if not authorize(
         policy,
-        subject=Subject(
-            platform_user_id=auth.platform_user_id, administered_channel_ids=administered
-        ),
+        subject=subject,
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
-        agent=AgentRef.of(*agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        agent=build_agent_ref(ma_agent.name, ma_agent.metadata),
         place=(
             Place.from_origin(
                 parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id

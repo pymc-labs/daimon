@@ -24,10 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 
-class BillingError(Exception):
-    """Raised by `load_billing_config()` when required env vars are missing."""
-
-
 @dataclass(frozen=True)
 class BillingConfig:
     """Stripe + checkout config. Loaded once at app boot.

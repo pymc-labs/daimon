@@ -27,10 +27,21 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.access_policy import TenantAccessPolicy, is_dm_source_sealed
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
+    build_turn_place,
+)
 from daimon.core.billing import is_over_cap
+from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -43,10 +54,52 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
+from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, MissingTurnConfigError
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 
-__all__ = ["Admission", "AdmissionDenied", "MissingTurnConfigError", "admit"]
+__all__ = [
+    "Admission",
+    "AdmissionDenied",
+    "AdmissionGrant",
+    "DmSource",
+    "MissingTurnConfigError",
+    "admit",
+    "reauthorize",
+]
+
+
+@dataclass(frozen=True)
+class DmSource:
+    """Where a DM conversation was started from, re-checked by `reauthorize`."""
+
+    channel_id: str | None
+    thread_id: str | None
+    thread_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AdmissionGrant:
+    """The facts an admission was decided on, kept so it can be decided again.
+
+    `admit()` decides at admission time; the session is built, reused,
+    replaced or recovered later -- after a compatibility check, a workspace
+    transfer, or a dead-session recovery minutes on. `reauthorize` re-reads
+    the policy and asks `authorize` the same questions at that moment, so a
+    pin, seal, protection or invoker change made in between applies to the
+    turn that is about to run (the model's decide-then-do race).
+    """
+
+    tenant_id: uuid.UUID
+    subject: Subject
+    surface: Surface
+    turn_place: Place
+    agent: AgentRef
+    run_place: Place
+    channel_id: str
+    thread_id: str | None
+    is_dm: bool
+    # Set by the DM path: the conversation's source, whose seal is re-checked.
+    dm_source: DmSource | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +130,9 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
+    # What admission was decided on; `reauthorize` decides it again at the
+    # moment the session is built. None only for hand-built test admissions.
+    grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -159,6 +215,20 @@ async def admit_impl(
         await session.commit()
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        # Matched against the live role ids; a server admin needs no grant.
+        administered = (
+            frozenset[str]()
+            if role is Role.ADMIN
+            else await load_administered_channel_ids(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                caller=ChannelAdminCaller(
+                    platform_user_id=external_user_id,
+                    role_ids=frozenset(platform_role_ids or ()),
+                ),
+            )
+        )
 
     # --- Channel protection, first of the policy gates: the turn's reply
     # would land in its thread or channel, so a protected target refuses the
@@ -172,22 +242,18 @@ async def admit_impl(
     # non-admin, never a stored role the user may have lost. An unreadable
     # policy raised `AccessPolicyUnreadable` above -- refused, never open.
     # Both gates are `authorize(START_TURN)`, protection first. ---
-    subject = Subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
-    caller_gate = authorize(
-        policy,
-        subject=subject,
-        action=Action.START_TURN,
-        place=Place(
-            channel_id=thread_id or channel_id,
-            parent_channel_id=channel_id,
-            category_id=category_id,
-            category_unresolved=category_unresolved,
-        ),
+    subject = build_subject(
+        is_admin=role is Role.ADMIN,
+        platform_user_id=external_user_id,
+        administered_channel_ids=administered,
     )
-    if caller_gate.reason == "channel_protected":
-        raise AdmissionDenied(reason="channel_protected")
-    if caller_gate.reason == "invoker_not_allowed":
-        raise AdmissionDenied(reason="invoker_not_allowed")
+    turn_place = build_turn_place(
+        channel_id=channel_id,
+        thread_id=thread_id,
+        category_id=category_id,
+        category_unresolved=category_unresolved,
+    )
+    _require_turn_start(policy, subject, turn_place)
 
     if (observation := current_outcome.get()) is not None:
         observation.account_id = principal.account_id
@@ -286,17 +352,20 @@ async def admit_impl(
     # only in a DM, where the reply reaches no one else; in a channel or
     # thread other members would see it, so the pin holds for them too. The
     # role is the adapter's live one, never a stored role. ---
-    if not authorize(
-        policy,
+    grant = AdmissionGrant(
+        tenant_id=tenant_id,
         subject=subject,
-        action=Action.RUN_AGENT,
         surface=Surface.DM if is_dm else Surface.CHANNEL,
-        agent=AgentRef.of(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
-        place=Place()
+        turn_place=turn_place,
+        agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
+        run_place=Place()
         if is_dm
-        else Place(channel_id=thread_id or channel_id, parent_channel_id=channel_id),
-    ):
-        raise AdmissionDenied(reason="agent_pinned_elsewhere")
+        else build_turn_place(channel_id=channel_id, thread_id=thread_id),
+        channel_id=channel_id,
+        thread_id=thread_id,
+        is_dm=is_dm,
+    )
+    _require_run_agent(policy, grant)
 
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
@@ -326,15 +395,7 @@ async def admit_impl(
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = frozenset(
-        candidate
-        for candidate in (
-            channel_id,
-            thread_id,
-            f"{channel_id}:{thread_id}" if thread_id is not None else None,
-        )
-        if candidate is not None and candidate in policy.sealed_channel_ids
-    )
+    seal_ids = _seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
@@ -353,4 +414,90 @@ async def admit_impl(
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
+        grant=grant,
+    )
+
+
+def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Place) -> None:
+    """Protection, then the invoker allowlist; any denial refuses the turn."""
+    decision = authorize(policy, subject=subject, action=Action.START_TURN, place=place)
+    if not decision:
+        raise AdmissionDenied(
+            reason="invoker_not_allowed"
+            if decision.reason == "invoker_not_allowed"
+            else "channel_protected"
+        )
+
+
+def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
+    """The agent pin; any denial refuses the turn."""
+    decision = authorize(
+        policy,
+        subject=grant.subject,
+        action=Action.RUN_AGENT,
+        surface=grant.surface,
+        agent=grant.agent,
+        place=grant.run_place,
+    )
+    if not decision:
+        raise AdmissionDenied(reason="agent_pinned_elsewhere")
+
+
+def _seal_ids(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> frozenset[str]:
+    """Every id that seals a turn: its channel and a thread sealed on its own.
+
+    A Discord thread is sealed by its id, a Slack one as channel_id:thread_ts.
+    All of them are recorded, so unsealing one later leaves the others holding.
+    """
+    return frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
+    )
+
+
+async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
+    """Decide an admission again, on the policy as it is now.
+
+    Called at the moment a session is built, reused, replaced or recovered:
+    protection, the invoker allowlist and the agent pin are re-asked of
+    `authorize` with a fresh policy read, and a turn that would now be
+    refused raises `AdmissionDenied` before any session runs it. A seal added
+    since admission joins the turn's seal ids (they only grow), so the
+    session is stamped with it and memory turns read-only. An unreadable
+    policy raises `AccessPolicyUnreadable` -- refused, never open.
+
+    A hand-built admission with no recorded grant (tests only) is returned
+    unchanged.
+    """
+    grant = admission.grant
+    if grant is None:
+        return admission
+    async with deps.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+    _require_turn_start(policy, grant.subject, grant.turn_place)
+    _require_run_agent(policy, grant)
+    if grant.dm_source is not None and is_dm_source_sealed(
+        policy,
+        source_channel_id=grant.dm_source.channel_id,
+        source_thread_id=grant.dm_source.thread_id,
+        source_thread_keys=grant.dm_source.thread_keys,
+    ):
+        raise DmSourceSealedError("dm_source_sealed")
+    seal_ids = admission.origin_seal_ids | _seal_ids(
+        policy, channel_id=grant.channel_id, thread_id=grant.thread_id
+    )
+    if seal_ids == admission.origin_seal_ids:
+        return admission
+    return replace(
+        admission,
+        origin_seal_ids=seal_ids,
+        source_sealed=True,
+        memory_read_only=True,
     )

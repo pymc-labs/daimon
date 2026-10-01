@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
+
 from daimon.core.stores.accounts import get_account_with_tenant, set_platform_role_ids
 from daimon.core.stores.channel_admins import (
     count_channel_admin_grants_for_user,
     delete_channel_admins,
     get_channel_admins,
-    has_channel_admin_grant,
+    list_administered_channel_ids,
     list_channel_admins,
     remove_user_from_channel_admins,
     set_channel_admins,
@@ -57,8 +59,18 @@ async def test_grant_matches_user_or_role_and_stays_in_its_tenant(
         actor_account_id=None,
     )
 
-    async def grant(tenant_id, user: str, roles: list[str]) -> bool:
-        return await has_channel_admin_grant(
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c2",
+        role_ids=["r2"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+
+    async def administered(tenant_id: uuid.UUID, user: str, roles: list[str]) -> frozenset[str]:
+        return await list_administered_channel_ids(
             db_session,
             tenant_id=tenant_id,
             platform="discord",
@@ -66,10 +78,12 @@ async def test_grant_matches_user_or_role_and_stays_in_its_tenant(
             role_ids=roles,
         )
 
-    assert await grant(tenant.id, "u1", []), "a user grant counts"
-    assert await grant(tenant.id, "u9", ["r0", "r1"]), "a role grant counts"
-    assert not await grant(tenant.id, "u9", ["r0"]), "a role with no grant does not"
-    assert not await grant(other.id, "u1", ["r1"]), "a grant never crosses tenants"
+    assert await administered(tenant.id, "u1", []) == {"c1"}, "a user grant counts"
+    assert await administered(tenant.id, "u9", ["r0", "r1", "r2"]) == {"c1", "c2"}, (
+        "every role grant counts"
+    )
+    assert await administered(tenant.id, "u9", ["r0"]) == frozenset(), "an ungranted role does not"
+    assert await administered(other.id, "u1", ["r1"]) == frozenset(), "never across tenants"
 
 
 async def test_remove_user_drops_their_id_and_empty_rows(db_session: AsyncSession) -> None:

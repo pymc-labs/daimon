@@ -148,11 +148,13 @@ async def refuse_unless_allowed(
     channel_id: str,
     user_id: str,
     thread_ts: str | None = None,
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Decide `operation` against the agent daimon knows as `agent_id`.
 
     Returns True when the caller must stop (the refusal has been posted as an
-    ephemeral), False to proceed.
+    ephemeral), False to proceed. `caller_account_id` leaves the caller's own
+    live sessions out of the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
@@ -185,6 +187,7 @@ async def refuse_unless_allowed(
         ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller_account_id=caller_account_id,
     )
     return await _render_outcome(
         client,

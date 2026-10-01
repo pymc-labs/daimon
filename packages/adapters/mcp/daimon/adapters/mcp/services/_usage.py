@@ -47,11 +47,3 @@ def from_metadata(meta: types.GenerateContentResponseUsageMetadata | None) -> Me
         output_tokens=(meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0),
         cache_read_input_tokens=meta.cached_content_token_count or 0,
     )
-
-
-def sum_media_usage(usages: list[MediaUsage]) -> MediaUsage:
-    """Aggregate a list of per-call MediaUsage into one invocation-level total."""
-    total = EMPTY_MEDIA_USAGE
-    for usage in usages:
-        total = total + usage
-    return total

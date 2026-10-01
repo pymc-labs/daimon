@@ -1413,6 +1413,7 @@ async def run_skill_repo_credential_submission(
         channel_id=channel_id,
         user_id=user_id,
         thread_ts=thread_ts,
+        caller_account_id=request.account_id,
     ):
         # Same shape as the repo bind: nothing is spent, and the card stops
         # offering a form this submitter could never finish.

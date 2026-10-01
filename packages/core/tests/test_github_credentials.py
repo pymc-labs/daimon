@@ -11,7 +11,6 @@ from daimon.core.github_credentials import (
     build_multifernet,
     decrypt_token,
     encrypt_token,
-    get_github_login,
     get_pat,
     upsert_credential_encrypted,
 )
@@ -163,60 +162,6 @@ async def test_get_pat_agent_no_overlay_returns_none(
         "get_pat(agent_id=X) with no overlay row must return None — "
         "NOT the principal-default credential (bleed fix)"
     )
-
-
-async def test_get_github_login_returns_overlay_login_for_agent(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-) -> None:
-    """The panel's display resolver returns the per-agent overlay login."""
-    overlay_principal_id = uuid.uuid4()
-    caller_principal_id = uuid.uuid4()
-    agent_id = uuid.uuid4()
-
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=overlay_principal_id,
-        github_login="overlay-user",
-        plaintext_token="ghp_overlay",
-        scopes=("repo",),
-    )
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=caller_principal_id,
-        github_login="caller-user",
-        plaintext_token="ghp_caller_default",
-        scopes=("repo",),
-    )
-    async with db_session_factory.begin() as session:
-        session.add(AgentGithubBinding(agent_id=agent_id, principal_id=overlay_principal_id))
-
-    result = await get_github_login(
-        principal_id=caller_principal_id,
-        agent_id=agent_id,
-        sessionmaker=db_session_factory,
-    )
-    assert result == "overlay-user", (
-        "get_github_login must return the binding-resolved overlay login, "
-        "NOT the caller's principal default"
-    )
-
-
-async def test_get_github_login_agent_no_overlay_returns_none(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No binding for the agent → None, no principal-default bleed."""
-    principal_id = uuid.uuid4()
-    agent_id = uuid.uuid4()  # no binding row
-
-    result = await get_github_login(
-        principal_id=principal_id,
-        agent_id=agent_id,
-        sessionmaker=db_session_factory,
-    )
-    assert result is None, "get_github_login(agent_id=X) with no overlay binding must return None"
 
 
 # --- Opt-in operator service-default tier (allow_service_default + fallback_pat) ---

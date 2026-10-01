@@ -252,7 +252,8 @@ only by a chat turn's own credential; agent-chat keys run outside every
 channel, so they never list, read or continue a sealed conversation, and the
 hub does the same for members. A workspace admin may list and read any sealed
 conversation from the hub, and a channel admin those of the channels they
-administer, but continue none (see [Trust model](#trust-model)).
+administer whose every seal lies there too (the channel, a thread in it, or
+its `channel:ts`), but continue none (see [Trust model](#trust-model)).
 Sealing a channel later covers its existing sessions, and unsealing never
 releases a session that ran sealed -- only that thread, when the thread was
 sealed on its own. A session from before the stamp that a thread ran on
@@ -392,7 +393,7 @@ started from. A session counts in the channel recorded when it was created
 routine in the one its spend counts against; one with none recorded could run
 anywhere, and the refusal says so. An agent answering nowhere is local to
 nobody, so locality only narrows what key and MCP server replacements and
-removals count as shared, never past it. In `daimon.core.authz` a channel admin
+removals and skill repo connects count as shared, never past it. In `daimon.core.authz` a channel admin
 is `Subject.administered_channel_ids`, filled from the stored grants and never
 `is_admin`: configuring a pinned agent from anywhere is theirs once they
 administer every channel of every pin on it (a pin to no channel stays with
@@ -582,6 +583,38 @@ but them:
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
 
+The pin, seal, protection, invoker and fork rules are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); the turn pipeline, the
+MCP gates, the channel tools, the routine and handoff tools and the fork
+paths gather their facts and ask it, including the hub's admin and channel
+admin read of a sealed conversation and the refusal to continue one. The scheduler's
+protection and invoker checks and the shared-agent replace/remove table are
+still decided where they are.
+
+**Decided again at the moment of action.** Admission is a decision about a
+turn that has not run yet, so it is asked again, on the policy as it is
+then, where it matters:
+
+- `bind_session` and the dead-session recovery call
+  `daimon.core.turn.admission.reauthorize` before a session is found,
+  reused, replaced or created. A pin, protection or invoker change since
+  admission refuses the turn there; a seal added since joins the turn's seal
+  ids, so the session is stamped with it and memory mounts read-only.
+- Every channel send, card and direct message reads the policy when it is
+  made, as do the routine fire, the handoff and the form submit checks.
+- The MCP OAuth callback asks the pinned-agent write rule again after the
+  code exchange and before the grant is written to the vault.
+- A published report's reader variant carries its source agent's names
+  (`daimon_reader_source`), so a pin on the source holds for the reader, and
+  publishing a pinned agent's reader needs an admin or an `origin_context_id`
+  from inside its channels.
+- An agent-scoped key is never exempt as an admin inside `authorize`,
+  whoever minted it.
+
+A demoted admin keeps their stored role until their next platform turn
+refreshes it; that is accepted.
+
 On every turn, wherever a pinned agent runs (including an exempt admin turn
 and a member's turn inside its channel), its sends (messages, replies,
 threads and posts, files and cards on Discord, Slack and Teams) reach only:
@@ -627,9 +660,8 @@ configuration rights and channel default binds are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
 where the result lands, which agent, which channel); each caller keeps only
 its own I/O and refusal copy. The live protection and invoker checks in the
-scheduler and routine delivery, the hub's admin and channel admin sealed-read
-exemption and the OAuth no-request rule still use the same `access_policy`
-predicates directly.
+scheduler and routine delivery and the OAuth no-request rule still use the
+same `access_policy` predicates directly.
 
 ## Tenancy and isolation
 

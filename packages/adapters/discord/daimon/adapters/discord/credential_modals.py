@@ -1141,6 +1141,7 @@ class SkillRepoModal(discord.ui.Modal):
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
             operation="skill_repo_connect",
+            caller_account_id=self._row.account_id,
         ):
             # Same shape as the repo bind: nothing is spent, and the card
             # stops offering a form this submitter could never finish.
@@ -1488,6 +1489,7 @@ class RepoBindModal(discord.ui.Modal):
             runtime=self._runtime,
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
+            caller_account_id=self._row.account_id,
         ):
             # The gate runs before the consume, so the request is NOT spent —
             # an admin can still use this same card. The card itself is

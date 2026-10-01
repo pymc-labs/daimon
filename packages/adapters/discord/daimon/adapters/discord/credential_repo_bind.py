@@ -128,8 +128,12 @@ async def refuse_if_shared_and_not_admin_for_request(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     operation: Literal["repo_bind", "skill_repo_connect"] = "repo_bind",
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Click-time re-check for the chat-initiated repo-bind write.
+
+    `caller_account_id` (the requester's, who alone may click) leaves their own
+    live sessions out of the sharing read, as their routines are.
 
     Returns True when the caller must return immediately (the write is
     refused); False when the write may proceed. Order, each short-circuiting:
@@ -206,6 +210,8 @@ async def refuse_if_shared_and_not_admin_for_request(
             default=runtime.deployment_default,
             caller=channel_admin_caller(interaction.user),
             is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=str(interaction.user.id),
         )
     outcome = decide_operation(operation, is_admin=False, target=facts)
     if outcome in ("managed_agent", "needs_admin"):

@@ -15,12 +15,17 @@ own token.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.errors import DaimonError
 from daimon.core.reports.host_client import Recipient, ReportHostError
 from daimon.core.reports.publish import (
@@ -53,6 +58,25 @@ def _report_host_error_message(err: ReportHostError) -> str:
     return str(err)
 
 
+async def _source_authorizer(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> Callable[[BetaManagedAgentsAgent], Awaitable[None]]:
+    """The pinned-agent write rule for the agent whose reader variant is published.
+
+    A reader answers as its source agent, so publishing one is a change to
+    what that agent reaches: an admin may, and a member only from a turn
+    inside the source's pinned channels (``origin_context_id``).
+    """
+    origin = (
+        await require_turn_origin(runtime, auth, origin_context_id) if origin_context_id else None
+    )
+
+    async def authorize_source(source: BetaManagedAgentsAgent) -> None:
+        await require_pin_write_access(runtime, auth, ma_agent=source, origin=origin)
+
+    return authorize_source
+
+
 async def _publish_report_impl(
     runtime: McpRuntime,
     *,
@@ -64,6 +88,8 @@ async def _publish_report_impl(
     cap_usd: float | str,
     agent: str | None,
     client_factory: type[httpx.AsyncClient] = httpx.AsyncClient,
+    auth: AuthIdentity | None = None,
+    origin_context_id: str | None = None,
 ) -> dict[str, object]:
     # FastMCP has no Decimal-shaped tool argument, so cap_usd arrives as a
     # float or a string; a string round trip is what keeps a float's binary
@@ -72,6 +98,9 @@ async def _publish_report_impl(
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
+    authorize_source = (
+        await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
+    )
     try:
         async with client_factory() as client:
             result = await publish_report(
@@ -90,6 +119,7 @@ async def _publish_report_impl(
                 cap_usd=cap,
                 agent=agent,
                 now=datetime.now(UTC),
+                authorize_source=authorize_source,
             )
     except HostNotConfiguredError as err:
         raise ToolError("report host not configured") from err
@@ -135,6 +165,7 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         recipients: list[Recipient],
         cap_usd: float | str,
         agent: str | None = None,
+        origin_context_id: str | None = None,
     ) -> dict[str, object]:
         """Publish a report: a page where the named people can read it and
         ask it questions.
@@ -145,6 +176,10 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         may spend against your tenant's balance, and optionally which agent
         should answer questions (defaults to this tenant's configured
         agent).
+
+        When the answering agent is pinned to channels, a non-admin may only
+        publish its reader from inside them: pass this turn's
+        ``origin_context_id``.
 
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
@@ -170,6 +205,8 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             recipients=recipients,
             cap_usd=cap_usd,
             agent=agent,
+            auth=auth,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool

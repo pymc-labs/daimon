@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -11,8 +11,10 @@ from typing import Literal
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
-from daimon.core.authz import Action, SessionFacts, Subject, authorize
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, SessionFacts, Subject, Surface, authorize, build_subject
 from daimon.core.channel_admins import load_stored_subject
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -31,24 +33,19 @@ _SEALED_SESSION_MSG = (
 
 
 @dataclass(frozen=True)
-class _HubSealedAccess:
+class _HubAccess:
+    subject: Subject
     mode: Literal["read", "continue"]
-    # None for a server admin (every channel); a channel admin's channels otherwise.
-    channel_ids: frozenset[str] | None
 
 
-# Set only by the hub, for a workspace admin or a channel admin
-# (`load_hub_subject`): the hub runs headless and its output reaches only that
-# person, so an admin may READ any sealed conversation of the agent there,
-# anyone's, and a channel admin those of the channels they administer. "read"
-# admits sealed sessions (and other accounts' channel sessions) to
-# list/get/events; "continue" never admits a sealed one -- continuing would add
-# the admin's private text to a session its channel goes on reusing -- and only
-# changes the refusal to say where to continue it. Agent keys (agent chat),
-# chat turns, routines and members never set it.
-_HUB_SEALED_ACCESS: ContextVar[_HubSealedAccess | None] = ContextVar(
-    "daimon_hub_sealed_access", default=None
-)
+# Set only by the hub, for every caller (`load_hub_subject`): who is calling
+# and which hub action is running -- "read" (list/get/events) or "continue" --
+# so the session checks below ask `authorize` on the hub surface. The decision
+# itself is `authorize(READ_SESSION / CONTINUE_SESSION)`: an admin may read any
+# channel conversation of the agent from the hub, a channel admin those of the
+# channels they administer, never a private DM, never to continue it. Agent
+# keys (agent chat), chat turns and routines never set it.
+_HUB_ACCESS: ContextVar[_HubAccess | None] = ContextVar("daimon_hub_access", default=None)
 
 _ADMIN_CONTINUE_REFUSED = (
     "this conversation ran in a sealed channel. As an admin you can read it from "
@@ -73,7 +70,7 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
         or auth.chat_agent_id is not None
         or auth.slack_turn_context_id is not None
     ):
-        return Subject(platform_user_id=auth.platform_user_id)
+        return build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
     async with runtime.session_factory() as db:
         return await load_stored_subject(
             db,
@@ -84,47 +81,76 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
         )
 
 
-@contextmanager
-def admin_sealed_access(subject: Subject, mode: Literal["read", "continue"]) -> Iterator[None]:
-    """Run the enclosed hub call with an admin's or channel admin's sealed-session access.
-
-    A server admin's covers every channel, a channel admin's the channels they
-    administer; anyone else runs the call as a member.
-    """
-    access = None
-    if subject.is_admin:
-        access = _HubSealedAccess(mode=mode, channel_ids=None)
-    elif subject.administered_channel_ids:
-        access = _HubSealedAccess(mode=mode, channel_ids=subject.administered_channel_ids)
-    token = _HUB_SEALED_ACCESS.set(access)
-    try:
-        yield
-    finally:
-        _HUB_SEALED_ACCESS.reset(token)
+def _hub_request(auth: AuthIdentity) -> tuple[Subject, Surface, Action]:
+    """The caller and surface the session checks ask `authorize` about."""
+    access = _HUB_ACCESS.get()
+    if access is None:
+        return mcp_subject(auth), Surface.AGENT_CHAT, Action.READ_SESSION
+    action = Action.READ_SESSION if access.mode == "read" else Action.CONTINUE_SESSION
+    # The hub calls through a person's own login (it mounts their agent
+    # identity), described by `load_hub_subject`.
+    return access.subject, Surface.HUB, action
 
 
-def _hub_access_covers(access: _HubSealedAccess, session: BetaManagedAgentsSession) -> bool:
-    """Whether the session ran in a channel this hub access covers."""
-    channel = (session.metadata or {}).get(MA_METADATA_KEY_CHANNEL)
-    return access.channel_ids is None or channel in access.channel_ids
+def _is_private_session(metadata: Mapping[str, str]) -> bool:
+    return (
+        MA_METADATA_KEY_PRIVATE_DM in metadata
+        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_CHANNEL) or ""))
+        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
+    )
 
 
-def _hub_read_opens(session: BetaManagedAgentsSession) -> bool:
-    """Whether the hub read in progress opens this channel conversation, anyone's, sealed or not.
+def _session_facts(
+    metadata: Mapping[str, str],
+    *,
+    owned: bool,
+    legacy_thread_id: str | None = None,
+) -> SessionFacts:
+    channel = metadata.get(MA_METADATA_KEY_CHANNEL)
+    return SessionFacts(
+        channel=channel,
+        thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
+        seal_ids=frozenset(seal_ids(metadata)),
+        legacy_thread_id=legacy_thread_id,
+        owned=owned,
+        private=_is_private_session(metadata)
+        or (legacy_thread_id is not None and _is_private_conversation(legacy_thread_id)),
+    )
 
-    Never a private DM, and never to continue it.
-    """
-    access = _HUB_SEALED_ACCESS.get()
-    metadata = session.metadata or {}
+
+def _hub_reads_as_anyone(
+    subject: Subject, metadata: Mapping[str, str], legacy_thread_id: str | None = None
+) -> bool:
+    """Whether `authorize`'s admin or channel admin hub read covers this session."""
+    return bool(
+        authorize(
+            TenantAccessPolicy(),
+            subject=subject,
+            action=Action.READ_SESSION,
+            surface=Surface.HUB,
+            session=_session_facts(metadata, owned=False, legacy_thread_id=legacy_thread_id),
+        )
+    )
+
+
+def _admin_may_read_other(metadata: Mapping[str, str], legacy_thread_id: str | None = None) -> bool:
+    """Whether the hub read in progress may open another account's session."""
+    access = _HUB_ACCESS.get()
     return (
         access is not None
         and access.mode == "read"
-        and MA_METADATA_KEY_CHANNEL in metadata
-        and MA_METADATA_KEY_PRIVATE_DM not in metadata
-        and not _is_private_conversation(str(metadata[MA_METADATA_KEY_CHANNEL]))
-        and not _is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
-        and _hub_access_covers(access, session)
+        and _hub_reads_as_anyone(access.subject, metadata, legacy_thread_id)
     )
+
+
+@contextmanager
+def hub_session_access(subject: Subject, mode: Literal["read", "continue"]) -> Iterator[None]:
+    """Run the enclosed hub call as `subject` (`load_hub_subject`) on the hub surface."""
+    token = _HUB_ACCESS.set(_HubAccess(subject=subject, mode=mode))
+    try:
+        yield
+    finally:
+        _HUB_ACCESS.reset(token)
 
 
 async def admin_readable_legacy_sessions(
@@ -132,32 +158,35 @@ async def admin_readable_legacy_sessions(
 ) -> set[str]:
     """Other members' pre-stamp channel sessions an admin's hub read may open.
 
-    Only inside `admin_sealed_access("read")`. A session from before the
+    Only inside `hub_session_access(..., "read")`. A session from before the
     channel stamp carries no ``daimon_channel``; a durable thread mapping in
     the caller's tenant (`thread_ids_for_sessions`) shows it is a channel
     conversation all the same. Never a private DM, never a headless session,
-    and never for a channel admin: with no channel stamp the session can't be
-    placed in the channels they administer.
+    and never for a channel admin: it can't be placed in their channels.
     """
-    access = _HUB_SEALED_ACCESS.get()
-    if access is None or access.mode != "read" or access.channel_ids is not None:
+    access = _HUB_ACCESS.get()
+    # Only a server admin's hub read opens one (`authorize`); skip the lookup otherwise.
+    if access is None or access.mode != "read" or not access.subject.is_admin:
         return set()
-    candidates = [
-        s.id
+    by_id = {
+        s.id: (s.metadata or {})
         for s in sessions
         if (s.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id)
         and MA_METADATA_KEY_CHANNEL not in (s.metadata or {})
-        and MA_METADATA_KEY_PRIVATE_DM not in (s.metadata or {})
-    ]
-    if not candidates:
+    }
+    if not by_id:
         return set()
     async with runtime.session_factory() as db:
         mapped = await thread_ids_for_sessions(
-            db, tenant_id=auth.tenant_id, ma_session_ids=candidates
+            db, tenant_id=auth.tenant_id, ma_session_ids=list(by_id)
         )
     # A DM scope ("dm:<uuid>") or a Teams personal chat ("a:…") is a private
-    # conversation, never a channel one.
-    return {sid for sid, thread in mapped.items() if not _is_private_conversation(thread)}
+    # conversation, never a channel one: `authorize` refuses it.
+    return {
+        sid
+        for sid, thread in mapped.items()
+        if _admin_may_read_other(by_id[sid], legacy_thread_id=thread)
+    }
 
 
 def _is_private_conversation(conversation_id: str) -> bool:
@@ -176,14 +205,17 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
 
     The stamp also protects session mutation: another caller must not drive the
     private session while it holds an active read grant. Missing or malformed
-    grants fail closed; admins have no exception for them. Inside a hub
-    admin read (`admin_sealed_access(..., "read")`) another account's channel
-    conversation is admitted too, in a channel the access covers. Discord private scopes carry
+    grants fail closed; admins have no exception for them. Inside a hub read
+    (`hub_session_access(..., "read")`) an admin's or channel admin's
+    `authorize` read admits another account's channel conversation too.
+    Discord private scopes carry
     no execution credential, so all MCP session introspection is denied there.
     """
     metadata = session.metadata or {}
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
-        return _hub_read_opens(session)
+        # Another account's session: only `authorize`'s admin or channel admin
+        # hub read opens it (never a private DM, never to continue).
+        return _admin_may_read_other(metadata)
     if MA_METADATA_KEY_PRIVATE_DM not in metadata:
         return True
     return (
@@ -194,7 +226,10 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
 
 
 def _seal_allows(
-    session: BetaManagedAgentsSession, read: ChannelReadPolicy, legacy_thread_id: str | None
+    session: BetaManagedAgentsSession,
+    read: ChannelReadPolicy,
+    legacy_thread_id: str | None,
+    hub: tuple[Subject, Surface, Action],
 ) -> bool:
     """Whether the calling turn may see this session under the channel seal.
 
@@ -208,19 +243,16 @@ def _seal_allows(
     same thread. An unstamped session no thread ran on is a
     headless one and carries no channel content.
     """
-    metadata = session.metadata or {}
-    channel = metadata.get(MA_METADATA_KEY_CHANNEL)
+    subject, surface, action = hub
     return bool(
         authorize(
             read.policy,
-            subject=Subject(),
-            action=Action.READ_SESSION,
+            subject=subject,
+            action=action,
+            surface=surface,
             origin_channel_ids=read.origin_channel_ids,
-            session=SessionFacts(
-                channel=channel,
-                thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
-                seal_ids=frozenset(seal_ids(metadata)),
-                legacy_thread_id=legacy_thread_id,
+            session=_session_facts(
+                session.metadata or {}, owned=True, legacy_thread_id=legacy_thread_id
             ),
         )
     )
@@ -250,26 +282,24 @@ async def sessions_outside_seals(
 
     ``origin_context_id`` is the calling turn's origin, checked as the channel
     read tools check it (`load_read_policy`); without one every sealed
-    conversation is dropped -- except inside `admin_sealed_access(..., "read")`,
+    conversation is dropped -- except inside `hub_session_access(..., "read")`,
     where an admin's hub read keeps sealed channel sessions, anyone's, and a
-    channel admin's those in the channels they administer (ownership is still
-    checked by the caller first). Only a chat turn's own credential can claim one:
+    channel admin's those of their channels (ownership is still checked by the
+    caller first). Only a chat turn's own credential can claim one:
     an agent key (``agent_id``) runs outside every channel, unless it was minted
     in one (`token_channel_id`), which then counts as its origin. Call after the
     ownership filter.
     """
     if not sessions:
         return []
-    access = _HUB_SEALED_ACCESS.get()
-    if access is not None and access.mode == "read" and access.channel_ids is None:
-        return list(sessions)
+    hub = _hub_request(auth)
     if auth.agent_id is not None or auth.chat_agent_id is None:
         origin_context_id = None
     read = await load_read_policy(
         runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
     )
     legacy = await _legacy_threads(runtime, auth, read, sessions)
-    return [s for s in sessions if _hub_read_opens(s) or _seal_allows(s, read, legacy.get(s.id))]
+    return [s for s in sessions if _seal_allows(s, read, legacy.get(s.id), hub)]
 
 
 async def require_session_outside_seals(
@@ -287,7 +317,11 @@ async def require_session_outside_seals(
     if not await sessions_outside_seals(
         runtime, auth, [session], origin_context_id=origin_context_id
     ):
-        access = _HUB_SEALED_ACCESS.get()
-        if access is not None and access.mode == "continue" and _hub_access_covers(access, session):
+        access = _HUB_ACCESS.get()
+        if (
+            access is not None
+            and access.mode == "continue"
+            and _hub_reads_as_anyone(access.subject, session.metadata or {})
+        ):
             raise ToolError(_ADMIN_CONTINUE_REFUSED)
         raise ToolError(_SEALED_SESSION_MSG)

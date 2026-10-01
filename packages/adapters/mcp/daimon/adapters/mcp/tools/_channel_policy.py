@@ -21,9 +21,9 @@ from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -82,7 +82,7 @@ async def require_channel_writable(
         category_id=category_id,
         own_dm=_is_requesters_own_dm(channel_id),
     )
-    subject = Subject(platform_user_id=auth.platform_user_id)
+    subject = mcp_subject(auth)
     # Protection, the own-DM allowance and an unpinned tenant need no agent
     # lookup; settle those first.
     first = authorize(policy, subject=subject, action=Action.POST, place=place)
@@ -123,7 +123,7 @@ async def _executing_agent(
     )
     if agent is None:
         return AgentRef.unresolved()
-    return AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+    return build_agent_ref(agent.name, agent.metadata)
 
 
 async def require_dm_recipient_allowed(
@@ -139,7 +139,7 @@ async def require_dm_recipient_allowed(
     policy = await load_channel_policy(runtime, auth)
     decision = authorize(
         policy,
-        subject=Subject(platform_user_id=auth.platform_user_id),
+        subject=mcp_subject(auth),
         action=Action.DIRECT_MESSAGE,
         agent=await _executing_agent(runtime, auth, policy),
         recipient_id=recipient_id,

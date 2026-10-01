@@ -171,35 +171,3 @@ def test_select_agent_without_a_legacy_entry_leaves_the_editor_selection_alone()
 
     assert state.selected_agent is chosen, "the read-only panel always records its own selection"
     assert state.selected is None, "there is no editor entry to point at, and none is invented"
-
-
-def test_roster_page_of_clamps_stale_page() -> None:
-    """A page number that outlived its rows shows the last page, not an error."""
-    from daimon.core.roster import RosterAgent
-
-    agents = tuple(
-        RosterAgent(
-            name=f"agent-{index}",
-            ma_agent_id=f"ag_{index}",
-            model_id="claude-sonnet-4-6",
-            is_built_in=False,
-        )
-        for index in range(3)
-    )
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=uuid.uuid4(),
-        roster_agents=agents,
-        roster_page=7,
-    )
-
-    page = state.roster_page_of(2)
-
-    assert page.page == 1, "a page past the end clamps to the last page that exists"
-    assert [agent.name for agent in page.items] == ["agent-2"], (
-        "the clamped page carries the rows that are actually there"
-    )
-    assert page.has_next is False and page.has_previous is True, (
-        "the pager must know it is at the end"
-    )

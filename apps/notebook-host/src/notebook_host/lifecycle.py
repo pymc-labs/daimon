@@ -103,10 +103,6 @@ class NotebookProcess:
         return f"{base}?access_token={self.access_token}" if self.access_token else base
 
     @property
-    def internal_url(self) -> str:
-        return f"http://localhost:{self.port}/n/{self.slug}/"
-
-    @property
     def age_s(self) -> float:
         return time.time() - self.started_at
 
