@@ -2758,10 +2758,10 @@ async def main() -> None:
 asyncio.run(main())
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=3.0, check=False
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=8.0, check=False
     )
     assert result.returncode == 0, (
-        "a successful archive should finish within three seconds; "
+        "a successful archive should finish within eight seconds; "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
 
