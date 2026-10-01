@@ -356,20 +356,6 @@ class DiscordSettings(BaseModel):
             "(8082) — all process groups share one host."
         ),
     )
-    per_caller_thread_sessions: bool = Field(
-        default=True,
-        description=(
-            "When True (default), each Discord thread keeps a separate agent "
-            "session per calling user, so no user inherits another user's "
-            "session identity or permissions in a shared thread. When False, "
-            "a single session is shared by every caller in the thread — a "
-            "legacy fallback, not recommended for production. Setting this "
-            "False also exposes credentials: the shared session's token is "
-            "minted for the thread starter's account, so any participant can "
-            "prompt the agent into calling get_cli_token and receive the "
-            "starter's bound PAT as plaintext."
-        ),
-    )
     qa_bot_user_ids: tuple[str, ...] = Field(
         default=(),
         description=(

@@ -125,7 +125,6 @@ def _make_runtime(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
     discord_settings.bot_display_name = "daimon"
-    discord_settings.per_caller_thread_sessions = True
     settings.discord = discord_settings
 
     anthropic = build_fake_anthropic(router.dispatch)

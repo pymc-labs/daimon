@@ -342,18 +342,6 @@ notice; continuation wakes keep their existing admission path.
 Port for the Discord process's liveness endpoint. Must not collide with the mcp process
 (8080) or the scheduler process (8082) — all process groups share one host.
 
-### `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS`
-
-`bool` · optional · default `True`
-
-When True (default), each Discord thread keeps a separate agent session per calling
-user, so no user inherits another user's session identity or permissions in a shared
-thread. When False, a single session is shared by every caller in the thread — a legacy
-fallback, not recommended for production. Setting this False also exposes credentials:
-the shared session's token is minted for the thread starter's account, so any
-participant can prompt the agent into calling get_cli_token and receive the starter's
-bound PAT as plaintext.
-
 ### `DAIMON_DISCORD__QA_BOT_USER_IDS`
 
 `tuple[str, ...]` · optional · default unset

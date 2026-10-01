@@ -177,8 +177,10 @@ def _render_skill_removed(target_name: str, skill: str | None) -> str:
 
 
 def _render_skills_bulk_added(change: ConfigurationChange) -> str:
-    if change.detail is not None:
-        raise ValueError("kind='skills_bulk' does not use detail; it names no single skill")
+    """`detail` is an optional closing line: why skills did not import or attach.
+
+    `saved` means the skills reached the library but not the target agent.
+    """
     if change.count is None:
         raise ValueError("kind='skills_bulk' requires count")
     if change.count < 1:
@@ -191,17 +193,23 @@ def _render_skills_bulk_added(change: ConfigurationChange) -> str:
             [
                 f"Your GitHub token is saved for {target_name}.",
                 "The skills did not import.",
-                f"Ask me to add skills from {change.repo} again to retry.",
+                change.detail or f"Ask me to add skills from {change.repo} again to retry.",
             ]
         )
     noun = "skill" if change.count == 1 else "skills"
     pronoun = "it" if change.count == 1 else "them"
-    return "\n".join(
-        [
+    if change.availability == "saved":
+        lines = [
+            f"{change.count} {noun} imported from {change.repo}, but not added to {target_name}."
+        ]
+    else:
+        lines = [
             f"{change.count} {noun} added to {target_name} from {change.repo}.",
             f"It can use {pronoun} from your next message here.",
         ]
-    )
+    if change.detail is not None:
+        lines.append(change.detail)
+    return "\n".join(lines)
 
 
 def _render_mcp_connected(
