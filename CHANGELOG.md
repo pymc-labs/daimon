@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
+
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
   channels, with an in-place status card, author-only Cancel, per-thread
   queueing, feedback buttons and restart recovery. The configured Entra
