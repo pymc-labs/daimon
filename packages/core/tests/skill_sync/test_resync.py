@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import resync as resync_module
@@ -68,6 +69,7 @@ async def _setup_agent_in_ma(
     tenant_id: uuid.UUID,
     agent_name: str,
     daimon_name: str | None = None,
+    extra_metadata: dict[str, str] | None = None,
 ) -> str:
     """Create an agent in the fake MA store; return its MA id string."""
     from anthropic import AsyncAnthropic
@@ -79,6 +81,7 @@ async def _setup_agent_in_ma(
         metadata={
             "daimon_tenant": str(tenant_id),
             "daimon_name": daimon_name or agent_name,
+            **(extra_metadata or {}),
         },
     )
     return agent.id
@@ -1229,6 +1232,50 @@ async def test_resync_refuses_duplicate_name_before_github_or_ma_writes(
     )
     assert rows_a == [], "refusing the binding must not write agent A's user_skills ledger"
     assert rows_b == [], "refusing the binding must not write agent B's user_skills ledger"
+
+
+async def test_resync_refuses_a_managed_agent_before_github_or_ma_writes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An admin may bind a repo to a built-in agent, but a push must not attach skills to it."""
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/built-in-bound"
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="daimon",
+        extra_metadata={MA_METADATA_KEY_MANAGED: "true"},
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id)
+    await _setup_binding(
+        db_session, tenant_id=tenant.id, agent_id=agent_id, repo_url=repo_url, proof_kind="public"
+    )
+    await db_session.commit()
+    github_requests: list[httpx.Request] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(500)
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=anthropic_client,
+    )
+
+    assert report.failed_bindings == 1 and report.retryable_bindings == 0
+    assert github_requests == [], "the refusal comes before the fetch"
+    async with db_session_factory() as session:
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id)
+    assert binding is not None and binding.last_sync_error is not None
+    assert "built-in agent" in binding.last_sync_error
 
 
 async def test_resync_refuses_duplicate_added_after_bridge_resolution(

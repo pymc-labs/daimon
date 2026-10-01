@@ -21,7 +21,7 @@ from daimon.core.defaults.ma_index import (
     find_environments_by_daimon_tag,
     list_environments_by_tenant,
 )
-from daimon.core.defaults.metadata import build_metadata
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, build_metadata
 from daimon.core.specs import EnvironmentSpec
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -102,6 +102,17 @@ async def _create_environment_impl(
     return EnvironmentInfo.from_ma(ma_env)
 
 
+def _reject_managed_environment(env: BetaEnvironment, *, refusal: str) -> None:
+    """Refuse chat edits of a defaults-managed environment, admins included.
+
+    A chat edit never restamps the reconciler's spec hash, so the drift would
+    survive every later `defaults apply`; archiving one strands every seeded
+    agent scoped onto it.
+    """
+    if env.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        raise ToolError(f"environment '{env.name}' is managed by defaults; {refusal}")
+
+
 async def _update_environment_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -118,6 +129,10 @@ async def _update_environment_impl(
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None:
         raise ToolError(f"environment '{name}' not found")
+    _reject_managed_environment(
+        env,
+        refusal="chat tools cannot modify it. Use create_environment to make a new one instead.",
+    )
     updated = await runtime.client.beta.environments.update(env.id, **patch)
     return EnvironmentInfo.from_ma(updated)
 
@@ -131,6 +146,10 @@ async def _archive_environment_impl(
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None:
         raise ToolError(f"environment '{name}' not found")
+    _reject_managed_environment(
+        env,
+        refusal="built-in agents run in it, so chat tools cannot archive it. Nothing changed.",
+    )
     await runtime.client.beta.environments.archive(env.id)
 
 

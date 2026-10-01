@@ -94,6 +94,7 @@ from daimon.core.posted_controls import (
     CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
@@ -105,6 +106,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -1211,8 +1213,8 @@ class SkillAttachOutcome:
 
     `attached` is the one bit `run_skill_repo_credential_submission` needs to
     pick the confirmation copy's availability: `next_message` when the attach
-    actually landed, `preparation_failed` when the import succeeded but the
-    attach did not (or found nothing new to attach).
+    actually landed, `saved` when the skills reached the library but not the
+    agent. `note` then closes the card with the reason.
     """
 
     note: str
@@ -1253,9 +1255,18 @@ async def _attach_skills_to_requested_agent(
     )
     if agent is None:
         return SkillAttachOutcome(
-            note="Could not attach: that agent no longer exists. The skills are in the library.",
+            note="That agent no longer exists.",
             attached=False,
             agent_name=None,
+            skill_count=len(skill_ids),
+        )
+    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        # Admins included: an attach never stamps the reconciler's spec hash,
+        # so the seeded agent would drift for good.
+        return SkillAttachOutcome(
+            note=f"`{agent.name}` is a built-in agent. Fork it and add them to the fork.",
+            attached=False,
+            agent_name=agent.name,
             skill_count=len(skill_ids),
         )
     new_skills: list[BetaManagedAgentsSkillParams] = [
@@ -1282,10 +1293,7 @@ async def _attach_skills_to_requested_agent(
             err_type=type(err).__name__,
         )
         return SkillAttachOutcome(
-            note=(
-                f"Imported, but attaching to `{agent.name}` failed. "
-                "Ask again to retry attaching it."
-            ),
+            note="Attaching them did not finish. Ask again to retry.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),
@@ -1374,8 +1382,9 @@ async def run_skill_repo_credential_submission(
     The credential lands in the skill-repo store, NOT in the agent's working
     repo binding: somebody who offers a token so an agent can read skills out
     of a repo has not asked for that repo to become the agent's checkout, and
-    the card they clicked said as much. No admin gate, matching the env/mcp
-    kinds — `sync_skills` itself gates imports at request time.
+    the card they clicked said as much. The import attaches skills to the
+    agent, so `skill_repo_connect` is decided again before the consume, as the
+    repo bind does, and the attach never lands on a defaults-managed agent.
     """
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
@@ -1394,6 +1403,25 @@ async def run_skill_repo_credential_submission(
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
+
+    if await refuse_unless_allowed(
+        runtime,
+        client,
+        operation="skill_repo_connect",
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        thread_ts=thread_ts,
+    ):
+        # Same shape as the repo bind: nothing is spent, and the card stops
+        # offering a form this submitter could never finish.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+        await edit_posted_card(client, row=request, state="refused", refusal="admin_required")
+        return
 
     now = datetime.now(UTC)
     consumed = await _consume(runtime, token=token, now=now)
@@ -1457,6 +1485,9 @@ async def run_skill_repo_credential_submission(
                 ma_secret_ref=ma_secret_ref,
                 proof=proof,
             )
+            seeded_skill_names = await list_seeded_skill_names(
+                session, tenant_id=consumed.tenant_id
+            )
         outcomes = await run_skill_sync(
             runtime.anthropic,
             runtime.http_client,
@@ -1464,6 +1495,8 @@ async def run_skill_repo_credential_submission(
             branch=branch,
             path=path,
             tenant_id=consumed.tenant_id,
+            seeded_skill_names=seeded_skill_names,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
             token=value,
         )
     except DaimonError as err:
@@ -1498,12 +1531,38 @@ async def run_skill_repo_credential_submission(
         )
         return
 
+    imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+    failure_detail = summarize_failed_imports(outcomes)
+    if not imported:
+        # Nothing reached the library (an empty repo, or every skill refused
+        # or failed), which an applied card must not claim.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await edit_posted_card(
+            client,
+            row=consumed,
+            state="partial",
+            outcome=ConfigurationChange(
+                target_name=consumed.target_name or "the agent",
+                kind="skills_bulk",
+                availability="preparation_failed",
+                repo=owner_repo,
+                # `preparation_failed` names no count but the model requires one.
+                count=1,
+                detail=failure_detail,
+            ),
+        )
+        return
+
     attach = await _attach_skills_to_requested_agent(
-        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=outcomes
+        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=imported
     )
     log.info(
         "credential_request.skill_repo.attach",
-        imported=len(outcomes),
+        imported=len(imported),
         attached=attach.attached,
         note=attach.note,
     )
@@ -1516,6 +1575,7 @@ async def run_skill_repo_credential_submission(
         )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
+    detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
     await edit_posted_card(
         client,
         row=consumed,
@@ -1523,11 +1583,10 @@ async def run_skill_repo_credential_submission(
         outcome=ConfigurationChange(
             target_name=consumed.target_name or attach.agent_name or "the agent",
             kind="skills_bulk",
-            availability="next_message" if attach.attached else "preparation_failed",
+            availability="next_message" if attach.attached else "saved",
             repo=owner_repo,
-            # `preparation_failed` names no count but the model requires one;
-            # see `_report_skill_repo_failure`.
-            count=max(attach.skill_count, 1),
+            count=len(imported),
+            detail="\n".join(line for line in detail_lines if line) or None,
         ),
     )
     if attach.attached and queued:

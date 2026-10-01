@@ -66,6 +66,8 @@ async def test_successful_sync() -> None:
             url="https://github.com/org/repo",
             branch="main",
             tenant_id=_TENANT,
+            seeded_skill_names=frozenset(),
+            is_admin=True,
         )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -91,6 +93,8 @@ async def test_path_escape_raises_daimon_error() -> None:
                         url="https://github.com/org/repo",
                         path="../etc",
                         tenant_id=_TENANT,
+                        seeded_skill_names=frozenset(),
+                        is_admin=True,
                     )
 
         assert not cleanup_dir.exists(), "finally block must clean up temp dir"
@@ -117,6 +121,8 @@ async def test_missing_path_raises_daimon_error() -> None:
                         url="https://github.com/org/repo",
                         path="nonexistent",
                         tenant_id=_TENANT,
+                        seeded_skill_names=frozenset(),
+                        is_admin=True,
                     )
 
         assert not cleanup_dir.exists(), "finally block must clean up temp dir"
@@ -152,6 +158,8 @@ async def test_cleanup_runs_on_sync_error() -> None:
                     url="https://github.com/org/repo",
                     branch="main",
                     tenant_id=_TENANT,
+                    seeded_skill_names=frozenset(),
+                    is_admin=True,
                 )
 
         assert len(outcomes) == 1, "should return one (failed) outcome"

@@ -281,3 +281,52 @@ async def test_archive_environment_impl_calls_ma_archive() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _archive_environment_impl(_runtime(client), auth, "e")
     assert archived == ["env_a"], "should archive the correct MA environment"
+
+
+async def test_update_and_archive_refuse_a_managed_environment() -> None:
+    """A seeded environment is edited through `defaults/`, never from chat.
+
+    A chat edit leaves the reconciler's spec hash in place, so `defaults apply`
+    would skip the drifted environment forever; archiving one strands every
+    seeded agent scoped onto it. Admins are refused too.
+    """
+    tenant_id = uuid.uuid4()
+    writes: list[str] = []
+
+    def on_write(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        writes.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/environments",
+        lambda _req, _m: list_response(
+            [
+                _ma_env(
+                    id="env_seeded",
+                    name="python",
+                    metadata={
+                        "daimon_tenant": str(tenant_id),
+                        "daimon_name": "python",
+                        "daimon_managed": "true",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("POST", r"/v1/environments/([^/]+)", on_write)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    with pytest.raises(ToolError, match="managed by defaults.*create_environment"):
+        await _update_environment_impl(
+            runtime, auth, name="python", config=None, description="changed"
+        )
+    with pytest.raises(ToolError, match="managed by defaults.*cannot archive") as refused:
+        await _archive_environment_impl(runtime, auth, "python")
+    assert "create_environment" not in str(refused.value), "a new one does not replace it"
+
+    assert writes == [], "neither the update nor the archive may reach the provider"

@@ -128,7 +128,6 @@ def _make_runtime(
     settings.billing.signup_credit = Decimal("0")
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
-    discord_settings.per_caller_thread_sessions = True
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()

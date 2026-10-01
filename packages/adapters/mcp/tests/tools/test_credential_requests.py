@@ -42,6 +42,7 @@ from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
 )
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -84,6 +85,9 @@ _request_mcp_oauth_impl = (
 )
 _request_repo_binding_impl = (
     _credential_requests_mod._request_repo_binding_impl  # pyright: ignore[reportPrivateUsage]
+)
+_request_skill_repo_token_impl = (
+    _credential_requests_mod._request_skill_repo_token_impl  # pyright: ignore[reportPrivateUsage]
 )
 register_credential_request_tools = _credential_requests_mod.register_credential_request_tools
 
@@ -139,7 +143,12 @@ def _auth_identity(
 
 
 def _ma_agent(
-    *, agent_id: str, name: str, tenant_id: uuid.UUID, managed: bool = False
+    *,
+    agent_id: str,
+    name: str,
+    tenant_id: uuid.UUID,
+    managed: bool = False,
+    account_id: uuid.UUID | None = None,
 ) -> dict[str, object]:
     metadata = {
         MA_METADATA_KEY_TENANT: str(tenant_id),
@@ -147,6 +156,8 @@ def _ma_agent(
     }
     if managed:
         metadata[MA_METADATA_KEY_MANAGED] = "true"
+    if account_id is not None:
+        metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
     agent = ma_agent(
         id=agent_id,
         name=name,
@@ -1700,6 +1711,120 @@ async def test_request_agent_key_allows_replacement_for_admin_on_shared_agent(
     )
 
 
+async def test_request_skill_repo_token_refuses_a_managed_agent_even_for_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skills imported for a seeded agent could never be attached, so no card is posted."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_seeded", name="daimon", tenant_id=tenant.id, managed=True)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9401", posted=posted)
+
+    with pytest.raises(ToolError, match="fork_agent"):
+        await _request_skill_repo_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_seeded",
+            agent_name="daimon",
+            repo_url="https://github.com/example/skills",
+            branch="main",
+            path="",
+            purpose="importing the team's skills",
+            channel_id="222",
+        )
+
+    assert await _row_count(db_session) == 0, "a refused request must mint no row"
+    assert posted == {}, "a refused request must post no card"
+
+
+async def test_request_skill_repo_token_refuses_a_member_on_a_shared_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent answering for the whole tenant needs an admin to gain skills."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_team", name="team", tenant_id=tenant.id, account_id=uuid.uuid4())]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="team"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9402", posted=posted)
+
+    with pytest.raises(ToolError, match="admin"):
+        await _request_skill_repo_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_team",
+            agent_name="team",
+            repo_url="https://github.com/example/skills",
+            branch="main",
+            path="",
+            purpose="importing the team's skills",
+            channel_id="222",
+        )
+
+    assert await _row_count(db_session) == 0, "a refused request must mint no row"
+    assert posted == {}, "a refused request must post no card"
+
+
+async def test_request_skill_repo_token_allows_a_member_on_an_agent_that_answers_nowhere(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's own unbound agent is theirs to extend, so the card is posted."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_mine", name="mine", tenant_id=tenant.id, account_id=uuid.uuid4())]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9403", posted=posted)
+
+    result = await _request_skill_repo_token_impl(
+        runtime,
+        auth,
+        origin_context_id=str(origin_id),
+        expected_ma_agent_id="ag_mine",
+        agent_name="mine",
+        repo_url="https://github.com/example/skills",
+        branch="main",
+        path="",
+        purpose="importing my skills",
+        channel_id="222",
+    )
+
+    assert result.kind == "skill_repo", "the skill-repo request is minted"
+    assert await _row_count(db_session) == 1, "exactly one request row is created"
+
+
 async def test_pending_task_is_sanitized_and_bounded(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -2668,10 +2793,16 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
         policy=TenantAccessPolicy(agent_channel_pins={"acme-project": (_ACME_CHANNEL,)}),
     )
     await db_session.commit()
+    # Account-stamped: an agent with no account counts as a system agent.
+    owner = uuid.uuid4()
     client = _ma_client_with_agents(
         [
-            _ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id),
-            _ma_agent(agent_id="ag_clientb", name="clientb-project", tenant_id=tenant.id),
+            _ma_agent(
+                agent_id="ag_acme", name="acme-project", tenant_id=tenant.id, account_id=owner
+            ),
+            _ma_agent(
+                agent_id="ag_clientb", name="clientb-project", tenant_id=tenant.id, account_id=owner
+            ),
         ]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
