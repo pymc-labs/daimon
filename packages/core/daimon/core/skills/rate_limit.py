@@ -54,7 +54,7 @@ class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
         if request.url.path.startswith("/v1/skills"):
             await self._pacer.wait()
         response = await self._inner.handle_async_request(request)
-        await record_anthropic_response(request, response)
+        record_anthropic_response(request, response)
         if response.status_code == 429:
             await response.aread()
             if spend_limit_response(response) == "org_cap":

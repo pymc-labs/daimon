@@ -17,7 +17,6 @@ from sqlalchemy.pool import QueuePool
 
 _responses: Counter[tuple[str, str]] = Counter()
 _remaining: dict[str, int] = {}
-_lock = asyncio.Lock()
 _turns_by_tenant: Counter[uuid.UUID] = Counter()
 _turns_global = 0
 
@@ -72,28 +71,26 @@ def _status(code: int) -> str:
     return "other"
 
 
-async def record_anthropic_response(request: httpx.Request, response: httpx.Response) -> None:
+def record_anthropic_response(request: httpx.Request, response: httpx.Response) -> None:
     """Count one transport response, including responses retried by the SDK."""
-    async with _lock:
-        _responses[(_endpoint(request.url.path), _status(response.status_code))] += 1
-        for name, value in response.headers.items():
-            if name.startswith("anthropic-ratelimit-") and name.endswith("-remaining"):
-                try:
-                    number = int(value)
-                except ValueError:
-                    continue
-                _remaining[name] = min(number, _remaining.get(name, number))
+    _responses[(_endpoint(request.url.path), _status(response.status_code))] += 1
+    for name, value in response.headers.items():
+        if name.startswith("anthropic-ratelimit-") and name.endswith("-remaining"):
+            try:
+                number = int(value)
+            except ValueError:
+                continue
+            _remaining[name] = min(number, _remaining.get(name, number))
 
 
-async def take_anthropic_window() -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Return and clear counts and minimum remaining quotas atomically."""
-    async with _lock:
-        counts: dict[str, dict[str, int]] = {}
-        for (endpoint, status), count in _responses.items():
-            counts.setdefault(endpoint, {})[status] = count
-        remaining = dict(_remaining)
-        _responses.clear()
-        _remaining.clear()
+def take_anthropic_window() -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Return and clear counts and minimum remaining quotas; no await, so atomic on the loop."""
+    counts: dict[str, dict[str, int]] = {}
+    for (endpoint, status), count in _responses.items():
+        counts.setdefault(endpoint, {})[status] = count
+    remaining = dict(_remaining)
+    _responses.clear()
+    _remaining.clear()
     return counts, remaining
 
 
@@ -111,7 +108,7 @@ async def log_health_once(
     turns: Callable[[], tuple[int, int | None]],
     interval_s: float = 30,
 ) -> None:
-    counts, remaining = await take_anthropic_window()
+    counts, remaining = take_anthropic_window()
     global_turns, per_tenant_max = turns()
     pool = cast(QueuePool, engine.sync_engine.pool)
     structlog.get_logger().info(

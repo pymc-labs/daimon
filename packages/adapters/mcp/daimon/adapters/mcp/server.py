@@ -258,8 +258,6 @@ def create_mcp_app(
                 yield
         finally:
             await identity_middleware.drain_audit()
-            if engine is not None:
-                await engine.dispose()
 
     mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=audit_lifespan)
     mcp.add_middleware(identity_middleware)

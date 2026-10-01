@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 async def test_sdk_retry_counts_each_attempt_and_window_resets() -> None:
-    await take_anthropic_window()
+    take_anthropic_window()
     attempts = 0
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -45,11 +45,11 @@ async def test_sdk_retry_counts_each_attempt_and_window_resets() -> None:
         api_key="test", max_retries=1, http_client=DefaultAsyncHttpxClient(transport=transport)
     ) as client:
         await client.models.list()
-    counts, remaining = await take_anthropic_window()
+    counts, remaining = take_anthropic_window()
     assert attempts == 2
     assert counts == {"other": {"429": 1, "2xx": 1}}
     assert remaining == {"anthropic-ratelimit-requests-remaining": 3}
-    assert await take_anthropic_window() == ({}, {})
+    assert take_anthropic_window() == ({}, {})
 
 
 async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch) -> None:
