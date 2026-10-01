@@ -1,6 +1,6 @@
 [project]
 name = "daimon-adapter-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Daimon MCP server — agent-to-agent orchestration adapter"
 requires-python = ">=3.12"
 license = "MIT"
@@ -10,16 +10,19 @@ dependencies = [
     "fastmcp>=3.2.4,<4",
     "uvicorn[standard]>=0.30",
     "anthropic>=0.96",
+    "botocore>=1.40,<2",
     "httpx>=0.27",
     "sqlalchemy[asyncio]>=2",
     "asyncpg>=0.29",
     "pydantic>=2.7",
+    "pillow>=11,<13",
     "sentry-sdk>=2.61",
     "discord.py>=2.7,<3",
     "aiohttp>=3.10",
     "google-genai>=2.5,<3",
     "imageio-ffmpeg>=0.6",
     "slack-sdk>=3.42,<4",
+    "py-key-value-aio[postgresql]>=0.4.4",
 ]
 
 [project.optional-dependencies]

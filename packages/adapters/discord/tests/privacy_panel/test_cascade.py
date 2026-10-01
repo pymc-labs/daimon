@@ -172,7 +172,7 @@ def test_cascade_container_github_credentials_row_renders_when_nonzero() -> None
     joined = _joined_text(container)
     assert "1" in joined, "github_credentials count must appear in the row"
     assert "octocat" in joined, "github_credentials.example (login) must appear in the row"
-    assert "GitHub credential" in joined, "github_credentials row must mention GitHub credential"
+    assert "GitHub token" in joined, "github_credentials row must mention GitHub token"
 
 
 def test_cascade_container_github_credentials_row_absent_when_zero() -> None:
@@ -180,7 +180,7 @@ def test_cascade_container_github_credentials_row_absent_when_zero() -> None:
     preview = _make_preview(github_credentials=PurgePreviewRow(count=0, example=None))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
-    assert "GitHub credential" not in joined, (
+    assert "GitHub token" not in joined, (
         "zero-count github_credentials must NOT render a row (D-PREVIEW-FMT-01)"
     )
 
@@ -255,24 +255,24 @@ def test_cascade_container_mcp_tokens_row_absent_when_zero() -> None:
     """per-agent MCP token row is suppressed when count == 0."""
     preview = _make_preview(mcp_tokens=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "MCP token" not in joined, "zero-count mcp_tokens must NOT render a row"
+    assert "per-agent MCP token(s)" not in joined, "zero-count mcp_tokens must NOT render a row"
 
 
 def test_cascade_container_agent_github_binding_row_renders_when_nonzero() -> None:
-    """per-agent GitHub credential link row appears when count > 0."""
+    """per-agent GitHub token link row appears when count > 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=3, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "3" in joined, "agent_github_binding count must appear in the row"
-    assert "per-agent GitHub credential link" in joined, (
-        "agent_github_binding row must mention the per-agent GitHub credential link"
+    assert "per-agent GitHub token link" in joined, (
+        "agent_github_binding row must mention the per-agent GitHub token link"
     )
 
 
 def test_cascade_container_agent_github_binding_row_absent_when_zero() -> None:
-    """per-agent GitHub credential link row is suppressed when count == 0."""
+    """per-agent GitHub token link row is suppressed when count == 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "per-agent GitHub credential link" not in joined, (
+    assert "per-agent GitHub token link" not in joined, (
         "zero-count agent_github_binding must NOT render a row"
     )
 

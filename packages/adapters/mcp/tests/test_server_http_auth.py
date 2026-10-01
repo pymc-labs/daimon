@@ -6,15 +6,11 @@ Real ASGI app via httpx.ASGITransport, real DaimonJWTVerifier, real Postgres
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
 
 import httpx
 import jwt as pyjwt
-import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -22,57 +18,14 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.types import ASGIApp, Message
+from starlette.types import ASGIApp
 
-from .factories import seed_tenant_and_account
-
-pytestmark = pytest.mark.asyncio
+from .harness import seed_tenant_and_account
 
 SECRET = "a" * 32
-INIT_BODY: dict[str, object] = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "test", "version": "0"},
-    },
-}
-INIT_HEADERS = {
-    "Accept": "application/json, text/event-stream",
-    "Content-Type": "application/json",
-}
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app: ASGIApp) -> AsyncIterator[None]:
-    send_queue: asyncio.Queue[Message] = asyncio.Queue()
-    receive_queue: asyncio.Queue[Message] = asyncio.Queue()
-
-    async def receive() -> Message:
-        return await receive_queue.get()
-
-    async def send(message: Message) -> None:
-        await send_queue.put(message)
-
-    async def run_lifespan() -> None:
-        await app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-
-    task = asyncio.create_task(run_lifespan())
-
-    await receive_queue.put({"type": "lifespan.startup"})
-    msg = await send_queue.get()
-    assert msg["type"] == "lifespan.startup.complete", msg
-    try:
-        yield
-    finally:
-        await receive_queue.put({"type": "lifespan.shutdown"})
-        msg = await send_queue.get()
-        assert msg["type"] == "lifespan.shutdown.complete", msg
-        await task
 
 
 async def _post(
@@ -86,7 +39,7 @@ async def _post(
         headers["Authorization"] = f"Bearer {token}"
     transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
     async with (
-        _lifespan(app),
+        asgi_lifespan(app),
         httpx.AsyncClient(transport=transport, base_url="http://t") as c,
     ):
         return await c.post("/mcp", json=body, headers=headers)

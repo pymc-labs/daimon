@@ -1,4 +1,4 @@
-"""Ephemeral MCP config render + Revoke follow-up View for the Talk via MCP button.
+"""Ephemeral MCP config render + Revoke follow-up View for Use from your coding tools.
 
 Provides:
 - render_mcp_config: build the .mcp.json snippet for copy-paste into a coding agent
@@ -35,8 +35,11 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.roster import RosterAgent
+from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 
 import discord
@@ -44,25 +47,31 @@ import discord
 log = structlog.get_logger()
 
 
-async def send_connect_via_mcp(
+async def send_coding_tools_access(
     interaction: discord.Interaction,
     *,
     runtime: DiscordRuntime,
     state: PanelState,
     allowed_user_id: int,
+    agent: RosterAgent | None = None,
 ) -> None:
     """Mint a per-agent MCP token for the selected agent and reply ephemerally
     with the config block + Revoke view.
 
-    Shared handler for the agent-setup panel's "Connect via MCP" button. Lets a
-    coding agent (Claude Code, etc.) drive the selected Daimon agent over MCP.
-    The token is scoped to the derived per-agent UUID and attributed to the
+    Shared handler for the setup panel's "Use from your coding tools" button.
+    Lets a coding agent (Claude Code, etc.) drive the selected Daimon agent over
+    MCP. The token is scoped to the derived per-agent UUID and attributed to the
     invoker's personal account; it is shown once and never logged.
+
+    ``selected_agent`` is what the Details screen sets; ``selected`` is the
+    legacy panel's field, read as a fallback so both entry points keep working
+    while they coexist.
     """
-    selected = state.selected
+    card_agent = agent or state.selected_agent
+    selected = card_agent or state.selected
     if selected is None:
         return
-    log.info("agent_setup.connect_via_mcp.click", agent_name=selected.name)
+    log.info("agent_setup.coding_tools.click", agent_name=selected.name)
 
     public_url = (
         str(runtime.settings.mcp.public_url)
@@ -71,18 +80,34 @@ async def send_connect_via_mcp(
     )
     jwt_secret = runtime.settings.mcp.jwt_secret
     assert public_url is not None and jwt_secret is not None, (
-        "MCP public_url + jwt_secret required for Connect via MCP; "
+        "MCP public_url + jwt_secret required for coding-tools access; "
         "check DAIMON_MCP__PUBLIC_URL / DAIMON_MCP__JWT_SECRET"
     )
 
     tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    ma_agent = await find_agent_by_daimon_tag(
-        runtime.anthropic,
-        tenant_id=tenant_id,
-        name=selected.name,
-    )
+    if card_agent is not None:
+        try:
+            ma_agent = await get_setup_agent(
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                ma_agent_id=card_agent.ma_agent_id,
+            )
+        except DaimonError:
+            await interaction.response.send_message(
+                f"Agent **{card_agent.name}** is no longer available. "
+                "Reopen Details and try again.",
+                ephemeral=True,
+            )
+            return
+    else:
+        # The legacy editor still passes only its name-based RosterEntry.
+        ma_agent = await find_agent_by_daimon_tag(
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            name=selected.name,
+        )
     if ma_agent is None:
-        log.info("agent_setup.connect_via_mcp.agent_missing", agent_name=selected.name)
+        log.info("agent_setup.coding_tools.agent_missing", agent_name=selected.name)
         await interaction.response.send_message(
             f"Could not find agent **{selected.name}** on MA.", ephemeral=True
         )
@@ -116,7 +141,7 @@ async def send_connect_via_mcp(
     )
 
     log.info(
-        "agent_setup.connect_via_mcp.minted",
+        "agent_setup.coding_tools.minted",
         agent_name=selected.name,
         jti=str(jti),
         # Never log the token itself.
@@ -165,7 +190,7 @@ def render_mcp_config(*, agent_name: str, public_url: str, jwt: str) -> str:
         f'--header "Authorization: Bearer {jwt}"'
     )
     return (
-        f"**Connect a coding agent to `{agent_name}`** — token shown once, copy it now.\n"
+        f"**Use `{agent_name}` from your coding tools** — token shown once, copy it now.\n"
         "**Run this:**\n"
         f"```\n{cli_oneliner}\n```\n"
         "**Or paste into `.mcp.json`:**\n"

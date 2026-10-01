@@ -14,6 +14,7 @@ from daimon.core.stores import (
     scoped_config_write,
     tenants,
     thread_sessions,
+    turn_card_intents,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "scoped_config_write",
     "tenants",
     "thread_sessions",
+    "turn_card_intents",
 ]

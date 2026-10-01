@@ -16,7 +16,6 @@ import re
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
 import yarl
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.privacy_panel.actions import (
@@ -33,6 +32,8 @@ from daimon.core.stores.slack_user_tokens import get_slack_user_token, upsert_sl
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import build_slack_runtime
+
 _AUTH_REVOKE_PATTERN = re.compile(r"https://slack\.com/api/auth\.revoke.*")
 
 
@@ -40,22 +41,14 @@ def _build_runtime(
     fernet_key: str, db_factory: async_sessionmaker[AsyncSession], *, mintable: bool = False
 ) -> SlackRuntime:
     settings = MagicMock()
-    settings.crypto.keys = (SecretStr(fernet_key),)
     if mintable:
         settings.slack.signing_secret = SecretStr("shh-secret")
+        settings.slack.bot_display_name = "research-bot"
         settings.mcp.app_root_url = "https://mcp.example.com"
     else:
         settings.slack = None
         settings.mcp.app_root_url = None
-    return SlackRuntime(
-        settings=settings,
-        anthropic=MagicMock(),
-        sessionmaker=db_factory,
-        billing_config=None,
-        http_client=MagicMock(spec=httpx.AsyncClient),
-        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-    )
+    return build_slack_runtime(fernet_key, db_factory, anthropic=MagicMock(), settings=settings)
 
 
 def _disconnect_payload(*, team_id: str, user_id: str, view_id: str) -> dict[str, Any]:
@@ -473,3 +466,44 @@ async def test_disconnect_with_no_row_reports_nothing_connected(
     assert "Nothing to disconnect" in view_text, (
         "views.update body must report that nothing was connected"
     )
+
+
+async def test_privacy_command_replaces_loading_modal_with_error_on_failure(
+    fake_slack_web_client: Any,
+) -> None:
+    """A DaimonError from account resolution must reach the boundary and
+    replace the Loading… modal, not escape to the background-task logger."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.errors import DaimonError
+
+    runtime = MagicMock()
+    payload: dict[str, Any] = {
+        "team_id": "T_PRIVACY_ERR",
+        "user_id": "U_PRIVACY_ERR",
+        "channel_id": "C_PRIVACY_ERR",
+        "trigger_id": "TRIGGER_TEST",
+    }
+
+    with (
+        patch(
+            "daimon.adapters.slack.privacy_panel.actions.resolve_web_client",
+            new_callable=AsyncMock,
+            return_value=fake_slack_web_client.client,
+        ),
+        patch(
+            "daimon.adapters.slack.privacy_panel.actions.resolve_privacy_account",
+            new_callable=AsyncMock,
+            side_effect=DaimonError("identity store unavailable"),
+        ),
+    ):
+        await handle_privacy_command(runtime, payload)
+
+    update_key = ("POST", yarl.URL("https://slack.com/api/views.update"))
+    update_calls = fake_slack_web_client.mock.requests.get(update_key)
+    assert update_calls, "the Loading… modal must be replaced after account resolution fails"
+    body: dict[str, Any] = update_calls[-1].kwargs["json"]
+    assert body["view"]["title"]["text"] == "Privacy"
+    text = body["view"]["blocks"][0]["text"]["text"]
+    assert "identity store unavailable" in text
+    assert "rid:" in text

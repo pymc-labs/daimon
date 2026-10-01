@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from daimon.core.pricing import AGENT_MODEL_PRICING
 
-# The Anthropic models the /agent-setup panel allows. Single source of truth:
+# The Anthropic models the product offers for Prompt & model. Single source of truth:
 # `pricing.AGENT_MODEL_PRICING.keys()` — when a model is added or repriced, both
 # surfaces update in lockstep. Tool-pinned models (`pricing.TOOL_MODEL_PRICING`)
 # are metered but never selectable here.
 #
-# UX-25-03: the Model TextInput is free-text because Discord modals cannot
-# contain Select components, so validation happens at submit time against this
-# tuple.
+# The model input is free-text, so submission validates against this tuple.
 ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
+
+# Human-readable label for each selectable model, keyed by the same ids as
+# `ALLOWED_MODEL_IDS`. Every entry in `pricing.AGENT_MODEL_PRICING` must have
+# one here — `models_catalog.list_model_choices` falls back to the raw id for
+# any id missing from this map, and `test_models_catalog` asserts none does.
+MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
+    "claude-opus-5-5": "Opus 5.5",
+    "claude-opus-5": "Opus 5",
+    "claude-opus-4-8": "Opus 4.8",
+    "claude-opus-4-7": "Opus 4.7",
+    "claude-sonnet-5-5": "Sonnet 5.5",
+    "claude-sonnet-5": "Sonnet 5",
+    "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-haiku-4-5": "Haiku 4.5",
+}
 
 # What a new agent gets when the creator does not name a model: every panel
 # prefill and every "no model supplied" fallback reads this one value. It used
@@ -20,7 +35,7 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
 # modal and the Slack submit path, which is how three surfaces ended up a
 # generation behind `defaults/agents/daimon.yaml` while each looked correct in
 # isolation. Keep it equal to the model that file pins.
-DEFAULT_AGENT_MODEL: str = "claude-sonnet-5"
+DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 
 # The per-agent skill and MCP-server limits every surface enforces. The setup
 # panel (disabling its add controls) and the chat update path (refusing a
@@ -35,3 +50,15 @@ DEFAULT_AGENT_MODEL: str = "claude-sonnet-5"
 # value here, because that number has moved before.
 AGENT_SKILL_CAP: int = 20
 AGENT_MCP_CAP: int = 20
+
+# The byte cap on a single key/token value entered through a private form.
+MAX_SECRET_VALUE_BYTES: Final[int] = 4096
+
+# How many times the SDK retries a request before giving up. The SDK's own
+# default is 2, which retries a 429 twice honouring `retry-after` and then
+# raises. That is enough for a burst and not enough for a sustained overage:
+# the Skills API is capped per ORG at 100 requests/minute, so a cold defaults
+# sweep across every tenant can sit over the line for longer than two retries
+# can wait out. Every adapter runtime passes this when constructing its
+# client, so a boot-time sweep paces itself instead of failing half-applied.
+MA_MAX_RETRIES: int = 8

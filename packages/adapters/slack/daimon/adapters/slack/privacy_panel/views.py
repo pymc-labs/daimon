@@ -9,7 +9,7 @@ Block Kit limits enforced:
   - private_metadata ≤ 3000 chars  (Pitfall 6)
 
 Discord analogs:
-  privacy_panel/panel.py:17-73 (_POLICY_URL, _summary_line, build_privacy_main_container)
+  privacy_panel/panel.py:17-73 (_POLICY_URL, build_privacy_main_container)
   privacy_panel/cascade.py:18-85 (cascade preview body)
   privacy_panel/embeds.py (build_post_delete_container)
 """
@@ -21,41 +21,12 @@ import uuid
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.privacy import PurgePreview
+from daimon.core.privacy import PurgePreview, summary_line
 from daimon.core.purge import AccountPurgeResult
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def summary_line(preview: PurgePreview) -> str:
-    """Return a comma-joined one-line summary of all non-zero held-data categories.
-
-    Port of privacy_panel/panel.py:20-35 (Discord).
-    """
-    parts: list[str] = []
-    if preview.linked_principals.count > 0:
-        parts.append(f"{preview.linked_principals.count} linked principal(s)")
-    if preview.routines.count > 0:
-        parts.append(f"{preview.routines.count} routine(s)")
-    if preview.user_configs.count > 0:
-        parts.append(f"{preview.user_configs.count} user config row(s)")
-    if preview.user_skills.count > 0:
-        parts.append(f"{preview.user_skills.count} synced skill(s)")
-    if preview.github_credentials.count > 0:
-        parts.append(f"{preview.github_credentials.count} GitHub credential(s)")
-    if preview.github_oauth_states.count > 0:
-        parts.append(f"{preview.github_oauth_states.count} OAuth handshake record(s)")
-    if preview.mcp_tokens.count > 0:
-        parts.append(f"{preview.mcp_tokens.count} MCP token(s)")
-    if preview.agent_github_binding.count > 0:
-        parts.append(f"{preview.agent_github_binding.count} per-agent GitHub link(s)")
-    if preview.slack_user_tokens.count > 0:
-        parts.append(f"{preview.slack_user_tokens.count} Slack user token(s)")
-    if preview.slack_turn_contexts.count > 0:
-        parts.append(f"{preview.slack_turn_contexts.count} Slack turn context(s)")
-    return ", ".join(parts) if parts else "nothing visible to you yet"
 
 
 def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
@@ -87,7 +58,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     if preview.github_credentials.count > 0:
         ex = escape_mrkdwn(preview.github_credentials.example or "—")
         n = preview.github_credentials.count
-        will_happen_lines.append(f"• 🔑 Delete *{n}* stored GitHub credential(s) (`{ex}`)")
+        will_happen_lines.append(f"• 🔑 Delete *{n}* stored GitHub token(s) (`{ex}`)")
     if preview.github_oauth_states.count > 0:
         will_happen_lines.append(
             f"• 🤝 Remove *{preview.github_oauth_states.count}* GitHub OAuth handshake record(s)"
@@ -96,7 +67,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         will_happen_lines.append(f"• 🎫 Revoke *{preview.mcp_tokens.count}* per-agent MCP token(s)")
     if preview.agent_github_binding.count > 0:
         n = preview.agent_github_binding.count
-        will_happen_lines.append(f"• 🤖 Remove *{n}* per-agent GitHub credential link(s)")
+        will_happen_lines.append(f"• 🤖 Remove *{n}* per-agent GitHub token link(s)")
     if preview.slack_user_tokens.count > 0:
         will_happen_lines.append(
             f"• 🔐 Remove *{preview.slack_user_tokens.count}* Slack user token(s)"
@@ -104,6 +75,10 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     if preview.slack_turn_contexts.count > 0:
         will_happen_lines.append(
             f"• 💬 Remove *{preview.slack_turn_contexts.count}* Slack turn context(s)"
+        )
+    if preview.direct_message_conversations.count > 0:
+        will_happen_lines.append(
+            f"• Remove *{preview.direct_message_conversations.count}* private conversation(s)"
         )
     if preview.account.count > 0:
         will_happen_lines.append("• 🪪 Remove the account row itself")
@@ -114,7 +89,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
 
     stays_text = (
         "🔐 *What stays in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP credentials\n"
+        "• Agent definitions, system prompts, MCP tokens\n"
         "• Session transcripts, turn message content\n"
         "• Skill repo references — the repos themselves stay on GitHub\n"
         "• Retention is governed by Anthropic's Managed Agents policy."
@@ -162,6 +137,7 @@ def build_privacy_main_container(
     is_slack_connected: bool,
     slack_connect_url: str | None,
     policy_url: str,
+    display_name: str = "daimon",
 ) -> dict[str, Any]:
     """Main privacy view: held-data summary + three trust-model groups + action buttons.
 
@@ -186,18 +162,18 @@ def build_privacy_main_container(
         "• Routines you scheduled\n"
         "• User config rows\n"
         "• Synced skill ledger rows\n"
-        "• Encrypted GitHub credentials (stored encrypted-at-rest)\n"
+        "• Encrypted GitHub tokens (stored encrypted-at-rest)\n"
         "• GitHub OAuth handshake records\n"
         "• The account row itself\n"
         "\n"
         "🔐 *What lives in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP credentials\n"
+        "• Agent definitions, system prompts, MCP tokens\n"
         "• Session transcripts, turn message content\n"
         "• Skill repo references (repos themselves stay on GitHub)\n"
         "• Retention governed by Anthropic's Managed Agents policy.\n"
         "\n"
         "🚫 *What we don't hold*\n"
-        "• Plaintext credentials (GitHub tokens are encrypted-at-rest)\n"
+        "• Plaintext keys or tokens (GitHub tokens are encrypted-at-rest)\n"
         "• Message content (we only log structural events)"
     )
 
@@ -236,7 +212,7 @@ def build_privacy_main_container(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*🔒 Privacy*\ndaimon holds: {summary}",
+                "text": f"*🔒 Privacy*\n{escape_mrkdwn(display_name)} holds: {summary}",
             },
         },
         {"type": "divider"},
@@ -328,7 +304,9 @@ def build_deleting_view() -> dict[str, Any]:
     }
 
 
-def build_post_delete_view(result: AccountPurgeResult) -> dict[str, Any]:
+def build_post_delete_view(
+    result: AccountPurgeResult, *, display_name: str = "daimon"
+) -> dict[str, Any]:
     """Final status modal view enumerating what was removed.
 
     Port of privacy_panel/embeds.py:15-71 (Discord) adapted to Block Kit.
@@ -348,7 +326,7 @@ def build_post_delete_view(result: AccountPurgeResult) -> dict[str, Any]:
     if result.db.user_skills > 0:
         rows.append(f"• ✓ {result.db.user_skills} synced skill ledger row(s) removed")
     if result.db.github_credentials > 0:
-        rows.append(f"• ✓ {result.db.github_credentials} stored GitHub credential(s) deleted")
+        rows.append(f"• ✓ {result.db.github_credentials} stored GitHub token(s) deleted")
     if result.db.github_oauth_states > 0:
         rows.append(f"• ✓ {result.db.github_oauth_states} OAuth handshake record(s) removed")
     if result.db.accounts > 0:
@@ -384,7 +362,8 @@ def build_post_delete_view(result: AccountPurgeResult) -> dict[str, Any]:
                     "type": "mrkdwn",
                     "text": (
                         "*✅ Deleted*\n"
-                        "Your daimon data has been deleted. Re-onboarding starts from scratch."
+                        f"Your {escape_mrkdwn(display_name)} data has been deleted. "
+                        "Re-onboarding starts from scratch."
                     ),
                 },
             },
@@ -408,7 +387,9 @@ def _connect_button(connect_url: str) -> dict[str, Any]:
     }
 
 
-def build_export_result_view(*, summary: str | None) -> dict[str, Any]:
+def build_export_result_view(
+    *, summary: str | None, display_name: str = "daimon"
+) -> dict[str, Any]:
     """Modal pushed after the Export action.
 
     The privacy panel's buttons live in a modal, whose block_actions payloads
@@ -416,13 +397,13 @@ def build_export_result_view(*, summary: str | None) -> dict[str, Any]:
     posted as an ephemeral channel message. ``summary=None`` means no account.
     """
     if summary is None:
-        text = "📤 *Privacy export*\nYou have no data on file with daimon."
+        text = f"📤 *Privacy export*\nYou have no data on file with {escape_mrkdwn(display_name)}."
     else:
         text = (
             "📤 *Privacy export (summary)*\n"
-            f"daimon holds: {summary}\n\n"
+            f"{escape_mrkdwn(display_name)} holds: {summary}\n\n"
             "_Full JSON export is not yet implemented. When ready, it will produce "
-            "a download of every daimon-side row tied to your identity._"
+            f"a download of every row {escape_mrkdwn(display_name)} stores for your identity._"
         )
     return {
         "type": "modal",
@@ -432,7 +413,7 @@ def build_export_result_view(*, summary: str | None) -> dict[str, Any]:
 
 
 def build_disconnect_result_view(
-    *, was_connected: bool, reconnect_url: str | None
+    *, was_connected: bool, reconnect_url: str | None, display_name: str = "daimon"
 ) -> dict[str, Any]:
     """Modal shown after the Disconnect Slack action (both outcomes).
 
@@ -443,7 +424,8 @@ def build_disconnect_result_view(
     if was_connected:
         text = (
             "*🔌 Slack account disconnected.*\n"
-            "daimon no longer holds a token that reads Slack as you; reads fall "
+            f"{escape_mrkdwn(display_name)} no longer holds a token that reads Slack as you; "
+            "reads fall "
             "back to channels the bot is invited to."
         )
     else:

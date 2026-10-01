@@ -17,17 +17,12 @@ from __future__ import annotations
 
 import uuid
 from io import StringIO
-from typing import cast
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.commands.repo_bindings import backfill_public_proof, list_proofless
 from daimon.adapters.cli.main import app
-from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.testing.factories import make_agent_repo_binding, make_tenant
@@ -35,24 +30,15 @@ from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
+from ..harness import build_cli_runtime
 
-def _build_rt(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    anthropic: AsyncAnthropic,
-) -> CliRuntime:
-    class _FakeCli:
-        local_user = "testuser"
 
-    class _FakeSettings:
-        cli = _FakeCli()
+class _FakeCli:
+    local_user = "testuser"
 
-    return CliRuntime(
-        settings=cast(Settings, _FakeSettings()),
-        anthropic=anthropic,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
+
+class _FakeSettings:
+    cli = _FakeCli()
 
 
 def _github_client(transport: httpx.MockTransport) -> httpx.AsyncClient:
@@ -90,7 +76,7 @@ async def test_list_proofless_returns_only_bindings_with_no_recorded_proof_acros
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     await list_proofless(rt=rt, console=console, check_visibility=False)
 
@@ -127,7 +113,7 @@ async def test_list_proofless_check_visibility_issues_one_request_per_distinct_r
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await list_proofless(rt=rt, console=console, check_visibility=True, http_client=http_client)
@@ -160,7 +146,7 @@ async def test_list_proofless_check_visibility_renders_probe_error_when_probe_ra
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await list_proofless(rt=rt, console=console, check_visibility=True, http_client=http_client)
@@ -195,7 +181,7 @@ async def test_backfill_dry_run_writes_nothing(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await backfill_public_proof(
@@ -228,7 +214,7 @@ async def test_backfill_yes_stamps_public_anon_binding(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await backfill_public_proof(
@@ -263,7 +249,7 @@ async def test_backfill_does_not_stamp_private_repo(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await backfill_public_proof(
@@ -295,7 +281,7 @@ async def test_backfill_does_not_stamp_404_repo(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await backfill_public_proof(
@@ -334,7 +320,7 @@ async def test_backfill_does_not_stamp_token_backed_binding(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=200)
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     async with _github_client(httpx.MockTransport(handler)) as http_client:
         await backfill_public_proof(
@@ -374,7 +360,7 @@ async def test_backfill_second_run_is_idempotent_and_issues_zero_requests(
         request_count += 1
         return httpx.Response(200, json={"private": False})
 
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
 
     out1 = StringIO()
     console1 = Console(file=out1, force_terminal=False, highlight=False, width=200)

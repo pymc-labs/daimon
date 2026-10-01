@@ -13,22 +13,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_cloud_config import BetaCloudConfig
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from anthropic.types.beta.beta_managed_agents_session import BetaManagedAgentsSession
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from anthropic.types.beta.beta_packages import BetaPackages
-from anthropic.types.beta.beta_unrestricted_network import BetaUnrestrictedNetwork
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid as _derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -37,67 +28,11 @@ from daimon.core.stores.tenants import (
     get_tenant_liveness,
     set_provision_status,
 )
+from daimon.core.turn.deps import build_turn_deps
+from daimon.testing import ma_agent, ma_environment, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-
-def _make_fake_session(session_id: str = "sess_test") -> BetaManagedAgentsSession:
-    return BetaManagedAgentsSession(
-        id=session_id,
-        agent=BetaManagedAgentsSessionAgent(
-            id="agent_test",
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-5"),
-            name="test-agent",
-            skills=[],
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        created_at="2026-04-28T00:00:00Z",
-        environment_id="env_test",
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at="2026-04-28T00:00:00Z",
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
-        outcome_evaluations=[],
-    )
-
-
-def _make_fake_agent(name: str = "test-agent") -> BetaManagedAgentsAgent:
-    return BetaManagedAgentsAgent(
-        id="ag_test",
-        version=1,
-        name=name,
-        type="agent",
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-5"),
-        created_at=datetime(2026, 4, 28, tzinfo=UTC),
-        updated_at=datetime(2026, 4, 28, tzinfo=UTC),
-        mcp_servers=[],
-        metadata={},
-        skills=[],
-        tools=[],
-    )
-
-
-def _make_fake_environment(name: str = "test-env") -> BetaEnvironment:
-    return BetaEnvironment(
-        id="env_test",
-        name=name,
-        type="environment",
-        config=BetaCloudConfig(
-            type="cloud",
-            networking=BetaUnrestrictedNetwork(type="unrestricted"),
-            packages=BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
-        ),
-        created_at="2026-04-28T00:00:00Z",
-        updated_at="2026-04-28T00:00:00Z",
-        description="",
-        metadata={},
-    )
+from .harness import make_bot
 
 
 def _make_runtime(
@@ -114,9 +49,10 @@ def _make_runtime(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
     settings.discord = discord_settings
+    settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
-    anthropic.beta.agents.retrieve = AsyncMock(return_value=_make_fake_agent())
-    anthropic.beta.environments.retrieve = AsyncMock(return_value=_make_fake_environment())
+    anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
+    anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
     return DiscordRuntime(
@@ -136,16 +72,6 @@ def _make_runtime(
             billing_config=None,
         ),
     )
-
-
-def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = DaimonBot(runtime=runtime, intents=intents)
-    bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
-    return bot
 
 
 def _make_channel_message(
@@ -212,7 +138,7 @@ class TestAgentResolveMiss:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message(guild_id=int(guild_id))
 
         await bot.on_message(message)
@@ -260,12 +186,12 @@ class TestPerMessageTenantResolution:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-a")
+        mock_create_session.return_value = ma_session(id="sess-a")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message(guild_id=int(guild_a))
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 7001
@@ -296,7 +222,7 @@ class TestPerMessageTenantResolution:
         await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="pending")
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message(guild_id=int(guild_id))
 
         await bot.on_message(message)
@@ -331,7 +257,7 @@ class TestNonReadySelfHealGate:
         await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="failed")
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         # The follow-up post (✅/⚠️) is covered in test_on_guild_join; here the bare
         # MagicMock guild has no awaitable channel, so stub the post-back path.
         bot._post_to_guild = AsyncMock()  # type: ignore[method-assign]
@@ -362,9 +288,15 @@ class TestNonReadySelfHealGate:
         guild_id = "700000005"  # NO tenant row — get_tenant_liveness returns None
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         bot._post_to_guild = AsyncMock()  # type: ignore[method-assign]
         message = _make_channel_message(guild_id=int(guild_id))
+        # discord.py resolves a guild message through its guild cache before
+        # dispatch. Mirror that cache-before-dispatch state so this exercises
+        # self-heal for a live guild; a post-remove stale message has no cache
+        # entry and must not provision/unarchive the tenant.
+        bot._connection._guilds[int(guild_id)] = message.guild  # pyright: ignore[reportPrivateUsage]
+        assert bot.get_guild(int(guild_id)) is message.guild
 
         await bot.on_message(message)
         await _drain_bg_tasks(bot)
@@ -394,7 +326,7 @@ class TestEveryoneMentionIgnored:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         # @everyone ping: discord populates mention_everyone but the bot is NOT in
         # message.mentions. mentioned_in would still return True, so assert we don't
         # rely on it.

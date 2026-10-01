@@ -13,8 +13,10 @@ an external API.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import uuid
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -23,6 +25,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import (
+    derive_repo_access,
+    render_clone_refusal,
     resolve_clone_token,
     resolve_skill_sync_token,
     select_clone_auth,
@@ -47,7 +51,11 @@ def _generate_rsa_keypair() -> str:
 
 
 def _make_binding(
-    *, repo_url: str, ma_secret_ref: str, proof_kind: RepoProofKind | None = None
+    *,
+    repo_url: str,
+    ma_secret_ref: str,
+    proof_kind: RepoProofKind | None = None,
+    proof_account_id: uuid.UUID | None = None,
 ) -> AgentRepoBindingRow:
     now = dt.datetime.now(dt.UTC)
     return AgentRepoBindingRow(
@@ -60,7 +68,7 @@ def _make_binding(
         last_sync_error=None,
         proof_kind=proof_kind,
         proof_at=now if proof_kind is not None else None,
-        proof_account_id=None,
+        proof_account_id=proof_account_id,
         created_at=now,
         updated_at=now,
     )
@@ -182,6 +190,39 @@ async def test_resolve_clone_token_app_installed_mints_installation_token() -> N
 
     assert token == "ghs_installation_token", "App mode must return the minted installation token"
     assert len(captured) == 2, "must issue exactly one lookup and one mint request"
+
+
+@pytest.mark.asyncio
+async def test_resolve_clone_token_rate_limited_app_mint_falls_back_to_public_pat() -> None:
+    """A rate-limited best-effort App mint must preserve the clone fallback."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/acme/oss-repo/installation":
+            return httpx.Response(status_code=200, json={"id": 777})
+        if request.url.path == "/app/installations/777/access_tokens":
+            return httpx.Response(
+                status_code=403,
+                headers={"retry-after": "45"},
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    binding = _make_binding(repo_url="acme/oss-repo", ma_secret_ref="anon:", proof_kind="public")
+
+    token = await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat="ghp_operator_fallback",
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert token == "ghp_operator_fallback", (
+        "rate-limited App minting must degrade to the verified-public fallback PAT"
+    )
 
 
 @pytest.mark.asyncio
@@ -522,6 +563,150 @@ async def test_resolve_clone_token_pat_proof_app_unavailable_keeps_rebind_and_lo
     )
     assert app_events[0].get("repo_url") == "acme/private-repo", (
         "the app_not_configured event must carry the repo_url"
+    )
+
+
+# ---------------------------------------------------------------------------
+# render_clone_refusal + derive_repo_access (pure, no I/O)
+# ---------------------------------------------------------------------------
+
+
+def test_render_clone_refusal_names_the_operator_gap_for_a_public_binding_with_no_fallback() -> (
+    None
+):
+    """A correct public binding on a deployment with no public-clone credential
+    is the operator's gap, so the sentence must not tell the user to re-bind."""
+    message = render_clone_refusal(
+        repo_url="acme/oss-repo", proof_kind="public", has_fallback_pat=False
+    )
+    assert "operator" in message.lower() and "deployment" in message.lower(), (
+        "the operator-gap sentence must name the deployment and the operator"
+    )
+    assert re.search(r"[Rr]e-bind", message) is None, (
+        "a correctly-bound public repo must never be blamed on the user's binding"
+    )
+
+
+def test_render_clone_refusal_names_the_rebind_fix_for_every_other_row() -> None:
+    """Anything the user can fix is fixed by re-binding with a token that reads the repo."""
+    message = render_clone_refusal(repo_url="acme/secret", proof_kind=None, has_fallback_pat=True)
+    assert "acme/secret" in message, "the refusal must name the repo it is about"
+    assert re.search(r"[Rr]e-bind", message) is not None, (
+        "the refusal must name the fix (re-bind with a token) for a binding the user can correct"
+    )
+
+
+def test_derive_repo_access_reports_connected_per_agent_token_when_a_check_was_recorded() -> None:
+    """A per-agent token with a recorded access check needs nothing else to clone."""
+    binding = _make_binding(
+        repo_url="acme/private-repo", ma_secret_ref="inline-pat:agent-1", proof_kind="pat"
+    )
+    access = derive_repo_access(binding, has_fallback_pat=False, app_configured=False)
+    assert access.kind == "connected", "a checked per-agent token is a settled, working credential"
+    assert access.credential == "per_agent_token", "the per-agent token is what the clone uses"
+    assert access.corrective is None, "nothing needs correcting when the clone would work"
+
+
+def test_derive_repo_access_reports_not_checked_when_a_pat_is_attached_without_a_proof() -> None:
+    """A token nobody ever demonstrated against this repo is attached, not verified."""
+    binding = _make_binding(repo_url="acme/private-repo", ma_secret_ref="inline-pat:agent-1")
+    access = derive_repo_access(binding, has_fallback_pat=True, app_configured=True)
+    assert access.kind == "not_checked", (
+        "an attached token with no recorded access check must not be reported as connected"
+    )
+    assert access.credential == "per_agent_token", "the attached token is still the credential"
+    assert access.checked_at is None, "there is no check timestamp to report"
+
+
+def test_derive_repo_access_reports_deployment_public_when_a_public_proof_meets_a_fallback() -> (
+    None
+):
+    """A verified-public repo plus the deployment's public-read credential clones."""
+    binding = _make_binding(repo_url="acme/oss-repo", ma_secret_ref="anon:", proof_kind="public")
+    access = derive_repo_access(binding, has_fallback_pat=True, app_configured=False)
+    assert access.kind == "connected", "a public repo with the deployment credential is settled"
+    assert access.credential == "deployment_public", (
+        "the deployment's public-read token is what serves this clone"
+    )
+
+
+def test_derive_repo_access_reports_github_app_when_only_app_coverage_could_serve_it() -> None:
+    """A recorded check with no other credential leaves the App, which is only
+    resolved at clone time, so the state is 'checked' rather than 'connected'."""
+    binding = _make_binding(repo_url="acme/private-repo", ma_secret_ref="anon:", proof_kind="pat")
+    access = derive_repo_access(binding, has_fallback_pat=False, app_configured=True)
+    assert access.kind == "checked", (
+        "App coverage for this specific repo is decided at clone time, not here"
+    )
+    assert access.credential == "github_app", "the App is the only remaining credential"
+    assert access.corrective is None, "a recorded check is not something to correct"
+
+
+def test_derive_repo_access_needs_attention_with_a_corrective_when_nothing_authorizes() -> None:
+    """No token, no proof, no App: the reader gets the same sentence a clone would raise."""
+    binding = _make_binding(repo_url="acme/secret-repo", ma_secret_ref="anon:")
+    access = derive_repo_access(binding, has_fallback_pat=True, app_configured=False)
+    assert access.kind == "needs_attention", "nothing would authorize this clone"
+    assert access.credential == "none", "there is no credential to name"
+    assert access.corrective is not None and "acme/secret-repo" in access.corrective, (
+        "the corrective must name the repo the reader has to fix"
+    )
+
+
+def test_derive_repo_access_carries_the_recorded_check_timestamp_and_account() -> None:
+    """Attribution comes off the binding's recorded proof, not a fresh probe."""
+    binder = uuid.uuid4()
+    binding = _make_binding(
+        repo_url="acme/oss-repo",
+        ma_secret_ref="anon:",
+        proof_kind="public",
+        proof_account_id=binder,
+    )
+    access = derive_repo_access(binding, has_fallback_pat=True, app_configured=False)
+    assert access.checked_at == binding.proof_at, "checked_at is the binding's recorded proof_at"
+    assert access.checked_by_account_id == binder, (
+        "checked_by_account_id is whoever demonstrated access at bind time"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ma_secret_ref", "proof_kind"),
+    [("anon:", None), ("anon:", "public")],
+)
+@pytest.mark.asyncio
+async def test_derive_repo_access_corrective_matches_resolve_clone_token_error_for_same_row(
+    ma_secret_ref: str, proof_kind: RepoProofKind | None
+) -> None:
+    """The panel's corrective and the clone's refusal are the same sentence.
+
+    Two surfaces describing one failure drift the moment each writes its own
+    copy; this pins them to the same string for the rows that produce each of
+    the two refusals.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"App is not configured; no request expected: {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    binding = _make_binding(
+        repo_url="acme/some-repo", ma_secret_ref=ma_secret_ref, proof_kind=proof_kind
+    )
+    access = derive_repo_access(binding, has_fallback_pat=False, app_configured=False)
+
+    with pytest.raises(DaimonError) as exc_info:
+        await resolve_clone_token(
+            client,
+            binding=binding,
+            per_agent_pat=None,
+            fallback_pat=None,
+            app_id=None,
+            app_private_key=None,
+            now=1_000_000,
+        )
+
+    assert access.kind == "needs_attention", "this row is the one a clone refuses"
+    assert access.corrective == str(exc_info.value), (
+        "derive_repo_access must hand back the exact sentence resolve_clone_token raises"
     )
 
 
@@ -883,6 +1068,41 @@ async def test_resolve_skill_sync_token_lookup_error_degrades_to_fallback() -> N
 
 
 @pytest.mark.asyncio
+async def test_resolve_skill_sync_token_rate_limited_app_mint_falls_back_to_public_pat() -> None:
+    """A rate-limited App mint must remain best-effort for the sync resolver."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/777/access_tokens":
+            return httpx.Response(
+                status_code=403,
+                headers={"retry-after": "45"},
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def lookup(owner: str, repo: str) -> int | None:
+        return 777
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    token = await resolve_skill_sync_token(
+        client,
+        repo_url="acme/oss-repo",
+        per_agent_pat=None,
+        proof_kind="public",
+        fallback_pat="ghp_operator_fallback",
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        installation_lookup=lookup,
+        now=1_000_000,
+    )
+
+    assert token == "ghp_operator_fallback", (
+        "rate-limited App minting must degrade to the fallback PAT"
+    )
+
+
+@pytest.mark.asyncio
 async def test_resolve_skill_sync_token_none_lookup_skips_app_tier_entirely() -> None:
     """installation_lookup=None skips the App tier entirely -- zero outbound
     requests, no App JWT built -- and falls through to the fallback tier."""
@@ -939,3 +1159,111 @@ async def test_resolve_skill_sync_token_unnormalizable_repo_raises() -> None:
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Installation-token scope: a minted App token must cover only the bound repo
+# ---------------------------------------------------------------------------
+#
+# The deployment's GitHub App is installed by repo owners for their own use,
+# and one installation usually covers many repositories. A binding's recorded
+# proof demonstrates access to ONE repository, so the token handed to that
+# binding's session must be narrowed to that repository — never the whole
+# installation. A verified-public proof demonstrates read access only, so its
+# token must also be read-only.
+
+
+def _capture_mint_body(
+    captured: list[dict[str, object]],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/acme/widgets/installation":
+            return httpx.Response(status_code=200, json={"id": 777})
+        if request.url.path == "/app/installations/777/access_tokens":
+            captured.append(json.loads(request.content or b"{}"))
+            return httpx.Response(status_code=201, json={"token": "ghs_installation_token"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof_kind", ["pat", "public"])
+async def test_resolve_clone_token_app_token_is_scoped_to_the_bound_repository(
+    proof_kind: RepoProofKind,
+) -> None:
+    """The clone token minted through the App covers only the bound repository."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+    binding = _make_binding(
+        repo_url="acme/widgets", ma_secret_ref="anon:public", proof_kind=proof_kind
+    )
+
+    token = await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert token == "ghs_installation_token"
+    assert len(captured) == 1
+    assert captured[0].get("repositories") == ["widgets"], (
+        "an installation token must be narrowed to the bound repository, "
+        f"not the whole installation; mint body was {captured[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_clone_token_public_proof_app_token_is_read_only() -> None:
+    """A verified-public proof demonstrates read access only: the App token
+    minted for it must request read-only contents permission."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+    binding = _make_binding(
+        repo_url="acme/widgets", ma_secret_ref="anon:public", proof_kind="public"
+    )
+
+    await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].get("permissions") == {"contents": "read"}, (
+        f"a public-proof binding must get a read-only token; mint body was {captured[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_skill_sync_token_app_token_is_read_only_and_repo_scoped() -> None:
+    """Skill sync only reads the named repo: its App token is narrowed to that
+    repository with read-only contents permission."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+
+    async def lookup(owner: str, repo: str) -> int | None:
+        return 777
+
+    token = await resolve_skill_sync_token(
+        client,
+        repo_url="https://github.com/acme/widgets",
+        per_agent_pat=None,
+        proof_kind="pat",
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        installation_lookup=lookup,
+        now=1_000_000,
+    )
+
+    assert token == "ghs_installation_token"
+    assert captured == [{"repositories": ["widgets"], "permissions": {"contents": "read"}}]

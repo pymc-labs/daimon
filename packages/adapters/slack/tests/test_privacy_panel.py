@@ -18,9 +18,8 @@ from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
     build_privacy_main_container,
-    summary_line,
 )
-from daimon.core.privacy import PurgePreview, PurgePreviewRow
+from daimon.core.privacy import PurgePreview, PurgePreviewRow, summary_line
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -310,6 +309,7 @@ def _make_preview(**overrides: Any) -> PurgePreview:
         "credential_requests": PurgePreviewRow(count=0, example=None),
         "wizard_sessions": PurgePreviewRow(count=0, example=None),
         "message_feedback": PurgePreviewRow(count=0, example=None),
+        "support_escalations": PurgePreviewRow(count=0, example=None),
     }
     base.update(overrides)
     return PurgePreview(**base)
@@ -345,8 +345,8 @@ def test_cascade_blocks_render_agent_github_binding_row_when_nonzero() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V2")
     joined = _extract_text(view)
     assert "2" in joined, "agent_github_binding count must appear in the cascade"
-    assert "per-agent GitHub credential link" in joined, (
-        "agent_github_binding row must mention the per-agent GitHub credential link"
+    assert "per-agent GitHub token link" in joined, (
+        "agent_github_binding row must mention the per-agent GitHub token link"
     )
 
 
@@ -375,8 +375,8 @@ def test_cascade_blocks_zero_count_categories_omit_new_rows() -> None:
     preview = _make_preview()
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V5")
     joined = _extract_text(view).lower()
-    assert "mcp token" not in joined, "zero-count mcp_tokens must NOT render a row"
-    assert "per-agent github credential link" not in joined, (
+    assert "mcp token(s)" not in joined, "zero-count mcp_tokens must NOT render a row"
+    assert "per-agent github token link" not in joined, (
         "zero-count agent_github_binding must NOT render a row"
     )
     assert "slack user token" not in joined, "zero-count slack_user_tokens must NOT render a row"
@@ -397,7 +397,7 @@ def _extract_text(view: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _collect_text(obj: Any, parts: list[str]) -> None:  # noqa: ANN401 — test helper
+def _collect_text(obj: Any, parts: list[str]) -> None:  # test helper
     if isinstance(obj, dict):
         text_type = obj.get("type")
         if text_type in ("mrkdwn", "plain_text"):
@@ -416,7 +416,7 @@ def _has_url_button(view: dict[str, Any], url: str) -> bool:
     return _find_url_button(view, url)
 
 
-def _find_url_button(obj: Any, url: str) -> bool:  # noqa: ANN401 — test helper
+def _find_url_button(obj: Any, url: str) -> bool:  # test helper
     if isinstance(obj, dict):
         if obj.get("type") == "button" and obj.get("url") == url:
             return True
@@ -424,3 +424,27 @@ def _find_url_button(obj: Any, url: str) -> bool:  # noqa: ANN401 — test helpe
     if isinstance(obj, list):
         return any(_find_url_button(item, url) for item in obj)
     return False
+
+
+def test_privacy_views_use_the_configured_display_name() -> None:
+    from daimon.adapters.slack.privacy_panel.views import (
+        build_disconnect_result_view,
+        build_export_result_view,
+    )
+
+    views = [
+        build_privacy_main_container(
+            _make_preview(),
+            is_slack_connected=False,
+            slack_connect_url=None,
+            policy_url=_POLICY_URL,
+            display_name="research-bot",
+        ),
+        build_export_result_view(summary=None, display_name="research-bot"),
+        build_export_result_view(summary="one session", display_name="research-bot"),
+        build_disconnect_result_view(
+            was_connected=True, reconnect_url=None, display_name="research-bot"
+        ),
+    ]
+    for view in views:
+        assert "research-bot" in _extract_text(view), "privacy copy must use the configured name"

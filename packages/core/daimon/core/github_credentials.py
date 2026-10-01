@@ -49,7 +49,8 @@ def build_multifernet(keys: tuple[str, ...]) -> MultiFernet:
     if not keys:
         raise ValueError(
             "settings.crypto.keys is empty — at least one Fernet key is required "
-            "for GitHub OAuth. Generate one with `cryptography.fernet.Fernet.generate_key()`."
+            "for credential and agent environment encryption; configure DAIMON_CRYPTO__KEYS. "
+            "Generate one with `cryptography.fernet.Fernet.generate_key()`."
         )
     return MultiFernet([Fernet(k.encode("utf-8")) for k in keys])
 
@@ -133,7 +134,7 @@ async def get_github_login(
     """Display-only login resolver — the non-secret peer of `get_pat`.
 
     Returns `github_login` for the resolved credential without decrypting (or
-    even reading) the token, so the /agent-setup panel can show GitHub linkage
+    even reading) the token, so a Working repo view can show GitHub linkage
     for the selected agent. Same cascade shape as `get_pat`:
 
     agent_id given -> overlay-only -> None (no principal-default bleed).

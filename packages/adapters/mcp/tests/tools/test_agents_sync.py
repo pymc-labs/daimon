@@ -14,17 +14,13 @@ Patterns followed:
 
 from __future__ import annotations
 
-import io
 import re
-import tarfile
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
-from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
-from cryptography.fernet import Fernet, MultiFernet
+from anthropic.types.beta import SkillListResponse
+from cryptography.fernet import MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
@@ -35,32 +31,15 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync import SyncReport
 from daimon.core.specs import AgentSpec, SkillRepo
 from daimon.core.stores.github_credentials import upsert_credential
+from daimon.testing import build_fake_anthropic, ma_agent, make_fernet, make_tarball
 from daimon.testing.factories import make_cli_principal
 from daimon.testing.ma import MARouter, list_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
-
 # ---------------------------------------------------------------------------
-# Helpers (minimal, no factory wrappers)
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_tarball(files: dict[str, bytes]) -> bytes:
-    """Build a tar.gz with the given path → content mapping."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for path, content in files.items():
-            info = tarfile.TarInfo(name=path)
-            info.size = len(content)
-            tf.addfile(info, io.BytesIO(content))
-    return buf.getvalue()
-
-
-def _make_fernet() -> MultiFernet:
-    return MultiFernet([Fernet(Fernet.generate_key())])
 
 
 def _generate_rsa_keypair() -> str:
@@ -93,12 +72,6 @@ async def _seed_pat(
         )
 
 
-def _build_anthropic(router: MARouter) -> AsyncAnthropic:
-    transport = httpx.MockTransport(router.dispatch)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
-
-
 # ---------------------------------------------------------------------------
 # Test: auto-sync on create
 # ---------------------------------------------------------------------------
@@ -116,7 +89,7 @@ async def test_create_agent_impl_syncs_skill_repos(
     """
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
-    fernet = _make_fernet()
+    fernet = make_fernet()
     # Use cli.account_id as principal_id — _create_agent_impl passes auth.account_id
     # to sync_agent_skills, NOT a CliPrincipal.id.
     await _seed_pat(
@@ -125,7 +98,7 @@ async def test_create_agent_impl_syncs_skill_repos(
         principal_id=cli.account_id,
     )
 
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {"myskills-main/SKILL.md": b"---\nname: myskill\ndescription: d\n---\nbody"}
     )
 
@@ -142,19 +115,10 @@ async def test_create_agent_impl_syncs_skill_repos(
     def on_agents_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=agent_id,
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -189,19 +153,10 @@ async def test_create_agent_impl_syncs_skill_repos(
             return list_response([])
         return list_response(
             [
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id=agent_id,
-                    type="agent",
-                    version=1,
                     name=agent_name,
-                    model={"id": "claude-opus-4-5"},
-                    description=None,
-                    system=None,
-                    tools=[],
-                    mcp_servers=[],
-                    skills=[],
-                    created_at="2026-04-24T00:00:00Z",
-                    updated_at="2026-04-24T00:00:00Z",
+                    model="claude-opus-4-5",
                     metadata={
                         "daimon_tenant": str(tenant_id),
                         "daimon_name": agent_name,
@@ -223,23 +178,16 @@ async def test_create_agent_impl_syncs_skill_repos(
         ]
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=agent_id,
-                type="agent",
-                version=2,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=normalized_skills,
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
                 },
+                skills=normalized_skills,
+                version=2,
             ).model_dump(mode="json"),
         )
 
@@ -247,19 +195,10 @@ async def test_create_agent_impl_syncs_skill_repos(
         """reconcile re-retrieves the created agent by id for _build_agent_info."""
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=m.group(1),
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -275,7 +214,7 @@ async def test_create_agent_impl_syncs_skill_repos(
     router.add("GET", r"/v1/agents/([^/]+)$", on_agents_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)$", on_agents_update)
 
-    anthropic_client = _build_anthropic(router)
+    anthropic_client = build_fake_anthropic(router.dispatch)
 
     settings = MagicMock()  # type: ignore[var-annotated]
     settings.mcp.public_url = None  # no daimon-mcp merge needed in sync tests
@@ -343,7 +282,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
     """
     cli = await make_cli_principal(db_session, os_user="bob")
     await db_session.commit()
-    fernet = _make_fernet()
+    fernet = make_fernet()
     account_id = cli.account_id
     tenant_id = cli.tenant_id
     agent_name = "failing-sync-agent"
@@ -355,19 +294,10 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
     def on_agents_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=agent_id,
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -388,19 +318,10 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
             return list_response([])
         return list_response(
             [
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id=agent_id,
-                    type="agent",
-                    version=1,
                     name=agent_name,
-                    model={"id": "claude-opus-4-5"},
-                    description=None,
-                    system=None,
-                    tools=[],
-                    mcp_servers=[],
-                    skills=[],
-                    created_at="2026-04-24T00:00:00Z",
-                    updated_at="2026-04-24T00:00:00Z",
+                    model="claude-opus-4-5",
                     metadata={
                         "daimon_tenant": str(tenant_id),
                         "daimon_name": agent_name,
@@ -414,19 +335,10 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
         """reconcile re-retrieves the created agent by id for _build_agent_info."""
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=m.group(1),
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -440,7 +352,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
     router.add("GET", r"/v1/agents$", on_agents_list)
     router.add("GET", r"/v1/agents/([^/]+)$", on_agents_retrieve_2)
 
-    anthropic_client = _build_anthropic(router)
+    anthropic_client = build_fake_anthropic(router.dispatch)
 
     settings = MagicMock()  # type: ignore[var-annotated]
     settings.mcp.public_url = None  # no daimon-mcp merge needed in sync tests
@@ -510,26 +422,17 @@ async def _run_create_with_mocked_sync(
     """
     cli = await make_cli_principal(db_session, os_user=os_user)
     await db_session.commit()
-    fernet = _make_fernet()
+    fernet = make_fernet()
     account_id = cli.account_id
     tenant_id = cli.tenant_id
 
     def on_agents_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=agent_id,
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -547,19 +450,10 @@ async def _run_create_with_mocked_sync(
     def on_agents_retrieve(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id=m.group(1),
-                type="agent",
-                version=1,
                 name=agent_name,
-                model={"id": "claude-opus-4-5"},
-                description=None,
-                system=None,
-                tools=[],
-                mcp_servers=[],
-                skills=[],
-                created_at="2026-04-24T00:00:00Z",
-                updated_at="2026-04-24T00:00:00Z",
+                model="claude-opus-4-5",
                 metadata={
                     "daimon_tenant": str(tenant_id),
                     "daimon_name": agent_name,
@@ -573,7 +467,7 @@ async def _run_create_with_mocked_sync(
     router.add("GET", r"/v1/agents$", on_agents_list)
     router.add("GET", r"/v1/agents/([^/]+)$", on_agents_retrieve)
 
-    anthropic_client = _build_anthropic(router)
+    anthropic_client = build_fake_anthropic(router.dispatch)
 
     settings = MagicMock()  # type: ignore[var-annotated]
     settings.mcp.public_url = None

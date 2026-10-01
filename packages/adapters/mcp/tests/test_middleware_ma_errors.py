@@ -11,8 +11,6 @@ import pytest
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from fastmcp.exceptions import ToolError
 
-pytestmark = pytest.mark.asyncio
-
 
 async def test_on_call_tool_converts_api_status_error_to_tool_error() -> None:
     mw = MaErrorMiddleware()

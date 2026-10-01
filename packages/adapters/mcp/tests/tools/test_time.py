@@ -6,8 +6,6 @@ import pytest
 from daimon.adapters.mcp.tools.time import _convert_impl, _now_impl
 from fastmcp.exceptions import ToolError
 
-pytestmark = pytest.mark.asyncio
-
 
 async def test_now_impl_returns_iso_with_offset_for_iana_tz() -> None:
     out = await _now_impl("America/Los_Angeles")

@@ -26,8 +26,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-pytestmark = pytest.mark.asyncio
-
 
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
     return AsyncAnthropic(
@@ -47,8 +45,10 @@ def _vault_obj(vault_id: str, display_name: str, created_at: str) -> dict[str, A
     }
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     db_session_factory: async_sessionmaker[AsyncSession],
+    legacy: bool,
 ) -> None:
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -78,6 +78,7 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {} if legacy else {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_old",
                             "auth": {
@@ -87,6 +88,25 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
                         }
                     ],
                     "has_more": False,
+                },
+            )
+        if req.method == "POST" and req.url.path == "/v1/vaults/vlt_old/credentials/vcrd_existing":
+            body = json.loads(req.content)
+            claims = pyjwt.decode(body["auth"]["token"], b"a" * 32, algorithms=["HS256"])
+            assert claims["chat_agent_id"] == str(agent_id)
+            assert claims["sub"] == str(account_id)
+            assert "agent_id" not in claims and "internal" not in claims
+            assert body["metadata"] == {"daimon_chat_identity": str(agent_id)}
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_existing",
+                    "type": "credential",
+                    "vault_id": "vlt_old",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": "https://mcp.example.com/mcp",
+                    },
                 },
             )
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
@@ -104,7 +124,10 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
 
     assert vault_id == "vlt_old", "must pick oldest matching display_name"
     # Warm path verifies the credential URL matches; no rebind needed when it does.
-    assert calls == ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"], (
+    expected = ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"]
+    if legacy:
+        expected.append("POST /v1/vaults/vlt_old/credentials/vcrd_existing")
+    assert calls == expected, (
         "must list creds to verify URL match, but not create/delete when matching"
     )
 
@@ -200,10 +223,10 @@ def _cold_path_handler(
     return handler
 
 
-async def test_ensure_agent_mcp_vault_cold_path_mints_claimless_jwt(
+async def test_ensure_agent_mcp_vault_cold_path_mints_chat_identity_jwt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Cold-path credential carries no platform/guild_id wire claims (account-scoped only)."""
+    """Cold-path credentials identify the executing agent without platform wire claims."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
@@ -225,6 +248,8 @@ async def test_ensure_agent_mcp_vault_cold_path_mints_claimless_jwt(
     token = captured[0]["auth"]["token"]
     # Inspect-only: signature verification is the MCP verifier's job; here we assert claim shape.
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert claims["chat_agent_id"] == str(agent_id)
+    assert "agent_id" not in claims
     assert "platform" not in claims, "minted token must carry no platform wire claim"
     assert "guild_id" not in claims, "minted token must carry no guild_id wire claim"
 
@@ -368,6 +393,7 @@ async def test_ensure_agent_mcp_vault_warm_path_with_matching_url_skips_rebind(
                     "data": [
                         {
                             "id": "vcrd_ok",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -978,6 +1004,7 @@ async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1047,14 +1074,10 @@ async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_adm
     )
 
 
-async def test_minted_jwt_has_no_agent_claim(
+async def test_minted_jwt_has_chat_identity_without_restricted_agent_claim(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """SC-4: the daimon-mcp JWT minted into the vault carries no agent or agent_id claim.
-
-    The vault is per-agent (storage location), but the JWT content stays
-    account-scoped (account/platform/guild/is_admin). No agent claim is added.
-    """
+    """Chat execution identity must not select the external agent-chat surface."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
@@ -1076,13 +1099,14 @@ async def test_minted_jwt_has_no_agent_claim(
     token = captured[0]["auth"]["token"]
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])
 
+    assert claims["chat_agent_id"] == str(agent_id)
     assert "agent" not in claims, "daimon-mcp JWT must NOT carry an 'agent' claim (SC-4)"
     assert "agent_id" not in claims, "daimon-mcp JWT must NOT carry an 'agent_id' claim (SC-4)"
     # Verify the expected account-scoped claims are present.
     # The account UUID is carried as the JWT `sub` claim.
     assert "sub" in claims, "JWT must carry sub (account) claim"
     # platform and guild_id are NOT carried as wire claims —
-    # the JWT is account-scoped only (sub + iat).
+    # they are resolved live from the account.
     assert "platform" not in claims, "daimon-mcp JWT must NOT carry a platform wire claim (58.5)"
     assert "guild_id" not in claims, "daimon-mcp JWT must NOT carry a guild_id wire claim (58.5)"
 
@@ -1158,7 +1182,7 @@ async def test_ensure_agent_mcp_vault_concurrent_calls_create_exactly_one_vault(
                 "id": "vcrd_race",
                 "type": "vault_credential",
                 "vault_id": "vlt_race",
-                "metadata": {},
+                "metadata": body["metadata"],
                 "created_at": "2026-04-24T00:00:00Z",
                 "updated_at": "2026-04-24T00:00:00Z",
                 "auth": body["auth"],
@@ -1201,3 +1225,143 @@ async def test_ensure_agent_mcp_vault_concurrent_calls_create_exactly_one_vault(
     assert vault_id_a == vault_id_b == "vlt_race", (
         "both concurrent callers must resolve to the same (single) created vault"
     )
+
+
+async def test_add_external_mcp_credential_replaces_the_callers_oauth_grant_at_that_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pasted token for a server the person had signed in to replaces the
+    grant: one credential per URL, and the create would otherwise be a 409."""
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    target_url = "https://mcp.notion.com/mcp"
+
+    deleted_ids: list[str] = []
+    created_bodies: list[dict[str, Any]] = []
+    handler = _stateful_vault_handler(
+        initial_vaults=[_vault_obj("vlt_acct", display, "2026-04-01T00:00:00Z")],
+        per_vault_creds={
+            "vlt_acct": [
+                {
+                    "id": "vcrd_grant",
+                    "type": "credential",
+                    "vault_id": "vlt_acct",
+                    "auth": {"type": "mcp_oauth", "mcp_server_url": target_url + "/"},
+                },
+                {
+                    "id": "vcrd_other",
+                    "type": "credential",
+                    "vault_id": "vlt_acct",
+                    "auth": {"type": "mcp_oauth", "mcp_server_url": "https://mcp.linear.app/mcp"},
+                },
+            ]
+        },
+        created_bodies=created_bodies,
+        deleted_ids=deleted_ids,
+    )
+
+    await add_external_mcp_credential(
+        _make_client(httpx.MockTransport(handler)),
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=b"x" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        mcp_server_url=target_url,
+        token="fresh_token",
+        session_factory=db_session_factory,
+    )
+
+    assert deleted_ids == ["vcrd_grant"], (
+        f"only the grant at the target URL goes; got {deleted_ids}"
+    )
+    assert len(created_bodies) == 1 and created_bodies[0]["auth"]["token"] == "fresh_token", (
+        "exactly one fresh static credential is written in the grant's place"
+    )
+
+
+async def test_ensure_agent_mcp_vault_warm_path_counts_a_grant_at_public_url_as_present(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A vault holds one credential per URL: a grant sitting at `public_url` means
+    the slot is taken, and creating the JWT next to it would 409 on every session
+    create with nothing to heal it."""
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    public_url = "https://mcp.example.com/mcp"
+    writes: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [_vault_obj("vlt_warm", display, "2026-04-01T00:00:00Z")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_warm/credentials":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vcrd_grant",
+                            "type": "credential",
+                            "vault_id": "vlt_warm",
+                            "auth": {"type": "mcp_oauth", "mcp_server_url": public_url + "/"},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        writes.append(f"{req.method} {req.url.path}")
+        return httpx.Response(409, json={"type": "error", "error": {"message": "exists"}})
+
+    vault_id = await ensure_agent_mcp_vault(
+        _make_client(httpx.MockTransport(handler)),
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=b"a" * 32,
+        public_url=public_url,
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        session_factory=db_session_factory,
+    )
+
+    assert vault_id == "vlt_warm"
+    assert writes == [], f"a taken slot is not written to; attempted {writes}"
+
+
+async def test_add_github_copilot_credential_leaves_the_callers_grant_in_place() -> None:
+    """The person signed in to GitHub's MCP themselves: their grant outranks the
+    agent's PAT and the slot is taken, so nothing is deleted or created."""
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
+
+    writes: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vcrd_grant",
+                            "type": "credential",
+                            "vault_id": "vlt_1",
+                            "auth": {"type": "mcp_oauth", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        writes.append(f"{req.method} {req.url.path}")
+        return httpx.Response(409, json={"type": "error", "error": {"message": "exists"}})
+
+    await add_github_copilot_credential(
+        _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", token="ghp_x"
+    )
+
+    assert writes == [], f"the grant is neither replaced nor duplicated; attempted {writes}"

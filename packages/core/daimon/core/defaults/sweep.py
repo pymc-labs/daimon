@@ -15,6 +15,7 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
@@ -35,8 +36,8 @@ _log = structlog.get_logger(__name__)
 def _is_defaults_managed(metadata: dict[str, str]) -> bool:
     """True when the resource was stamped by a defaults `reconcile_*` write.
 
-    User forks (created via `daimon agents fork`, Discord `/agent-setup`, etc.)
-    leave this marker unset so the sweep ignores them. Without this filter the
+    User forks (created via `daimon agents fork`, the chat `fork_agent` tool,
+    etc.) leave this marker unset so the sweep ignores them. Without this filter the
     sweep would archive every user-created resource on the next `defaults
     apply` (which runs on every scheduler boot).
     """
@@ -107,6 +108,7 @@ async def sweep_removed_skills(
     present_names: set[str],
     tenant_id: uuid.UUID,
     dry_run: bool,
+    skills_view: list[SkillListResponse] | None = None,
 ) -> list[ResourceOutcome]:
     """Delete seeded skills that belong to this tenant and are no longer in the defaults tree.
 
@@ -130,7 +132,7 @@ async def sweep_removed_skills(
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts
     it to ResourceOutcome(FAILED, "<sweep>") with zero deletions.
     """
-    all_skills = await list_skills_strict(client)
+    all_skills = skills_view if skills_view is not None else await list_skills_strict(client)
     # Skills carry no daimon_managed marker (MA skills have no metadata field),
     # so — unlike the agent/env sweeps — we cannot tell a defaults-created skill
     # from a user-synced one. Spare any skill an agent still pins so the sweep

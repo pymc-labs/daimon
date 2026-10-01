@@ -12,14 +12,16 @@ import re
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import httpx
-from daimon.adapters.discord.agent_setup.panel import AgentSetupView
+from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,7 +52,12 @@ def _make_interaction(runtime: DiscordRuntime, *, guild_id: int, channel_id: int
     interaction.client.user = None
     interaction.guild_id = guild_id
     interaction.channel_id = channel_id
-    interaction.channel = None
+    # The panel resolves its own channel off the interaction so a thread reports
+    # its parent; a not-ready tenant short-circuits before that ever runs.
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = channel_id
+    channel.name = "general"
+    interaction.channel = channel
     interaction.guild = None
     interaction.user = MagicMock()  # not spec=discord.Member -> is_guild_admin() is False
     interaction.user.id = 999
@@ -179,7 +186,33 @@ async def test_ready_status_still_renders_panel(
     interaction.edit_original_response.assert_awaited_once()
     kwargs = interaction.edit_original_response.call_args.kwargs
     view = kwargs.get("view")
-    assert isinstance(view, AgentSetupView), (
-        "a ready tenant must still render AgentSetupView, unchanged from before"
-    )
+    assert isinstance(view, RosterView), "a ready tenant renders the read-only roster screen"
     assert "/v1/agents" in calls, "a ready tenant's roster must be fetched from MA"
+    assert kwargs["allowed_mentions"].users is False, (
+        "the roster renders creator mentions; rendering it must not ping anybody"
+    )
+
+
+async def test_ready_status_names_the_channel_and_offers_setup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The panel opens on the question, with the one primary action available."""
+    guild_id = 700000005
+    await _provision(db_session_factory, guild_id=guild_id, status="ready")
+    router, _calls = _counting_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _make_runtime(db_session_factory, anthropic_client=client)
+    interaction = _make_interaction(runtime, guild_id=guild_id)
+    cog = AgentSetupCog(MagicMock())
+
+    await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
+
+    view = interaction.edit_original_response.call_args.kwargs["view"]
+    text = "\n".join(
+        child.content for child in view.walk_children() if isinstance(child, discord.ui.TextDisplay)
+    )
+    labels = [child.label for child in view.walk_children() if isinstance(child, discord.ui.Button)]
+    assert "Agents in #general" in text, "the header names the channel the panel is about"
+    assert EMPTY_ROSTER_COPY in text, "a seeded-but-empty roster says what to do next"
+    assert setup_target_label(None) in labels, "setup honestly reports that no target is selected"
+    assert "Done" in labels, "and the panel can always be dismissed"

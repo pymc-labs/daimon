@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import json
 import re
 import uuid
-from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -37,27 +33,41 @@ from daimon.adapters.mcp.tools.agents import (
     _update_agent_impl,
     register_agent_tools,
 )
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
+from daimon.core.agent_mcp_credentials import (
+    resolve_agent_mcp_credentials,
+    save_agent_mcp_credential,
+)
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
+from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_agent
+from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
-from factories import make_ma_agent
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    build_no_retry_anthropic,
+    json_body,
+    list_response,
+)
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.types import ASGIApp, Message
-
-pytestmark = pytest.mark.asyncio
-
+from starlette.types import ASGIApp
 
 # Repeated nested config required by the SDK response models. Inlined in every
 # test that needs it (only the permission_policy block is shared — every other
@@ -93,95 +103,10 @@ def _runtime(
 
 
 # ---------------------------------------------------------------------------
-# Full-HTTP-pipeline harness (copied from test_agent_chat.py:964-1086) — FastMCP
+# Full-HTTP-pipeline app — FastMCP
 # output-schema validation only runs through mcp.http_app() + a real JSON-RPC
 # tools/call; unit-calling the _impl functions bypasses it entirely.
 # ---------------------------------------------------------------------------
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app: ASGIApp) -> AsyncIterator[None]:
-    send_q: asyncio.Queue[Message] = asyncio.Queue()
-    recv_q: asyncio.Queue[Message] = asyncio.Queue()
-
-    async def receive() -> Message:
-        return await recv_q.get()
-
-    async def send(message: Message) -> None:
-        await send_q.put(message)
-
-    async def run() -> None:
-        await app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-
-    task = asyncio.create_task(run())
-    await recv_q.put({"type": "lifespan.startup"})
-    msg = await send_q.get()
-    assert msg["type"] == "lifespan.startup.complete", msg
-    try:
-        yield
-    finally:
-        await recv_q.put({"type": "lifespan.shutdown"})
-        msg = await send_q.get()
-        assert msg["type"] == "lifespan.shutdown.complete", msg
-        await task
-
-
-def _parse_jsonrpc(resp: httpx.Response) -> dict[str, object]:
-    ct = resp.headers.get("content-type", "")
-    if "text/event-stream" in ct:
-        for line in resp.text.splitlines():
-            if line.startswith("data: "):
-                return json.loads(line[6:])  # type: ignore[return-value]
-        raise AssertionError(f"No data line in SSE: {resp.text!r}")
-    return resp.json()  # type: ignore[return-value]
-
-
-async def _call_tool_via_http(
-    app: ASGIApp, token: str, name: str, arguments: dict[str, object]
-) -> dict[str, object]:
-    """Initialize an MCP HTTP session and call tools/call; return the JSON-RPC result.
-
-    Goes through the full server pipeline (auth -> IdentityMiddleware -> tool ->
-    FastMCP OUTPUT VALIDATION) so it exercises the same output-schema check that
-    rejects overly-strict schemas in prod — unlike _impl-level tests, which bypass it.
-    """
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-    transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
-    async with _lifespan(app), httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        init_resp = await c.post(
-            "/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0"},
-                },
-            },
-            headers=headers,
-        )
-        assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
-        session_id = init_resp.headers.get("mcp-session-id")
-        if session_id:
-            headers["Mcp-Session-Id"] = session_id
-        call_resp = await c.post(
-            "/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            },
-            headers=headers,
-        )
-        assert call_resp.status_code == 200, f"tools/call failed: {call_resp.text}"
-        return _parse_jsonrpc(call_resp)
 
 
 def _agents_mcp_app(client: AsyncAnthropic, token: str, claims: dict[str, str]) -> ASGIApp:
@@ -216,7 +141,7 @@ def _make_agent_payload_with_skill_type(
     SDK's discriminated skills union has no constructor for a novel skill
     type, so validated construction is impossible for that single field
     (mirrors test_sessions.py's ``_make_session_payload(status=...)``)."""
-    payload = make_ma_agent(
+    payload = ma_agent(
         id=agent_id,
         name=name,
         metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
@@ -259,7 +184,7 @@ async def test_get_agent_admits_novel_skill_type_through_fastmcp() -> None:
     client = build_fake_anthropic(router.dispatch)
     app = _agents_mcp_app(client, token, claims)
 
-    result = await _call_tool_via_http(app, token, "get_agent", {"name": "demo"})
+    result = await call_mcp_tool(app, token=token, name="get_agent", arguments={"name": "demo"})
 
     payload = result.get("result", result)
     assert isinstance(payload, dict), f"unexpected tools/call shape: {result!r}"
@@ -283,7 +208,7 @@ async def test_list_agents_impl_returns_tenant_agents() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="demo",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
                 ).model_dump(mode="json")
@@ -308,7 +233,7 @@ async def test_get_agent_impl_returns_agent_info() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="a",
                     metadata={
                         "daimon_tenant": str(tenant_id),
@@ -339,7 +264,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="a",
                     mcp_servers=[
                         {"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}
@@ -398,7 +323,7 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="demo",
                     mcp_servers=[
                         {"name": "docs", "type": "url", "url": "https://docs.example/mcp"}
@@ -452,7 +377,140 @@ async def test_get_agent_impl_raises_tool_error_not_found() -> None:
         await _get_agent_impl(_runtime(client), auth, "nope")
 
 
-async def test_create_agent_impl_calls_ma_create() -> None:
+def _get_one(tenant_id: uuid.UUID, metadata: dict[str, str], system: str | None) -> AsyncAnthropic:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    name="a",
+                    system=system,
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a", **metadata},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent() -> None:
+    """Setup flows must save the prompt before replacing it; get_agent was the
+    only read path and it never returned ``system``."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system == "You are A.", "admin must read the prompt it could replace"
+
+
+async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_prompt() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, None)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system == "", "an empty prompt must be distinguishable from a withheld one"
+
+
+async def test_get_agent_impl_withholds_system_prompt_from_non_admin() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "secret prompt")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system is None, "a non-admin caller must not read the system prompt"
+    assert result.name == "a", "the rest of get_agent stays open to non-admins"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"daimon_managed": "true", "daimon_account": "x"}, id="defaults-managed"),
+        pytest.param({}, id="unstamped-system-agent"),
+    ],
+)
+async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_from_admin(
+    metadata: dict[str, str],
+) -> None:
+    tenant_id = uuid.uuid4()
+    client = _get_one(tenant_id, metadata, "daimon prompt")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system is None, (
+        "Daimon/defaults-managed prompts follow update_agent's no-edit rule"
+    )
+
+
+@pytest.mark.parametrize(
+    "expected_ma_agent_id",
+    [pytest.param(None, id="by-name"), pytest.param("ag_tenant_b", id="by-pinned-ma-id")],
+)
+async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
+    expected_ma_agent_id: str | None,
+) -> None:
+    """A tenant-A admin naming tenant B's agent, or pinning its MA id, gets
+    neither the agent nor its prompt -- the org-wide MA list holds both."""
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_tenant_b",
+                    name="shared-name",
+                    system="tenant B prompt",
+                    metadata={
+                        "daimon_tenant": str(tenant_b),
+                        "daimon_name": "shared-name",
+                        "daimon_account": str(uuid.uuid4()),
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+
+    with pytest.raises(ToolError) as excinfo:
+        await _get_agent_impl(
+            _runtime(client), auth, "shared-name", expected_ma_agent_id=expected_ma_agent_id
+        )
+
+    assert "tenant B prompt" not in str(excinfo.value), "the error must not carry the prompt"
+
+
+async def test_list_agents_impl_never_returns_system_prompt() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _list_agents_impl(_runtime(client), auth, page=None)
+
+    assert [a.system for a in result] == [None], (
+        "list_agents is a summary; the prompt is get_agent-only"
+    )
+
+
+async def test_create_agent_impl_calls_ma_create(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -460,7 +518,7 @@ async def test_create_agent_impl_calls_ma_create() -> None:
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_new", name="demo").model_dump(mode="json"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -470,14 +528,16 @@ async def test_create_agent_impl_calls_ma_create() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
+            200, json=ma_agent(id="ag_new", name="demo").model_dump(mode="json")
         ),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _create_agent_impl(_runtime(client), auth, spec)
+    result = await _create_agent_impl(
+        _runtime(client, session_factory=db_session_factory), auth, spec
+    )
     assert result.name == "demo", "should return the created agent name"
     assert result.id == "ag_new", "should store the MA-assigned id"
     assert len(created) == 1, "should call MA create exactly once"
@@ -489,7 +549,9 @@ async def test_create_agent_impl_calls_ma_create() -> None:
     )
 
 
-async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_toolset() -> None:
+async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Regression: passing mcp_servers forces a matching mcp_toolset into tools,
     which used to skip the base-toolset default entirely — the created agent then
     400s at session create once skills are attached (skills require read)."""
@@ -500,7 +562,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -509,9 +571,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     client = build_fake_anthropic(router.dispatch)
 
@@ -524,7 +584,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
         }
     )
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _create_agent_impl(_runtime(client), auth, spec)
+    await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
     tool_types = [t.get("type") for t in created[0].get("tools", [])]
@@ -560,7 +620,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a", description="new desc")
+        body = ma_agent(id="ag_a", name="a", description="new desc")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -569,7 +629,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -586,7 +646,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 metadata={
@@ -617,6 +677,182 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
     assert "model" not in captured, "should omit None model field"
     assert "system" not in captured, "should omit None system field"
     # version is sent by the SDK automatically (callers don't provide it)
+    assert row.applies is None, "a description-only update touches neither model nor system"
+
+
+async def test_update_agent_impl_returns_applies_for_model_change() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    metadata = {
+        "daimon_tenant": str(tenant_id),
+        "daimon_name": "a",
+        "daimon_account": str(account_id),
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200,
+            json=ma_agent(id="ag_a", name="a", model="claude-opus-5", metadata=metadata).model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    row = await _update_agent_impl(
+        _runtime(client),
+        auth,
+        name="a",
+        model="claude-opus-5",
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+    )
+    expected = render_change_confirmation(
+        ConfigurationChange(target_name="a", kind="model", availability="next_message")
+    )
+    assert row.applies == expected, (
+        "a model change must return the next-message confirmation text, not an 'immediately' claim"
+    )
+
+
+async def test_update_agent_impl_returns_applies_for_system_change() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    metadata = {
+        "daimon_tenant": str(tenant_id),
+        "daimon_name": "a",
+        "daimon_account": str(account_id),
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200,
+            json=ma_agent(id="ag_a", name="a", system="new prompt", metadata=metadata).model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    row = await _update_agent_impl(
+        _runtime(client),
+        auth,
+        name="a",
+        model=None,
+        description=None,
+        system="new prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+    )
+    expected = render_change_confirmation(
+        ConfigurationChange(target_name="a", kind="instructions", availability="next_message")
+    )
+    assert row.applies == expected, (
+        "a system-prompt change must return the instructions confirmation"
+    )
+
+
+async def test_update_agent_impl_returns_applies_for_model_then_instructions_when_both_change() -> (
+    None
+):
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    metadata = {
+        "daimon_tenant": str(tenant_id),
+        "daimon_name": "a",
+        "daimon_account": str(account_id),
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(
+            200,
+            json=ma_agent(
+                id="ag_a",
+                name="a",
+                model="claude-opus-5",
+                system="new prompt",
+                metadata=metadata,
+            ).model_dump(mode="json"),
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    row = await _update_agent_impl(
+        _runtime(client),
+        auth,
+        name="a",
+        model="claude-opus-5",
+        description=None,
+        system="new prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+    )
+    model_line = render_change_confirmation(
+        ConfigurationChange(target_name="a", kind="model", availability="next_message")
+    )
+    instructions_line = render_change_confirmation(
+        ConfigurationChange(target_name="a", kind="instructions", availability="next_message")
+    )
+    assert row.applies == f"{model_line}\n{instructions_line}", (
+        "when both model and system change, applies must render model then instructions, "
+        "joined by a newline"
+    )
 
 
 async def test_update_agent_impl_rejects_empty_patch() -> None:
@@ -629,7 +865,7 @@ async def test_update_agent_impl_rejects_empty_patch() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -669,7 +905,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear() -> None:
         captured.update(json_body(req))
         return httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", tools=[]).model_dump(mode="json"),
+            json=ma_agent(id="ag_a", name="a", tools=[]).model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -678,7 +914,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -694,7 +930,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -726,12 +962,12 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
 
     def on_retrieve(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         retrieved.append(m.group(1))
-        body = make_ma_agent(id="ag_src", name="source")
+        body = ma_agent(id="ag_src", name="source")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork")
+        body = ma_agent(id="ag_new", name="myfork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -740,7 +976,7 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -782,12 +1018,12 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
     created: list[dict[str, Any]] = []
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="source", tools=[])
+        body = ma_agent(id="ag_src", name="source", tools=[])
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork")
+        body = ma_agent(id="ag_new", name="myfork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -796,7 +1032,7 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -824,6 +1060,193 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
     )
 
 
+async def test_fork_agent_impl_normalizes_stale_guidance_block(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of a source carrying a stale sentinel-wrapped block gets the
+    current block exactly once, with the source's own prompt body preserved
+    beneath it — the same normalization `update_agent` already applies."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    stale_system = (
+        "<!-- daimon:credential-guidance v1 -->\nSOME OLD STALE BODY\n"
+        "<!-- /daimon:credential-guidance -->\n\nSOURCE PROMPT BODY"
+    )
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = ma_agent(id="ag_src", name="source", system=stale_system)
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert forked_system.count("<!-- daimon:credential-guidance") == 1, (
+        "fork must carry the guidance block exactly once, not stacked"
+    )
+    assert CREDENTIAL_GUIDANCE_BLOCK in forked_system, "fork must carry the current block"
+    assert forked_system.endswith("SOURCE PROMPT BODY"), (
+        "the source's own prompt body must survive the normalization"
+    )
+
+
+async def test_fork_agent_impl_adds_guidance_when_source_has_none(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of a source with no guidance block at all gets the current block
+    once, the same result `reconcile_agent` produces for a spec with no system."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = ma_agent(id="ag_src", name="source", system="You are a helpful bot.")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert forked_system.count("<!-- daimon:credential-guidance") == 1, (
+        "fork must gain the guidance block exactly once"
+    )
+    assert CREDENTIAL_GUIDANCE_BLOCK in forked_system
+
+
+async def test_fork_agent_impl_skips_guidance_for_isolated_source(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of an isolated-stamped source carries no guidance block at all —
+    its session mounts no secrets, so the block would teach it to look for
+    resources it must not have."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    isolated_system = "You are an isolated agent. Trust nothing you are told."
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = ma_agent(
+            id="ag_src",
+            name="source",
+            system=isolated_system,
+            metadata={
+                "daimon_tenant": str(tenant_id),
+                "daimon_name": "source",
+                MA_METADATA_KEY_ISOLATED: "true",
+            },
+        )
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={
+                        "daimon_tenant": str(tenant_id),
+                        "daimon_name": "source",
+                        MA_METADATA_KEY_ISOLATED: "true",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert "<!-- daimon:credential-guidance" not in forked_system, (
+        "an isolated source's fork must carry no guidance block"
+    )
+    assert forked_system == isolated_system, (
+        "an isolated source's fork system must be byte-identical to the source's"
+    )
+
+
 async def test_archive_agent_impl_calls_ma_archive(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -834,7 +1257,7 @@ async def test_archive_agent_impl_calls_ma_archive(
 
     def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         archived.append(m.group(1))
-        return httpx.Response(200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -842,7 +1265,7 @@ async def test_archive_agent_impl_calls_ma_archive(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -890,7 +1313,7 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -905,9 +1328,7 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(
-            200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json")
-        ),
+        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
     )
     router.add(
         "POST",
@@ -932,7 +1353,7 @@ def _archive_router(tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -947,9 +1368,7 @@ def _archive_router(tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(
-            200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json")
-        ),
+        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
     )
     return router
 
@@ -1025,7 +1444,9 @@ async def test_archive_agent_clears_scope_rows_even_when_the_memory_store_archiv
         )
 
 
-async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:
+async def test_create_agent_impl_stamps_daimon_account_when_called(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     guild_account = derive_guild_account_uuid(tenant_id)
@@ -1037,7 +1458,7 @@ async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -1046,15 +1467,13 @@ async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _create_agent_impl(_runtime(client), auth, spec)
+    await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
     assert len(created) == 1, "should call MA create exactly once"
     assert created[0].get("metadata", {}).get("daimon_account") == str(guild_account), (
         "SC-2: chat-created agents must stamp the guild account, not the personal account"
@@ -1064,7 +1483,9 @@ async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:
     )
 
 
-async def test_create_agent_merges_daimon_mcp_when_public_url_set() -> None:
+async def test_create_agent_merges_daimon_mcp_when_public_url_set(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#139: create_agent via reconcile_agent merges daimon-mcp server + mcp_toolset
     into the create payload when public_url is set."""
     tenant_id = uuid.uuid4()
@@ -1075,7 +1496,7 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set() -> None:
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -1083,15 +1504,17 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set() -> None:
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _create_agent_impl(_runtime(client, public_url=public_url), auth, spec)
+    await _create_agent_impl(
+        _runtime(client, public_url=public_url, session_factory=db_session_factory),
+        auth,
+        spec,
+    )
 
     assert len(created) == 1, "should call MA create exactly once"
     mcp_server_names = [s.get("name") for s in created[0].get("mcp_servers", [])]
@@ -1112,7 +1535,9 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set() -> None:
     )
 
 
-async def test_create_agent_stamps_spec_hash_and_managed_false() -> None:
+async def test_create_agent_stamps_spec_hash_and_managed_false(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#139: create_agent via reconcile_agent stamps daimon_spec_hash and guild account,
     and does NOT stamp daimon_managed (managed=False contract)."""
     tenant_id = uuid.uuid4()
@@ -1123,7 +1548,7 @@ async def test_create_agent_stamps_spec_hash_and_managed_false() -> None:
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -1131,15 +1556,13 @@ async def test_create_agent_stamps_spec_hash_and_managed_false() -> None:
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _create_agent_impl(_runtime(client), auth, spec)
+    await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
     metadata = created[0].get("metadata", {})
@@ -1167,12 +1590,12 @@ async def test_fork_agent_impl_stamps_daimon_account_on_clone(
     created: list[dict[str, Any]] = []
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="source")
+        body = ma_agent(id="ag_src", name="source")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork")
+        body = ma_agent(id="ag_new", name="myfork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1181,7 +1604,7 @@ async def test_fork_agent_impl_stamps_daimon_account_on_clone(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -1226,12 +1649,12 @@ async def test_fork_agent_impl_copies_source_skills(
     created: list[dict[str, Any]] = []
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="source", skills=source_skills)
+        body = ma_agent(id="ag_src", name="source", skills=source_skills)
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork", skills=source_skills)
+        body = ma_agent(id="ag_new", name="myfork", skills=source_skills)
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1240,7 +1663,7 @@ async def test_fork_agent_impl_copies_source_skills(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -1284,12 +1707,12 @@ async def test_fork_agent_merges_daimon_mcp_when_public_url_set(
     created: list[dict[str, Any]] = []
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="source", tools=[], mcp_servers=[])
+        body = ma_agent(id="ag_src", name="source", tools=[], mcp_servers=[])
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork")
+        body = ma_agent(id="ag_new", name="myfork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1298,7 +1721,7 @@ async def test_fork_agent_merges_daimon_mcp_when_public_url_set(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -1347,12 +1770,12 @@ async def test_fork_agent_skips_mcp_merge_when_public_url_none(
     created: list[dict[str, Any]] = []
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="source", tools=[], mcp_servers=[])
+        body = ma_agent(id="ag_src", name="source", tools=[], mcp_servers=[])
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        body = make_ma_agent(id="ag_new", name="myfork")
+        body = ma_agent(id="ag_new", name="myfork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1361,7 +1784,7 @@ async def test_fork_agent_skips_mcp_merge_when_public_url_none(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="source",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
@@ -1409,7 +1832,7 @@ def _fork_agent_router(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id=source_id,
                     name=source_name,
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": source_name},
@@ -1422,25 +1845,25 @@ def _fork_agent_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id=source_id, name=source_name).model_dump(mode="json"),
+            json=ma_agent(id=source_id, name=source_name).model_dump(mode="json"),
         ),
     )
     router.add(
         "POST",
         r"/v1/agents",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id=fork_id, name=fork_name).model_dump(mode="json")
+            200, json=ma_agent(id=fork_id, name=fork_name).model_dump(mode="json")
         ),
     )
     return router
 
 
-async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
+async def test_fork_agent_impl_copies_no_credential_binding_or_mcp_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """After _fork_agent_impl, get_pat(agent_id=fork) resolves the source's token,
-    re-keyed under the fork's OWN principal."""
+    """A fork starts credential-less: no GitHub PAT, no repo binding or proof and no
+    agent-wide MCP token, so copying an agent never hands out another's access."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     await make_tenant(db_session, platform="discord", workspace_id=str(tenant_id), id=tenant_id)
@@ -1471,6 +1894,14 @@ async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
             ma_secret_ref=f"inline-pat:{source_agent_uuid}",
             proof=None,
         )
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant_id,
+        agent_id=source_agent_uuid,
+        mcp_server_url="https://crm.example.com/mcp",
+        plaintext_token="tok_client_a",
+    )
 
     router = _fork_agent_router(
         tenant_id=tenant_id,
@@ -1495,93 +1926,18 @@ async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
         sessionmaker=db_session_factory,
         fernet=fernet,
     )
-    assert fork_pat == plaintext, "fork's credential must resolve the source's token"
-
-
-async def test_fork_agent_impl_raises_tool_error_on_undecryptable_source_credential(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An undecryptable inline-pat source binding must fail loud as a
-    ToolError (the core DaimonError converted at the MCP call site)."""
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    await make_tenant(db_session, platform="discord", workspace_id=str(tenant_id), id=tenant_id)
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_nocred")
-
-    # Binding exists (inline-pat:) but no github_credentials row backs it.
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
+    assert fork_pat is None, "the fork must not hold the source's GitHub token"
+    async with db_session_factory() as s:
+        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
+            "the fork must not inherit the source's repo binding or its proof"
         )
-
-    router = _fork_agent_router(
+    forked_tokens = await resolve_agent_mcp_credentials(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
         tenant_id=tenant_id,
-        source_id="ag_src_nocred",
-        source_name="source",
-        fork_id="ag_fork_nocred",
-        fork_name="myfork2",
+        agent_id=fork_agent_uuid,
     )
-    client = build_fake_anthropic(router.dispatch)
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-
-    with pytest.raises(ToolError, match="github git-proxy"):
-        await _fork_agent_impl(
-            _runtime(client, session_factory=db_session_factory, fernet=fernet),
-            auth,
-            source_name="source",
-            new_name="myfork2",
-        )
-
-
-async def test_fork_agent_impl_raises_tool_error_when_fernet_none() -> None:
-    """McpRuntime.fernet is None (no crypto keys configured) must raise
-    a clean ToolError before any partial write, not crash with an AttributeError."""
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-
-    def on_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        raise AssertionError("fork must not POST create before the fernet-None guard fires")
-
-    router = MARouter()
-    router.add(
-        "GET",
-        r"/v1/agents",
-        lambda _req, _m: list_response(
-            [
-                make_ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
-        ),
-    )
-    router.add(
-        "GET",
-        r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_src", name="source").model_dump(mode="json")
-        ),
-    )
-    router.add("POST", r"/v1/agents", on_create)
-    client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-
-    with pytest.raises(ToolError, match="no crypto keys configured"):
-        await _fork_agent_impl(
-            _runtime(client, fernet=None),
-            auth,
-            source_name="source",
-            new_name="myfork3",
-        )
+    assert forked_tokens == (), "the fork must not hold the source's MCP tokens"
 
 
 async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
@@ -1592,7 +1948,7 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a")
+        body = ma_agent(id="ag_a", name="a")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1601,7 +1957,7 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1617,7 +1973,7 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -1649,7 +2005,7 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a", description="new")
+        body = ma_agent(id="ag_a", name="a", description="new")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1658,7 +2014,7 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1674,7 +2030,7 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -1703,7 +2059,7 @@ async def test_update_agent_impl_accepts_skills_only_patch() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a")
+        body = ma_agent(id="ag_a", name="a")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1712,7 +2068,7 @@ async def test_update_agent_impl_accepts_skills_only_patch() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1728,7 +2084,7 @@ async def test_update_agent_impl_accepts_skills_only_patch() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -1759,7 +2115,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a")
+        body = ma_agent(id="ag_a", name="a")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1768,7 +2124,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1801,7 +2157,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -1834,7 +2190,7 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         nonlocal update_called
         update_called = True
-        body = make_ma_agent(id="ag_a", name="a")
+        body = ma_agent(id="ag_a", name="a")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1843,7 +2199,7 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1859,7 +2215,7 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -1881,7 +2237,9 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
     assert not update_called, "rejected skill dicts must never reach the MA update call"
 
 
-async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() -> None:
+async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -1889,7 +2247,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() ->
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        body = make_ma_agent(id="ag_a", name="a")
+        body = ma_agent(id="ag_a", name="a")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -1898,7 +2256,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() ->
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -1918,7 +2276,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() ->
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
@@ -1930,7 +2288,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() ->
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="docs",
@@ -1952,7 +2310,7 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -1960,7 +2318,7 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -1990,7 +2348,9 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
     assert result.id == "ag_a", "should return the current agent state"
 
 
-async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() -> None:
+async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -1998,7 +2358,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2006,7 +2366,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -2024,7 +2384,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -2036,7 +2396,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2047,7 +2407,9 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
     ], "same-name different-URL must replace the slot (last-write-wins)"
 
 
-async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
+async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2055,7 +2417,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2063,7 +2425,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -2081,7 +2443,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -2089,7 +2451,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2106,29 +2468,23 @@ def _list_one(agent_kwargs: dict[str, Any]) -> tuple[MARouter, AsyncAnthropic]:
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response([make_ma_agent(**agent_kwargs).model_dump(mode="json")]),
+        lambda _req, _m: list_response([ma_agent(**agent_kwargs).model_dump(mode="json")]),
     )
     # update_agent_with_version_retry always retrieves before updating
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(**agent_kwargs).model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(**agent_kwargs).model_dump(mode="json")),
     )
     router.add(
         "POST",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(**agent_kwargs).model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(**agent_kwargs).model_dump(mode="json")),
     )
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(
-            200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json")
-        ),
+        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
     )
     return router, build_fake_anthropic(router.dispatch)
 
@@ -2199,7 +2555,7 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    with pytest.raises(ToolError, match="managed by defaults"):
+    with pytest.raises(ToolError, match="managed by defaults") as refused:
         await _update_agent_impl(
             _runtime(client),
             auth,
@@ -2211,6 +2567,11 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
             mcp_servers=None,
             skills=None,
         )
+
+    assert "daimon" in str(refused.value) and "fork_agent" in str(refused.value), (
+        "managed agent refusal must preserve target and name the fork path"
+    )
+    assert "/agent-setup" not in str(refused.value), "refusal must name a callable tool"
 
 
 async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent() -> None:
@@ -2284,7 +2645,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
         return httpx.Response(
-            200, json=make_ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
+            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
         )
 
     router = MARouter()
@@ -2293,7 +2654,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_other",
                     name="alices-agent",
                     metadata={
@@ -2309,7 +2670,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
+            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -2342,7 +2703,7 @@ async def test_update_agent_impl_allows_owned_agent() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2350,7 +2711,7 @@ async def test_update_agent_impl_allows_owned_agent() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2366,7 +2727,7 @@ async def test_update_agent_impl_allows_owned_agent() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -2410,7 +2771,9 @@ async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account() -
         )
 
 
-async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> None:
+async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin must be able to attach to any stamped tenant agent regardless of which account owns it."""
     tenant_id = uuid.uuid4()
     caller_account_id = uuid.uuid4()
@@ -2424,7 +2787,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> No
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
         return httpx.Response(
-            200, json=make_ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
+            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
         )
 
     router = MARouter()
@@ -2433,7 +2796,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> No
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_other",
                     name="alices-agent",
                     mcp_servers=[],
@@ -2451,7 +2814,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> No
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id="ag_other", name="alices-agent", mcp_servers=[]).model_dump(
+            json=ma_agent(id="ag_other", name="alices-agent", mcp_servers=[]).model_dump(
                 mode="json"
             ),
         ),
@@ -2463,7 +2826,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> No
         account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="alices-agent",
         server_name="ctx7",
@@ -2504,7 +2867,7 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
 
     def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         archived.append(m.group(1))
-        return httpx.Response(200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2512,7 +2875,7 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_other",
                     name="alices-agent",
                     metadata={
@@ -2558,7 +2921,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2566,7 +2929,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     skills=[
@@ -2587,7 +2950,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 skills=[
@@ -2618,7 +2981,9 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
     assert "skill-repo" in sent_skill_ids, "all existing MA skills must be preserved"
 
 
-async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -> None:
+async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2626,7 +2991,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2634,7 +2999,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -2654,7 +3019,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[
@@ -2668,7 +3033,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -2691,7 +3056,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2699,7 +3064,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     tools=[
@@ -2732,7 +3097,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -2789,7 +3154,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2797,7 +3162,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     skills=[{"type": "anthropic", "skill_id": "cli-auth", "version": "1"}],
@@ -2815,7 +3180,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 skills=[{"type": "anthropic", "skill_id": "cli-auth", "version": "1"}],
@@ -2845,7 +3210,9 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
     )
 
 
-async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> None:
+async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2853,7 +3220,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2861,7 +3228,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -2880,9 +3247,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", mcp_servers=[], tools=[]).model_dump(
-                mode="json"
-            ),
+            json=ma_agent(id="ag_a", name="a", mcp_servers=[], tools=[]).model_dump(mode="json"),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -2890,7 +3255,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2911,7 +3276,9 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
     )
 
 
-async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_toolset() -> None:
+async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2919,7 +3286,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -2927,7 +3294,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -2963,7 +3330,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[
@@ -2993,7 +3360,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -3010,7 +3377,9 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
     assert ("mcp_toolset", "ctx7") in tool_kinds, "new mcp_toolset for the attached server appended"
 
 
-async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_name_replace() -> None:
+async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_name_replace(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Same name, different URL → mcp_server entry replaced, mcp_toolset entry not duplicated."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3019,7 +3388,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3027,7 +3396,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -3053,7 +3422,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -3073,7 +3442,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -3161,7 +3530,7 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap()
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3177,7 +3546,7 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap()
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -3220,7 +3589,7 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_existing",
                     name="demo",
                     metadata={
@@ -3259,7 +3628,7 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_existing",
                     name="myfork",
                     metadata={
@@ -3307,7 +3676,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_personal",
                     name="demo",
                     metadata={
@@ -3349,7 +3718,7 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_personal",
                     name="myfork",
                     metadata={
@@ -3391,7 +3760,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3467,7 +3836,7 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3510,7 +3879,7 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="a",
                     skills=[{"type": "custom", "skill_id": "skill_auth", "version": "1"}],
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a"},
@@ -3554,23 +3923,6 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_no_retry_anthropic(router: MARouter) -> AsyncAnthropic:
-    """Build an AsyncAnthropic with max_retries=0 backed by the given MARouter.
-
-    The SDK auto-retries 409 by default (max_retries=2). Tests for
-    update_agent_with_version_retry must disable SDK retries so the helper's
-    own retry logic is exercised in isolation.
-    """
-    return AsyncAnthropic(
-        api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(router.dispatch),
-            base_url="https://api.anthropic.com",
-        ),
-        max_retries=0,
-    )
-
-
 def _conflict_response() -> httpx.Response:
     """Return an httpx.Response shaped like MA's 409 stale-version conflict."""
     return httpx.Response(
@@ -3599,7 +3951,7 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3607,7 +3959,7 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3623,7 +3975,7 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -3651,7 +4003,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3659,7 +4011,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3675,7 +4027,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json")
+            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -3704,7 +4056,9 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
         )
 
 
-async def test_attach_mcp_server_allows_unrelated_server() -> None:
+async def test_attach_mcp_server_allows_unrelated_server(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#142: a different server name and a different URL still attaches normally."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3714,7 +4068,7 @@ async def test_attach_mcp_server_allows_unrelated_server() -> None:
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3722,7 +4076,7 @@ async def test_attach_mcp_server_allows_unrelated_server() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -3740,7 +4094,7 @@ async def test_attach_mcp_server_allows_unrelated_server() -> None:
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -3749,7 +4103,7 @@ async def test_attach_mcp_server_allows_unrelated_server() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     # Completely different name + URL — should succeed
     result = await _attach_mcp_server_impl(
-        _runtime(client, public_url=public_url),
+        _runtime(client, session_factory=db_session_factory, public_url=public_url),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -3776,7 +4130,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3784,7 +4138,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     # No agent_toolset_20260401 — legacy toolless agent
@@ -3810,7 +4164,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -3855,7 +4209,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() ->
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=make_ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
 
     router = MARouter()
     router.add(
@@ -3863,7 +4217,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() ->
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     tools=[
@@ -3887,7 +4241,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() ->
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -3937,7 +4291,7 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
         retrieve_calls.append("retrieve")
         return httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 version=1,
@@ -3955,7 +4309,7 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
             return _conflict_response()
         return httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", description="updated", version=2).model_dump(
+            json=ma_agent(id="ag_a", name="a", description="updated", version=2).model_dump(
                 mode="json"
             ),
         )
@@ -3966,7 +4320,7 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3980,7 +4334,7 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _update_agent_impl(
@@ -4009,7 +4363,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 metadata={
@@ -4029,7 +4383,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4043,7 +4397,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="modified concurrently"):
@@ -4060,7 +4414,9 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
         )
 
 
-async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
+async def test_attach_mcp_server_retries_once_on_version_conflict(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2: conflict on first attach attempt retries with a fresh agent; result is success."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4072,7 +4428,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
         retrieve_calls.append("retrieve")
         return httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[],
@@ -4091,7 +4447,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
             return _conflict_response()
         return httpx.Response(
             200,
-            json=make_ma_agent(id="ag_a", name="a", version=2).model_dump(mode="json"),
+            json=ma_agent(id="ag_a", name="a", version=2).model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -4100,7 +4456,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -4115,11 +4471,11 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -4130,7 +4486,9 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
     assert len(retrieve_calls) == 2, "#144-2: must re-retrieve agent after conflict"
 
 
-async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
+async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2c: two consecutive 409 conflicts on attach surface as ToolError, not a raw SDK error."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4138,7 +4496,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 mcp_servers=[],
@@ -4160,7 +4518,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -4175,12 +4533,12 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="modified concurrently"):
         await _attach_mcp_server_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             agent_name="a",
             server_name="ext-mcp",
@@ -4210,9 +4568,7 @@ def _scoped_agent_router(
         captured.update(json_body(req))
         return httpx.Response(
             200,
-            json=make_ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(
-                mode="json"
-            ),
+            json=ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -4221,7 +4577,7 @@ def _scoped_agent_router(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_scoped",
                     name=agent_name,
                     mcp_servers=[],
@@ -4239,9 +4595,7 @@ def _scoped_agent_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(
-                mode="json"
-            ),
+            json=ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(mode="json"),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -4277,7 +4631,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4327,7 +4681,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4351,7 +4705,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4375,7 +4729,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4455,7 +4809,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4485,20 +4839,20 @@ async def test_attach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
     assert "mcp_servers" in captured, "an unreachable agent's MCP attachment is not gated"
 
 
-async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
+async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Forking the seeded (unstamped) agent is the sanctioned escape hatch — it
-    must work for a non-admin caller exactly as it does for an admin."""
+    """Forking is admin-only for every source: a fork routes nowhere and carries
+    no pin, so a member could otherwise run a copy anywhere."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_src", name="daimon")
+        body = ma_agent(id="ag_src", name="daimon")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def on_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        body = make_ma_agent(id="ag_new", name="my-fork")
+        body = ma_agent(id="ag_new", name="my-fork")
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     router = MARouter()
@@ -4507,7 +4861,7 @@ async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_src",
                     name="daimon",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
@@ -4521,15 +4875,103 @@ async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    result = await _fork_agent_impl(
-        _runtime(client, session_factory=db_session_factory, fernet=fernet),
-        auth,
-        source_name="daimon",
-        new_name="my-fork",
+    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory, fernet=fernet),
+            auth,
+            source_name="daimon",
+            new_name="my-fork",
+        )
+
+
+async def test_fork_agent_impl_refuses_to_copy_a_pinned_agent_even_for_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A copy would be the pinned agent's prompt, skills and connectors with no pin."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"acme-project": ("C_ACME",)}),
     )
-    assert isinstance(result, AgentInfo), (
-        "non-admin fork of the unstamped seeded agent must succeed"
+    await db_session.commit()
+    router = _fork_agent_router(
+        tenant_id=tenant.id,
+        source_id="ag_acme",
+        source_name="acme-project",
+        fork_id="ag_copy",
+        fork_name="acme-copy",
     )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _fork_agent_impl(
+            _runtime(
+                build_fake_anthropic(router.dispatch),
+                session_factory=db_session_factory,
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            ),
+            auth,
+            source_name="acme-project",
+            new_name="acme-copy",
+        )
+
+
+async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork carries the source's repo binding and tokens and is pinned nowhere, so a
+    member copying another client's agent would walk off with its credentials."""
+    tenant_id = uuid.uuid4()
+    created: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        return httpx.Response(200, json=ma_agent(id="ag_new", name="loot").model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_src",
+                    name="acme-project",
+                    metadata={
+                        "daimon_tenant": str(tenant_id),
+                        "daimon_name": "acme-project",
+                        "daimon_account": str(uuid.uuid4()),
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_agent(id="ag_src", name="acme-project").model_dump(mode="json")
+        ),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory, fernet=fernet),
+            auth,
+            source_name="acme-project",
+            new_name="loot",
+        )
+    assert created == [], "a refused fork must create nothing"
 
 
 # ---------------------------------------------------------------------------
@@ -4540,7 +4982,7 @@ async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
 
 
 def _anthropic_skill(skill_id: str) -> dict[str, Any]:
-    # "version" is required by the SDK response model (make_ma_agent below
+    # "version" is required by the SDK response model (ma_agent below
     # builds a real BetaManagedAgentsAgent) but not by the update-patch
     # BetaManagedAgentsSkillParams shape the extra key is simply ignored there.
     return {"type": "anthropic", "skill_id": skill_id, "version": "1"}
@@ -4574,7 +5016,7 @@ def _cap_router(
         response_skills = [{**s, "version": s.get("version", "1")} for s in body.get("skills", [])]
         return httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 skills=response_skills or existing_skills,
@@ -4588,7 +5030,7 @@ def _cap_router(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4605,7 +5047,7 @@ def _cap_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=make_ma_agent(
+            json=ma_agent(
                 id="ag_a",
                 name="a",
                 skills=existing_skills,
@@ -4648,6 +5090,9 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap() 
     assert str(AGENT_SKILL_CAP) in str(exc_info.value), (
         f"refusal must name the cap; got {exc_info.value}"
     )
+    assert "remove_skill" in str(exc_info.value) and "No skills were changed" in str(
+        exc_info.value
+    ), "cap refusal must name the removal path and failed-save outcome"
     assert not update_calls, "the merged-count refusal must fire before any agents.update request"
 
 
@@ -4685,7 +5130,9 @@ async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap() -> None:
     )
 
 
-async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_cap() -> None:
+async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_mcp_servers = [_url_mcp_server(f"existing-{i}") for i in range(AGENT_MCP_CAP - 1)]
@@ -4703,7 +5150,7 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -4719,7 +5166,9 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
     assert not update_calls, "the merged-count refusal must fire before any agents.update request"
 
 
-async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap() -> None:
+async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_mcp_servers = [_url_mcp_server(f"existing-{i}") for i in range(AGENT_MCP_CAP - 1)]
@@ -4736,7 +5185,7 @@ async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     result = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -4786,7 +5235,7 @@ def test_create_spec_accepts_the_current_generation_models() -> None:
         _build_create_spec,  # pyright: ignore[reportPrivateUsage]
     )
 
-    for model in ("claude-sonnet-5", "claude-opus-5"):
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
         spec = _build_create_spec(
             name="a",
             model=model,
@@ -4797,3 +5246,263 @@ def test_create_spec_accepts_the_current_generation_models() -> None:
             skill_repos=None,
         )
         assert spec.model == model, f"{model} must be accepted"
+
+
+# ---------------------------------------------------------------------------
+# A newly created agent that nothing routes to says so — `AgentInfo.answering`
+# ---------------------------------------------------------------------------
+
+
+def _create_demo_router() -> AsyncAnthropic:
+    """Serve the empty name-collision listing plus create/retrieve for one agent."""
+    body = ma_agent(id="ag_new", name="demo").model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    router.add("POST", r"/v1/agents", lambda _req, _m: httpx.Response(200, json=body))
+    router.add("GET", r"/v1/agents/([^/]+)", lambda _req, _m: httpx.Response(200, json=body))
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_create_agent_returns_unrouted_note_when_not_reachable(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    result = await _create_agent_impl(
+        _runtime(_create_demo_router(), session_factory=db_session_factory),
+        auth,
+        AgentSpec(name="demo", model="claude-opus-4-5"),
+    )
+
+    assert result.answering is not None, (
+        "a new agent nothing routes to must come back with the routing handoff"
+    )
+    assert UNROUTED_LINE in result.answering, (
+        "the handoff must be the shared unrouted copy, not a second wording"
+    )
+
+
+async def test_create_agent_returns_no_unrouted_note_when_a_config_row_names_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="demo")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    result = await _create_agent_impl(
+        _runtime(_create_demo_router(), session_factory=db_session_factory),
+        auth,
+        AgentSpec(name="demo", model="claude-opus-4-5"),
+    )
+
+    assert result.answering is None, (
+        "an agent the workspace default already names is reachable — nothing to hand off"
+    )
+
+
+async def test_fork_agent_returns_unrouted_note_when_not_reachable(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    source = ma_agent(
+        id="ag_src",
+        name="source",
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
+    )
+    router = MARouter()
+    router.add_agent_list(source)
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=source.model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda _req, _m: httpx.Response(
+            200, json=ma_agent(id="ag_new", name="myfork").model_dump(mode="json")
+        ),
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    result = await _fork_agent_impl(
+        _runtime(
+            build_fake_anthropic(router.dispatch),
+            session_factory=db_session_factory,
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        ),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert result.answering is not None, (
+        "a fork nothing routes to must come back with the routing handoff"
+    )
+    assert UNROUTED_LINE in result.answering, "the fork handoff must reuse the shared unrouted copy"
+
+
+@pytest.mark.parametrize(
+    ("server", "public_url"),
+    [
+        # Re-pointing the reserved name anywhere else.
+        ({"name": "daimon-mcp", "type": "url", "url": "https://evil.example/mcp"}, None),
+        (
+            {"name": "daimon-mcp", "type": "url", "url": "https://evil.example/mcp"},
+            "https://mcp.example.com/mcp",
+        ),
+        # The deployment's own endpoint under another name.
+        (
+            {"name": "shadow", "type": "url", "url": "https://mcp.example.com/mcp"},
+            "https://mcp.example.com/mcp",
+        ),
+    ],
+)
+async def test_update_agent_refuses_to_repoint_the_reserved_server(
+    server: dict[str, str], public_url: str | None
+) -> None:
+    """`update_agent` merges servers by name, so it gets the same reserved-name
+    guard as `attach_mcp_server` — the tool-safety exemption relies on it."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    update_calls: list[dict[str, Any]] = []
+    router = _cap_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        existing_skills=[],
+        existing_mcp_servers=[],
+        update_calls=update_calls,
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    with pytest.raises(ToolError, match="reserved|deployment's own"):
+        await _update_agent_impl(
+            _runtime(client, public_url=public_url),
+            auth,
+            name="a",
+            model=None,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=[server],  # type: ignore[list-item]
+            skills=None,
+        )
+    assert not update_calls
+
+
+async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    update_calls: list[dict[str, Any]] = []
+    router = _cap_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        existing_skills=[],
+        existing_mcp_servers=[],
+        update_calls=update_calls,
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    await _update_agent_impl(
+        _runtime(
+            client, session_factory=db_session_factory, public_url="https://mcp.example.com/mcp"
+        ),
+        auth,
+        name="a",
+        model=None,
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=[{"name": "daimon-mcp", "type": "url", "url": "https://mcp.example.com/mcp/"}],
+        skills=None,
+    )
+    assert len(update_calls) == 1
+
+
+def _personal_agent_router(
+    *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> tuple[list[dict[str, Any]], AsyncAnthropic]:
+    """One agent that already has `ctx7` at the real URL; captures update bodies."""
+    updates: list[dict[str, Any]] = []
+    body = ma_agent(
+        id="ag_personal",
+        name="personal-bot",
+        mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://real.example/mcp"}],
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "personal-bot",
+            "daimon_account": str(account_id),
+        },
+    ).model_dump(mode="json")
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json_body(req))
+        return httpx.Response(200, json=body)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([body]))
+    router.add("GET", r"/v1/agents/([^/]+)", lambda _req, _m: httpx.Response(200, json=body))
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    return updates, build_fake_anthropic(router.dispatch)
+
+
+@pytest.mark.parametrize("tool", ["attach_mcp_server", "update_agent"])
+async def test_member_cannot_repoint_a_server_on_someones_personal_default_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """H2: a personal default answers another person, so repointing its server is
+    `mcp_replace` and needs an admin, though the plain reachability gate passes."""
+    from daimon.core.scope import UserScopeRef
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    async with db_session_factory() as session, session.begin():
+        from daimon.core.stores.tenants import get_tenant
+
+        tenant = await get_tenant(session, tenant_id)
+        owner = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=owner.id),
+            tenant_id=tenant_id,
+            agent_name="personal-bot",
+        )
+    member = uuid.uuid4()
+    updates, client = _personal_agent_router(tenant_id=tenant_id, account_id=member)
+    auth = AuthIdentity(account_id=member, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    runtime = _runtime(client, session_factory=db_session_factory)
+
+    with pytest.raises(ToolError, match="admin"):
+        if tool == "attach_mcp_server":
+            await _attach_mcp_server_impl(
+                runtime,
+                auth,
+                agent_name="personal-bot",
+                server_name="ctx7",
+                url="https://attacker.example/mcp",
+            )
+        else:
+            await _update_agent_impl(
+                runtime,
+                auth,
+                name="personal-bot",
+                model=None,
+                description=None,
+                system=None,
+                tools=None,
+                mcp_servers=[
+                    {"name": "ctx7", "type": "url", "url": "https://attacker.example/mcp"}
+                ],
+                skills=None,
+            )
+    assert updates == [], "the server must not be repointed"

@@ -254,7 +254,9 @@ class WizardNavButton(
     ) -> bool:
         try:
             return await _authorize_tap(self.wizard_row, interaction)
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard.nav_interaction_check_failed", err_type=type(err).__name__)
             await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
             return False
@@ -290,7 +292,9 @@ class WizardNavButton(
             await _apply_and_render(
                 interaction, bot=bot, row=row, action=self.action, values=[], text=None
             )
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard.nav_callback_failed", err_type=type(err).__name__)
             await _reply_or_followup(interaction, _CALLBACK_FAILED)
 
@@ -383,7 +387,9 @@ class WizardSelect(
     ) -> bool:
         try:
             return await _authorize_tap(self.wizard_row, interaction)
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard.select_interaction_check_failed", err_type=type(err).__name__)
             await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
             return False
@@ -405,7 +411,9 @@ class WizardSelect(
                 values=list(self.item.values),
                 text=None,
             )
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard.select_callback_failed", err_type=type(err).__name__)
             await _reply_or_followup(interaction, _CALLBACK_FAILED)
 
@@ -461,6 +469,8 @@ class WizardCustomTextModal(discord.ui.Modal):
                 # The pure transition already refuses empty/whitespace text
                 # -- surface that as an ephemeral notice, not a state change.
                 await interaction.followup.send(_EMPTY_TEXT, ephemeral=True)
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard.modal_submit_failed", err_type=type(err).__name__)
             await _reply_or_followup(interaction, _CALLBACK_FAILED)

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     make_fake_memory_store_handler,
 )
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_create_seed_list_retrieve_archive_delete_roundtrip() -> None:

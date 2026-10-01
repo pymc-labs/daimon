@@ -11,6 +11,7 @@ others are left alone and a warning is logged.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Literal
 
 import sentry_sdk
@@ -35,11 +36,10 @@ from daimon.core.ma_identity import derive_agent_uuid
 
 _log = structlog.get_logger(__name__)
 
-# _SKILLS_PAGE_LIMIT is the absolute org-wide visibility window for skills.
-# ``next_page`` is NEVER populated for skills at any page boundary (verified
-# live, 2026-06-10); agents.list paginates correctly under identical
-# conditions. A full page therefore means
-# the org skill view is truncated, not simply "more pages to follow".
+# Anthropic documents a `page` / `next_page` cursor for skills. Older live
+# responses omitted `next_page` even at a page boundary (verified 2026-06-10).
+# Follow a cursor when present, but treat a full final page without one as
+# potentially truncated so create/delete decisions remain safe.
 #
 # Raised 100 -> 1000 after production crossed 100 skills and locked itself out
 # of every write path: the seeded-agent reconcile could not resolve a skill id,
@@ -47,9 +47,7 @@ _log = structlog.get_logger(__name__)
 # resolve its agent, and a fresh install would have failed to provision at all.
 # `skills.list` honours a larger limit — 103 rows came back with has_more=False
 # at limit=200 against production, verified live 2026-08-08 — so the ceiling was
-# ours, not the API's. This buys headroom, it does not remove the ceiling: the
-# truncation guards below are still the thing that keeps a partial view from
-# driving a delete, and at 1000 skills they will fire again.
+# ours, not the API's. The guard remains necessary if the API omits the cursor.
 _SKILLS_PAGE_LIMIT = 1000
 
 
@@ -148,6 +146,27 @@ async def list_agents_by_tenant(
     return results
 
 
+async def list_agents_by_tenants(
+    client: AsyncAnthropic, *, tenant_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[BetaManagedAgentsAgent]]:
+    """Return non-archived MA agents for several tenants from one org listing.
+
+    The org listing is paginated in full whichever way it is filtered, so a
+    caller holding many tenants (a hub login spanning several workspaces)
+    pays once here rather than once per tenant. Every requested tenant is a
+    key in the result, empty when it has no agents.
+    """
+    wanted = {str(t): t for t in tenant_ids}
+    results: dict[uuid.UUID, list[BetaManagedAgentsAgent]] = {t: [] for t in tenant_ids}
+    if not wanted:
+        return results
+    async for ag in client.beta.agents.list(include_archived=False):
+        tenant = wanted.get(ag.metadata.get(MA_METADATA_KEY_TENANT, ""))
+        if tenant is not None:
+            results[tenant].append(ag)
+    return results
+
+
 async def find_agent_by_derived_uuid(
     client: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> BetaManagedAgentsAgent | None:
@@ -196,20 +215,19 @@ async def list_environments_by_tenant(
 async def _collect_skills_page(
     client: AsyncAnthropic,
 ) -> tuple[list[SkillListResponse], bool]:
-    """Fetch the single skills page and return (rows, page_full).
-
-    ``page_full`` is True when the number of returned rows equals
-    _SKILLS_PAGE_LIMIT — because MA never populates ``next_page`` for skills,
-    a full page means the org view is truncated.
-    """
+    """Follow skill cursors and flag a full terminal page with no cursor."""
     rows: list[SkillListResponse] = []
-    async for sk in client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT):
-        rows.append(sk)
-    return rows, len(rows) >= _SKILLS_PAGE_LIMIT
+    page = await client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT)
+    truncated = False
+    async for current in page.iter_pages():
+        rows.extend(current.data)
+        if len(current.data) >= _SKILLS_PAGE_LIMIT and not current.next_page:
+            truncated = True
+    return rows, truncated
 
 
 async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
-    """Return all MA skills, raising SkillsListTruncatedError if the page is full.
+    """Return all MA skills, raising if the last full page has no cursor.
 
     Use in write contexts (create, delete, dedup) where making decisions on a
     truncated view is unsafe.
@@ -218,7 +236,7 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
     if page_full:
         raise SkillsListTruncatedError(
             f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
-            "MA never populates next_page for skills, so the org skill view is "
+            "the org skill view may be "
             "truncated; create/delete decisions on this view are unsafe"
         )
     return rows
@@ -265,11 +283,18 @@ async def find_skills_by_display_title(
         if on_truncation == "raise":
             raise SkillsListTruncatedError(
                 f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
-                "MA never populates next_page for skills, so the org skill view is "
+                "the org skill view may be "
                 "truncated; create/delete decisions on this view are unsafe"
             )
         _log.warning("ma_index.skills_list_ceiling_hit", limit=_SKILLS_PAGE_LIMIT)
         sentry_sdk.capture_message("skills list truncated at MA API page limit", level="warning")
+    return match_skills_by_display_title(rows, display_title)
+
+
+def match_skills_by_display_title(
+    rows: list[SkillListResponse], display_title: str
+) -> list[SkillListResponse]:
+    """Find canonical and duplicate custom skills in an already validated view."""
     matches = [sk for sk in rows if sk.source == "custom" and sk.display_title == display_title]
     if len(matches) > 1:
         _log.warning("ma_index.multi_match", kind="skills", count=len(matches))

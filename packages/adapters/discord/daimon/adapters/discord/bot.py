@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final, Literal
 
 import anthropic as _anthropic
 import sentry_sdk
@@ -20,13 +23,24 @@ from daimon.adapters.discord.context import (
     build_context_xml,
     build_delta_xml,
 )
+from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.gating import should_process_message
+from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
+from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_naming import generate_thread_name
+from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
+from daimon.adapters.discord.turn_card_recovery import (
+    post_initial_turn_card,
+    reconcile_turn_card_intent,
+    retire_terminal_turn_card,
+)
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -34,40 +48,96 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
-from daimon.core.config import Settings
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
+from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
+from daimon.core.continuity.messages import (
+    render_current_work_must_finish,
+    render_preparation_failed,
+    render_replacement_summary,
+    render_unexpected_loss,
+)
+from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
-from daimon.core.defaults.report import Action, ApplyReport
-from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.defaults.report import compose_failure_reason
+from daimon.core.errors import DaimonError, TurnError
+from daimon.core.ma import interrupt_orphaned_session
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.ops_alerts import alert_ops
+from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
+    get_turn_cap,
     list_tenants_by_platform,
     set_provision_status,
 )
+from daimon.core.stores.thread_agent_bindings import update_lifecycle
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
+    clear_active_turn_if_message_id,
+    get_live_thread_session,
     list_orphaned_turns,
-    mark_dead,
     mark_turn_active,
     update_watermark,
 )
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.thread_naming import strip_mentions
+from daimon.core.thread_participation import ParticipationMode
+from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.ceiling import turn_deadline
+from daimon.core.turn.errors import (
+    SessionAgentMismatch,
+    SessionBusyError,
+    SessionPreparationFailed,
+)
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
-from sqlalchemy.exc import SQLAlchemyError  # noqa: TCH002
+from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.ext import commands
 
 log = structlog.get_logger()
 
+
+def log_anthropic_overload(
+    exc: object, *, tenant_id: uuid.UUID, path: str, alert_webhook_url: SecretStr | None = None
+) -> None:
+    """Surface provider throttling that the SDK eventually gives up retrying."""
+    if spend_limit_error(exc) is not None:
+        return
+    if isinstance(exc, TurnError):
+        exc = exc.cause
+    if isinstance(exc, _anthropic.APIStatusError) and exc.status_code in (429, 529):
+        log.warning(
+            "turn.anthropic_overloaded",
+            tenant_id=str(tenant_id),
+            path=path,
+            status_code=exc.status_code,
+        )
+        alert_ops(
+            alert_webhook_url,
+            key="overloaded",
+            message=f"Anthropic overloaded: HTTP {exc.status_code} (tenant {tenant_id})",
+        )
+
+
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
+GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
 
 # Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
@@ -75,29 +145,15 @@ _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMA
 # mid-stream.
 _DRAIN_GRACE_S: float = 60.0
 
-# Bounded concurrency for the on_ready re-seed sweep.
-_SWEEP_CONCURRENCY = 4
-
-# Wall-clock ceiling on a single turn. Not a latency target -- legitimate
-# agentic turns run many minutes (notebooks, model fits), so this is set well
-# above the longest real turn and exists only to bound the pathological case.
-#
-# Without it a turn can hang forever: an MA session that never leaves `running`
-# (e.g. a tool call whose result never comes back) leaves the await unresolved,
-# so the clear_active_turn below it is never reached and the thread's
-# active_turn marker is held for good. _retire_orphaned_turns cannot help --
-# it runs once per process at on_ready and deliberately has no age filter,
-# because it assumes "a turn cannot outlive the process rendering it". A hung
-# await outlives the process just fine, which is how a thread ends up
-# permanently unable to accept a mention until the next deploy.
-#
-# ponytail: a flat wall-clock deadline, not a liveness deadline. A turn
-# streaming events is alive no matter how long it runs, and one silent for ten
-# minutes is wedged regardless of total duration -- keying on time-since-last-
-# event would cut the dead case loose sooner and never touch a live one. That
-# needs the render loop to expose a last-event timestamp; upgrade to it if this
-# ceiling ever fires on a real turn.
-_TURN_DEADLINE_S: float = 45.0 * 60.0
+# Bounded concurrency for the on_ready re-seed sweep. Each tenant reconcile
+# issues roughly two dozen Skills API calls (a read per seeded skill, plus an
+# upload per skill that changed), and that API is rate limited per ORG at 100
+# requests/minute -- shared across every deployment on the operator's key. At 4
+# a cold sweep of 16 tenants exceeded it and the promote of 2026-08-20 landed
+# only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
+# attaching skills the sweep had never created.
+_SWEEP_CONCURRENCY = 2
+_TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -110,16 +166,126 @@ def _resolve_bot_display_name(settings: Settings) -> str:
     return settings.discord.bot_display_name if settings.discord is not None else "daimon"
 
 
+def _responder_handle(settings: Settings) -> str:
+    """The handle the turn's own history shows people mentioning.
+
+    `context.py` rewrites `<@bot_id>` to `@{bot_display_name}`, so this is the
+    exact string the model reads in the message that summoned it. The turn
+    controls carry it beside the MA agent name so a deployment whose bot is
+    named `daimon-staging` is not read as a second agent.
+    """
+    return f"@{_resolve_bot_display_name(settings)}"
+
+
 def _setting_up_message(bot_display_name: str) -> str:
     """Distinct from the MAResolverMissError "no longer exists" message so a
     still-provisioning state is never confused with a genuine misconfiguration."""
     return f"{bot_display_name.capitalize()} is setting up this server — try again in a moment."
 
 
+async def _resolve_category(channel: object, *, fetch: bool = True) -> tuple[str | None, bool]:
+    """``(category id, unresolved)`` for a channel, or for a thread's parent --
+    what the access policy's protected categories are matched against.
+
+    An uncached thread parent is fetched (``fetch=True``) and added to the
+    guild cache, so the admission that follows reads it without a second REST
+    call; with ``fetch=False``, or if the fetch fails, the category is
+    unresolved, which fails closed when any category is protected."""
+    if isinstance(channel, discord.Thread):
+        parent: object = channel.parent
+        if parent is None:
+            if not fetch:
+                return None, True
+            try:
+                fetched = await channel.guild.fetch_channel(channel.parent_id)
+            except discord.HTTPException:
+                return None, True
+            if isinstance(fetched, discord.abc.GuildChannel):
+                channel.guild._add_channel(fetched)  # pyright: ignore[reportPrivateUsage]  # cache it for the admission that follows
+            parent = fetched
+        channel = parent
+    category_id = getattr(channel, "category_id", None)
+    return (str(category_id) if category_id is not None else None), False
+
+
+async def _channel_protection_state(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, channel: object
+) -> ProtectionState:
+    """May the agent post for a turn in this channel or thread? Never raises.
+    The category (possibly a REST fetch) is looked up only when it matters."""
+    if isinstance(channel, discord.Thread):
+        channel_id, thread_id = str(channel.parent_id), str(channel.id)
+    else:
+        channel_id, thread_id = str(getattr(channel, "id", "")), None
+
+    async def _category() -> tuple[str | None, bool]:
+        return await _resolve_category(channel)
+
+    return await protection_state(
+        sessionmaker,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        resolve_category=_category,
+    )
+
+
+INVOKER_NOT_ALLOWED_NOTICE = (
+    "you aren't on this server's list of people who can start a turn. A server admin can add you."
+)
+
+AGENT_PINNED_ELSEWHERE_NOTICE = (
+    "this agent only runs in the channels an operator pinned it to, so it can't answer here."
+)
+
+
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
         f"This server's {bot_display_name} credit is depleted. An admin can top up with `/billing`."
     )
+
+
+async def _resolve_agent_display_name(
+    anthropic: _anthropic.AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+) -> str:
+    """Best-effort display name for a concrete MA agent id, tenant-scoped.
+
+    Used only for copy -- a lookup miss (agent gone since, API hiccup) falls
+    back to a generic phrase rather than failing the render.
+    """
+    try:
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    except _anthropic.APIError:
+        return "the previous agent"
+    for candidate in agents:
+        if candidate.id == ma_agent_id:
+            name = candidate.metadata.get(MA_METADATA_KEY_NAME)
+            if name:
+                return str(name)
+    return "the previous agent"
+
+
+def _resolve_session_account_id(
+    discord_settings: DiscordSettings,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    thread_id: str,
+) -> uuid.UUID:
+    """Per-caller vs legacy single-session-per-thread account key.
+
+    Shared by the main mention path and continuation dispatch's follow-up
+    turn -- both must derive the SAME key for the same (tenant, thread,
+    caller) so a follow-up turn binds the session the mention path would
+    have bound. See `_orchestrate`'s original inline comment (#162) for the
+    confused-deputy history this closes.
+    """
+    if (
+        discord_settings.per_caller_thread_sessions
+        or admission.config.thread_binding_id is not None
+    ):
+        return admission.account_id
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"legacy-thread-sentinel:{tenant_id}:{thread_id}")
 
 
 def _compose_queued_content(messages: list[discord.Message]) -> str:
@@ -161,7 +327,7 @@ def _build_welcome_embed(bot_display_name: str) -> discord.Embed:
         name="Once ready",
         value=(
             f"Mention `@{bot_display_name}` anywhere to chat, or run `/agent-setup` "
-            "to manage your agents."
+            "to see who answers here."
         ),
         inline=False,
     )
@@ -186,24 +352,6 @@ def _build_snag_embed() -> discord.Embed:
     )
 
 
-def _compose_failure_reason(report: ApplyReport) -> str | None:
-    """Compose a persisted reason from a report's failed outcomes only, one
-    line per failure naming the resource kind, name, and its recorded error.
-    Pure -- no I/O. Returns None when the report has no failures.
-
-    Composed ONLY from the outcome's own recorded fields -- never a raw
-    exception repr of a credentialed request -- so a provider secret or
-    request body can never land in this operator-visible column."""
-    failures = [
-        o
-        for o in (*report.agents, *report.environments, *report.skills, *report.system_config)
-        if o.action is Action.FAILED
-    ]
-    if not failures:
-        return None
-    return "\n".join(f"{o.kind} {o.name!r}: {o.error}" for o in failures)
-
-
 def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
     """Channel fallback: system_channel (writable) → first sendable text channel.
 
@@ -221,6 +369,46 @@ def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
     return next((c for c in guild.text_channels if c.permissions_for(me).send_messages), None)
 
 
+@dataclass
+class _ParticipationBatch:
+    """Unmentioned messages piling up in one followed thread, and the timer watching them.
+
+    The timer restarts on every new message, so the batch is only judged once
+    the thread has gone quiet: a rapid human back-and-forth costs one
+    classifier call at the end, not one per message.
+    """
+
+    messages: list[discord.Message]
+    first_at: float
+    timer: asyncio.Task[None] | None = None
+
+
+# A batch keeps only this many newest messages (the classifier window is the
+# same size), and stops restarting its timer once it has waited this many quiet
+# periods, so a thread that never goes quiet is still judged on a bounded delay
+# with a bounded prompt.
+_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
+_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+
+
+async def _requester_role(guild: discord.Guild, external_user_id: str) -> Role:
+    """The requester's live guild role, for a turn that has no message to read it from.
+
+    Same test a mention applies (`is_member_guild_admin`), against the member
+    fetched from Discord now. Never the member cache: a cached member can
+    still carry a role the requester has since lost, and a continuation can
+    run long after the form was submitted. Anything short of a fetched member
+    -- left the guild, a Discord error, a malformed id -- is USER: a
+    continuation never runs with more than its requester provably holds.
+    """
+    try:
+        member = await guild.fetch_member(int(external_user_id))
+    except (discord.HTTPException, ValueError) as exc:
+        log.warning("continuation.requester_role_lookup_failed", exc_info=exc)
+        return Role.USER
+    return Role.ADMIN if is_member_guild_admin(member, guild_owner_id=guild.owner_id) else Role.USER
+
+
 class DaimonBot(commands.Bot):
     """Discord bot process. Slash commands + turn pipeline."""
 
@@ -233,14 +421,33 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._pending: dict[int, list[discord.Message]] = {}
+        # Continuation dispatches skipped because the thread was processing,
+        # keyed by thread id: re-run when the thread is released (see
+        # `_release_thread`). Last writer wins; a dispatch reads every pending
+        # row for the thread, so one entry is enough.
+        self._deferred_dispatch: dict[int, tuple[uuid.UUID, discord.Thread, str]] = {}
         # Per-tenant concurrency cap (SCALE-01): active turn count keyed by tenant_id.
         # Incremented before the turn starts; decremented in a finally that brackets
         # the whole drain loop so the slot is always released.
         self._inflight: dict[uuid.UUID, int] = {}
+        self._global_inflight = 0
+        # Organic thread participation: per-thread quiet-period batches, keyed
+        # by thread id. Populated only for threads that resolved to `on`.
+        self._participation_pending: dict[int, _ParticipationBatch] = {}
+        # Built on first use, not here: it needs `self.user`, which the gateway
+        # only supplies once the bot is ready.
+        self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
+        # Gateway lifecycle callbacks run as separate tasks. Serialize only the
+        # tenant provision/archive transitions so an earlier remove cannot
+        # overwrite a later join's archive clear.
+        self._guild_lifecycle_locks: dict[int, asyncio.Lock] = {}
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._output_sweeps: dict[str, asyncio.Task[None]] = {}
+        self._delivery_notice_thread_ids: set[int] = set()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
@@ -248,6 +455,18 @@ class DaimonBot(commands.Bot):
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
         self._orphans_retired: bool = False
+        self._orphan_sweep_lock = asyncio.Lock()
+        self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
+        self._turn_card_recovery_started: bool = False
+        # Set by setup_hook, which runs after login and before the gateway
+        # connects, so it is set before any message or interaction can arrive.
+        # From then on every turn entry passes the sweep barrier. Left unset
+        # only by unit tests that build a bot without logging it in.
+        self._orphan_recovery_armed: bool = False
+        # Set by the process entrypoint, so the wake poller runs in the
+        # deployed bot (started from setup_hook, once login has completed)
+        # and never in a test that drives setup_hook directly.
+        self.wake_poller_enabled: bool = False
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -256,6 +475,48 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
+        if self._output_sweeps.get(session_id) is task:
+            del self._output_sweeps[session_id]
+
+    async def _sweep_session_outputs(
+        self,
+        previous: asyncio.Task[None] | None,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        session_id: str,
+    ) -> None:
+        # A previous sweep owns post-then-delete for this MA session until it finishes.
+        if previous is not None:
+            with contextlib.suppress(Exception):
+                await previous
+        try:
+            await deliver_session_outputs(
+                self.runtime.turn_deps.anthropic,
+                thread,
+                session_id=session_id,
+                may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+                notice_thread_ids=self._delivery_notice_thread_ids,
+            )
+        except Exception as exc:  # detached sweep must not fail the completed turn
+            log.warning(
+                "discord.output_delivery.unhandled_error",
+                session_id=session_id,
+                thread_id=thread.id,
+                error=str(exc)[:300],
+            )
+
+    def _schedule_output_sweep(
+        self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
+    ) -> None:
+        if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            return
+        session_id = outcome.ma_session_id
+        previous = self._output_sweeps.get(session_id)
+        task = self._spawn(self._sweep_session_outputs(previous, thread, tenant_id, session_id))
+        self._output_sweeps[session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
@@ -266,17 +527,52 @@ class DaimonBot(commands.Bot):
         bot.close() unconditionally so the gateway disconnects cleanly.
         """
         self.draining = True
+        # Pending auto batches are unasked-for turns that have not started;
+        # dropping them is free, whereas letting a timer fire mid-drain would
+        # admit a new turn the drain is trying to stop.
+        for thread_id in list(self._participation_pending):
+            self._cancel_participation_batch(thread_id)
         log.info("discord.draining", inflight_threads=len(self._processing))
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
-        while self._processing and asyncio.get_running_loop().time() < deadline:
+        while (
+            self._processing or self._global_inflight
+        ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
         log.info("discord.drain_complete", remaining=len(self._processing))
         await self.close()
 
     async def setup_hook(self) -> None:
-        """Load command Cogs before on_ready syncs the tree."""
+        """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
+        self.start_orphan_recovery()
+        if self.wake_poller_enabled:
+            self._spawn(
+                run_wake_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    open_thread=self._open_wake_thread,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            # FEAT-085: post routine results to their destinations. Same
+            # switch as the wake poller: one process per platform posts.
+            self._spawn(
+                run_delivery_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    post=make_discord_routine_poster(
+                        self.runtime.sessionmaker,
+                        fetch_channel=self._channel_by_id,
+                        open_dm=self._open_member_dm,
+                        dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
+                            row.tenant_id, DirectMessagePolicy()
+                        ),
+                    ),
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
+        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
@@ -284,6 +580,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
+        await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(BillingCog(self))
@@ -323,8 +620,10 @@ class DaimonBot(commands.Bot):
         # class-level registration rather than a live view. Local import for
         # the same cycle reason as above.
         from daimon.adapters.discord.feedback_button import FeedbackButton
+        from daimon.adapters.discord.support_escalation import SupportEscalateButton
 
         self.add_dynamic_items(FeedbackButton)
+        self.add_dynamic_items(SupportEscalateButton)
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
@@ -408,13 +707,14 @@ class DaimonBot(commands.Bot):
             else None
         )
         try:
-            report = await reconcile_tenant_defaults(
-                self.runtime.anthropic,
-                self.runtime.sessionmaker,
-                self.runtime.settings.defaults_root,
-                tenant_id=tenant_id,
-                public_url=public_url,
-            )
+            async with self._seed_sem:
+                report = await reconcile_tenant_defaults(
+                    self.runtime.anthropic,
+                    self.runtime.sessionmaker,
+                    self.runtime.settings.defaults_root,
+                    tenant_id=tenant_id,
+                    public_url=public_url,
+                )
             seed_ok = not report.is_failure()
             roster_failure_reason: str | None = None
             if seed_ok:
@@ -446,7 +746,7 @@ class DaimonBot(commands.Bot):
                 if not was_ready:
                     await self._post_to_guild(guild, _build_ready_embed())
             else:
-                reason = roster_failure_reason or _compose_failure_reason(report)
+                reason = roster_failure_reason or compose_failure_reason(report)
                 if was_ready:
                     # A previously-ready install stays ready: a transient reconcile
                     # failure must not take a working guild's turns offline. Record
@@ -478,7 +778,7 @@ class DaimonBot(commands.Bot):
             )
             if not was_ready:
                 await self._post_to_guild(guild, _build_snag_embed())
-        except Exception as exc:  # noqa: BLE001 — background-task supervisor boundary
+        except Exception as exc:  # background-task supervisor boundary
             log.exception("guild_seed_unexpected", tenant_id=str(tenant_id))
             # This branch's message body may carry anything (an unclassified bug,
             # not a known API/Daimon error), and the reason column is read by an
@@ -493,26 +793,73 @@ class DaimonBot(commands.Bot):
         finally:
             self._seeding.discard(tenant_id)
 
+    def _guild_lifecycle_lock_for(self, guild_id: int) -> asyncio.Lock:
+        """Return the process-local lifecycle lock for one Discord guild."""
+        lock = self._guild_lifecycle_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guild_lifecycle_locks[guild_id] = lock
+        return lock
+
+    async def _provision_joined_guild(self, guild: discord.Guild) -> uuid.UUID | None:
+        """Provision and unarchive a guild that is still present in the cache."""
+        guild_id = str(guild.id)
+        async with self._guild_lifecycle_lock_for(guild.id):
+            # Boot sweeps and hot-path recovery may carry a snapshot from before
+            # a remove callback updated the gateway cache. Do not revive it.
+            if self.get_guild(guild.id) is None:
+                return None
+            result = await provision_tenant(
+                self.runtime.sessionmaker,
+                platform="discord",
+                workspace_id=guild_id,
+                signup_credit=self.runtime.settings.billing.signup_credit,
+            )
+            await set_provision_status(
+                self.runtime.sessionmaker,
+                tenant_id=result.tenant_id,
+                status="pending",
+                clear_archive=True,
+            )
+        return result.tenant_id
+
     async def _ensure_provisioning(self, guild: discord.Guild) -> None:
         """Self-heal an unprovisioned/archived guild: provision + un-archive + bg seed."""
-        guild_id = str(guild.id)
-        result = await provision_tenant(
-            self.runtime.sessionmaker,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=self.runtime.settings.billing.signup_credit,
-        )
-        await set_provision_status(
-            self.runtime.sessionmaker,
-            tenant_id=result.tenant_id,
-            status="pending",
-            clear_archive=True,
-        )
-        self._spawn(
-            self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild, was_ready=False)
-        )
+        tenant_id = await self._provision_joined_guild(guild)
+        if tenant_id is None:
+            return
+        self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
+
+    def start_orphan_recovery(self) -> None:
+        """Start the boot sweep before the gateway can deliver a turn.
+
+        Mirrors Slack's `start_orphan_recovery`, which runs before Socket Mode
+        connects. discord.py dispatches messages before `on_ready` (which
+        waits for every guild to stream in), so a barrier gated on
+        `is_ready()` let a turn start and write its marker before the first
+        sweep, and that sweep then retired -- and interrupted on MA -- the
+        live turn. Arming here makes every turn entry wait for the sweep from
+        the first event on. The sweep needs only REST calls (`fetch_channel`),
+        which work once login has completed.
+        """
+        self._orphan_recovery_armed = True
+        self._spawn(self._retire_orphaned_turns())
+
+    async def _wait_for_orphan_recovery(self) -> None:
+        """The turn-admission barrier: returns once the boot sweep has run.
+
+        A sweep that failed is retried here, so a transient failure delays
+        turns rather than letting a later sweep mistake their markers for
+        orphans.
+        """
+        if self._orphan_recovery_armed:
+            await self._retire_orphaned_turns()
 
     async def _retire_orphaned_turns(self) -> None:
+        async with self._orphan_sweep_lock:
+            await self._retire_orphaned_turns_once()
+
+    async def _retire_orphaned_turns_once(self) -> None:
         """Lay to rest every embed whose turn died with the previous process.
 
         A turn's render loop lives in the process that started it, so a deploy
@@ -522,8 +869,9 @@ class DaimonBot(commands.Bot):
 
         Marking it failed is honest and cheap, and the alternative -- draining
         in-flight turns before the container exits -- needs a lameduck story the
-        compose refresh does not have. This runs first in on_ready so a user
-        reading the thread sees the truth before anything else happens.
+        compose refresh does not have. It starts from setup_hook, before the
+        gateway connects, and every turn waits for it, so a user reading the
+        thread sees the truth before anything else happens.
 
         Failures to edit are swallowed per row: the message may be deleted, the
         thread archived, or permissions changed since. One unreachable embed
@@ -532,14 +880,21 @@ class DaimonBot(commands.Bot):
 
         Runs at most once per process: on_ready re-fires on every full gateway
         reconnect, and a marker set by this process is a LIVE turn, not an
-        orphan.
+        orphan. That only holds because no turn can write a marker before the
+        first run finishes (`_wait_for_orphan_recovery`); the MA interrupt
+        below would otherwise stop a live turn of this very process.
         """
         if self._orphans_retired:
             return
-        self._orphans_retired = True
         async with self.runtime.sessionmaker() as session:
+            if self._boot_turn_card_intents is None:
+                self._boot_turn_card_intents = await list_recoverable_turn_card_intents(
+                    session, platform="discord"
+                )
             orphans = await list_orphaned_turns(session, platform="discord")
         if not orphans:
+            self._orphans_retired = True
+            self._start_turn_card_recovery()
             return
         log.info("turn.orphans_found", count=len(orphans))
 
@@ -584,56 +939,90 @@ class DaimonBot(commands.Bot):
                     error=str(err),
                 )
             async with self.runtime.sessionmaker() as session:
-                await clear_active_turn(session, id=row.id)
+                cleared = await clear_active_turn_if_message_id(
+                    session, id=row.id, expected_message_id=row.active_turn_message_id
+                )
                 await session.commit()
+            if cleared:
+                # Stop the turn MA is still running for this orphan, so it
+                # stops billing and the next mention's message is not sent
+                # into a running session (which MA ignores). A moved marker
+                # belongs to a live turn and is never interrupted.
+                await interrupt_orphaned_session(
+                    self.runtime.anthropic, session_id=row.ma_session_id
+                )
+            else:
+                log.info(
+                    "turn.orphan_marker_moved",
+                    thread_id=row.thread_id,
+                    message_id=row.active_turn_message_id,
+                )
+        self._orphans_retired = True
+        self._start_turn_card_recovery()
 
-    async def _retire_deadlocked_turn(
-        self,
-        *,
-        mapping_id: uuid.UUID | None,
-        thread_id: str,
-        session_id: str | None,
-        message_ref: Any | None,
-    ) -> None:
-        """Lay to rest a turn that blew `_TURN_DEADLINE_S`.
-
-        The session is wedged, not merely slow: it will never reach a terminal
-        state, so the mapping is marked dead. Without that the next mention
-        binds the same dead MA session and hangs again — the thread would come
-        unstuck for exactly one message.
-
-        Clearing the active_turn marker is deliberately NOT done here; the
-        caller's `finally` owns it, so it also runs for failures that are not
-        deadline-related.
-        """
-        log.error(
-            "turn.deadline_exceeded",
-            thread_id=thread_id,
-            session_id=session_id,
-            deadline_s=_TURN_DEADLINE_S,
-        )
-        if mapping_id is not None:
-            async with self.runtime.sessionmaker() as session:
-                await mark_dead(session, id=mapping_id)
-                await session.commit()
-        if message_ref is None:
+    def _start_turn_card_recovery(self) -> None:
+        """Reconcile the pre-admission intent snapshot after gateway readiness."""
+        if (
+            not self._orphan_recovery_armed
+            or self._turn_card_recovery_started
+            or self._boot_turn_card_intents is None
+        ):
             return
-        try:
-            await message_ref.edit(
-                embed=discord.Embed(
-                    color=theme.COLOR_RED,
-                    description=(
-                        "❌ This turn stopped responding and was abandoned. Nothing was "
-                        "lost on your side — mention me again to start fresh."
-                    ),
-                ),
-                view=None,
-            )
-        except (discord.HTTPException, discord.ClientException) as err:
-            # The spinner may be deleted or the thread archived. The marker is
-            # cleared by the caller either way, which is what actually unsticks
-            # the thread; a stale embed is cosmetic by comparison.
-            log.warning("turn.deadline_embed_failed", thread_id=thread_id, error=str(err))
+        self._turn_card_recovery_started = True
+        self._spawn(self._reconcile_boot_turn_cards(self._boot_turn_card_intents))
+
+    async def _reconcile_boot_turn_cards(self, intents: list[TurnCardIntentRow]) -> None:
+        """Run a fixed number of workers over the startup intent snapshot."""
+        if not intents:
+            return
+        await self.wait_until_ready()
+        intent_iter = iter(intents)
+
+        async def worker() -> None:
+            for intent in intent_iter:
+                await self._reconcile_turn_card_intent(intent)
+
+        await asyncio.gather(
+            *(worker() for _ in range(min(_TURN_CARD_RECOVERY_CONCURRENCY, len(intents))))
+        )
+
+    async def _reconcile_turn_card_intent(
+        self,
+        intent: TurnCardIntentRow,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """Recover one intent independently so a delayed search cannot block others."""
+        await self.wait_until_ready()
+        for attempt in range(3):
+            try:
+                channel = self.get_channel(int(intent.thread_id)) or await self.fetch_channel(
+                    int(intent.thread_id)
+                )
+                if not isinstance(channel, discord.Thread):
+                    log.warning(
+                        "turn.card_intent_thread_unavailable",
+                        intent_id=str(intent.id),
+                        thread_id=intent.thread_id,
+                        channel_type=type(channel).__name__,
+                    )
+                    return
+                await reconcile_turn_card_intent(
+                    self.runtime.sessionmaker,
+                    intent=intent,
+                    thread=channel,
+                )
+                return
+            except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                if attempt < 2:
+                    await sleep(5.0)
+                    continue
+                log.warning(
+                    "turn.card_intent_thread_fetch_failed",
+                    intent_id=str(intent.id),
+                    thread_id=intent.thread_id,
+                    error=str(err),
+                )
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
@@ -641,38 +1030,31 @@ class DaimonBot(commands.Bot):
         log.info("bot_ready", user=str(self.user))
         await self._retire_orphaned_turns()
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
-        known_guild_ids = {tr.external_id for tr in tenants}
-        sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
-
-        async def _bounded_seed(
-            *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
-        ) -> None:
-            async with sem:
-                await self._seed_tenant_defaults(
-                    tenant_id=tenant_id, guild=guild, was_ready=was_ready
-                )
-
-        # Provision guilds joined while the bot was down.
+        known_tenants = {tr.external_id: tr for tr in tenants}
+        recovered_tenant_ids: set[uuid.UUID] = set()
+        # Provision guilds joined while the bot was down. A known archived tenant
+        # means the bot left and rejoined while this process was stopped: revive
+        # it and reseed without sending a second welcome or signup credit.
         for guild in self.guilds:
             ws_id = str(guild.id)
-            if ws_id in known_guild_ids:
+            known_tenant = known_tenants.get(ws_id)
+            if known_tenant is not None and known_tenant.archived_at is None:
                 continue
-            result = await provision_tenant(
-                self.runtime.sessionmaker,
-                platform="discord",
-                workspace_id=ws_id,
-                signup_credit=self.runtime.settings.billing.signup_credit,
-            )
-            await set_provision_status(
-                self.runtime.sessionmaker,
-                tenant_id=result.tenant_id,
-                status="pending",
-                clear_archive=True,  # #132: rejoined guilds must not stay archived
-            )
+            tenant_id = await self._provision_joined_guild(guild)
+            if tenant_id is None:
+                continue
+            if known_tenant is not None:
+                recovered_tenant_ids.add(tenant_id)
+                self._spawn(
+                    self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
+                )
+                continue
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
-            self._spawn(_bounded_seed(tenant_id=result.tenant_id, guild=guild, was_ready=False))
+            self._spawn(
+                self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
+            )
 
         # Reconcile every registered, joined tenant against the shipped defaults on
         # every boot, not just the ones stuck in pending/failed. Because every
@@ -687,11 +1069,12 @@ class DaimonBot(commands.Bot):
             if guild is None:
                 log.warning("registered_guild_not_joined", external_id=tr.external_id)
                 continue
-            self._spawn(
-                _bounded_seed(
-                    tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
+            if tr.id not in recovered_tenant_ids:
+                self._spawn(
+                    self._seed_tenant_defaults(
+                        tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
+                    )
                 )
-            )
             missing = check_missing_permissions(guild.me.guild_permissions)
             if missing:
                 log.warning(
@@ -728,17 +1111,13 @@ class DaimonBot(commands.Bot):
         per-guild tree sync → background seed that flips ready/failed + posts the follow-up."""
         guild_id = str(guild.id)
         try:
-            result = await provision_tenant(
-                self.runtime.sessionmaker,
-                platform="discord",
-                workspace_id=guild_id,
-                signup_credit=self.runtime.settings.billing.signup_credit,
-            )
-            await set_provision_status(
-                self.runtime.sessionmaker,
-                tenant_id=result.tenant_id,
-                status="pending",
-                clear_archive=True,  # #132: rejoined guilds must not stay archived
+            tenant_id = await self._provision_joined_guild(guild)
+            if tenant_id is None:
+                return
+            alert_ops(
+                self.runtime.settings.ops.alert_webhook_url,
+                key=f"install:discord:{guild_id}",
+                message=f"New install: Discord {guild.name} ({guild_id})",
             )
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
@@ -757,16 +1136,20 @@ class DaimonBot(commands.Bot):
             log.warning("guild_join_failed", guild_id=guild_id, error=str(exc))
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
-        self._spawn(
-            self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild, was_ready=False)
-        )
+        self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
         guild_id = str(guild.id)
-        log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-        await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+        async with self._guild_lifecycle_lock_for(guild.id):
+            # discord.py updates its guild cache before dispatching gateway
+            # callbacks. A delayed removal therefore sees a later rejoin here.
+            if self.get_guild(guild.id) is not None:
+                log.info("stale_guild_remove_skipped", guild_id=guild_id, guild_name=guild.name)
+                return
+            await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+        log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
 
     def _release_inflight(self, tenant_id: uuid.UUID) -> None:
         """Release one per-tenant in-flight slot, dropping the key at zero."""
@@ -774,23 +1157,258 @@ class DaimonBot(commands.Bot):
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
 
+    def try_claim_global_turn(self) -> bool:
+        """Claim a process-wide slot without yielding between check and increment."""
+        settings = self.runtime.settings.discord
+        cap = settings.max_concurrent_turns if settings is not None else None
+        if self.draining or (isinstance(cap, int) and self._global_inflight >= cap):
+            return False
+        self._global_inflight += 1
+        return True
+
+    def release_global_turn(self) -> None:
+        self._global_inflight -= 1
+
+    def _cancel_participation_batch(self, thread_id: int) -> None:
+        """Drop a thread's pending auto batch and its timer, if any."""
+        batch = self._participation_pending.pop(thread_id, None)
+        if batch is not None and batch.timer is not None:
+            batch.timer.cancel()
+
+    def _thread_participant(self, *, bot_user_id: int, bot_display_name: str) -> ThreadParticipant:
+        """The bot's one participant, built on first use and reused after that."""
+        if self._participant is None:
+            self._participant = ThreadParticipant(
+                settings=self.runtime.settings.thread_participation,
+                sessionmaker=self.runtime.sessionmaker,
+                anthropic=self.runtime.anthropic,
+                bot_user_id=bot_user_id,
+                bot_display_name=bot_display_name,
+                billing_config=self.runtime.billing_config,
+                markup=self.runtime.settings.billing.markup,
+            )
+        return self._participant
+
+    async def _maybe_participate(self, message: discord.Message) -> None:
+        """Organic thread participation: an unmentioned human message in a guild thread.
+
+        Reached only after the mention gate said no. Where the mention path
+        posts a notice (tenant still provisioning, decision failure), this
+        path stays silent: nobody asked, so nothing is owed, and a chatty
+        failure mode would be worse than the missing reply.
+
+        Nothing is decided here: the message joins the thread's batch and the
+        quiet timer restarts. A thread the cascade resolves to anything but
+        `on` costs exactly one indexed read and returns -- no liveness read,
+        no classifier, no timer, no turn.
+        """
+        if self.draining or self.user is None:
+            return
+        if message.guild is None or not isinstance(message.channel, discord.Thread):
+            return
+        thread = message.channel
+        thread_id = thread.id
+        if thread_id in self._processing:
+            # The in-flight turn's delta context already carries this message.
+            return
+        guild_id = str(message.guild.id)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None:
+            return
+        responder = self._thread_participant(
+            bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
+        )
+        try:
+            # Cascade first: it says `off` for almost every message, so the
+            # tenant liveness read is only paid by threads actually followed.
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if resolved.mode is not ParticipationMode.ON:
+                log.debug(
+                    "thread_participation.not_following",
+                    thread_id=str(thread_id),
+                    mode=resolved.mode.value,
+                    tier=resolved.tier,
+                )
+                return
+            tr = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
+            if tr is None or tr.archived_at is not None or tr.provision_status != "ready":
+                return
+        except Exception as exc:  # unasked-for turn: log, stay silent
+            log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
+            sentry_sdk.capture_exception(exc)
+            return
+
+        now = asyncio.get_running_loop().time()
+        quiet_seconds = self.runtime.settings.thread_participation.quiet_seconds
+        batch = self._participation_pending.setdefault(
+            thread_id, _ParticipationBatch(messages=[], first_at=now)
+        )
+        batch.messages.append(message)
+        del batch.messages[:-_PARTICIPATION_BATCH_MAX_MESSAGES]
+        if batch.timer is not None:
+            if now - batch.first_at >= quiet_seconds * _PARTICIPATION_BATCH_MAX_QUIET_PERIODS:
+                return  # waited long enough: let the running timer fire as scheduled
+            batch.timer.cancel()
+        batch.timer = self._spawn(
+            self._participation_quiet_timer(
+                quiet_seconds, thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
+            )
+        )
+
+    async def _participation_quiet_timer(
+        self,
+        quiet_seconds: float,
+        thread: discord.Thread,
+        *,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        responder: ThreadParticipant,
+    ) -> None:
+        """Wait out the quiet period, then judge the batch. Cancelled = a newer message won."""
+        await asyncio.sleep(quiet_seconds)
+        await self._participation_fire(
+            thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
+        )
+
+    async def _participation_fire(
+        self,
+        thread: discord.Thread,
+        *,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        responder: ThreadParticipant,
+    ) -> None:
+        """The thread went quiet: judge the whole batch once, then run at most one turn."""
+        thread_id = thread.id
+        batch = self._participation_pending.pop(thread_id, None)
+        if batch is None or not batch.messages:
+            return
+        if self.draining or thread_id in self._processing:
+            return
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None:
+            return
+        # One turn = one caller (see _drain_pending_mentions): the newest
+        # message's author is the caller, and only their messages are judged.
+        # Coalescing other authors' text onto this caller's session would
+        # reopen the confused-deputy hole the mention path closed.
+        trigger = batch.messages[-1]
+        candidates = [m for m in batch.messages if m.author.id == trigger.author.id]
+        try:
+            # Re-resolved rather than carried from the batch: the quiet window
+            # is long enough for someone to turn the thread off mid-burst.
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if not await responder.should_respond(
+                thread, candidates, trigger=trigger, tenant_id=tenant_id, resolved=resolved
+            ):
+                return
+        except Exception as exc:  # unasked-for turn: log, stay silent
+            log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
+            sentry_sdk.capture_exception(exc)
+            return
+        if self.draining or thread_id in self._processing:
+            return  # a drain or a mention landed while the classifier was deciding
+        post_state = await _channel_protection_state(
+            self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+        )
+        if not post_state.may_post:
+            log.info(
+                "thread_participation.skipped",
+                reason="channel_protected",
+                state=post_state.value,
+                thread_id=str(thread_id),
+            )
+            return
+        cap = await get_turn_cap(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            default=discord_settings.max_concurrent_turns_per_tenant,
+        )
+        if self.draining or thread_id in self._processing:
+            return  # protection and cap reads both awaited
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread_id),
+                thread_id=str(thread_id),
+            )
+            log.info(
+                "turn.skipped.concurrency_shed",
+                tenant_id=str(tenant_id),
+                guild_id=guild_id,
+                channel_id=str(thread_id),
+                in_flight=count,
+                cap=cap,
+            )
+            return
+        if not self.try_claim_global_turn():
+            log.info(
+                "turn.skipped.global_concurrency_shed",
+                tenant_id=str(tenant_id),
+                guild_id=guild_id,
+                channel_id=str(thread_id),
+            )
+            return  # unprompted participation follows the per-tenant silent refusal
+        self._inflight[tenant_id] = count + 1
+        self._processing.add(thread_id)
+        try:
+            # The ledger row is written when the turn is admitted, not when it
+            # answers: spend starts here, and a turn the agent ends in silence
+            # (or one that fails) must still count against the hourly cap.
+            try:
+                await responder.record(
+                    tenant_id=tenant_id, thread_id=thread_id, message_id=str(trigger.id)
+                )
+            except Exception:  # best-effort ledger: a miss loosens the cap by one
+                log.exception("thread_participation.record_failed", thread_id=str(thread_id))
+            # The newest message is the trigger; the delta context carries the
+            # rest of the batch, since they all landed after the watermark.
+            await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
+            await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
+        finally:
+            self._release_thread(thread_id)
+            self._pending.pop(thread_id, None)
+            self._release_inflight(tenant_id)
+            self.release_global_turn()
+
     async def on_message(self, message: discord.Message) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         discord_settings = self.runtime.settings.discord
+        # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
+        # (it short-circuits on message.mention_everyone), which would make the bot
+        # reply to every mass ping. message.mentions excludes @everyone/@here and
+        # role mentions, so this triggers only on a direct user mention of the bot.
+        bot_mentioned = self.user is not None and any(
+            user.id == self.user.id for user in message.mentions
+        )
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
-            # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
-            # (it short-circuits on message.mention_everyone), which would make the bot
-            # reply to every mass ping. message.mentions excludes @everyone/@here and
-            # role mentions, so this triggers only on a direct user mention of the bot.
-            bot_mentioned=self.user is not None
-            and any(user.id == self.user.id for user in message.mentions),
+            bot_mentioned=bot_mentioned,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
         ):
+            # Not a mention. The only other way a message starts a turn is
+            # organic thread participation, which has its own gates.
+            if is_participation_candidate(
+                # No Discord settings block means no bot to follow anything.
+                deployment_mode=(
+                    self.runtime.settings.thread_participation.mode
+                    if discord_settings is not None
+                    else ParticipationMode.DISABLED
+                ),
+                author_is_bot=message.author.bot,
+                bot_mentioned=bot_mentioned,
+                in_thread=isinstance(message.channel, discord.Thread),
+                guild_id=str(message.guild.id) if message.guild else None,
+            ):
+                await self._maybe_participate(message)
             return
         if self.draining:
             return  # stop admitting new mentions during drain
@@ -807,6 +1425,22 @@ class DaimonBot(commands.Bot):
         # liveness-read/mutex-bookkeeping failures, since the turn-execution path
         # already has its own boundary in _handle_mention.
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        # May the agent post here at all? Decided FIRST -- before the liveness
+        # read, provisioning or any notice -- and never raises: a protected
+        # channel, or one whose protection can't be established, hears nothing
+        # from this turn, not even the prologue's error reply.
+        post_state = await _channel_protection_state(
+            self.runtime.sessionmaker, tenant_id=tenant_id, channel=message.channel
+        )
+        if not post_state.may_post:
+            log.info(
+                "turn.skipped.channel_protected",
+                guild_id=guild_id,
+                channel_id=str(message.channel.id),
+                user_id=str(message.author.id),
+                state=post_state.value,
+            )
+            return
         try:
             tr: TenantRow | None = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
             if tr is None or tr.archived_at is not None:
@@ -838,12 +1472,17 @@ class DaimonBot(commands.Bot):
                 "the __main__.py entrypoint validates this at boot time"
             )
 
+            # An explicit mention supersedes any batch waiting out its quiet
+            # period in this thread: this turn's context carries those messages
+            # anyway, so judging them separately would only duplicate the reply.
+            if isinstance(message.channel, discord.Thread):
+                self._cancel_participation_batch(message.channel.id)
+
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
             if thread_id in self._processing:
-                await message.add_reaction("⌛")
-                self._pending.setdefault(thread_id, []).append(message)
+                await self._queue_behind_inflight_turn(thread_id, message)
                 return
 
             # --- Per-tenant concurrency cap (SCALE-01) ---
@@ -852,19 +1491,51 @@ class DaimonBot(commands.Bot):
             # both increment past the cap. The queue check above is also synchronous,
             # so there is exactly one increment per coroutine that reaches this point
             # and one matching decrement in the finally block below.
-            cap = self.runtime.settings.discord.max_concurrent_turns_per_tenant
+            cap = (
+                tr.turn_cap
+                if tr.turn_cap is not None
+                else self.runtime.settings.discord.max_concurrent_turns_per_tenant
+            )
             count = self._inflight.get(tenant_id, 0)
             if not should_admit_turn(current_in_flight=count, cap=cap):
+                # Mirror of the Slack shed log — here the notice is a visible
+                # channel message, but the log keeps shed counts greppable
+                # across both adapters.
+                record_refusal(
+                    self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id=str(thread_id),
+                    thread_id=str(thread_id),
+                )
+                log.info(
+                    "turn.skipped.concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=str(message.guild.id) if message.guild else None,
+                    channel_id=str(message.channel.id),
+                    in_flight=count,
+                    cap=cap,
+                )
                 await message.channel.send(
                     "This server has too many chats in flight right now — try again in a moment."
                 )
                 return
+            if not self.try_claim_global_turn():
+                log.info(
+                    "turn.skipped.global_concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=guild_id,
+                    channel_id=str(thread_id),
+                )
+                await message.channel.send(GLOBAL_CAP_NOTICE)
+                return
             self._inflight[tenant_id] = count + 1
 
             # Channel-level mentions each open their own thread + MA session, so
-            # they run in parallel — no serialization (bounded only by the
-            # per-tenant concurrency cap claimed above). Serializing them by channel
-            # id wedged the whole channel whenever a single turn stalled (e.g. an
+            # they run in parallel — no serialization (bounded by the
+            # per-tenant and optional process-wide caps claimed above).
+            # Serializing them by channel id wedged the whole channel whenever
+            # a single turn stalled (e.g. an
             # upstream overload backoff with no SSE events for minutes).
             #
             # Channel mentions still parallelize per-mention (each opens its own
@@ -902,46 +1573,73 @@ class DaimonBot(commands.Bot):
                     # the final drain iteration, the same residual window the
                     # thread branch below has.
                     for created_id in created_thread_ids:
-                        self._processing.discard(created_id)
+                        self._release_thread(created_id)
                         self._pending.pop(created_id, None)
                     self._release_inflight(tenant_id)
+                    self.release_global_turn()
                 return
 
             thread_id = message.channel.id
-            if thread_id in self._processing:
-                await message.add_reaction("⌛")
-                self._pending.setdefault(thread_id, []).append(message)
-                # This coroutine won't run a turn; the slot was claimed for the
-                # already-processing path which will do the work.
-                self._release_inflight(tenant_id)
-                return
-
             self._processing.add(thread_id)
             try:
                 await self._handle_mention(message, guild_id, tenant_id)
                 await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
             finally:
-                self._processing.discard(thread_id)
+                self._release_thread(thread_id)
                 self._pending.pop(thread_id, None)
                 self._release_inflight(tenant_id)
+                self.release_global_turn()
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await self._handle_prologue_failure(message, exc, guild_id)
-        except Exception as exc:  # noqa: BLE001 — on_message event-handler boundary
-            await self._handle_prologue_failure(message, exc, guild_id)
+            await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
+        except Exception as exc:  # on_message event-handler boundary
+            await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
+
+    async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
+        """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
+
+        The append happens before the first await. The in-flight turn's drain
+        loop and ``finally`` can run while this coroutine is suspended in
+        ``add_reaction``; a message appended only after the reaction would land
+        in ``_pending`` after the last drain, stranded until some later mention
+        in the thread. Slack fixed the same ordering as WR-05.
+
+        The reaction is a cosmetic hint, so its failure (missing Add Reactions
+        permission, rate limit, a connection error surviving discord.py's
+        retry) is logged and swallowed rather than dropping the queued message
+        into the prologue error path.
+        """
+        self._pending.setdefault(thread_id, []).append(message)
+        try:
+            await message.add_reaction("⌛")
+        except Exception as exc:
+            # best-effort queue marker after the message is already queued; see docstring
+            log.warning(
+                "mention_queue.reaction_failed",
+                thread_id=str(thread_id),
+                err_type=type(exc).__name__,
+            )
 
     async def _handle_prologue_failure(
-        self, message: discord.Message, exc: Exception, guild_id: str
+        self,
+        message: discord.Message,
+        exc: Exception,
+        guild_id: str,
+        *,
+        post_state: ProtectionState,
     ) -> None:
         """Best-effort error render for on_message prologue failures (#170 backstop).
 
         Never raises — a failure here would defeat the whole point of the
         boundary it's called from. Mirrors _flip_failed_best_effort's
-        try/log-only shape for the send itself.
+        try/log-only shape for the send itself. Posts only where the agent may
+        post (``post_state``); otherwise the log is all there is.
         """
         log.exception(
             "mention_prologue_failed", guild_id=guild_id, channel_id=str(message.channel.id)
         )
         sentry_sdk.capture_exception(exc)
+        if not post_state.may_post:
+            return
         rid = generate_request_id()
         try:
             await message.channel.send(render_error(exc, request_id=rid))
@@ -992,6 +1690,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
     ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
 
@@ -1010,6 +1709,9 @@ class DaimonBot(commands.Bot):
         ``message.attachments`` wholesale for the turn -- it carries the merged
         attachments from ALL of the queued author's messages, not just
         ``message``'s own.
+
+        ``unprompted`` marks a turn nobody @mentioned (organic thread
+        participation) so the context tells the agent it chose to speak.
         """
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
@@ -1021,11 +1723,18 @@ class DaimonBot(commands.Bot):
                 content_override=content_override,
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
+                unprompted=unprompted,
             )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="mention",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
-        except Exception as exc:  # noqa: BLE001 — mention-turn adapter boundary
+        except Exception as exc:  # mention-turn adapter boundary
             log.exception(
                 "turn.failed.unexpected", error=str(exc), channel_id=str(message.channel.id)
             )
@@ -1054,6 +1763,515 @@ class DaimonBot(commands.Bot):
         else:
             await target.send(error_text)
 
+    async def _dispatch_continuations(
+        self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
+    ) -> None:
+        """Claim and run any pending continuations for `thread`, guard already held.
+
+        Callers must already own this thread's `_processing` slot. The
+        turn-completion path does (`on_message` holds it for the whole turn);
+        anything outside a turn goes through
+        `dispatch_continuations_in_thread`, which takes the guard first.
+        """
+        if self.draining:
+            return
+        await dispatch_pending_continuations(
+            self.runtime.sessionmaker,
+            self.runtime.anthropic,
+            tenant_id=tenant_id,
+            thread=thread,
+            run_follow_up=lambda row, decision: self._run_continuation_turn(
+                row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
+            ),
+            may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+        )
+
+    async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
+        """The access policy's may-post decision for a channel or thread."""
+        state = await _channel_protection_state(
+            self.runtime.sessionmaker, tenant_id=tenant_id, channel=channel
+        )
+        return state.may_post
+
+    async def dispatch_continuations_in_thread(
+        self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
+    ) -> None:
+        """Claim and run any pending continuations for `thread`, from outside a turn.
+
+        Takes the same per-thread guard a mention turn takes, so a form
+        submission and a mention can never dispatch the same thread at once. A
+        thread already processing is skipped outright rather than queued: the
+        turn running there reaches `_dispatch_continuations` at its own tail
+        anyway, and will pick up whatever this call would have.
+        """
+        await self._wait_for_orphan_recovery()
+        if thread.id in self._processing:
+            # The turn running there may already be past its own tail
+            # dispatch, so remember the call and re-run it on release.
+            self._deferred_dispatch[thread.id] = (tenant_id, thread, guild_id)
+            return
+        self._processing.add(thread.id)
+        try:
+            # A mention that arrived during the dispatch queued behind it (⌛);
+            # it gets its own turn here, as it would behind a mention turn.
+            # Drain-always, like on_message after a failed turn: a dispatch
+            # that raises still drains (`_drain_pending_mentions` never
+            # raises), then re-raises for the spawned task's error log.
+            try:
+                await self._dispatch_continuations(
+                    tenant_id=tenant_id, thread=thread, guild_id=guild_id
+                )
+            except Exception:
+                await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
+                raise
+            await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
+        finally:
+            self._release_thread(thread.id)
+
+    async def _channel_by_id(self, channel_id: int) -> object:
+        """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
+        return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
+        """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
+
+        Same membership rule as the direct-message tool: the recipient must be
+        a current, non-bot member of the tenant's guild.
+        """
+        guild = self.get_guild(guild_id) or await self.fetch_guild(guild_id)
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        if member.bot:
+            raise LookupError("the routine's creator is not a human member")
+        return await member.create_dm()
+
+    async def _open_wake_thread(self, wake: WakeThread) -> bool:
+        """The wake poller's hook: dispatch a thread's due wakes, spawned.
+
+        Goes through `dispatch_continuations_in_thread`, so a wake takes the
+        same per-thread guard and the same admit -> bind -> run path as any
+        continuation. A thread Discord says is gone or forbidden has its wakes
+        settled; any other failure returns False and the poller pushes the
+        thread back. While draining, the rows are left for the next process.
+        """
+        if self.draining:
+            return True
+        try:
+            channel = self.get_channel(int(wake.thread_id)) or await self.fetch_channel(
+                int(wake.thread_id)
+            )
+        except (discord.NotFound, discord.Forbidden):
+            channel = None
+        except discord.HTTPException as exc:
+            log.warning("wake.thread_fetch_failed", thread_id=wake.thread_id, error=str(exc))
+            return False
+        if not isinstance(channel, discord.Thread):
+            await skip_thread_wakes(
+                self.runtime.sessionmaker,
+                thread=wake,
+                reason="thread_unavailable",
+                now=datetime.now(UTC),
+            )
+            return True
+        self._spawn(
+            self.dispatch_continuations_in_thread(
+                tenant_id=wake.tenant_id, thread=channel, guild_id=str(channel.guild.id)
+            )
+        )
+        return True
+
+    def _release_thread(self, thread_id: int) -> None:
+        """Free the thread's `_processing` slot; re-run a dispatch it skipped.
+
+        `dispatch_continuations_in_thread` skips a processing thread, trusting
+        the running turn's tail dispatch. A continuation recorded after that
+        tail already ran (a form submitted as the turn was finishing) would
+        otherwise wait for the next completed turn in the thread. Spawned, so
+        the caller's `finally` never blocks; not while draining, when no new
+        turn may start (the row stays pending for the next turn).
+        """
+        self._processing.discard(thread_id)
+        deferred = self._deferred_dispatch.pop(thread_id, None)
+        if deferred is not None and not self.draining:
+            tenant_id, thread, guild_id = deferred
+            self._spawn(
+                self.dispatch_continuations_in_thread(
+                    tenant_id=tenant_id, thread=thread, guild_id=guild_id
+                )
+            )
+
+    async def _run_continuation_turn(
+        self,
+        row: TaskContinuationRow,
+        decision: ContinuationDecision,
+        *,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        guild_id: str,
+    ) -> None:
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread.parent_id),
+                thread_id=str(thread.id),
+                origin="handoff",
+            ):
+                return await self._run_continuation_turn_observed(
+                    row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
+                )
+        except _anthropic.APIError as exc:
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="continuation",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
+            raise
+
+    async def _run_continuation_turn_observed(
+        self,
+        row: TaskContinuationRow,
+        decision: ContinuationDecision,
+        *,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        guild_id: str,
+    ) -> None:
+        """Run the destination agent's first turn for one dispatched continuation.
+
+        Same admit -> bind_session -> run_prepared_turn path an ordinary
+        mention takes, seeded with the requester's own words
+        (`decision.seed_user_message`) instead of a Discord message, and
+        framed with a one-time `HandoffNotice` since this is the receiving
+        agent's first turn in the thread. Raises on failure (propagates to
+        `continuation_dispatch`'s caller, which settles the row) rather than
+        rendering its own error -- there is no lifecycle message to attach
+        one to before `bind_session` has even run.
+        """
+        _ = guild_id  # kept for parity with _handle_mention's error-context signature
+        discord_settings = self.runtime.settings.discord
+        assert discord_settings is not None, (
+            "_run_continuation_turn called without discord settings"
+        )
+
+        # Read the predecessor BEFORE bind_session decides the replacement --
+        # once it runs, the old row is superseded and this is the only chance
+        # to read what it was running.
+        async with self.runtime.sessionmaker() as session:
+            predecessor = await get_live_thread_session(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=row.thread_id,
+                account_id=row.requester_account_id,
+            )
+        from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+        from_name = (
+            predecessor.effective_config.agent_name
+            if predecessor is not None and predecessor.effective_config is not None
+            else None
+        )
+
+        # The follow-up runs as the requester, so it carries their role as it
+        # stands NOW -- re-read from the guild, never from anything the form
+        # or the row recorded. A lookup that fails runs the turn as USER.
+        role = await _requester_role(thread.guild, row.requester_external_user_id)
+        # A continuation posts into the thread too: a protected one is skipped
+        # (the dispatcher logs it) before admission, which then reads the
+        # parent the check cached.
+        post_state = await _channel_protection_state(
+            self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+        )
+        if not post_state.may_post:
+            raise AdmissionDenied(reason="channel_protected")
+        category_id, category_unresolved = await _resolve_category(thread, fetch=False)
+        admission = await admit(
+            self.runtime.turn_deps,
+            tenant_id=tenant_id,
+            platform="discord",
+            external_user_id=row.requester_external_user_id,
+            channel_id=row.parent_channel_id,
+            thread_id=row.thread_id,
+            role=role,
+            now=datetime.now(UTC),
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        )
+        # A timer runs only as the agent it was set with; a thread rerouted in
+        # the meantime refuses it here, before any card, bind or billed turn.
+        check_wake_responder(
+            reason=row.reason,
+            target_ma_agent_id=row.target_ma_agent_id,
+            target_name=row.target_name,
+            admitted_ma_agent_id=admission.agent.id,
+            admitted_name=admission.agent.name,
+        )
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        agent = admission.agent
+
+        # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
+        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
+            return await thread.send(**kwargs)
+
+        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
+            await msg.edit(**kwargs)
+
+        async def _delete_message(msg: discord.Message) -> None:
+            await msg.delete()
+
+        cancel = asyncio.Event()
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                tenant_id=tenant_id,
+                requester_id=int(row.requester_external_user_id),
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
+                is True,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                send=_send_embed,
+                edit=_edit_message,
+                delete=_delete_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=int(row.requester_external_user_id),
+                    cancel=cancel,
+                    turn_id=turn_id,
+                ),
+                unprompted=False,
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=row.thread_id,
+            make_lifecycle=_make_lifecycle,
+        )
+
+        session_account_id = _resolve_session_account_id(
+            discord_settings, admission, tenant_id=tenant_id, thread_id=row.thread_id
+        )
+        prepared = await bind_session(
+            self.runtime.turn_deps,
+            admission,
+            tenant_id=tenant_id,
+            platform="discord",
+            external_user_id=row.requester_external_user_id,
+            thread_id=row.thread_id,
+            session_account_id=session_account_id,
+            reuse_existing=True,
+            deadline=turn_deadline_at,
+        )
+
+        if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+            async with self.runtime.sessionmaker() as session:
+                await mark_turn_active(
+                    session,
+                    id=prepared.mapping_id,
+                    active_turn_message_id=lifecycle.final_message_id,
+                    now=datetime.now(UTC),
+                )
+                await session.commit()
+
+        transfer_kind = prepared.continuity.transfer_kind
+        workspace: Literal["transferred", "transcript_only", "history_only"] = (
+            "transferred"
+            if transfer_kind == "full"
+            else "transcript_only"
+            if transfer_kind == "transcript"
+            else "history_only"
+        )
+        # Only a handoff hands the task to a different agent, so only a handoff
+        # gets the one-time notice. `private_input_applied` re-runs the SAME
+        # agent that just asked for the value, so framing it as "X handed you
+        # this" would describe a transfer that never happened.
+        handoff_notice = (
+            HandoffNotice(
+                from_name=from_name or "the previous agent",
+                from_ma_agent_id=from_ma_agent_id or "",
+                requested_by=f"<@{row.requester_external_user_id}>",
+                requested_work=decision.seed_user_message,
+                workspace=workspace,
+            )
+            if row.reason == "task_handoff"
+            else None
+        )
+        session_state = (
+            None
+            if prepared.continuity.state == "continued"
+            else SessionState(
+                state=prepared.continuity.state, applied=prepared.continuity.applied, lost=()
+            )
+        )
+        seed_message = decision.seed_user_message or ""
+
+        lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
+
+        async def _reseed_continuation_message() -> str:
+            async with self.runtime.sessionmaker() as session:
+                recovery_origin = await get_active_origin(
+                    session,
+                    origin_id=origin.id,
+                    tenant_id=tenant_id,
+                    account_id=admission.account_id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+            if recovery_origin is None:
+                raise DaimonError(
+                    "This turn's setup context expired. Mention me again to continue."
+                )
+            return (
+                render_turn_origin(
+                    recovery_origin,
+                    responder_handle=_responder_handle(self.runtime.settings),
+                    session_state=session_state,
+                    handoff=handoff_notice,
+                )
+                + "\n"
+                + seed_message
+            )
+
+        def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
+            new_lifecycle = DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                tenant_id=tenant_id,
+                requester_id=int(row.requester_external_user_id),
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
+                is True,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                send=_send_embed,
+                edit=_edit_message,
+                delete=_delete_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=int(row.requester_external_user_id),
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
+                ),
+                adopt_message_ref=lifecycle.message_ref,
+                unprompted=False,
+            )
+            lifecycle_holder[0] = new_lifecycle
+            return new_lifecycle
+
+        outcome: RunOutcome | None = None
+        try:
+            async with turn_origin(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                platform="discord",
+                parent_channel_id=row.parent_channel_id,
+                thread_id=row.thread_id,
+                responder_ma_agent_id=str(agent.id),
+                responder_name=admission.config.agent_name or agent.name,
+                configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
+                configuration_target_name=admission.config.configuration_target_name,
+                role=role,
+                is_setup=admission.config.thread_binding_kind == "setup",
+            ) as origin:
+                outcome = await run_prepared_turn(
+                    self.runtime.turn_deps,
+                    prepared,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=row.thread_id,
+                    external_user_id=row.requester_external_user_id,
+                    origin="handoff" if handoff_notice is not None else "chat",
+                    user_message=(
+                        render_turn_origin(
+                            origin,
+                            responder_handle=_responder_handle(self.runtime.settings),
+                            session_state=session_state,
+                            handoff=handoff_notice,
+                        )
+                        + "\n"
+                        + seed_message
+                    ),
+                    lifecycle=lifecycle,
+                    cancel=cancel,
+                    reseed_user_message=_reseed_continuation_message,
+                    recovery_lifecycle=_recovery_lifecycle,
+                    render_interval_s=2.0,
+                    deadline=turn_deadline_at,
+                    confirm_write=discord_confirmation_hook(thread),
+                )
+        finally:
+            done_ids = {prepared.mapping_id}
+            if outcome is not None:
+                done_ids.add(outcome.mapping_id)
+            for done_id in done_ids - {None}:
+                if done_id is None:  # pragma: no cover - set difference guarantees this
+                    continue
+                async with self.runtime.sessionmaker() as session:
+                    await clear_active_turn(session, id=done_id)
+                    await session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
+                    allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
+                )
+
+        assert outcome is not None
+        log_anthropic_overload(
+            outcome.state.error.cause if outcome.state.error is not None else None,
+            tenant_id=tenant_id,
+            path="continuation",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+        )
+        final_lifecycle = lifecycle_holder[0]
+        if outcome.state.error is None and prepared.mapping_id is not None:
+            if final_lifecycle.final_message_id is not None:
+                async with self.runtime.sessionmaker() as session:
+                    await update_watermark(
+                        session,
+                        id=prepared.mapping_id,
+                        watermark_message_id=final_lifecycle.final_message_id,
+                    )
+                    await session.commit()
+            if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
+                await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+
+    async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
+        metadata = payload.data["thread_metadata"]
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+        async with self.runtime.sessionmaker() as session:
+            await update_lifecycle(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=str(payload.parent_id),
+                thread_id=str(payload.thread_id),
+                archived=metadata.get("archived"),
+                locked=metadata.get("locked"),
+            )
+            await session.commit()
+
+    async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+        async with self.runtime.sessionmaker() as session:
+            await update_lifecycle(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=str(payload.parent_id),
+                thread_id=str(payload.thread_id),
+                deleted=True,
+            )
+            await session.commit()
+
     async def _orchestrate(
         self,
         message: discord.Message,
@@ -1063,6 +2281,34 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
+    ) -> None:
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(message.channel.id),
+        ):
+            return await self._orchestrate_observed(
+                message,
+                guild_id,
+                tenant_id,
+                content_override=content_override,
+                created_thread_ids=created_thread_ids,
+                attachments_override=attachments_override,
+                unprompted=unprompted,
+            )
+
+    async def _orchestrate_observed(
+        self,
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
     ) -> None:
         """Core orchestration logic extracted for clean error boundary.
 
@@ -1075,7 +2321,14 @@ class DaimonBot(commands.Bot):
         wholesale for the attachment split below -- the drain path uses this to
         carry the merged attachments from all of a queued author's messages
         (for the merged-attachments path).
+
+        ``unprompted`` marks the trigger as one nobody @mentioned; it reaches
+        the agent as an attribute on the ``<user_query>`` element.
         """
+        # Serialize every turn against the boot snapshot, including a turn
+        # that arrives before on_ready, so a marker written by this process
+        # cannot be mistaken for an orphan.
+        await self._wait_for_orphan_recovery()
         if self.user is None:
             log.warning("orchestrate_called_before_ready")
             return
@@ -1088,6 +2341,15 @@ class DaimonBot(commands.Bot):
             parent_channel_id = str(message.channel.id)
             thread = None
 
+        author = message.author
+        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
+            author, guild_owner_id=message.guild.owner_id if message.guild else None
+        )
+        role = Role.ADMIN if is_admin else Role.USER
+        # Cache-only: on_message's protection check already fetched an uncached
+        # parent when a category is protected, and cached it.
+        category_id, category_unresolved = await _resolve_category(message.channel, fetch=False)
+
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
         try:
@@ -1097,7 +2359,11 @@ class DaimonBot(commands.Bot):
                 platform="discord",
                 external_user_id=str(message.author.id),
                 channel_id=parent_channel_id,
+                thread_id=str(thread.id) if thread else None,
+                role=role,
                 now=datetime.now(UTC),
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             )
         except MissingTurnConfigError as err:
             log.info(
@@ -1106,12 +2372,14 @@ class DaimonBot(commands.Bot):
                 channel_id=parent_channel_id,
                 missing=list(err.missing),
             )
+            if unprompted:
+                return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
             hints: list[str] = []
             if "agent" in err.missing:
                 hints.append(
-                    "An admin can set the default agent in `/agent-setup` -> "
-                    "**Set as default...** -> [This channel] or [Whole server]."
+                    "An admin can tell Daimon: make an agent answer in this channel or the "
+                    "whole server. Run `/agent-setup` to see who answers where."
                 )
             if "environment" in err.missing:
                 hints.append(
@@ -1129,17 +2397,53 @@ class DaimonBot(commands.Bot):
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
+            if unprompted:
+                return
             target = thread or message.channel
             await target.send(
                 "The configured agent or environment no longer exists. "
-                "An admin can re-set the agent in `/agent-setup` -> "
-                "**Set as default...**; the environment is "
+                "An admin can ask Daimon to pick an existing agent; the environment is "
                 "operator-only via the CLI (`daimon config set environment_name=...`)."
             )
             return
         except AdmissionDenied as err:
+            if unprompted:
+                # An unprompted turn that cannot be admitted stays silent: the
+                # balance or cap notice is owed to someone who asked, and every
+                # quiet burst would otherwise repost it.
+                log.info(
+                    "thread_participation.skipped",
+                    reason=err.reason,
+                    guild_id=guild_id,
+                    tenant_id=str(tenant_id),
+                )
+                return
             target = thread or message.channel
-            if err.reason == "balance_depleted":
+            if err.reason == "channel_protected":
+                # Nothing may be posted into a protected channel, a refusal
+                # included; the log is the only trace.
+                log.info(
+                    "turn.skipped.channel_protected",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+            elif err.reason == "invoker_not_allowed":
+                log.info(
+                    "turn.skipped.invoker_not_allowed",
+                    guild_id=guild_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
+            elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
                     _credit_depleted_message(_resolve_bot_display_name(self.runtime.settings))
@@ -1156,49 +2460,48 @@ class DaimonBot(commands.Bot):
                 )
             return
 
+        # D-03 boundary: the per-turn ceiling clock starts here, once admission
+        # has passed, and covers session bind/create (bind_session) plus the
+        # driver pump (run_prepared_turn) as ONE shared budget -- admit()
+        # itself is deliberately outside it.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+
         agent = admission.agent
-
-        # --- Derive is_admin from Discord-native permissions ---
-        # author is Union[User, Member]; guild_permissions is only on Member.
-        # Non-Member (DM edge case) defaults to False.
-        author = message.author
-        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
-            author, guild_owner_id=message.guild.owner_id if message.guild else None
-        )
-
-        # --- Per-turn role upsert: sync account.role from live Discord perms ---
-        # This write is UNCONDITIONAL — it is NOT gated by per_caller_thread_sessions.
-        # The admin-via-live-role mechanism (this write + the MCP gate) ships
-        # active on every deploy regardless of the session-keying flag (B4 disposition).
-        #
-        # (a) Runs BEFORE run_turn so the live-role gate reads the fresh DB role
-        #     when this turn's MCP calls arrive — ensuring the first post-deploy admin turn
-        #     already has role=ADMIN when the gate evaluates.
-        # (b) Idempotent per-(tenant, account_id) write: the value is derived solely from the
-        #     caller's current guild-admin status, so concurrent same-account turns write the
-        #     IDENTICAL value. No lock is needed — accounts are tenant-scoped so admin status
-        #     is singular within a tenant (B1).
-        # (c) Targets only admission.account_id — by construction a platform-principal account
-        #     created by admit()'s identity resolution. CLI/operator accounts are distinct
-        #     rows and are never touched by this write (T-88-04-03).
-        async with self.runtime.sessionmaker() as _role_session:
-            await set_role(
-                _role_session,
-                admission.account_id,
-                Role.ADMIN if is_admin else Role.USER,
-            )
-            await _role_session.commit()
 
         # --- Create thread + status embed BEFORE session create ---
         # MA sessions.create can hold its HTTP response for minutes while it
         # provisions the session (the record exists server-side in ~1s; the
         # response is what stalls). The thread and a thinking embed go up
-        # first so the user gets instant feedback; the lifecycle adopts the
-        # embed and edits it in place once SSE events flow.
+        # first, behind only the short naming call, so the user gets early
+        # feedback; the lifecycle adopts the embed and edits it in place once
+        # SSE events flow.
         is_thread_mention = thread is not None
         if thread is None:
+            # Titled BEFORE creation: renaming afterwards posted a "renamed the
+            # thread" system message into every new thread. The channel shows
+            # typing meanwhile, the only signal possible before the thread
+            # exists. Once the mention tokens are gone an attachment-only
+            # message has nothing to title, so it keeps the static name and
+            # skips the (metered) call.
+            thread_name = f"Chat with {agent.name}"
+            naming = self.runtime.settings.thread_naming
+            opening_text = strip_mentions(message.content)
+            if naming.enabled and opening_text:
+                async with message.channel.typing():
+                    thread_name = await generate_thread_name(
+                        fallback=thread_name,
+                        message_text=opening_text,
+                        message_id=message.id,
+                        anthropic=self.runtime.anthropic,
+                        sessionmaker=self.runtime.sessionmaker,
+                        tenant_id=tenant_id,
+                        platform_user_id=str(message.author.id),
+                        markup=self.runtime.settings.billing.markup,
+                        max_input_chars=naming.max_input_chars,
+                        timeout_seconds=naming.timeout_seconds,
+                    )
             thread = await message.create_thread(
-                name=f"Chat with {agent.name}",
+                name=thread_name,
                 auto_archive_duration=10080,
             )
             # Register the thread as processing IMMEDIATELY — no await between
@@ -1215,22 +2518,48 @@ class DaimonBot(commands.Bot):
                 created_thread_ids.append(thread.id)
 
         # --- Wire lifecycle with send/edit callables ---
-        async def _send_embed(**kwargs: Any) -> discord.Message:
+        # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
+        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
             return await thread.send(**kwargs)
 
-        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:
+        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
             await msg.edit(**kwargs)
 
+        async def _delete_message(msg: discord.Message) -> None:
+            await msg.delete()
+
         cancel = asyncio.Event()
-        cancel_view = CancelView(allowed_user_id=message.author.id, cancel=cancel)
-        lifecycle = DiscordTurnLifecycle(
-            send=_send_embed,
-            edit=_edit_message,
-            agent_name=agent.name,
-            model_id=agent.model.id,
-            cancel_view=cancel_view,
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                tenant_id=tenant_id,
+                requester_id=message.author.id,
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
+                is True,
+                trigger_message=message,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                send=_send_embed,
+                edit=_edit_message,
+                delete=_delete_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
+                ),
+                unprompted=unprompted,
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=str(thread.id),
+            make_lifecycle=_make_lifecycle,
         )
-        await lifecycle.post_initial()
 
         # Compute the account_id used to key thread-session lookup and create.
         # When per_caller_thread_sessions is ON (default): use the caller's real
@@ -1249,32 +2578,128 @@ class DaimonBot(commands.Bot):
         assert discord_settings is not None, (
             "_orchestrate called without discord settings — entrypoint must validate at boot"
         )
-        if discord_settings.per_caller_thread_sessions:
-            session_account_id = admission.account_id
-        else:
-            session_account_id = uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"legacy-thread-sentinel:{tenant_id}:{thread.id}",
-            )
+        session_account_id = _resolve_session_account_id(
+            discord_settings, admission, tenant_id=tenant_id, thread_id=str(thread.id)
+        )
 
         # --- Stage two: bind_session (find-or-create, mapping write,
         # recorder binding) -- D-01 bind_session(). ---
-        prepared = await bind_session(
-            self.runtime.turn_deps,
-            admission,
-            tenant_id=tenant_id,
-            platform="discord",
-            external_user_id=str(message.author.id),
-            thread_id=str(thread.id),
-            session_account_id=session_account_id,
-            reuse_existing=is_thread_mention,
-        )
+        try:
+            prepared = await bind_session(
+                self.runtime.turn_deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_user_id=str(message.author.id),
+                thread_id=str(thread.id),
+                session_account_id=session_account_id,
+                reuse_existing=is_thread_mention,
+                deadline=turn_deadline_at,
+            )
+        except SessionAgentMismatch as error:
+            # Replace this attempt's status card; the mapped session and its
+            # workspace remain intact for the previous responder. No handoff
+            # binding authorized this responder change (a handoff would have
+            # resolved via config.thread_binding_kind == "handoff" instead),
+            # so the copy offers the handoff rather than describing an error.
+            owner_name = await _resolve_agent_display_name(
+                self.runtime.anthropic, tenant_id=tenant_id, ma_agent_id=error.source_agent_id
+            )
+            error_text = render_error(
+                error,
+                request_id=generate_request_id(),
+                new_responder=agent.name,
+                owner=owner_name,
+                channel=f"<#{parent_channel_id}>",
+            )
+            if lifecycle.message_ref is not None:
+                await _edit_message(
+                    lifecycle.message_ref, content=error_text, embed=None, view=None
+                )
+            else:
+                await thread.send(error_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.card_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
+            return
+        except SessionPreparationFailed:
+            # Nothing was attempted -- bind_session did not run the turn
+            # against a configuration nobody asked for, so no turn to render
+            # here either; the copy says what was preserved and asks for a retry.
+            failure_text = render_preparation_failed(agent.name)
+            if lifecycle.message_ref is not None:
+                await _edit_message(
+                    lifecycle.message_ref, content=failure_text, embed=None, view=None
+                )
+            else:
+                await thread.send(failure_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.card_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
+            return
+        except SessionBusyError:
+            # Nothing failed and nothing is misconfigured: the previous turn in
+            # this thread is still running, and the session it is running in
+            # belongs to the OUTGOING responder. Making the change around it
+            # would answer as one agent inside another agent's workspace, so no
+            # turn runs here -- the person is told the in-flight message
+            # finishes first and the switch applies to their next one.
+            busy_text = render_current_work_must_finish(agent.name, handoff=True)
+            if lifecycle.message_ref is not None:
+                await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
+            else:
+                await thread.send(busy_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.card_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
+            return
 
         log.info(
             "session.ready",
             session_id=prepared.ma_session_id,
             thread_id=thread.id,
             reused=prepared.reused,
+        )
+        # A planned transition the caller didn't necessarily ask to see this
+        # turn: say what happened to the workspace BEFORE the answer, so a
+        # replacement is never discovered only by its side effects.
+        # `prepared.continuity` is the bind's OWN decision, taken before the
+        # turn runs -- it can never be "replaced_after_loss" (that state only
+        # exists on the post-turn `RunOutcome`, set when `run_prepared_turn`'s
+        # recovery cycle recreates the session mid-call). That notice is
+        # posted after the turn instead, once the outcome is known.
+        replacement_summary: str | None = None
+        if (
+            prepared.continuity.state == "replaced"
+            and prepared.continuity.transfer_kind is not None
+        ):
+            # Not a separate message: the answer is an in-place edit of the
+            # embed posted at mention time, so a summary sent at any point
+            # after that lands BELOW the answer it explains ("the file
+            # vanished" above "here is why"). It becomes the answer's first
+            # paragraph instead. The fallback after the turn covers an answer
+            # that never arrives to carry it.
+            #
+            # A `None` transfer_kind here means a fresh start (no prior
+            # session to summarize a transfer from) -- that path already
+            # announces itself elsewhere, so no prefix is rendered.
+            replacement_summary = render_replacement_summary(prepared.continuity.transfer_kind, [])
+            lifecycle.answer_prefix = replacement_summary
+        session_state = (
+            None
+            if prepared.continuity.state == "continued"
+            else SessionState(
+                state=prepared.continuity.state, applied=prepared.continuity.applied, lost=()
+            )
         )
 
         # Flag the turn as in flight. The render loop lives in THIS process, so
@@ -1290,6 +2715,28 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
+
+        # Names-only <keys> context: stored key names for THIS agent, named
+        # only while the mounted `.env` is still exactly today's agent_files
+        # rows (see `list_mounted_key_names`). One extra read per turn.
+        async with self.runtime.sessionmaker() as _keys_session:
+            _live_row_for_keys = await get_live_thread_session(
+                _keys_session,
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=str(thread.id),
+                account_id=session_account_id,
+            )
+            _live_config = (
+                None if _live_row_for_keys is None else _live_row_for_keys.effective_config
+            )
+            _env_sha256 = None if _live_config is None else _live_config.env_sha256
+            key_names = await list_mounted_key_names(
+                _keys_session,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+                env_sha256=_env_sha256,
+            )
 
         # Split trigger-message attachments: API-consumable images → vision
         # blocks; everything else (data files, unsupported/oversized images)
@@ -1331,6 +2778,9 @@ class DaimonBot(commands.Bot):
                     after_message_id=int(prepared.watermark),
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
+                    unprompted=unprompted,
+                    key_names=key_names,
                 )
             else:
                 user_message, _ = await build_context_xml(
@@ -1339,6 +2789,9 @@ class DaimonBot(commands.Bot):
                     limit=100,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
+                    unprompted=unprompted,
+                    key_names=key_names,
                 )
         else:
             if content_override is not None:
@@ -1350,6 +2803,8 @@ class DaimonBot(commands.Bot):
                     thread=thread,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
+                    key_names=key_names,
                 )
             else:
                 # Forum/voice channels: fall back to raw message content
@@ -1416,23 +2871,65 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id if self.user else None,
                 bot_display_name=discord_settings.bot_display_name,
                 omit_oversized_image_urls=True,
+                is_admin=is_admin,
+                unprompted=unprompted,
+                key_names=key_names,
             )
             if synthetic_prefix:
                 full_message = synthetic_prefix + "\n" + full_message
-            return full_message
+            async with self.runtime.sessionmaker() as session:
+                recovery_origin = await get_active_origin(
+                    session,
+                    origin_id=origin.id,
+                    tenant_id=tenant_id,
+                    account_id=admission.account_id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+            if recovery_origin is None:
+                raise DaimonError(
+                    "This turn's setup context expired. Mention me again to continue."
+                )
+            return (
+                render_turn_origin(
+                    recovery_origin,
+                    responder_handle=_responder_handle(self.runtime.settings),
+                    session_state=session_state,
+                )
+                + "\n"
+                + full_message
+            )
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                tenant_id=tenant_id,
+                requester_id=message.author.id,
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
+                is True,
+                trigger_message=message,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=_send_embed,
                 edit=_edit_message,
+                delete=_delete_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
-                cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_event),
+                cancel_view=CancelView(
+                    allowed_user_id=message.author.id,
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
+                ),
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.message_ref,
+                unprompted=unprompted,
             )
+            # The replacement summary belongs to the turn, not to the lifecycle
+            # object that happens to render it -- a recovery cycle swaps the
+            # lifecycle and would otherwise drop it.
+            new_lifecycle.answer_prefix = lifecycle.answer_prefix
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -1445,38 +2942,54 @@ class DaimonBot(commands.Bot):
         )
         outcome: RunOutcome | None = None
         try:
-            outcome = await asyncio.wait_for(
-                run_prepared_turn(
+            async with turn_origin(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                platform="discord",
+                parent_channel_id=parent_channel_id,
+                thread_id=str(thread.id),
+                responder_ma_agent_id=str(agent.id),
+                responder_name=admission.config.agent_name or agent.name,
+                configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
+                configuration_target_name=admission.config.configuration_target_name,
+                role=role,
+                is_setup=admission.config.thread_binding_kind == "setup",
+            ) as origin:
+                outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,
                     tenant_id=tenant_id,
                     platform="discord",
                     thread_id=str(thread.id),
                     external_user_id=str(message.author.id),
-                    user_message=user_message,
+                    user_message=(
+                        render_turn_origin(
+                            origin,
+                            responder_handle=_responder_handle(self.runtime.settings),
+                            session_state=session_state,
+                        )
+                        + "\n"
+                        + user_message
+                    ),
                     lifecycle=lifecycle,
                     cancel=cancel,
                     reseed_user_message=_reseed_user_message,
                     recovery_lifecycle=_recovery_lifecycle,
                     image_blocks=image_blocks,
                     render_interval_s=2.0,
-                ),
-                timeout=_TURN_DEADLINE_S,
-            )
-        except TimeoutError:
-            await self._retire_deadlocked_turn(
-                mapping_id=prepared.mapping_id,
-                thread_id=str(thread.id),
-                session_id=prepared.ma_session_id,
-                message_ref=lifecycle.message_ref,
-            )
-            return
+                    deadline=turn_deadline_at,
+                    confirm_write=discord_confirmation_hook(thread),
+                )
         finally:
-            # Runs on the deadline and on any exception, not just the happy
-            # path: whatever else went wrong, the thread must not be left
-            # holding its active_turn marker. Both ids are cleared -- recovery
-            # moves the turn to a new mapping row and leaves the marker behind
-            # on the old one, which is still pointing at this same message.
+            # Runs on any exception, not just the happy path: whatever else
+            # went wrong, the thread must not be left holding its active_turn
+            # marker. Both ids are cleared -- recovery moves the turn to a new
+            # mapping row and leaves the marker behind on the old one, which
+            # is still pointing at this same message. A ceiling breach is not
+            # a special case here: run_prepared_turn already marked the
+            # active mapping dead and returns a normal RunOutcome, so it takes
+            # this same path.
             _done_ids = {prepared.mapping_id}
             if outcome is not None:
                 _done_ids.add(outcome.mapping_id)
@@ -1486,13 +2999,49 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as _ct_session:
                     await clear_active_turn(_ct_session, id=_done_id)
                     await _ct_session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
+                    allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
+                )
 
-        if outcome is None:  # pragma: no cover - the deadline branch above returns
-            return
-
+        # Reached only on the non-exceptional path -- any raise inside the try
+        # propagates past this point once the finally block above has run.
+        assert outcome is not None
+        log_anthropic_overload(
+            outcome.state.error.cause if outcome.state.error is not None else None,
+            tenant_id=tenant_id,
+            path="mention",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+        )
         state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
+
+        # The recovery cycle inside run_prepared_turn only learns a session was
+        # lost mid-call, after the turn has already run -- so unlike the
+        # planned-replacement summary above, this notice can only be posted
+        # here, once `outcome.continuity` is known. Posted regardless of
+        # whether the recovered turn itself then answered or errored: the
+        # person needs to know the workspace was lost either way.
+        if outcome.continuity.state == "replaced_after_loss":
+            loss_kind: Literal["transcript", "history"] = (
+                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
+            )
+            loss_notice = render_unexpected_loss(loss_kind)
+            # Edited in above the answer rather than sent under it, for the
+            # same ordering reason as the planned summary above. Falls back to
+            # a message when there is no answer to sit above (a tool-only or
+            # failed turn) or it will not fit.
+            if not await final_lifecycle.prepend_revealed_answer(loss_notice):
+                await thread.send(loss_notice)
+        if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
+            # The turn produced no answer to carry the summary (tool-only,
+            # cancelled, or failed). The person still has to be told what the
+            # replacement carried across, so it goes out on its own.
+            await thread.send(replacement_summary)
 
         if state.error is not None:
             log.warning(
@@ -1519,3 +3068,17 @@ class DaimonBot(commands.Bot):
             # session mapping, not whether the turn actually answered.
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+            # A change queued behind this turn (it was already running when the
+            # change landed) applies at the caller's NEXT message, not this one
+            # -- said only after the answer, so it never reads as a caveat on
+            # work that already finished.
+            if prepared.continuity.pending:
+                await target.send(render_current_work_must_finish(agent.name, handoff=False))
+            # Any task handed to another agent in THIS thread, with work to
+            # continue, gets its first turn dispatched now -- still inside this
+            # turn's concurrency guard, so nothing else can land in the thread
+            # first.
+            await self._dispatch_continuations(
+                tenant_id=tenant_id, thread=thread, guild_id=guild_id
+            )
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)

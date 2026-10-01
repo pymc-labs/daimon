@@ -1,0 +1,347 @@
+"""The panel's shell reads: roster state, GitHub facts and creator attribution."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+from unittest.mock import MagicMock
+
+import discord
+import pytest
+from daimon.adapters.discord.agent_setup.hydrate import (
+    github_facts,
+    load_roster_state,
+    resolve_attributions,
+)
+from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import Settings
+from daimon.core.defaults.provisioning import derive_guild_account_uuid
+from daimon.core.errors import DaimonError
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.roster import RosterAgent
+from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.turn.deps import build_turn_deps
+from daimon.testing import ma_agent
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+GUILD_ID = 700100001
+CHANNEL_ID = 222
+THREAD_ID = 333
+
+
+def _runtime(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: Any,
+    default: DeploymentDefault,
+    settings_overrides: dict[str, Any] | None = None,
+) -> DiscordRuntime:
+    payload: dict[str, Any] = {
+        "database": {"url": "postgresql+asyncpg://test:test@localhost/daimon_test"},
+        "anthropic": {"api_key": "test"},
+    }
+    payload.update(settings_overrides or {})
+    settings = Settings.model_validate(payload)
+    cache = new_resolver_cache()
+    return DiscordRuntime(
+        settings=settings,
+        anthropic=anthropic,
+        sessionmaker=sessionmaker,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=default,
+        resolver_cache=cache,
+        turn_deps=build_turn_deps(
+            settings,
+            anthropic,
+            sessionmaker,
+            deployment_default=default,
+            resolver_cache=cache,
+            billing_config=None,
+        ),
+    )
+
+
+def _interaction(*, in_thread: bool) -> MagicMock:
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.Member)
+    interaction.user.id = 42
+    interaction.guild_id = GUILD_ID
+    parent = MagicMock(spec=discord.TextChannel)
+    parent.id = CHANNEL_ID
+    parent.name = "general"
+    if in_thread:
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = THREAD_ID
+        thread.parent = parent
+        interaction.channel = thread
+    else:
+        interaction.channel = parent
+    return interaction
+
+
+# ---------------------------------------------------------------------------
+# github_facts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("github", "expected_pat", "expected_app"),
+    [
+        ({}, False, False),
+        ({"fallback_pat": "ghp_x"}, True, False),
+        ({"app_id": "1234"}, False, False),
+        ({"app_id": "1234", "app_private_key": "-----BEGIN KEY-----"}, False, True),
+        (
+            {
+                "fallback_pat": "ghp_x",
+                "app_id": "1234",
+                "app_private_key": "-----BEGIN KEY-----",
+            },
+            True,
+            True,
+        ),
+    ],
+)
+def test_github_facts_report_the_app_configured_only_with_both_halves(
+    github: dict[str, str],
+    expected_pat: bool,
+    expected_app: bool,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=MagicMock(),
+        default=DeploymentDefault(),
+        settings_overrides={"github": github},
+    )
+
+    facts = github_facts(runtime)
+
+    assert facts.has_fallback_pat is expected_pat, (
+        "the fallback PAT is configured exactly when it is set"
+    )
+    assert facts.app_configured is expected_app, (
+        "an app id with no private key mints nothing and must not read as configured"
+    )
+
+
+# ---------------------------------------------------------------------------
+# resolve_attributions
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_attributions_names_a_creator_with_a_discord_principal(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="12345"
+        )
+    runtime = _runtime(
+        sessionmaker=db_session_factory, anthropic=MagicMock(), default=DeploymentDefault()
+    )
+    state = PanelState(
+        roster=[],
+        selected=None,
+        account_id=principal.account_id,
+        guild_account_id=derive_guild_account_uuid(tenant.id),
+        guild_id=GUILD_ID,
+    )
+    agent = RosterAgent(
+        name="churn-explorer",
+        ma_agent_id="ag_churn",
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
+        created_by_account_id=principal.account_id,
+    )
+
+    attributions = await resolve_attributions(runtime, state=state, agents=[agent])
+
+    assert attributions == {"ag_churn": "<@12345>"}, (
+        "a creator with a live Discord principal is rendered as a mention"
+    )
+
+
+async def test_resolve_attributions_omits_the_guild_stamp_and_unknown_accounts(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+    runtime = _runtime(
+        sessionmaker=db_session_factory, anthropic=MagicMock(), default=DeploymentDefault()
+    )
+    guild_account_id = derive_guild_account_uuid(tenant.id)
+    state = PanelState(
+        roster=[],
+        selected=None,
+        account_id=account.id,
+        guild_account_id=guild_account_id,
+        guild_id=GUILD_ID,
+    )
+    agents = [
+        RosterAgent(
+            name="guild-made",
+            ma_agent_id="ag_guild",
+            model_id="claude-sonnet-4-6",
+            is_built_in=False,
+            created_by_account_id=guild_account_id,
+        ),
+        RosterAgent(
+            name="no-principal",
+            ma_agent_id="ag_orphan",
+            model_id="claude-sonnet-4-6",
+            is_built_in=False,
+            created_by_account_id=account.id,
+        ),
+        RosterAgent(
+            name="unstamped",
+            ma_agent_id="ag_unstamped",
+            model_id="claude-sonnet-4-6",
+            is_built_in=False,
+        ),
+    ]
+
+    attributions = await resolve_attributions(runtime, state=state, agents=agents)
+
+    assert attributions == {}, (
+        "the shared guild stamp names nobody, and an account with no Discord principal "
+        "must not be turned into an invented handle"
+    )
+
+
+# ---------------------------------------------------------------------------
+# load_roster_state
+# ---------------------------------------------------------------------------
+
+
+async def test_load_roster_state_reports_the_parent_channel_and_the_answering_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(id="ag_specialist", name="specialist", tenant_id=tenant.id),
+        ma_agent(
+            id="ag_daimon", name="daimon", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
+        ),
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(router.dispatch),
+        default=DeploymentDefault(agent_name="specialist"),
+    )
+
+    state = await load_roster_state(
+        runtime, _interaction(in_thread=False), tenant_id=tenant.id, is_admin=True
+    )
+
+    assert state.channel_id == CHANNEL_ID, "the panel is about the channel it was opened in"
+    assert state.channel_name == "general", "the header needs the channel's name, not its id"
+    assert state.thread_id is None, "outside a thread there is no thread to resolve against"
+    assert state.thread_context is None, "no thread, no thread line"
+    assert state.answering is not None and state.answering.name == "specialist", (
+        "the deployment default answers here when nothing else is set"
+    )
+    assert state.roster_agents[0].name == "specialist", "the answering agent leads the roster"
+    assert state.selected_agent == state.answering, "setup starts pointed at whoever answers here"
+    assert state.is_admin is True, "the caller's role is carried onto the state"
+    assert state.guild_account_id == derive_guild_account_uuid(tenant.id), (
+        "the guild stamp is needed to recognise agents nobody personally made"
+    )
+
+
+async def test_load_roster_state_reads_the_thread_binding_and_seeds_its_target(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id=str(CHANNEL_ID),
+            thread_id=str(THREAD_ID),
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id="ag_specialist",
+            configuration_target_name="specialist",
+        )
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(id="ag_specialist", name="specialist", tenant_id=tenant.id),
+        ma_agent(
+            id="ag_daimon", name="daimon", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
+        ),
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(router.dispatch),
+        default=DeploymentDefault(agent_name="specialist"),
+    )
+
+    state = await load_roster_state(
+        runtime, _interaction(in_thread=True), tenant_id=tenant.id, is_admin=False
+    )
+
+    assert state.channel_id == CHANNEL_ID, "inside a thread the panel still describes the parent"
+    assert state.thread_id == str(THREAD_ID), (
+        "the thread has to survive so Details resolves the same responder the thread does"
+    )
+    assert state.thread_context is not None, "a live binding produces a thread line"
+    assert state.thread_context.kind == "setup", "the binding's kind decides what the line says"
+    assert state.thread_context.responder_name == "Daimon", "the line names the thread's responder"
+    assert state.thread_context.target_name == "specialist", "and what is being set up"
+    assert state.selected_agent is not None and state.selected_agent.name == "specialist", (
+        "a setup thread seeds the selection with the agent it was opened about"
+    )
+
+
+async def test_load_roster_state_registers_the_caller_as_a_platform_principal(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(router.dispatch),
+        default=DeploymentDefault(),
+    )
+
+    state = await load_roster_state(
+        runtime, _interaction(in_thread=False), tenant_id=tenant.id, is_admin=False
+    )
+
+    async with db_session_factory() as session, session.begin():
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="42"
+        )
+    assert state.account_id == principal.account_id, (
+        "the panel's writes are attributed to the caller's own principal, not a fresh one"
+    )
+    assert state.platform_principal_id == principal.id, "and to that principal's identity"
+    assert state.roster_agents == (), "an empty install renders an empty roster, not an error"
+    assert state.answering is None, "nothing answers where nothing is configured"
+
+
+async def test_load_roster_state_refuses_a_place_with_no_channel() -> None:
+    """A panel opened somewhere with no guild channel has nothing to describe."""
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.guild_id = GUILD_ID
+    interaction.channel = None
+    interaction.user = MagicMock(spec=discord.Member)
+    interaction.user.id = 42
+
+    with pytest.raises(DaimonError, match="server channel"):
+        await load_roster_state(MagicMock(), interaction, tenant_id=uuid.uuid4(), is_admin=False)

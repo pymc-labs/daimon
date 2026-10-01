@@ -1,0 +1,959 @@
+"""Tests for `SlackApp`'s continuation-dispatch entry points.
+
+`dispatch_continuations_in_thread` is the entry a caller OUTSIDE a turn uses
+(a private-form submission, say); it takes the same per-thread `_processing`
+guard a mention takes, then delegates to `_dispatch_continuations`, which the
+turn tail calls directly because it already owns the guard.
+
+`_run_continuation_turn` is exercised with `bind_session` /
+`run_prepared_turn` patched at the names `app.py` imports (the precedent in
+`test_continuity_copy.py`) so the assertion is about the turn controls the
+follow-up runs with, not the session-preparation pipeline. Slack itself is
+faked at the transport (`fake_slack_web_client`), never method-mocked.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+from aioresponses import CallbackResult
+from daimon.adapters.slack.app import SlackApp
+from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.turn.deps import build_turn_deps
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
+from daimon.core.turn.run import RunOutcome
+from daimon.core.turn.state import TurnState
+from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
+from daimon.testing.factories import make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_AGENT_ID = "agent_continuation_entry"
+_ENV_ID = "env_continuation_entry"
+_CHANNEL = "C_CONT_ENTRY"
+_THREAD_ID = "9300000001.000001"
+
+
+def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
+    settings = MagicMock()
+    settings.crypto.keys = ()
+    settings.slack.max_concurrent_turns_per_tenant = 3
+    settings.slack.bot_display_name = "daimon"
+    settings.mcp.public_url = None
+    settings.mcp.app_root_url = None
+    settings.defaults_root = MagicMock()
+    settings.billing.markup = Decimal("1.0")
+
+    anthropic_client = build_fake_anthropic(
+        resolved_agent_env_router(
+            ma_agent(id=_AGENT_ID, name="uat-agent", tenant_id=tenant_id_str),
+            ma_environment(id=_ENV_ID, name="test-env", tenant_id=tenant_id_str),
+        ).dispatch
+    )
+    deployment_default = DeploymentDefault(agent_name="uat-agent", environment_name="test-env")
+    resolver_cache = new_resolver_cache()
+    turn_deps = build_turn_deps(
+        settings,
+        anthropic_client,
+        sessionmaker,
+        deployment_default=deployment_default,
+        resolver_cache=resolver_cache,
+        billing_config=None,
+    )
+    runtime = SlackRuntime(
+        settings=settings,
+        anthropic=anthropic_client,
+        sessionmaker=sessionmaker,
+        billing_config=None,
+        http_client=MagicMock(spec=httpx.AsyncClient),
+        resolver_cache=resolver_cache,
+        turn_deps=turn_deps,
+        deployment_default=deployment_default,
+    )
+    return SlackApp(runtime=runtime)
+
+
+async def _seed_pending_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    requested_work: str | None,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed one pending continuation; return (tenant_id, account_id, key)."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+
+    idempotency_key = uuid.uuid4()
+    await record_continuation(
+        db_session_factory,
+        ContinuationRequest(
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id=_CHANNEL,
+            thread_id=_THREAD_ID,
+            requester_account_id=requester.account_id,
+            requester_external_user_id="U_REQUESTER",
+            target_ma_agent_id=_AGENT_ID,
+            target_name="uat-agent",
+            requested_work=requested_work,
+            reason="task_handoff",
+            idempotency_key=idempotency_key,
+        ),
+    )
+    return tenant.id, requester.account_id, idempotency_key
+
+
+async def test_dispatch_continuations_in_thread_skips_a_thread_already_processing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A thread with a turn in flight is left alone, guard and row untouched.
+
+    The running turn reaches `_dispatch_continuations` at its own tail, so the
+    row is not dropped -- and the guard this call did not take must not be
+    released by it either.
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_BUSY",
+        requested_work="pick up the report",
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    app._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+
+    await app.dispatch_continuations_in_thread(
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        channel=_CHANNEL,
+        thread_id=_THREAD_ID,
+        account_id=account_id,
+        team_id="T_CONT_ENTRY",
+    )
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+        pending = await list_pending_continuations(
+            session, tenant_id=tenant_id, platform="slack", thread_id=_THREAD_ID
+        )
+    assert row is not None, "the seeded continuation should still exist"
+    assert row.status == "pending", (
+        "a thread already processing must not have its continuation claimed"
+    )
+    assert len(pending) == 1, (
+        f"the row must stay pending for the running turn's tail, got {pending}"
+    )
+    assert _THREAD_ID in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        "the guard belongs to the turn that took it; a skipped call must not release it"
+    )
+
+
+async def test_dispatch_continuations_in_thread_releases_the_guard_after_dispatch(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The guard is taken for the dispatch and released once it is done.
+
+    A save-only continuation (`requested_work=None`) settles `skip_save_only`
+    without running a turn, which is enough to prove the dispatch really ran
+    inside the guard rather than being skipped by it.
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_FREE",
+        requested_work=None,
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+
+    await app.dispatch_continuations_in_thread(
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        channel=_CHANNEL,
+        thread_id=_THREAD_ID,
+        account_id=account_id,
+        team_id="T_CONT_ENTRY",
+    )
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None, "the seeded continuation should still exist"
+    assert row.status == "skipped", "the dispatch must have run and settled the row"
+    assert row.skip_reason == "skip_save_only", f"unexpected skip reason {row.skip_reason}"
+    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        "the guard must be released once the dispatch finishes"
+    )
+
+
+async def test_dispatch_continuations_in_thread_releases_the_guard_when_dispatch_raises(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A dispatch that blows up must not strand the thread's guard forever."""
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.dispatch_pending_continuations",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=fake_slack_web_client.client,
+            tenant_id=uuid.uuid4(),
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=uuid.uuid4(),
+            team_id="T_CONT_ENTRY",
+        )
+
+    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        "a raising dispatch must still release the guard"
+    )
+
+
+def _make_continuation_row(
+    *, tenant_id: uuid.UUID, account_id: uuid.UUID, reason: ContinuationReason
+) -> TaskContinuationRow:
+    now = datetime.now(UTC)
+    return TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        platform="slack",
+        thread_id=_THREAD_ID,
+        parent_channel_id=_CHANNEL,
+        requester_account_id=account_id,
+        requester_external_user_id="U_REQUESTER",
+        target_ma_agent_id=_AGENT_ID,
+        target_name="uat-agent",
+        requested_work="finish the migration",
+        reason=reason,
+        status="claimed",
+        skip_reason=None,
+        idempotency_key=uuid.uuid4(),
+        created_at=now,
+        claimed_at=now,
+        delivered_at=None,
+    )
+
+
+def _prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
+    async def _record_noop(*, event: Any) -> None:
+        return None
+
+    from daimon.core.turn.admission import Admission
+
+    return PreparedTurn(
+        admission=MagicMock(spec=Admission),
+        ma_session_id="sess_continuation_entry",
+        mapping_id=None,
+        watermark=None,
+        reused=True,
+        session_account_id=account_id,
+        _record=_record_noop,
+        continuity=ContinuityOutcome(state="continued", transfer_kind="none"),
+    )
+
+
+async def _run_continuation_and_capture_controls(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    *,
+    workspace_id: str,
+    reason: ContinuationReason,
+    admin_status: bool | None = False,
+    prior_role: Role | None = None,
+) -> str:
+    """Run one continuation turn and return the `user_message` it ran with.
+
+    `admin_status` is what Slack's `users.info` lookup reports for the
+    requester (`None` = the lookup failed); `prior_role` pre-stamps the
+    requester's account as an earlier turn would have.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    if prior_role is not None:
+        await set_role(db_session, requester.account_id, prior_role)
+    await db_session.commit()
+
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason=reason
+    )
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=admin_status,
+        ),
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
+        patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+    ):
+        resolve_agent.return_value = _AGENT_ID
+        resolve_env.return_value = _ENV_ID
+        bind.return_value = _prepared_turn(account_id=requester.account_id)
+        run_turn.return_value = RunOutcome(
+            state=TurnState(),
+            ma_session_id="sess_continuation_entry",
+            mapping_id=None,
+            recovered=False,
+        )
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+        )
+
+    assert run_turn.await_args is not None, "the follow-up turn should have run"
+    user_message = run_turn.await_args.kwargs["user_message"]
+    assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
+    return user_message
+
+
+async def test_continuation_turn_omits_handoff_notice_for_private_input(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """`private_input_applied` re-runs the SAME agent, so there is no handoff.
+
+    A `task_handoff` row still gets the notice -- the suppression is keyed on
+    the row's `reason`, not on the dispatch path.
+    """
+    private_controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ENTRY_PRIVATE",
+        reason="private_input_applied",
+    )
+    assert '"handoff"' not in private_controls, (
+        f"a private-input continuation must carry no handoff block, got {private_controls}"
+    )
+    assert "your first reply must show you have the task" not in private_controls, (
+        "the handoff instruction paragraph must be absent with no handoff block"
+    )
+    assert private_controls.endswith("finish the migration"), (
+        "the requester's own words still seed the turn"
+    )
+
+    handoff_controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ENTRY_HANDOFF",
+        reason="task_handoff",
+    )
+    assert '"handoff"' in handoff_controls, (
+        f"a task handoff must still carry the one-time notice, got {handoff_controls}"
+    )
+
+
+async def _requester_role(db_session_factory: async_sessionmaker[AsyncSession]) -> list[Role]:
+    from sqlalchemy import text
+
+    async with db_session_factory() as session:
+        ids = (
+            await session.execute(
+                text("SELECT account_id FROM platform_principals WHERE external_id = 'U_REQUESTER'")
+            )
+        ).scalars()
+        roles: list[Role] = []
+        for account_id in ids:
+            account = await get_account(session, account_id)
+            assert account is not None
+            roles.append(account.role)
+    return roles
+
+
+async def test_continuation_turn_runs_as_admin_when_requester_is_a_workspace_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The continuation used to hardcode USER, so an admin's setup run lost its
+    admin tools on the turn that applied their private-form answer."""
+    controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ROLE_ADMIN",
+        reason="private_input_applied",
+        admin_status=True,
+    )
+    assert '"current_role": "admin"' in controls, (
+        f"an admin requester's continuation must carry the admin role, got {controls}"
+    )
+    assert await _requester_role(db_session_factory) == [Role.ADMIN], (
+        "the live-role gate the resumed turn's MCP calls read must say admin"
+    )
+
+
+@pytest.mark.parametrize(
+    "admin_status",
+    [pytest.param(False, id="non-admin"), pytest.param(None, id="lookup-failed")],
+)
+async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    admin_status: bool | None,
+) -> None:
+    """A non-admin's form never produces an admin continuation -- even when
+    the requester's account was admin on an earlier turn."""
+    controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ROLE_USER",
+        reason="private_input_applied",
+        admin_status=admin_status,
+        prior_role=Role.ADMIN,
+    )
+    assert '"current_role": "user"' in controls, f"continuation must run as user, got {controls}"
+    assert await _requester_role(db_session_factory) == [Role.USER], (
+        "a stale admin stamp must not survive into the continuation"
+    )
+
+
+async def _run_continuation_with_card_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    *,
+    workspace_id: str,
+    run_action: Any,
+) -> tuple[SlackApp, uuid.UUID | None, BaseException | None]:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
+    )
+
+    error: BaseException | None = None
+    with (
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
+        patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+    ):
+        resolve_agent.return_value = _AGENT_ID
+        resolve_env.return_value = _ENV_ID
+        bind.return_value = _prepared_turn(account_id=requester.account_id)
+        run_turn.side_effect = run_action
+        try:
+            await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+                row,
+                "finish the migration",
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant.id,
+                channel=_CHANNEL,
+                thread_id=_THREAD_ID,
+            )
+        except BaseException as caught:
+            error = caught
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) <= 1
+    return app, intents[0].id if intents else None, error
+
+
+async def test_continuation_commits_intent_before_post_and_records_response_id(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    message_ts = "9300000010.000001"
+
+    async def verify_committed_intent(_url: Any, **kwargs: Any) -> CallbackResult:
+        async with db_session_factory() as session:
+            intents = await list_recoverable_turn_card_intents(session, platform="slack")
+        assert len(intents) == 1 and intents[0].status == "prepared"
+        payload = kwargs["json"]
+        cancel_keys = [
+            element["value"]
+            for block in payload["blocks"]
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        ]
+        assert cancel_keys == [intents[0].id.hex]
+        return CallbackResult(payload={"ok": True, "ts": message_ts, "channel": _CHANNEL})
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage", callback=verify_committed_intent
+    )
+
+    async def complete_turn(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id="sess_continuation_entry",
+            mapping_id=None,
+            recovered=False,
+        )
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_COMMIT",
+        run_action=complete_turn,
+    )
+    assert error is None
+    assert intent_id is not None
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "posted" and intents[0].message_id == message_ts
+
+
+async def test_continuation_retains_prepared_intent_when_slack_accepts_then_loses_response(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    accepted: list[dict[str, Any]] = []
+
+    async def accept_then_drop(_url: Any, **kwargs: Any) -> Any:
+        accepted.append(kwargs["json"])
+        raise TimeoutError("accepted post response was lost")
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage", callback=accept_then_drop
+    )
+
+    async def unused_turn(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        pytest.fail("turn work must not run without a persisted Slack message ID")
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_AMBIGUOUS",
+        run_action=unused_turn,
+    )
+    assert isinstance(error, TimeoutError)
+    assert intent_id is not None
+    assert len(accepted) == 1
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "prepared" and intents[0].message_id is None
+
+
+async def test_continuation_preterminal_failure_keeps_posted_intent_recoverable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def fail_before_terminal(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        raise RuntimeError("turn failed before terminal render")
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_LIVE_FAILURE",
+        run_action=fail_before_terminal,
+    )
+    assert isinstance(error, RuntimeError)
+    assert intent_id is not None
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "posted" and intents[0].message_id is not None
+
+
+async def test_continuation_terminal_render_then_raise_retires_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def terminal_then_raise(*_args: Any, **kwargs: Any) -> RunOutcome:
+        lifecycle = kwargs["lifecycle"]
+        await lifecycle.on_terminal_failure(TurnState(), RuntimeError("terminal failure"))
+        raise RuntimeError("raised after terminal render")
+
+    _, _, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_TERMINAL",
+        run_action=terminal_then_raise,
+    )
+    assert isinstance(error, RuntimeError)
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert intents == []
+
+
+async def test_continuation_recovery_lifecycle_terminal_render_retires_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def recover_then_finish(*_args: Any, **kwargs: Any) -> RunOutcome:
+        recovery_lifecycle = kwargs["recovery_lifecycle"](asyncio.Event())
+        await recovery_lifecycle.on_terminal_failure(
+            TurnState(), RuntimeError("recovered turn failed")
+        )
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id="sess_continuation_entry",
+            mapping_id=None,
+            recovered=True,
+        )
+
+    _, _, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_RECOVERY_TERMINAL",
+        run_action=recover_then_finish,
+    )
+    assert error is None
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert intents == []
+
+
+async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A form submitted after the running turn's own tail dispatch is not stranded.
+
+    The mention turn owns `_processing`; the submission's dispatch arrives
+    once that turn has already passed its tail dispatch, so it is skipped.
+    When `_orchestrate` releases the thread, the skipped dispatch must run
+    (formal/thread_queue `FormDuringTail`), not wait for the next message.
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_TAIL",
+        requested_work=None,
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    web_client = fake_slack_web_client.client
+
+    async def _turn_whose_tail_already_ran(*_args: Any, **_kwargs: Any) -> None:
+        # The form submission lands here: past the tail, before the release.
+        await app.dispatch_continuations_in_thread(
+            web_client=web_client,
+            tenant_id=tenant_id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=account_id,
+            team_id="T_CONT_ENTRY_TAIL",
+        )
+
+    with (
+        patch.object(app, "_run_thread_turn", side_effect=_turn_whose_tail_already_ran),
+        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            {"ts": _THREAD_ID, "user": "U_REQUESTER", "text": "hi"},
+            team_id="T_CONT_ENTRY_TAIL",
+            channel=_CHANNEL,
+            event_ts=_THREAD_ID,
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+    for task in list(app._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+        await task
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None, "the seeded continuation should still exist"
+    assert row.status == "skipped" and row.skip_reason == "skip_save_only", (
+        f"the skipped dispatch must run once the thread is released, got {row.status}"
+    )
+    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        "the re-run dispatch must release the guard it took"
+    )
+
+
+async def test_no_redispatch_while_draining(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Shutdown drain starts no new work: the row stays pending for the next turn."""
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_DRAIN",
+        requested_work=None,
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    app._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    await app.dispatch_continuations_in_thread(
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        channel=_CHANNEL,
+        thread_id=_THREAD_ID,
+        account_id=account_id,
+        team_id="T_CONT_ENTRY",
+    )
+    app.draining = True
+    app._release_thread(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    assert not app._bg_tasks, "a draining adapter must not spawn the dispatch"  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "pending"
+
+
+async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A mention that lands while a form's continuation turn holds the thread is drained.
+
+    The dispatch holds `_processing`, so the mention queues behind it with ⌛
+    exactly as it would behind a mention turn. When the dispatch ends, the
+    queued mention must get its own turn instead of waiting for the next
+    mention in the thread (formal/thread_queue `NoStrandedMention`).
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_MENTION",
+        requested_work="pick up the report",
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    web_client = fake_slack_web_client.client
+    mention = {
+        "ts": "9300000001.000099",
+        "thread_ts": _THREAD_ID,
+        "user": "U_OTHER",
+        "text": "and the chart too?",
+    }
+
+    async def _continuation_turn_while_a_mention_arrives(*_args: Any, **_kwargs: Any) -> None:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            mention,
+            team_id="T_CONT_ENTRY_MENTION",
+            channel=_CHANNEL,
+            event_ts=mention["ts"],
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+        assert app._pending.get(_THREAD_ID) == [mention], (  # pyright: ignore[reportPrivateUsage]
+            "a mention during the dispatch must queue behind it, not run beside it"
+        )
+
+    thread_turn = AsyncMock()
+    with (
+        patch.object(
+            app,
+            "_run_continuation_turn",
+            side_effect=_continuation_turn_while_a_mention_arrives,
+        ),
+        patch.object(app, "_run_thread_turn", thread_turn),
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=web_client,
+            tenant_id=tenant_id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=account_id,
+            team_id="T_CONT_ENTRY_MENTION",
+        )
+        for task in list(app._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await task
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status != "pending", "the continuation itself must run"
+    hourglass = [
+        req
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "POST" and url.path == "/api/reactions.add"
+        for req in reqs
+    ]
+    assert hourglass, "the queued mention should carry the ⌛ reaction"
+    assert thread_turn.await_count == 1, (
+        f"the queued mention must get its own turn once the dispatch ends, "
+        f"got {thread_turn.await_count} turns"
+    )
+    call = thread_turn.await_args
+    assert call is not None
+    assert call.args[0] is mention
+    assert call.kwargs["content_override"] == "and the chart too?"
+    assert call.kwargs["team_id"] == "T_CONT_ENTRY_MENTION"
+    assert _THREAD_ID not in app._pending  # pyright: ignore[reportPrivateUsage]
+    assert _THREAD_ID not in app._processing  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_timer_set_with_another_agent_is_refused_before_bind(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The thread now resolves to `_AGENT_ID`; the timer was set with a different agent.
+
+    `_run_continuation_turn` must refuse after admission and before binding or
+    running anything. bind_session and run_prepared_turn are spies around the
+    real functions, not replacements.
+    """
+    from daimon.adapters.slack import app as app_module
+    from daimon.core.continuity.continuation import ResponderChanged
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_TIMER_REROUTED")
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="timer"
+    ).model_copy(update={"target_ma_agent_id": "agent_set_the_timer", "target_name": "old-agent"})
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch.object(app_module, "bind_session", side_effect=app_module.bind_session) as bind,
+        patch.object(
+            app_module, "run_prepared_turn", side_effect=app_module.run_prepared_turn
+        ) as run_turn,
+        pytest.raises(ResponderChanged) as refused,
+    ):
+        resolve_agent.return_value = _AGENT_ID
+        resolve_env.return_value = _ENV_ID
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "check the build",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+        )
+
+    bind.assert_not_called()
+    run_turn.assert_not_called()
+    assert "set with old-agent" in refused.value.message
+    assert "uat-agent answers here now" in refused.value.message
+
+
+class _StopAtAdmit(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "is_dm"),
+    [(_THREAD_ID, False), ("dm:3f1c0a52-0000-4000-8000-000000000000", True)],
+    ids=["channel-thread", "dm-scope"],
+)
+async def test_continuation_admits_a_dm_scope_as_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    thread_id: str,
+    is_dm: bool,
+) -> None:
+    """A continuation owed to a private DM conversation must be admitted as a DM:
+    outside every pin and under the DM memory rule."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_DM_{is_dm}")
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
+    ).model_copy(update={"thread_id": thread_id})
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "daimon.adapters.slack.app.admit", new_callable=AsyncMock, side_effect=_StopAtAdmit
+        ) as admit,
+        pytest.raises(_StopAtAdmit),
+    ):
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=thread_id,
+        )
+
+    assert admit.await_args is not None
+    assert admit.await_args.kwargs["is_dm"] is is_dm

@@ -7,8 +7,13 @@
         'embeds': list([
           dict({
             'color': 15548997,
-            'description': None,
-            'footer': '❌ upstream timeout · Atlas · 15s · 500 in / 80 out · $0.003',
+            'description': '''
+              The turn ended unexpectedly.
+              The conversation and its workspace are kept.
+              **Next:** Send your message again. If it keeps happening, share the request id with an admin.
+              `rid: 01TESTREQUESTID0000000000`
+            ''',
+            'footer': '❌ Something went wrong · Atlas · 15s · 500 in / 80 out · $0.003',
             'title': None,
           }),
         ]),
@@ -19,10 +24,10 @@
         'content': None,
         'embeds': list([
           dict({
-            'color': 9807270,
-            'description': '⏱️ 0s',
+            'color': 3447003,
+            'description': '**Thinking** · 0s',
             'footer': None,
-            'title': '🧠 thinking',
+            'title': None,
           }),
         ]),
       }),
@@ -38,11 +43,13 @@
           dict({
             'color': 3447003,
             'description': '''
-              ⏱️ 11s
-              ⚙️ Bash
+              **Working** · 11s
+              ```
+              🖋️ Running a command
+              ```
             ''',
             'footer': None,
-            'title': '⚙️ running tool',
+            'title': None,
           }),
         ]),
       }),
@@ -67,10 +74,10 @@
         'content': None,
         'embeds': list([
           dict({
-            'color': 9807270,
-            'description': '⏱️ 0s',
+            'color': 3447003,
+            'description': '**Thinking** · 0s',
             'footer': None,
-            'title': '🧠 thinking',
+            'title': None,
           }),
         ]),
       }),

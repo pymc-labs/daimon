@@ -11,53 +11,21 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
 from urllib.parse import quote
 
 import httpx
 from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.slack_file_token import verify_file_token
+from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response, StreamingResponse
 
+__all__ = ["build_slack_file_proxy_route", "fetch_slack_file"]
+
 FileFetcher = Callable[[str, str], Awaitable[tuple[bytes, str, str]]]
-
-SLACK_FILES_INFO_URL = "https://slack.com/api/files.info"
-
-
-async def fetch_slack_file(
-    http_client: httpx.AsyncClient, *, bot_token: str, file_id: str
-) -> tuple[bytes, str, str]:
-    """Return ``(bytes, content_type, filename)`` for a Slack file (auth'd).
-
-    Raises ``httpx.HTTPError`` for every upstream failure — transport error,
-    error status, non-JSON body, ``ok: false``, or a file with no download URL
-    (e.g. external-mode files) — so the proxy route's ``except httpx.HTTPError``
-    boundary maps all of them to a 502 rather than leaking a 500.
-    """
-    headers = {"Authorization": f"Bearer {bot_token}"}
-    info = await http_client.get(SLACK_FILES_INFO_URL, params={"file": file_id}, headers=headers)
-    info.raise_for_status()
-    try:
-        data: dict[str, Any] = info.json()
-    except ValueError as err:  # json.JSONDecodeError subclasses ValueError
-        raise httpx.HTTPError(f"files.info returned a non-JSON body: {err}") from err
-    if not data.get("ok"):
-        raise httpx.HTTPError(f"files.info not ok: {data.get('error', 'unknown')}")
-    file_obj: dict[str, Any] = data.get("file") or {}
-    download_url = file_obj.get("url_private_download")
-    if not download_url:
-        raise httpx.HTTPError("files.info response missing url_private_download")
-    download = await http_client.get(download_url, headers=headers)
-    download.raise_for_status()
-    return (
-        download.content,
-        str(file_obj.get("mimetype", "application/octet-stream")),
-        str(file_obj.get("name", "file")),
-    )
 
 
 def build_slack_file_proxy_route(

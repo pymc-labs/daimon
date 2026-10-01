@@ -50,7 +50,10 @@ them. The practical effect is that a wizard turn and a mention turn can run
 concurrently against the same thread's session -- an accepted trade-off, not
 a bug, for the first cut of this feature. It also means `_drain_and_close`
 (which polls `_processing`) does not wait for an already-running wizard turn;
-the drain gate above is what keeps new ones from starting.
+the drain gate above is what keeps new ones from starting. If the session
+dies under both turns at once, dead-session recovery (`core.turn.run`) runs
+under the per-thread preparation lock, so the second turn adopts the first
+one's replacement and the thread still has one live session.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Self, cast
 
@@ -65,14 +69,23 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    AGENT_PINNED_ELSEWHERE_NOTICE,
+    INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
+    _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
+    _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
+from daimon.adapters.discord.turn_card_recovery import (
+    post_initial_turn_card,
+    retire_terminal_turn_card,
+)
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
@@ -82,15 +95,22 @@ from daimon.adapters.discord.wizard import (
 from daimon.adapters.discord.wizard_render import build_wizard_view
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, WizardSessionRow
-from daimon.core.stores.thread_sessions import update_watermark
+from daimon.core.stores.tenants import get_turn_cap
+from daimon.core.stores.thread_sessions import (
+    clear_active_turn_if_message_id,
+    mark_turn_active,
+    update_watermark,
+)
 from daimon.core.stores.wizard_session import try_claim_submit
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
-from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.protection import ProtectionState
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
 from daimon.core.wizard.render import to_screen
@@ -159,7 +179,9 @@ class WizardSubmitButton(
     ) -> bool:
         try:
             return await _authorize_tap(self.wizard_row, interaction)
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard_submit.interaction_check_failed", err_type=type(err).__name__)
             await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
             return False
@@ -211,6 +233,7 @@ class WizardSubmitButton(
                     short_id=row.id,
                     answers=submitted.answers,
                     current_step=submitted.current_step,
+                    expected_updated_at=row.updated_at,
                     now=now,
                 )
 
@@ -225,22 +248,44 @@ class WizardSubmitButton(
                         bot=bot, interaction=interaction, row=claimed, spec=spec, state=submitted
                     )
                 )
+                displayed_state = submitted
+            else:
+                # A navigation/edit tap or another submit may have changed
+                # the row after this callback loaded it. Re-read so a stale
+                # submit cannot hide a committed edit behind a button-free
+                # summary or display an abandoned row as submitted.
+                latest = await _load_row(bot, row.id)
+                if latest is None:
+                    await _reply_or_followup(interaction, "This form is no longer available.")
+                    return
+                displayed_state = WizardState(
+                    short_id=latest.id,
+                    current_step=latest.current_step,
+                    answers=latest.answers,
+                    status=WizardStatus(latest.status),
+                )
+                if (
+                    displayed_state.status is WizardStatus.ABANDONED
+                    or latest.expires_at <= datetime.now(UTC)
+                ):
+                    await _reply_or_followup(interaction, "This form has expired.")
+                    return
 
             # Collapse to the read-only, button-free summary regardless of
-            # who won the claim -- see the module docstring, point 2. Both a
-            # winning and a losing concurrent tapper must see the SAME
-            # consistent, submitted-looking result. Purely cosmetic, and
-            # caught here rather than at the callback's outer boundary: the
-            # row is already claimed, so the outer handler's "please try
-            # again" would invite a retry that can only ever be rejected.
+            # who won the claim -- see the module docstring, point 2. A fresh
+            # open state stays interactive when a concurrent edit invalidated
+            # this submit; a submitted state renders the collapsed summary.
+            # This is cosmetic, so an edit failure cannot undo the claim.
             try:
                 await interaction.edit_original_response(
-                    view=build_wizard_view(to_screen(spec, submitted)),
+                    view=build_wizard_view(to_screen(spec, displayed_state)),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except discord.HTTPException:
                 _log.exception("wizard_submit.collapse_edit_failed", short_id=row.id)
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("wizard_submit.callback_failed", err_type=type(err).__name__)
             await _reply_or_followup(interaction, _CALLBACK_FAILED)
 
@@ -251,6 +296,7 @@ async def _render_wizard_turn_error(
     tenant_id: uuid.UUID,
     rid: str,
     exc: Exception,
+    post_state: ProtectionState,
 ) -> None:
     """Sentry-tag + post a rendered error for a turn failure caught in
     `run_wizard_submit_turn`. Mirrors `bot.py`'s `_render_turn_error`.
@@ -269,6 +315,8 @@ async def _render_wizard_turn_error(
             "guild_id", str(interaction.guild_id) if interaction.guild_id is not None else ""
         )
         sentry_sdk.capture_exception(exc)
+    if not post_state.may_post:
+        return
     error_text = render_error(exc, request_id=rid)
     channel = interaction.channel
     if channel is None or not isinstance(channel, discord.abc.Messageable):
@@ -280,6 +328,25 @@ async def _render_wizard_turn_error(
 
 
 async def run_wizard_submit_turn(
+    *,
+    bot: DaimonBot,
+    interaction: discord.Interaction[commands.Bot],
+    row: WizardSessionRow,
+    spec: WizardSpec,
+    state: WizardState,
+) -> None:
+    with observe_turn(
+        bot.runtime.sessionmaker,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        channel_id=str(interaction.channel_id),
+    ):
+        return await run_wizard_submit_turn_observed(
+            bot=bot, interaction=interaction, row=row, spec=spec, state=state
+        )
+
+
+async def run_wizard_submit_turn_observed(
     *,
     bot: DaimonBot,
     interaction: discord.Interaction[commands.Bot],
@@ -307,6 +374,9 @@ async def run_wizard_submit_turn(
     rid = generate_request_id()
     structlog.contextvars.bind_contextvars(rid=rid)
     inflight_claimed = False
+    # Nothing is posted -- not even an error -- until the channel is known to
+    # be one the agent may post in.
+    post_state = ProtectionState.UNKNOWN
     try:
         # The form lives in the conversation the resumed turn should
         # continue -- no new thread is created here.
@@ -314,6 +384,8 @@ async def run_wizard_submit_turn(
         if channel is None or not isinstance(channel, discord.abc.Messageable):
             _log.warning("wizard_submit.no_messageable_channel", short_id=row.id)
             return
+
+        await bot._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]  # share Discord's one-shot boot recovery barrier
 
         if isinstance(channel, discord.Thread):
             parent_channel_id = str(channel.parent_id)
@@ -326,6 +398,24 @@ async def run_wizard_submit_turn(
             "run_wizard_submit_turn called without discord settings -- entrypoint must "
             "validate at boot"
         )
+        cap = await get_turn_cap(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            default=discord_settings.max_concurrent_turns_per_tenant,
+        )
+
+        # --- A protected channel hears nothing: not the capacity notice below,
+        # not a refusal, not the reply, not an error. The log is the trace. ---
+        post_state = await _channel_protection_state(
+            bot.runtime.sessionmaker, tenant_id=row.tenant_id, channel=channel
+        )
+        if not post_state.may_post:
+            _log.info(
+                "wizard_submit.skipped.channel_protected",
+                short_id=row.id,
+                state=post_state.value,
+            )
+            return
 
         # --- Per-tenant concurrency cap, claimed exactly as `on_message`
         # claims it: read-check-increment with no await in between, and one
@@ -333,18 +423,33 @@ async def run_wizard_submit_turn(
         # committed, so an over-cap submit says the answers were recorded
         # rather than pretending nothing happened. ---
         count = bot._inflight.get(row.tenant_id, 0)  # pyright: ignore[reportPrivateUsage]  # the per-tenant cap bookkeeping DaimonBot owns; a wizard turn must count against the same cap the mention path claims
-        if not should_admit_turn(
-            current_in_flight=count, cap=discord_settings.max_concurrent_turns_per_tenant
-        ):
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                bot.runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                channel_id=parent_channel_id,
+                thread_id=thread_id,
+            )
             _log.info("wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id))
             await channel.send(_OVER_CAP)
             return
         bot._inflight[row.tenant_id] = count + 1  # pyright: ignore[reportPrivateUsage]  # see the read above
         inflight_claimed = True
 
-        # --- Stage one: admission -- D-01 admit(). Same three branches
+        # --- Stage one: admission -- D-01 admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
         # already recorded (the claim committed before this runs). ---
+        # The live role, read from the interaction before admission: the
+        # invoker policy's admin exemption must not rest on a stored role the
+        # user may have lost since. admit() persists it for the resumed turn's
+        # MCP calls. A non-Member author is treated as non-admin. ---
+        author = interaction.user
+        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
+            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
+        )
+        # The protection check above cached any parent it had to fetch.
+        category_id, category_unresolved = await _resolve_category(channel, fetch=False)
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
@@ -352,7 +457,11 @@ async def run_wizard_submit_turn(
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
+                thread_id=thread_id,
                 now=datetime.now(UTC),
+                role=Role.ADMIN if is_admin else Role.USER,
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -363,8 +472,8 @@ async def run_wizard_submit_turn(
             hints: list[str] = []
             if "agent" in err.missing:
                 hints.append(
-                    "An admin can set the default agent in `/agent-setup` -> "
-                    "**Set as default...** -> [This channel] or [Whole server]."
+                    "An admin can tell Daimon: make an agent answer in this channel or the "
+                    "whole server. Run `/agent-setup` to see who answers where."
                 )
             if "environment" in err.missing:
                 hints.append(
@@ -386,13 +495,26 @@ async def run_wizard_submit_turn(
             )
             await channel.send(
                 "Your answers were recorded, but the configured agent or environment "
-                "no longer exists -- ask again in the thread. An admin can re-set the "
-                "agent in `/agent-setup` -> **Set as default...**; the environment is "
+                "no longer exists. An admin can ask Daimon to pick an existing agent; "
+                "then ask again in the thread. The environment is "
                 "operator-only via the CLI (`daimon config set environment_name=...`)."
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "balance_depleted":
+            if err.reason == "channel_protected":
+                # No post into a protected channel, not even a refusal.
+                _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
+            elif err.reason == "invoker_not_allowed":
+                _log.info(
+                    "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
+                )
+                await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
+                await channel.send(
+                    "Your answers were recorded, but " + AGENT_PINNED_ELSEWHERE_NOTICE
+                )
+            elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(
                     "Your answers were recorded, but "
@@ -407,20 +529,15 @@ async def run_wizard_submit_turn(
                 )
             return
 
-        agent = admission.agent
+        # D-03 boundary, mirroring bot.py's mention path: the per-turn
+        # ceiling clock starts here, once admission has passed, and covers
+        # session bind (bind_session) plus the driver pump (run_prepared_turn)
+        # as ONE shared budget. This call site had NO timeout of any kind
+        # before this phase -- the old 45-minute wait_for lived only in
+        # bot.py's mention path, so a wizard-submit turn could hang forever.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
-        # --- Per-turn role upsert -- unconditional, same rationale as
-        # _orchestrate: the live-role gate the resumed turn's MCP calls hit
-        # must read a fresh value. ---
-        author = interaction.user
-        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
-            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
-        )
-        async with bot.runtime.sessionmaker() as role_session:
-            await set_role(
-                role_session, admission.account_id, Role.ADMIN if is_admin else Role.USER
-            )
-            await role_session.commit()
+        agent = admission.agent
 
         if discord_settings.per_caller_thread_sessions:
             session_account_id = admission.account_id
@@ -443,6 +560,7 @@ async def run_wizard_submit_turn(
             thread_id=thread_id,
             session_account_id=session_account_id,
             reuse_existing=True,
+            deadline=turn_deadline_at,
         )
 
         _log.info(
@@ -454,22 +572,40 @@ async def run_wizard_submit_turn(
 
         user_message = format_answer_block(spec, state)
 
-        async def _send_embed(**kwargs: Any) -> discord.Message:
+        # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
+        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
             return await channel.send(**kwargs)
 
-        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:
+        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
             await msg.edit(**kwargs)
 
         cancel = asyncio.Event()
-        cancel_view = CancelView(allowed_user_id=interaction.user.id, cancel=cancel)
-        lifecycle = DiscordTurnLifecycle(
-            send=_send_embed,
-            edit=_edit_message,
-            agent_name=agent.name,
-            model_id=agent.model.id,
-            cancel_view=cancel_view,
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
+                tenant_id=row.tenant_id,
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
+                send=_send_embed,
+                edit=_edit_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
+                ),
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            thread_id=thread_id,
+            make_lifecycle=_make_lifecycle,
         )
-        await lifecycle.post_initial()
 
         # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one
@@ -484,11 +620,20 @@ async def run_wizard_submit_turn(
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
+                tenant_id=row.tenant_id,
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
-                cancel_view=CancelView(allowed_user_id=interaction.user.id, cancel=cancel_event),
+                cancel_view=CancelView(
+                    allowed_user_id=interaction.user.id,
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
+                ),
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
@@ -497,25 +642,63 @@ async def run_wizard_submit_turn(
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
-        _log.info(
-            "wizard_submit.turn_started",
-            thread_id=thread_id,
-            session_id=prepared.ma_session_id,
-        )
-        outcome = await run_prepared_turn(
-            bot.runtime.turn_deps,
-            prepared,
-            tenant_id=row.tenant_id,
-            platform="discord",
-            thread_id=thread_id,
-            external_user_id=str(interaction.user.id),
-            user_message=user_message,
-            lifecycle=lifecycle,
-            cancel=cancel,
-            reseed_user_message=_reseed_user_message,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=2.0,
-        )
+        outcome: RunOutcome | None = None
+        marker_ids: dict[uuid.UUID, str] = {}
+        try:
+            if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+                marker_ids[prepared.mapping_id] = lifecycle.final_message_id
+                async with bot.runtime.sessionmaker() as marker_session:
+                    await mark_turn_active(
+                        marker_session,
+                        id=prepared.mapping_id,
+                        active_turn_message_id=lifecycle.final_message_id,
+                        now=datetime.now(UTC),
+                    )
+                    await marker_session.commit()
+
+            _log.info(
+                "wizard_submit.turn_started",
+                thread_id=thread_id,
+                session_id=prepared.ma_session_id,
+            )
+            outcome = await run_prepared_turn(
+                bot.runtime.turn_deps,
+                prepared,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                thread_id=thread_id,
+                external_user_id=str(interaction.user.id),
+                user_message=user_message,
+                lifecycle=lifecycle,
+                cancel=cancel,
+                reseed_user_message=_reseed_user_message,
+                recovery_lifecycle=_recovery_lifecycle,
+                render_interval_s=2.0,
+                deadline=turn_deadline_at,
+                confirm_write=discord_confirmation_hook(channel),
+            )
+        finally:
+            if outcome is not None and outcome.mapping_id is not None:
+                final_message_id = lifecycle_holder[0].final_message_id
+                if final_message_id is not None:
+                    marker_ids[outcome.mapping_id] = final_message_id
+            for marker_id, expected_message_id in marker_ids.items():
+                async with bot.runtime.sessionmaker() as marker_session:
+                    await clear_active_turn_if_message_id(
+                        marker_session,
+                        id=marker_id,
+                        expected_message_id=expected_message_id,
+                    )
+                    await marker_session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    bot.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
+                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
+                )
+
+        assert outcome is not None
         turn_state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
@@ -542,10 +725,16 @@ async def run_wizard_submit_turn(
                     )
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
-        await _render_wizard_turn_error(interaction, tenant_id=row.tenant_id, rid=rid, exc=exc)
-    except Exception as exc:  # noqa: BLE001 -- background-task adapter boundary (see module docstring); nothing above this task will otherwise report the failure
+        await _render_wizard_turn_error(
+            interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
+        )
+    except Exception as exc:
+        # background-task adapter boundary (see module docstring); nothing above this task will
+        # otherwise report the failure
         _log.exception("wizard_submit.turn_failed_unexpected", error=str(exc), short_id=row.id)
-        await _render_wizard_turn_error(interaction, tenant_id=row.tenant_id, rid=rid, exc=exc)
+        await _render_wizard_turn_error(
+            interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
+        )
     finally:
         if inflight_claimed:
             bot._release_inflight(row.tenant_id)  # pyright: ignore[reportPrivateUsage]  # the matching release for the claim above

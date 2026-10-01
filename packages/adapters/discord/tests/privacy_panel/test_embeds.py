@@ -181,7 +181,7 @@ def test_post_delete_container_github_credentials_row_renders_when_nonzero() -> 
     result = _make_result(github_credentials=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "1 stored GitHub credential(s) deleted" in joined, (
+    assert "1 stored GitHub token(s) deleted" in joined, (
         "When result.db.github_credentials > 0, post-delete container must show the github_credentials row"
     )
 
@@ -191,7 +191,7 @@ def test_post_delete_container_github_credentials_row_absent_when_zero() -> None
     result = _make_result(github_credentials=0, accounts=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "GitHub credential" not in joined, (
+    assert "GitHub token" not in joined, (
         "zero-count github_credentials must NOT render a checklist row (D-PREVIEW-FMT-01)"
     )
 

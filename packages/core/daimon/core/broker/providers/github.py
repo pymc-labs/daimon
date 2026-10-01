@@ -55,8 +55,15 @@ class GitHubTokenProvider:
             ),
         )
         if token is None:
+            if agent_id is None:
+                raise NoBindingError(
+                    "No GitHub token is bound to this caller's account. Ask the operator "
+                    "to configure CLI token access for this account. Binding a target "
+                    "agent's working repo does not supply an account-only call's token."
+                )
             raise NoBindingError(
-                "No GitHub credential bound to this account. Bind a PAT via the "
-                "agent-setup repo-auth panel, or install the GitHub App on the repo."
+                "No GitHub access is bound for this agent. Use request_repo_binding "
+                "to collect a token privately for the target agent. A GitHub App "
+                "installation alone does not supply this CLI token."
             )
         return token

@@ -7,11 +7,8 @@ not strand credential-request rows.
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import Connection, Inspector, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
 
 
 def _pk_columns(sync_conn: Connection, table: str) -> list[str]:

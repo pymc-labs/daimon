@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
+    ArtifactsSettings,
     DatabaseSettings,
     DiscordSettings,
     McpSettings,
@@ -18,9 +20,6 @@ from daimon.testing.ma import build_stub_anthropic
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
-
 
 _EXPECTED_TOOLS = {
     "list_agents",
@@ -87,6 +86,25 @@ def test_factory_accepts_valid_settings() -> None:
     )
     app = create_mcp_app(settings=settings)
     assert app is not None
+
+
+async def test_factory_builds_one_process_scoped_artifact_store() -> None:
+    settings = _settings(
+        jwt_secret=SecretStr("a" * 32),
+        public_url=HttpUrl("https://x/mcp"),
+    )
+    settings.artifacts = ArtifactsSettings(
+        endpoint_url="https://bucket.example.test",
+        bucket="private-artifacts",
+        access_key_id="access-key",
+        secret_access_key="secret-key",
+    )
+
+    with patch("daimon.adapters.mcp.server.build_artifact_store") as build_store:
+        app = create_mcp_app(settings=settings)
+
+    assert app is not None
+    build_store.assert_called_once_with(settings.artifacts)
 
 
 async def test_create_mcp_app_registers_all_phase_2_tools(

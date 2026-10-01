@@ -20,19 +20,16 @@ from typing import cast
 
 import httpx
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.adapters.cli.commands.agents import agents_backfill_toolset
-from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.testing.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import build_cli_runtime
 
 # These tests create their tenant explicitly as discord (the tenant
 # list_tenants_by_platform enumerates) and tag MA resources against it, so
@@ -78,22 +75,6 @@ class _FakeMcp:
 class _FakeSettings:
     cli = _FakeCli()
     mcp = _FakeMcp()
-
-
-def _build_rt(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    router: MARouter,
-) -> CliRuntime:
-    transport = httpx.MockTransport(router.dispatch)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client)
-    return CliRuntime(
-        settings=cast(Settings, _FakeSettings()),
-        anthropic=client,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
 
 
 def _agent_json(
@@ -178,7 +159,7 @@ async def test_backfill_patches_toolless_agent_with_base_toolset(
     router.add("POST", rf"/v1/agents/{agent_id}", on_update)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=False)
 
@@ -230,7 +211,7 @@ async def test_backfill_skips_agent_with_base_toolset(
     router.add("POST", rf"/v1/agents/{agent_id}", on_update)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=False)
 
@@ -274,7 +255,7 @@ async def test_backfill_dry_run_writes_nothing(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=True)
 
@@ -324,11 +305,57 @@ async def test_backfill_second_run_selects_zero_agents(
     router.add("POST", rf"/v1/agents/{agent_id}", on_update)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=False)
 
     assert len(update_calls) == 0, (
         "second run against already-patched agents must select zero agents "
         "and issue zero agents.update calls (structural idempotence)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backfill_patches_slack_tenant_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack tenant's toolless agent is patched too.
+
+    The command enumerated `platform="discord"` only, so every Slack install's
+    agents were silently skipped by this maintenance sweep.
+    """
+    workspace_id = "T_BACKFILL_SLACK"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=workspace_id)
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=workspace_id)
+
+    agent_id = "agent_toolless_slack_001"
+    agent_data = _agent_json(
+        agent_id=agent_id,
+        name="toolless-slack-agent",
+        version=2,
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "toolless-slack-agent"},
+        tools=[],
+    )
+
+    update_bodies: list[dict[str, object]] = []
+
+    def on_update(req: httpx.Request, _m: object) -> httpx.Response:
+        update_bodies.append(json.loads(req.content))
+        return httpx.Response(200, json=agent_data)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+    router.add(
+        "GET", rf"/v1/agents/{agent_id}", lambda req, m: httpx.Response(200, json=agent_data)
+    )
+    router.add("POST", rf"/v1/agents/{agent_id}", on_update)
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=False)
+
+    assert len(update_bodies) == 1, (
+        "a slack tenant's toolless agent must be patched, not skipped by a platform filter"
     )

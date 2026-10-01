@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -18,8 +17,6 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-
-pytestmark = pytest.mark.asyncio
 
 TEAM_ID = "T123"
 

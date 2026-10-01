@@ -8,11 +8,26 @@ from anthropic.types.beta.sessions.beta_managed_agents_document_block import (
 from anthropic.types.beta.sessions.beta_managed_agents_image_block import (
     BetaManagedAgentsImageBlock,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_mcp_authentication_failed_error import (
+    BetaManagedAgentsMCPAuthenticationFailedError,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_mcp_connection_failed_error import (
+    BetaManagedAgentsMCPConnectionFailedError,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_model_overloaded_error import (
+    BetaManagedAgentsModelOverloadedError,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_retry_status_exhausted import (
+    BetaManagedAgentsRetryStatusExhausted,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_retry_status_retrying import (
+    BetaManagedAgentsRetryStatusRetrying,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_retry_status_terminal import (
+    BetaManagedAgentsRetryStatusTerminal,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
 )
 from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
     BetaManagedAgentsTextBlock,
@@ -26,6 +41,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_url_image_source import (
 from daimon.core.errors import TurnError
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.testing.ma_models import ma_model_usage
 
 from .conftest import (
     make_agent_message,
@@ -211,6 +227,16 @@ def test_apply_pairs_custom_tool_result_via_custom_tool_use_id() -> None:
     block = state.content[0]
     assert isinstance(block, ToolUseBlock)
     assert block.status == "complete"
+
+
+def test_apply_records_tool_calls_in_the_order_they_finish() -> None:
+    state = apply(TurnState(), make_tool_use(event_id="tu_1", name="bash"))
+    state = apply(state, make_mcp_tool_use(event_id="tu_m", name="search", mcp_server_name="gh"))
+    state = apply(state, make_mcp_tool_result(event_id="r_m", mcp_tool_use_id="tu_m", text="hit"))
+    state = apply(state, make_tool_result(event_id="r_1", tool_use_id="tu_1", text="ok"))
+    assert state.finished_tool_ids == ("tu_m", "tu_1"), (
+        "results record finish order, not call order"
+    )
 
 
 def test_apply_preserves_mixed_content_blocks_in_tool_result() -> None:
@@ -406,11 +432,11 @@ def test_apply_folds_span_model_request_end_into_usage_totals() -> None:
         id="sevt_usage_1",
         type="span.model_request_end",
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
+        model_usage=ma_model_usage(
             input_tokens=10,
+            output_tokens=5,
             cache_creation_input_tokens=3,
             cache_read_input_tokens=2,
-            output_tokens=5,
             speed="standard",
         ),
         processed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -430,11 +456,11 @@ def test_apply_accumulates_usage_totals_across_two_span_events() -> None:
         id="sevt_usage_1",
         type="span.model_request_end",
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
+        model_usage=ma_model_usage(
             input_tokens=10,
+            output_tokens=5,
             cache_creation_input_tokens=3,
             cache_read_input_tokens=2,
-            output_tokens=5,
             speed="standard",
         ),
         processed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -443,11 +469,11 @@ def test_apply_accumulates_usage_totals_across_two_span_events() -> None:
         id="sevt_usage_2",
         type="span.model_request_end",
         model_request_start_id="start_2",
-        model_usage=BetaManagedAgentsSpanModelUsage(
+        model_usage=ma_model_usage(
             input_tokens=100,
+            output_tokens=20,
             cache_creation_input_tokens=7,
             cache_read_input_tokens=8,
-            output_tokens=20,
             speed="standard",
         ),
         processed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -468,11 +494,11 @@ def test_apply_dedupes_span_model_request_end_leaving_usage_totals_unchanged() -
         id="sevt_usage_1",
         type="span.model_request_end",
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
+        model_usage=ma_model_usage(
             input_tokens=10,
+            output_tokens=5,
             cache_creation_input_tokens=3,
             cache_read_input_tokens=2,
-            output_tokens=5,
             speed="standard",
         ),
         processed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -503,3 +529,72 @@ def test_apply_leaves_usage_totals_unchanged_on_non_usage_event() -> None:
     assert next_state.usage_totals == UsageTotals(), (
         "a non-usage event must not change usage_totals"
     )
+
+
+# --- session.error: MCP failures degrade the turn instead of ending it (#79) ---
+
+
+def _mcp_auth_error(
+    *, server: str = "notion", retry: str = "exhausted", message: str = "access forbidden"
+) -> BetaManagedAgentsMCPAuthenticationFailedError:
+    status: BetaManagedAgentsRetryStatusExhausted | BetaManagedAgentsRetryStatusRetrying
+    if retry == "exhausted":
+        status = BetaManagedAgentsRetryStatusExhausted(type="exhausted")
+    else:
+        status = BetaManagedAgentsRetryStatusRetrying(type="retrying")
+    return BetaManagedAgentsMCPAuthenticationFailedError(
+        type="mcp_authentication_failed_error",
+        mcp_server_name=server,
+        message=f"MCP server '{server}' initialize failed: {message}",
+        retry_status=status,
+    )
+
+
+def test_apply_records_exhausted_mcp_auth_failure_without_setting_error() -> None:
+    """The #79 shape: MA drops the server and keeps the session running, so
+    the turn is degraded, not failed."""
+    state = apply(TurnState(), make_session_error(event_id="e_1", error=_mcp_auth_error()))
+    assert state.error is None, "an exhausted MCP failure must not end the turn"
+    assert [f.server_name for f in state.mcp_failures] == ["notion"]
+    assert state.mcp_failures[0].retry_status == "exhausted"
+    assert state.mcp_failures[0].error_type == "mcp_authentication_failed_error"
+
+
+def test_apply_keeps_newest_status_per_server_when_mcp_error_repeats() -> None:
+    """MA fires the same error as `retrying` and then once as `exhausted`;
+    the state keeps one entry per server, the latest."""
+    state = apply(
+        TurnState(), make_session_error(event_id="e_1", error=_mcp_auth_error(retry="retrying"))
+    )
+    state = apply(state, make_session_error(event_id="e_2", error=_mcp_auth_error()))
+    assert len(state.mcp_failures) == 1, "one entry per server name"
+    assert state.mcp_failures[0].retry_status == "exhausted"
+
+
+def test_apply_routes_terminal_mcp_error_to_turn_error() -> None:
+    """`terminal` means the session is going down; that is still a failure."""
+    error = BetaManagedAgentsMCPConnectionFailedError(
+        type="mcp_connection_failed_error",
+        mcp_server_name="notion",
+        message="unreachable",
+        retry_status=BetaManagedAgentsRetryStatusTerminal(type="terminal"),
+    )
+    state = apply(TurnState(), make_session_error(event_id="e_1", error=error))
+    assert state.error is not None and state.error.kind == "upstream"
+    assert state.mcp_failures == (), "a terminal error is not a degradation"
+
+
+def test_apply_ignores_retrying_model_error_until_it_settles() -> None:
+    """A `retrying` copy of a model error is MA saying wait; the settled copy
+    (`exhausted`/`terminal`) is the one that fails the turn."""
+    retrying = BetaManagedAgentsModelOverloadedError(
+        type="model_overloaded_error",
+        message="overloaded",
+        retry_status=BetaManagedAgentsRetryStatusRetrying(type="retrying"),
+    )
+    state = apply(TurnState(), make_session_error(event_id="e_1", error=retrying))
+    assert state.error is None, "a retrying error must not fail the turn early"
+    assert state.retrying_error is not None, "kept aside so an empty turn can still name it"
+    assert "e_1" in state.seen_event_ids, "the event is still folded for dedup"
+    settled = apply(state, make_session_error(event_id="e_2", error=make_overloaded_error()))
+    assert settled.error is not None, "the settled copy fails the turn"

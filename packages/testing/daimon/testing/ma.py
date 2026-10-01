@@ -25,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -33,14 +34,18 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaCloudConfig,
-    BetaEnvironment,
-    BetaPackages,
-    BetaUnrestrictedNetwork,
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+from daimon.testing.ma_models import (
+    DEFAULT_MODEL_ID,
+    ma_agent,
+    ma_environment,
+    ma_session,
 )
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
+from daimon.testing.ma_models import EMPTY_CLOUD_CONFIG as EMPTY_CLOUD_CONFIG
+from daimon.testing.ma_models import EMPTY_SESSION_STATS as EMPTY_SESSION_STATS
+from daimon.testing.ma_models import EMPTY_SESSION_USAGE as EMPTY_SESSION_USAGE
+from daimon.testing.ma_models import SessionStatus as SessionStatus
 
 # ---------------------------------------------------------------------------
 # Sentinel
@@ -52,19 +57,8 @@ class NotHandled(Exception):
     does not match the request. combine_handlers will try the next handler."""
 
 
-# ---------------------------------------------------------------------------
-# Shared constants
-# ---------------------------------------------------------------------------
-
-EMPTY_CLOUD_CONFIG = BetaCloudConfig(
-    type="cloud",
-    networking=BetaUnrestrictedNetwork(type="unrestricted"),
-    packages=BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
-)
-
-EMPTY_SESSION_STATS = BetaManagedAgentsSessionStats()
-
-EMPTY_SESSION_USAGE = BetaManagedAgentsSessionUsage()
+# The shared `EMPTY_*` constants and `SessionStatus` live in
+# `daimon.testing.ma_models` and are re-exported above for existing importers.
 
 # ---------------------------------------------------------------------------
 # Handler type + MARouter
@@ -88,6 +82,35 @@ class MARouter:
     def add(self, method: str, path_re: str, handler: Handler) -> None:
         self.routes.append((method.upper(), re.compile(path_re), handler))
 
+    def add_agent(self, agent: BetaManagedAgentsAgent) -> None:
+        """Serve `GET /v1/agents/{agent.id}` (the exact id only)."""
+        body = agent.model_dump(mode="json")
+        self.add("GET", rf"/v1/agents/{re.escape(agent.id)}", lambda _r, _m: _json_200(body))
+
+    def add_environment(self, environment: BetaEnvironment) -> None:
+        """Serve `GET /v1/environments/{environment.id}` (the exact id only)."""
+        body = environment.model_dump(mode="json")
+        self.add(
+            "GET",
+            rf"/v1/environments/{re.escape(environment.id)}",
+            lambda _r, _m: _json_200(body),
+        )
+
+    def add_session(self, session: BetaManagedAgentsSession) -> None:
+        """Serve `GET /v1/sessions/{session.id}` (the exact id only)."""
+        body = session.model_dump(mode="json")
+        self.add("GET", rf"/v1/sessions/{re.escape(session.id)}", lambda _r, _m: _json_200(body))
+
+    def add_agent_list(self, *agents: BetaManagedAgentsAgent) -> None:
+        """Serve `GET /v1/agents` with exactly these agents (the resolver's tag lookup)."""
+        items = [agent.model_dump(mode="json") for agent in agents]
+        self.add("GET", r"/v1/agents", lambda _r, _m: list_response(items))
+
+    def add_environment_list(self, *environments: BetaEnvironment) -> None:
+        """Serve `GET /v1/environments` with exactly these environments."""
+        items = [environment.model_dump(mode="json") for environment in environments]
+        self.add("GET", r"/v1/environments", lambda _r, _m: list_response(items))
+
     def dispatch(self, request: httpx.Request) -> httpx.Response:
         for method, pattern, handler in self.routes:
             if request.method != method:
@@ -100,6 +123,10 @@ class MARouter:
             f"MARouter: no route for {request.method} {request.url.path} "
             f"(registered: {[(m, p.pattern) for m, p, _ in self.routes]})"
         )
+
+
+def _json_200(body: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(200, json=body)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +174,34 @@ def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
 def send_events_response(data: list[dict[str, Any]] | None = None) -> httpx.Response:
     """Response for POST /v1/sessions/{id}/events."""
     return httpx.Response(200, json={"data": data})
+
+
+def session_response(
+    *,
+    session_id: str,
+    status: SessionStatus = "idle",
+    agent_id: str | None = None,
+    environment_id: str = "env_test",
+    metadata: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Response for GET /v1/sessions/{id} (the SDK's `beta.sessions.retrieve`).
+
+    After plan 19-02, a driver-driven SSE script that ends without a terminal
+    event makes the driver check session status, so every transport-level
+    test that drives the driver needs this route registered.
+
+    Built on `ma_session`; a fresh `agent_...` id is minted when `agent_id`
+    is omitted, as a live create would.
+    """
+    session = ma_session(
+        id=session_id,
+        status=status,
+        agent_id=agent_id or _ma_id("agent"),
+        environment_id=environment_id,
+        metadata=metadata,
+        created_at=datetime.now(UTC),
+    )
+    return httpx.Response(200, json=session.model_dump(mode="json"))
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +266,22 @@ def build_stub_anthropic(
     return build_fake_anthropic(handler or _noop)
 
 
+def build_no_retry_anthropic(
+    handler: Callable[[httpx.Request], httpx.Response] | MARouter,
+) -> AsyncAnthropic:
+    """`build_fake_anthropic` with the SDK's own retries disabled.
+
+    The SDK auto-retries 409/429/5xx (max_retries=2), which would consume a
+    scripted conflict before the code under test can see it. A `MARouter`
+    is accepted directly so callers need not spell `.dispatch`.
+    """
+    dispatch = handler.dispatch if isinstance(handler, MARouter) else handler
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(dispatch), base_url="https://api.anthropic.com"
+    )
+    return AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
+
+
 @pytest.fixture
 def stub_anthropic() -> AsyncAnthropic:
     """AsyncAnthropic with a no-op 200 handler. Decorative; for tests that
@@ -241,7 +312,7 @@ def make_stub_anthropic() -> Callable[
 # ---------------------------------------------------------------------------
 
 
-def _require_api_key() -> str:
+def require_api_key() -> str:
     """Read DAIMON_TEST_ANTHROPIC_API_KEY from env, skip if missing.
 
     Shared by contract-test conftests (`-m contract`, env-gated, never gate
@@ -267,7 +338,7 @@ def _agent_response(
     *,
     agent_id: str | None = None,
     name: str = "uat-agent",
-    model: str = "claude-sonnet-4-6",
+    model: str = DEFAULT_MODEL_ID,
     system: str | None = None,
     metadata: dict[str, str] | None = None,
     mcp_servers: list[dict[str, object]] | None = None,
@@ -275,24 +346,28 @@ def _agent_response(
     skills: list[dict[str, object]] | None = None,
     version: int = 1,
 ) -> dict[str, object]:
-    """Build a payload shaped like MA's BetaManagedAgentsAgent."""
-    now = datetime.now(UTC).isoformat()
-    return {
-        "id": agent_id or _ma_id("agent"),
-        "type": "agent",
-        "name": name,
-        "version": version,
-        "model": {"id": model, "speed": "standard"},
-        "system": system,
-        "metadata": metadata or {},
-        "mcp_servers": mcp_servers or [],
-        "tools": tools or [],
-        "skills": skills or [],
-        "created_at": now,
-        "updated_at": now,
-        "archived_at": None,
-        "description": None,
-    }
+    """Build a payload shaped like MA's BetaManagedAgentsAgent.
+
+    The frame (ids, timestamps, model, metadata) comes from `ma_agent`. The
+    `tools` / `mcp_servers` / `skills` lists are echoed back verbatim, the
+    way `make_fake_ma_handler` returns whatever a create/update sent: those
+    arrive in the SDK's *request* shape (`default_config` optional, no
+    resolved `enabled` flags), which the response models would reject.
+    """
+    now = datetime.now(UTC)
+    payload: dict[str, object] = ma_agent(
+        id=agent_id or _ma_id("agent"),
+        name=name,
+        model=BetaManagedAgentsModelConfig(id=model, speed="standard"),
+        system=system,
+        metadata=metadata,
+        version=version,
+        created_at=now,
+    ).model_dump(mode="json")
+    payload["mcp_servers"] = mcp_servers or []
+    payload["tools"] = tools or []
+    payload["skills"] = skills or []
+    return payload
 
 
 def _environment_response(
@@ -302,22 +377,100 @@ def _environment_response(
     description: str = "",
     metadata: dict[str, str] | None = None,
 ) -> BetaEnvironment:
-    """Build a validated BetaEnvironment using real SDK construction.
-
-    Uses EMPTY_CLOUD_CONFIG for the config field. Serializes with
-    `.model_dump(mode="json")` — never model_construct.
-    """
+    """A validated BetaEnvironment with fresh timestamps (see `ma_environment`)."""
     now = datetime.now(UTC).isoformat()
-    return BetaEnvironment(
+    return ma_environment(
         id=environment_id,
         name=name,
-        type="environment",
-        config=EMPTY_CLOUD_CONFIG,
-        created_at=now,
-        updated_at=now,
         description=description,
-        metadata=metadata or {},
+        metadata=metadata,
+        created_at=now,
     )
+
+
+def make_archive_agent_handler(
+    *, name: str = "doomed", model: str = DEFAULT_MODEL_ID
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Handle `POST /v1/agents/{id}/archive`, which `make_fake_ma_handler`
+    does not implement. Raises `NotHandled` otherwise, so it composes via
+    `combine_handlers` in front of the agent fake."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
+        if request.method != "POST" or not m:
+            raise NotHandled
+        now = datetime.now(UTC)
+        archived = ma_agent(
+            id=m.group("id"),
+            name=name,
+            model=BetaManagedAgentsModelConfig(id=model, speed="standard"),
+            version=2,
+            created_at=now,
+            archived_at=now,
+        )
+        return httpx.Response(200, json=archived.model_dump(mode="json"))
+
+    return handler
+
+
+def make_agent_env_echo_handler(
+    *, tenant_id: uuid.UUID | str | None = None, with_session: bool = True
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer agent / environment (and, by default, session) retrieves for
+    whatever id was asked, built on the canonical `ma_*` shapes.
+
+    Covers the endpoints a thread turn hits when it creates an MA session
+    (`GET /v1/agents/{id}`, `GET /v1/environments/{id}`) and the session
+    read a mapping row without a recorded configuration triggers
+    (`GET /v1/sessions/{id}`, unless `with_session=False`). Any other
+    request fails loudly with an AssertionError naming it.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)", path)
+        if m and request.method == "GET":
+            agent = ma_agent(id=m.group("id"), tenant_id=tenant_id)
+            return httpx.Response(200, json=agent.model_dump(mode="json"))
+        m = re.fullmatch(r"/v1/environments/(?P<id>[^/]+)", path)
+        if m and request.method == "GET":
+            environment = ma_environment(id=m.group("id"), tenant_id=tenant_id)
+            return httpx.Response(200, json=environment.model_dump(mode="json"))
+        m = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)", path)
+        if with_session and m and request.method == "GET":
+            session = ma_session(id=m.group("id"))
+            return httpx.Response(200, json=session.model_dump(mode="json"))
+        raise AssertionError(f"make_agent_env_echo_handler: unhandled {request.method} {path}")
+
+    return handler
+
+
+def resolved_agent_env_router(
+    agent: BetaManagedAgentsAgent | None = None,
+    environment: BetaEnvironment | None = None,
+    *,
+    tenant_id: uuid.UUID | str | None = None,
+    router: MARouter | None = None,
+) -> MARouter:
+    """A router whose list + retrieve routes resolve one agent and one
+    environment: what admission needs to pick a responder for `tenant_id`.
+
+    Defaults to `ma_agent(tenant_id=...)` / `ma_environment(tenant_id=...)`
+    so the resolver's tag lookup (`daimon_tenant` + `daimon_name`) finds
+    them. Retrieve routes are exact-id (`MARouter.add_agent` /
+    `add_environment`): a retrieve of any other id fails loudly. Pass
+    `router=` to add these routes to an existing router.
+    """
+    resolved_agent = agent if agent is not None else ma_agent(tenant_id=tenant_id)
+    resolved_environment = (
+        environment if environment is not None else ma_environment(tenant_id=tenant_id)
+    )
+    target = router if router is not None else MARouter()
+    target.add_agent_list(resolved_agent)
+    target.add_agent(resolved_agent)
+    target.add_environment_list(resolved_environment)
+    target.add_environment(resolved_environment)
+    return target
 
 
 def _validate_mcp_toolset_crossref(payload: dict[str, Any]) -> str | None:
@@ -341,16 +494,48 @@ def _validate_mcp_toolset_crossref(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
+@dataclass
+class FakeMAState:
+    """In-memory agent store shared between the MA agent-CRUD fake and other
+    fakes that need to read agent specs (e.g. the sessions fake freezing an
+    agent snapshot at session-create time).
+
+    Extracted from `make_fake_ma_handler`'s local closure so it can be
+    injected and shared — `make_fake_ma_handler(state=None)` keeps today's
+    behaviour (a private, handler-local store) unchanged.
+
+    `agent_versions` is a full history keyed by (agent_id, version number):
+    `agents` alone only ever holds the LATEST version (each `agents.update`
+    overwrites it in place), so a caller pinning an explicit prior version
+    (e.g. `make_fake_sessions_handler`'s session-create, which accepts
+    `{"type": "agent", "id": ..., "version": N}`) needs the historical
+    snapshot, not whatever is current.
+    """
+
+    agents: dict[str, dict[str, object]] = field(default_factory=dict[str, dict[str, object]])
+    agent_versions: dict[str, dict[int, dict[str, object]]] = field(
+        default_factory=dict[str, dict[int, dict[str, object]]]
+    )
+
+
+def make_fake_ma_handler(
+    state: FakeMAState | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
     """Stateful fake handler for MA agent CRUD.
 
     Tracks created agents in memory so PATCH can update them. Validates the
     mcp_servers <-> mcp_toolset cross-reference on POST and PATCH.
 
+    Pass a `FakeMAState` to share the agent store with another fake (e.g.
+    `make_fake_sessions_handler`, which reads agent specs at session-create
+    time to freeze a session's agent snapshot). Omit it for today's
+    behaviour: a private store scoped to this handler.
+
     Returns a plain callable (not decorated) — wrap with build_fake_anthropic
     to get an AsyncAnthropic client.
     """
-    store: dict[str, dict[str, object]] = {}
+    st = state if state is not None else FakeMAState()
+    store = st.agents
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -377,9 +562,17 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
                         "error": {"type": "invalid_request_error", "message": err},
                     },
                 )
+            # A create may spell `model` as the config dict form
+            # (`{"id": ..., "speed": ...}`, what a fork copies off a live
+            # agent) or as the bare id string; the response carries the id.
+            match body.get("model", DEFAULT_MODEL_ID):
+                case {"id": str(model_id)} | str(model_id):
+                    pass
+                case other:
+                    raise AssertionError(f"make_fake_ma_handler: unexpected model {other!r}")
             agent = _agent_response(
                 name=body.get("name", "unnamed"),
-                model=body.get("model", "claude-sonnet-4-6"),
+                model=model_id,
                 system=body.get("system"),
                 metadata=body.get("metadata", {}),
                 mcp_servers=body.get("mcp_servers", []),
@@ -388,6 +581,7 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
                 version=1,
             )
             store[agent["id"]] = agent  # pyright: ignore[reportArgumentType]
+            st.agent_versions.setdefault(str(agent["id"]), {})[1] = dict(agent)
             return httpx.Response(200, json=agent)
 
         # GET /v1/environments/{id} — retrieve single environment
@@ -437,6 +631,7 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
                 )
             merged["version"] = existing.get("version", 1) + 1  # pyright: ignore[reportOperatorIssue]
             store[agent_id] = merged
+            st.agent_versions.setdefault(agent_id, {})[merged["version"]] = dict(merged)  # pyright: ignore[reportArgumentType]
             return httpx.Response(200, json=merged)
 
         return httpx.Response(404, json={"error": f"unhandled {method} {path}"})
@@ -464,8 +659,10 @@ def _prefix_match(path: str, prefix: str) -> bool:
 class FakeMemoryStoreState:
     """In-memory state shared between a memory-store fake and test assertions."""
 
-    stores: dict[str, dict[str, Any]] = field(default_factory=dict)
-    memories: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    stores: dict[str, dict[str, Any]] = field(default_factory=dict[str, dict[str, Any]])
+    memories: dict[str, list[dict[str, Any]]] = field(
+        default_factory=dict[str, list[dict[str, Any]]]
+    )
 
 
 def _memory_store_response(

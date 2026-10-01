@@ -6,8 +6,8 @@ This is the canonical proof that the routines integration coverage closes:
 2. ``last_error`` is populated on failure (``session.error`` event).
 3. The advisory lock blocks a second concurrent scheduler.
 
-The tests build a real ``AsyncEngine`` bound to the test Postgres, scoped
-to a per-test schema via SQLAlchemy ``schema_translate_map``. The
+The tests take a real ``AsyncEngine`` bound to the test Postgres from the
+``schema_engine`` fixture, an own pooled engine on the worker's test schema. The
 scheduler's ``run`` is invoked through its ``_engine_override`` and
 ``_anthropic_factory`` test seams so production wiring is exercised
 end-to-end without touching real network or the live Anthropic API.
@@ -26,9 +26,6 @@ from unittest.mock import AsyncMock
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig,
-)
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
@@ -57,11 +54,10 @@ from daimon.adapters.scheduler.main import (
 from daimon.adapters.scheduler.main import run as scheduler_run
 from daimon.core.config import Settings
 from daimon.core.db import build_engine
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.testing import ma_agent, ma_environment, ma_model_config
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -139,39 +135,14 @@ def _build_fake_anthropic_factory(
     """
     now_dt = dt.datetime.now(dt.UTC)
     now_iso = now_dt.isoformat()
-    live_agent = BetaManagedAgentsAgent(
+    live_agent = ma_agent(
         id=agent_id,
-        type="agent",
         name=agent_name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: agent_name,
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
+        model=ma_model_config(speed="standard"),
+        tenant_id=tenant_id,
         created_at=now_dt,
-        updated_at=now_dt,
-        archived_at=None,
     )
-    live_env = BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name="default",
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
+    live_env = ma_environment(id=env_id, name="default", tenant_id=tenant_id, created_at=now_iso)
 
     class _EnvList:
         """Async-iterable wrapper for `client.beta.environments.list(...)`."""
@@ -196,7 +167,7 @@ def _build_fake_anthropic_factory(
         def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
             self._evts = evts
 
-        def __await__(self):  # noqa: ANN204
+        def __await__(self):
             async def _self() -> _FakeAsyncIter:
                 return self
 
@@ -212,23 +183,61 @@ def _build_fake_anthropic_factory(
             except StopIteration as err:
                 raise StopAsyncIteration from err
 
+        async def close(self) -> None:
+            # Driver closes the abandoned stream on a clean close (no
+            # terminal event) before checking MA's session status —
+            # `_EmptyEventsPage`/`_events_page` below serve that status
+            # check + the replay-and-refold read that follows.
+            return None
+
+    class _EmptyEventsPage:
+        """Async-iterable stand-in for `client.beta.sessions.events.list(...)`
+        when a script's events must be replayed (no terminal event was seen,
+        so the driver's eventless-cycle finalize path re-reads the full log).
+        """
+
+        def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
+            self._evts = evts
+
+        def __aiter__(self) -> _EmptyEventsPage:
+            self._iter = iter(self._evts)
+            return self
+
+        async def __anext__(self) -> BetaManagedAgentsSessionEvent:
+            try:
+                return next(self._iter)
+            except StopIteration as err:
+                raise StopAsyncIteration from err
+
     stream_factory = _FakeAsyncIter(events)
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
     send_mock = AsyncMock(return_value=None)
     close_mock = AsyncMock(return_value=None)
+    # Post-19-09: any script that does not end in a real terminal event
+    # (session.status_idle / session.status_terminated) makes the driver
+    # check MA's session status on the resulting clean close, then replay
+    # the full event log to fold in whatever the (single, non-terminal)
+    # script already delivered — status "idle" finalizes without reopening
+    # the stream.
+    retrieve_mock = AsyncMock(return_value=SimpleNamespace(status="idle"))
 
     class _FakeEvents:
         stream = AsyncMock(return_value=stream_factory)
         send = send_mock
 
+        @staticmethod
+        def list(**_kwargs: object) -> _EmptyEventsPage:
+            return _EmptyEventsPage(events)
+
     class _FakeSessions:
         events = _FakeEvents()
         create = create_mock
+        retrieve = retrieve_mock
 
         @staticmethod
         def list(**_kwargs: object) -> _EmptySessionPage:
@@ -376,7 +385,12 @@ async def test_failure_records_last_error(
     assert refreshed is not None
     assert refreshed.last_result_tail is None, "no tail on failure"
     assert refreshed.last_error is not None, "last_error must be recorded"
-    assert refreshed.last_error.startswith("RuntimeError: session.error:"), (
+    # Post-19-09: headless_runner delegates its drain to the core turn
+    # driver, which raises the failed turn's own TurnError (kind-prefixed,
+    # e.g. "upstream: ...") rather than the old bespoke
+    # RuntimeError("session.error: ..."). scheduler.py's catch-all records
+    # `f"{type(err).__name__}: {err}"`.
+    assert refreshed.last_error.startswith("TurnError: upstream:"), (
         f"unexpected error format: {refreshed.last_error!r}"
     )
 
@@ -446,58 +460,22 @@ def _build_archived_agent_factory(
     """
     now_dt = dt.datetime.now(dt.UTC)
     now_iso = now_dt.isoformat()
-    archived_agent = BetaManagedAgentsAgent(
+    archived_agent = ma_agent(
         id=stale_agent_id,
-        type="agent",
         name=agent_name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: agent_name,
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
+        model=ma_model_config(speed="standard"),
+        tenant_id=tenant_id,
         created_at=now_dt,
-        updated_at=now_dt,
         archived_at=now_dt,  # archived_at populated -> resolver treats as not-live
     )
-    fresh_agent = BetaManagedAgentsAgent(
+    fresh_agent = ma_agent(
         id=fresh_agent_id,
-        type="agent",
         name=agent_name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: agent_name,
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
+        model=ma_model_config(speed="standard"),
+        tenant_id=tenant_id,
         created_at=now_dt,
-        updated_at=now_dt,
-        archived_at=None,
     )
-    live_env = BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name="default",
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
+    live_env = ma_environment(id=env_id, name="default", tenant_id=tenant_id, created_at=now_iso)
 
     class _AgentList:
         def __init__(self, agents: list[BetaManagedAgentsAgent]) -> None:
@@ -537,7 +515,7 @@ def _build_archived_agent_factory(
         def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
             self._evts = evts
 
-        def __await__(self):  # noqa: ANN204
+        def __await__(self):
             async def _self() -> _FakeAsyncIter:
                 return self
 
@@ -557,7 +535,7 @@ def _build_archived_agent_factory(
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
 
@@ -711,72 +689,22 @@ def _build_two_tenant_fake_anthropic_factory(
     now_dt = dt.datetime.now(dt.UTC)
     now_iso = now_dt.isoformat()
 
-    agent_a = BetaManagedAgentsAgent(
+    agent_a = ma_agent(
         id=agent_id_a,
-        type="agent",
         name="daimon",
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id_a),
-            MA_METADATA_KEY_NAME: "daimon",
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
+        model=ma_model_config(speed="standard"),
+        tenant_id=tenant_id_a,
         created_at=now_dt,
-        updated_at=now_dt,
-        archived_at=None,
     )
-    agent_b = BetaManagedAgentsAgent(
+    agent_b = ma_agent(
         id=agent_id_b,
-        type="agent",
         name="daimon",
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id_b),
-            MA_METADATA_KEY_NAME: "daimon",
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
+        model=ma_model_config(speed="standard"),
+        tenant_id=tenant_id_b,
         created_at=now_dt,
-        updated_at=now_dt,
-        archived_at=None,
     )
-    env_a = BetaEnvironment(
-        id=env_id_a,
-        type="environment",
-        name="default",
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id_a),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
-    env_b = BetaEnvironment(
-        id=env_id_b,
-        type="environment",
-        name="default",
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id_b),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
+    env_a = ma_environment(id=env_id_a, name="default", tenant_id=tenant_id_a, created_at=now_iso)
+    env_b = ma_environment(id=env_id_b, name="default", tenant_id=tenant_id_b, created_at=now_iso)
 
     _agents_by_id = {agent_id_a: agent_a, agent_id_b: agent_b}
     _envs_by_id = {env_id_a: env_a, env_id_b: env_b}
@@ -818,7 +746,7 @@ def _build_two_tenant_fake_anthropic_factory(
         ]
 
         class _FakeAsyncIter:
-            def __await__(self):  # noqa: ANN204
+            def __await__(self):
                 async def _self() -> _FakeAsyncIter:
                     return self
 
@@ -850,7 +778,7 @@ def _build_two_tenant_fake_anthropic_factory(
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
 

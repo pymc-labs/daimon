@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 from unittest.mock import MagicMock
@@ -22,9 +23,7 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.discord._credential_button import (  # pyright: ignore[reportPrivateUsage]
-    _build_message_body,  # pyright: ignore[reportPrivateUsage]
-)
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -33,13 +32,16 @@ from daimon.core.config import (
 )
 from daimon.core.credential_requests import (
     CredentialRequestKind,
-    build_button_label,
     build_custom_id,
 )
+from daimon.core.posted_controls import build_posted_card
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
+from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Load patch_discord_http directly from the sibling conftest.py by file path.
 # Avoids the "from conftest import ..." collision with the parent tests/conftest.py.
@@ -54,11 +56,12 @@ _send_message_impl = _discord_mod._send_message_impl  # pyright: ignore[reportPr
 _fetch_attachment = _discord_mod._fetch_attachment  # pyright: ignore[reportPrivateUsage]
 _require_discord_identity = _discord_mod._require_discord_identity  # pyright: ignore[reportPrivateUsage]
 _require_guild_id = _discord_mod._require_guild_id  # pyright: ignore[reportPrivateUsage]
+#: Discord's IS_COMPONENTS_V2 message flag (1 << 15).
+_IS_COMPONENTS_V2 = 1 << 15
+
 _post_credential_button_impl = (
     _discord_mod._post_credential_button_impl  # pyright: ignore[reportPrivateUsage]
 )
-
-pytestmark = pytest.mark.asyncio
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +112,9 @@ class _FakeAiohttpSession:
 # ---------------------------------------------------------------------------
 
 
-def _runtime_with_discord_token() -> McpRuntime:
+def _runtime_with_discord_token(
+    *, session_factory: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     """Build an McpRuntime with a Settings carrying a discord.bot_token.
 
     Settings construction is fully validated; we mock only the unrelated
@@ -122,7 +127,7 @@ def _runtime_with_discord_token() -> McpRuntime:
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
     )
     return McpRuntime(
-        session_factory=MagicMock(),  # type: ignore[arg-type]  # impls don't use it
+        session_factory=session_factory or MagicMock(),  # type: ignore[arg-type]  # only writes read the tenant policy
         client=MagicMock(),  # type: ignore[arg-type]  # impls don't use it
         settings=settings,
         deployment_default=DeploymentDefault(),
@@ -265,7 +270,10 @@ def _message_payload(
 # ---------------------------------------------------------------------------
 
 
-async def test_send_message_text_only(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_send_message_text_only(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
             return _guild_payload()
@@ -281,7 +289,7 @@ async def test_send_message_text_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
     patch_discord_http(monkeypatch, handler)
     row = await _send_message_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         content="posted",
@@ -293,6 +301,7 @@ async def test_send_message_text_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_send_message_with_attachments(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     payload_bytes = b"hello-attachment"
     fake_session = _FakeAiohttpSession(
@@ -326,7 +335,7 @@ async def test_send_message_with_attachments(
 
     patch_discord_http(monkeypatch, handler)
     row = await _send_message_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         content="with-att",
@@ -519,6 +528,7 @@ def _thread_payload(
 
 async def test_send_message_to_thread_succeeds_for_non_admin_when_parent_uncached(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Sending to a thread must fetch the uncached parent channel and check
     permissions against it, not raise ClientException('Parent channel not
@@ -544,7 +554,7 @@ async def test_send_message_to_thread_succeeds_for_non_admin_when_parent_uncache
 
     patch_discord_http(monkeypatch, handler)
     row = await _send_message_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="999",
         content="in-thread",
@@ -655,19 +665,49 @@ async def test_require_guild_id_raises_with_exact_error_string_when_guild_id_mis
 # ---------------------------------------------------------------------------
 
 
+_EXPIRES_AT = datetime(2026, 5, 9, 12, 30, tzinfo=UTC)
+
+
+def _post_kwargs(**overrides: Any) -> dict[str, Any]:
+    """The impl's required arguments, with a per-kind override."""
+    kwargs: dict[str, Any] = {
+        "channel_id": "222",
+        "kind": "env",
+        "target": "OPENAI_API_KEY",
+        "token": "tok-abc123",
+        "agent_name": "demo",
+        "purpose": "calling the OpenAI API",
+        "expires_at": _EXPIRES_AT,
+        "responder_name": "Daimon",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
 def _sent_component_button(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The single button inside the posted container's single action row."""
     components = kwargs["json"]["components"]
-    assert len(components) == 1, f"expected exactly one action row, got {components!r}"
-    row_children = components[0]["components"]
-    assert len(row_children) == 1, f"expected exactly one button, got {row_children!r}"
-    return row_children[0]  # type: ignore[no-any-return]
+    assert len(components) == 1, f"expected exactly one container, got {components!r}"
+    children = components[0]["components"]
+    rows = [child for child in children if child["type"] == 1]
+    assert len(rows) == 1, f"expected exactly one action row, got {children!r}"
+    buttons = rows[0]["components"]
+    assert len(buttons) == 1, f"expected exactly one button, got {buttons!r}"
+    return buttons[0]  # type: ignore[no-any-return]
+
+
+def _sent_text(kwargs: dict[str, Any]) -> str:
+    """Every text display on the posted card, newline-joined."""
+    container = kwargs["json"]["components"][0]
+    return "\n".join(child["content"] for child in container["components"] if child["type"] == 10)
 
 
 async def test_post_credential_button_posts_one_button_with_the_core_custom_id(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The posted message carries exactly one button whose custom_id is
-    build_custom_id(token) and whose label is build_button_label(kind, target)."""
+    """The posted card carries exactly one button, whose custom_id is the
+    core-owned build_custom_id(token) the bot process dispatches on."""
     posted: dict[str, Any] = {}
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
@@ -681,51 +721,27 @@ async def test_post_credential_button_posts_one_button_with_the_core_custom_id(
             return _text_channel_payload()
         if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
             posted.update(kwargs)
-            return _message_payload(message_id="9101", content=kwargs["json"]["content"])
+            return _message_payload(message_id="9101")
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
     message_id = await _post_credential_button_impl(
-        _runtime_with_discord_token(),
-        _auth(),
-        channel_id="222",
-        kind="env",
-        target="OPENAI_API_KEY",
-        token="tok-abc123",
-        agent_name="demo",
-        purpose="calling the OpenAI API",
+        _runtime_with_discord_token(session_factory=db_session_factory), _auth(), **_post_kwargs()
     )
     assert message_id == "9101", "must return the sent message id"
     button = _sent_component_button(posted)
     assert button["custom_id"] == build_custom_id("tok-abc123"), (
         "posted button custom_id must be the core-owned build_custom_id output"
     )
-    assert button["label"] == build_button_label("env", "OPENAI_API_KEY"), (
-        "posted button label must be the core-owned build_button_label output"
-    )
 
 
-async def test_build_message_body_renders_every_credential_request_kind() -> None:
-    """Every kind in CredentialRequestKind must render a body. _KIND_NOUN is a
-    plain dict, so pyright cannot prove it exhaustive — a kind added to the
-    Literal without a noun here raises KeyError at post time, not build time."""
-    for kind in get_args(CredentialRequestKind):
-        body = _build_message_body(
-            requester_platform_user_id="42",
-            agent_name="demo",
-            kind=kind,
-            target="some-target",
-            purpose="doing the thing",
-        )
-        assert "some-target" in body, f"body for kind {kind!r} must name the target"
-
-
-async def test_post_credential_button_body_mentions_requester_and_exposure(
+async def test_post_credential_button_sends_a_components_v2_card_with_no_content(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The message body pings the requester and states the credential becomes
-    usable by everyone who talks to the agent; allowed_mentions pings only
-    that user, never everyone or a role."""
+    """A components-v2 message may not carry content, and the view built here
+    must be the LayoutView the bot can later edit — a classic view would make
+    every later edit a 50035."""
     posted: dict[str, Any] = {}
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
@@ -739,27 +755,122 @@ async def test_post_credential_button_body_mentions_requester_and_exposure(
             return _text_channel_payload()
         if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
             posted.update(kwargs)
-            return _message_payload(message_id="9102", content=kwargs["json"]["content"])
+            return _message_payload(message_id="9104")
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
     await _post_credential_button_impl(
-        _runtime_with_discord_token(),
-        _auth(platform_user_id="42"),
-        channel_id="222",
-        kind="mcp",
-        target="linear",
-        token="tok-xyz789",
-        agent_name="demo",
-        purpose="syncing Linear issues",
+        _runtime_with_discord_token(session_factory=db_session_factory), _auth(), **_post_kwargs()
     )
-    body = posted["json"]["content"]
-    assert "<@42>" in body, "body must mention the requester"
-    assert "demo" in body, "body must name the agent"
-    assert "linear" in body, "body must name the exact target"
-    assert "syncing Linear issues" in body, "body must include the caller-supplied purpose"
-    assert "usable by everyone who talks to" in body, (
-        "body must disclose that the credential becomes usable by everyone who talks to the agent"
+
+    assert posted["json"]["content"] is None, "a components-v2 message may not carry content"
+    assert posted["json"]["flags"] & _IS_COMPONENTS_V2, (
+        "the components-v2 flag is what lets the bot edit this message with a LayoutView"
+    )
+    assert posted["json"]["components"][0]["type"] == 17, "the card is one container"
+
+
+@pytest.mark.parametrize("kind", list(get_args(CredentialRequestKind)), ids=str)
+async def test_post_credential_button_renders_the_core_built_requested_card(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: CredentialRequestKind,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every kind's posted copy is exactly what build_posted_card produced —
+    the MCP process never spells a card's words out for itself."""
+    posted: dict[str, Any] = {}
+    extra: dict[str, Any] = {
+        "mcp": {"target": "linear", "mcp_server_url": "https://mcp.linear.app/sse"},
+        "mcp_oauth": {"target": "notion", "mcp_server_url": "https://mcp.notion.com/mcp"},
+        "repo": {"target": "https://github.com/acme/pipeline", "branch": "main"},
+        "skill_repo": {"target": "https://github.com/acme/skills@release", "branch": "release"},
+    }.get(kind, {})
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            posted.update(kwargs)
+            return _message_payload(message_id="9105")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    await _post_credential_button_impl(
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(),
+        **_post_kwargs(kind=kind, **extra),
+    )
+
+    card = build_posted_card(
+        kind=kind,
+        state="requested",
+        agent_name="demo",
+        responder_name="Daimon",
+        target=extra.get("target", "OPENAI_API_KEY"),
+        requester_platform_user_id="42",
+        expires_at=_EXPIRES_AT,
+        token="tok-abc123",
+        mcp_server_url=extra.get("mcp_server_url"),
+        repo={"repo": "acme/pipeline", "skill_repo": "acme/skills"}.get(kind),
+        branch=extra.get("branch"),
+    )
+    text = _sent_text(posted)
+    assert f"**{card.headline}**" in text, f"kind {kind!r} must post the core-built headline"
+    for fact in card.facts:
+        assert f"-# {fact}" in text, f"kind {kind!r} must post the core-built fact {fact!r}"
+    assert _sent_component_button(posted)["label"] == card.buttons[0].label, (
+        f"kind {kind!r} must post the core-built button label"
+    )
+
+
+async def test_post_credential_button_pings_only_through_the_footer_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The footer mention is the one and only ping in a request's lifecycle:
+    allowed_mentions permits users and nothing else, and the mention itself
+    appears only in the footer, never in an agent-authored line."""
+    posted: dict[str, Any] = {}
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            posted.update(kwargs)
+            return _message_payload(message_id="9102")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    await _post_credential_button_impl(
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(platform_user_id="42"),
+        **_post_kwargs(
+            kind="mcp",
+            target="linear",
+            mcp_server_url="https://mcp.linear.app/sse",
+            purpose="syncing Linear issues; @everyone should never be pinged",
+        ),
+    )
+
+    lines = _sent_text(posted).split("\n")
+    mentioning = [line for line in lines if "<@42>" in line]
+    assert len(mentioning) == 1 and mentioning[0].startswith("-# "), (
+        "the requester is mentioned exactly once, in the footer"
+    )
+    assert not any("syncing Linear issues" in line for line in lines), (
+        "the agent-authored purpose is never rendered onto a public card"
     )
     allowed_mentions = posted["json"]["allowed_mentions"]
     assert allowed_mentions["parse"] == ["users"], (
@@ -769,6 +880,7 @@ async def test_post_credential_button_body_mentions_requester_and_exposure(
 
 async def test_post_credential_button_hydrates_thread_parent_before_permission_check(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Posting to a thread hydrates the parent before the permission check, so
     permissions_for does not raise on the REST-only client."""
@@ -787,21 +899,14 @@ async def test_post_credential_button_hydrates_thread_parent_before_permission_c
                 return _text_channel_payload()
             raise AssertionError(f"unexpected channel fetch {route.channel_id}")
         if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
-            return _message_payload(
-                message_id="9103", channel_id="999", content=kwargs["json"]["content"]
-            )
+            return _message_payload(message_id="9103", channel_id="999")
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
     message_id = await _post_credential_button_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
-        channel_id="999",
-        kind="env",
-        target="OPENAI_API_KEY",
-        token="tok-thread",
-        agent_name="demo",
-        purpose="calling the OpenAI API",
+        **_post_kwargs(channel_id="999", token="tok-thread"),
     )
     assert message_id == "9103", "posting into an uncached thread must succeed"
 
@@ -829,12 +934,7 @@ async def test_post_credential_button_denies_without_send_permission_and_posts_n
         await _post_credential_button_impl(
             _runtime_with_discord_token(),
             _auth(),
-            channel_id="222",
-            kind="env",
-            target="OPENAI_API_KEY",
-            token="tok-denied",
-            agent_name="demo",
-            purpose="x",
+            **_post_kwargs(channel_id="222", token="tok-denied"),
         )
 
 
@@ -862,12 +962,7 @@ async def test_post_credential_button_rejects_cross_guild_channel(
         await _post_credential_button_impl(
             _runtime_with_discord_token(),
             _auth(),
-            channel_id="222",
-            kind="env",
-            target="OPENAI_API_KEY",
-            token="tok-cross-guild",
-            agent_name="demo",
-            purpose="x",
+            **_post_kwargs(channel_id="222", token="tok-cross-guild"),
         )
 
 
@@ -894,10 +989,73 @@ async def test_post_credential_button_rejects_dm_channel(
         await _post_credential_button_impl(
             _runtime_with_discord_token(),
             _auth(),
-            channel_id="333",
-            kind="env",
-            target="OPENAI_API_KEY",
-            token="tok-dm",
-            agent_name="demo",
-            purpose="x",
+            **_post_kwargs(channel_id="333", token="tok-dm"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# SYS-048: tenant write protection — refused after the caller check, admins too
+# ---------------------------------------------------------------------------
+
+_ADMINISTRATOR = 1 << 3
+
+
+@pytest.mark.parametrize(
+    ("target_id", "policy", "everyone_perms"),
+    [
+        ("222", TenantAccessPolicy(protected_channel_ids=("222",)), _VIEW_CHANNEL | _SEND_MESSAGES),
+        ("999", TenantAccessPolicy(protected_channel_ids=("222",)), _VIEW_CHANNEL | _SEND_MESSAGES),
+        (
+            "222",
+            TenantAccessPolicy(protected_category_ids=("777",)),
+            _VIEW_CHANNEL | _SEND_MESSAGES,
+        ),
+        ("222", TenantAccessPolicy(protected_channel_ids=("222",)), _ADMINISTRATOR),
+    ],
+    ids=["protected-channel", "thread-under-protected-channel", "protected-category", "admin"],
+)
+async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    target_id: str,
+    policy: TenantAccessPolicy,
+    everyone_perms: int,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="111")
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await db_session.commit()
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", everyone_perms)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                return _thread_payload()
+            if str(route.channel_id) == "222":
+                return {**_text_channel_payload(), "parent_id": "777"}
+            raise AssertionError(f"unexpected channel fetch {route.channel_id}")
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            raise AssertionError("must not POST into a protected channel")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        external_id="111",
+        platform_user_id="42",
+    )
+    with pytest.raises(ToolError, match="protected"):
+        await _send_message_impl(
+            _runtime_with_discord_token(session_factory=db_session_factory),
+            auth,
+            channel_id=target_id,
+            content="internal notes",
         )

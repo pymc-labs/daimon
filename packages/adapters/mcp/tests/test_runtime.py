@@ -20,9 +20,12 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "deployment_default",
         "gemini_client",
         "notebook_rate_limiter",
+        "bundle_rate_limiter",
         "fernet",
+        "artifact_store",
+        "teams_client",
     }, (
-        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet"
+        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client"
     )
     # Frozen: assignment raises FrozenInstanceError
     sf: async_sessionmaker[AsyncSession] = async_sessionmaker()  # type: ignore[call-arg]
@@ -57,3 +60,4 @@ def test_mcp_runtime_optional_fields_default_to_none() -> None:
         deployment_default=DeploymentDefault(),
     )
     assert rt.gemini_client is None
+    assert rt.artifact_store is None

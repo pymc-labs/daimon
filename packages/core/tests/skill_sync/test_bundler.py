@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import tarfile
 import zipfile
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -19,22 +18,12 @@ import pytest
 from daimon.core.skill_sync.bundler import SkillEntry, extract_and_bundle
 from daimon.core.skill_sync.fetcher import TarballTooLarge
 from daimon.core.specs import SkillRepo
-
-
-def _make_tarball(files: dict[str, bytes]) -> bytes:
-    """Build a tar.gz blob from a {tar-internal-path -> content-bytes} mapping."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for path, content in files.items():
-            info = tarfile.TarInfo(name=path)
-            info.size = len(content)
-            tf.addfile(info, io.BytesIO(content))
-    return buf.getvalue()
+from daimon.testing.archives import make_tarball
 
 
 async def test_extract_and_bundle_split_mode_finds_two_skill_md_dirs(tmp_path: Path) -> None:
     """Split mode emits one SkillEntry per discovered SKILL.md directory, lex-sorted."""
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/skills/foo/SKILL.md": b"# foo\n",
             "repo/skills/bar/SKILL.md": b"# bar\n",
@@ -59,7 +48,7 @@ async def test_extract_and_bundle_with_default_split_keeps_every_subskill(tmp_pa
     nested subtree. This is the create_agent regression: the chat path relies on
     the SkillRepo default and a bundled default ships a hollow restaurant-ranker.
     """
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/restaurant-ranker/SKILL.md": b"---\nname: restaurant-ranker\n---\n",
             "repo/restaurant-ranker/scripts/booking.py": b"print('real booking')\n",
@@ -88,7 +77,7 @@ async def test_extract_and_bundle_bundled_mode_returns_single_entry_with_prebuil
     tmp_path: Path,
 ) -> None:
     """Bundled mode emits exactly one entry whose prebuilt_zip is populated."""
-    tarball = _make_tarball({"repo/SKILL.md": b"# repo skill\n"})
+    tarball = make_tarball({"repo/SKILL.md": b"# repo skill\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,
@@ -107,7 +96,7 @@ async def test_extract_and_bundle_bundled_mode_synthesizes_skill_md_when_missing
     tmp_path: Path,
 ) -> None:
     """When the tarball has no SKILL.md, the bundled zip must contain a synthesized one."""
-    tarball = _make_tarball({"repo/README.md": b"# readme\n"})
+    tarball = make_tarball({"repo/README.md": b"# readme\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,
@@ -126,7 +115,7 @@ async def test_extract_and_bundle_bundled_mode_synthesizes_skill_md_when_missing
 
 async def test_extract_and_bundle_smart_strips_single_wrapper_dir(tmp_path: Path) -> None:
     """A tarball with a single top-level wrapper dir is descended into automatically."""
-    tarball = _make_tarball({"wrapper-abc123/SKILL.md": b"# inside wrapper\n"})
+    tarball = make_tarball({"wrapper-abc123/SKILL.md": b"# inside wrapper\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,
@@ -139,7 +128,7 @@ async def test_extract_and_bundle_smart_strips_single_wrapper_dir(tmp_path: Path
 
 async def test_extract_and_bundle_walks_skill_md_case_insensitive(tmp_path: Path) -> None:
     """A file named `Skill.md` (mixed case) is still discovered."""
-    tarball = _make_tarball({"repo/foo/Skill.md": b"# mixed case\n"})
+    tarball = make_tarball({"repo/foo/Skill.md": b"# mixed case\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,
@@ -160,7 +149,7 @@ async def test_extract_and_bundle_marks_reserved_word_skill_with_skip_reason(
     orchestrator can record into SyncReport.failed_uploads instead of letting
     it fail at upload with an opaque message.
     """
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/claude-api/SKILL.md": (
                 b"---\nname: claude-api\ndescription: probe\n---\n# claude-api\n"
@@ -190,7 +179,7 @@ async def test_extract_and_bundle_marks_reserved_word_skill_with_skip_reason(
 
 async def test_extract_and_bundle_uses_filter_data(tmp_path: Path) -> None:
     """A malicious tarball with a `..` traversal must not escape extract_root."""
-    tarball = _make_tarball({"../escape.txt": b"pwned"})
+    tarball = make_tarball({"../escape.txt": b"pwned"})
     escape_target = tmp_path.parent / "escape.txt"
     # Either tarfile raises (filter='data' rejects the entry) or it sanitizes
     # the path; what matters is no file ends up outside extract_root.
@@ -225,7 +214,7 @@ async def test_extract_and_bundle_raises_before_extraction_when_decompressed_siz
     """A tarball whose declared member sizes sum above the decompressed cap must
     raise BEFORE any file is written — proving the check runs pre-extraction,
     not as post-hoc cleanup."""
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/SKILL.md": b"x" * 200,
             "repo/scripts/big.py": b"y" * 200,
@@ -248,7 +237,7 @@ async def test_extract_and_bundle_raises_when_member_count_exceeds_cap(tmp_path:
     """A tarball with more members than the member-count cap must raise, even
     when every member is tiny — guards against an inode/wall-clock exhaustion
     a byte cap alone would miss."""
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/a/SKILL.md": b"# a\n",
             "repo/b/SKILL.md": b"# b\n",
@@ -273,7 +262,7 @@ async def test_extract_and_bundle_extracts_normally_comfortably_under_both_caps(
     tmp_path: Path,
 ) -> None:
     """A tarball comfortably under both caps still extracts and bundles as before."""
-    tarball = _make_tarball({"repo/SKILL.md": b"# repo skill\n"})
+    tarball = make_tarball({"repo/SKILL.md": b"# repo skill\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,
@@ -288,7 +277,7 @@ async def test_extract_and_bundle_extracts_normally_comfortably_under_both_caps(
 
 async def test_extract_and_bundle_cap_of_zero_disables_both_checks(tmp_path: Path) -> None:
     """A cap of 0 disables the check, matching max_tarball_bytes' existing convention."""
-    tarball = _make_tarball(
+    tarball = make_tarball(
         {
             "repo/SKILL.md": b"x" * 5000,
             "repo/a.txt": b"y" * 5000,
@@ -319,7 +308,7 @@ async def test_extract_and_bundle_runs_in_thread(
 
     # Namespace-scoped patch — only the bundler's asyncio.to_thread reference.
     monkeypatch.setattr("daimon.core.skill_sync.bundler.asyncio.to_thread", spy)
-    tarball = _make_tarball({"repo/SKILL.md": b"# x\n"})
+    tarball = make_tarball({"repo/SKILL.md": b"# x\n"})
     entries = await extract_and_bundle(
         tarball_bytes=tarball,
         extract_root=tmp_path,

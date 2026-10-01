@@ -103,7 +103,7 @@ def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Pa
     # Spawn a real child we can prove was killed. Its argv carries the same
     # markers spawn_marimo's cmd does (`marimo` + `--base-url /n/<slug>`), so
     # the identity check recognizes it without needing marimo installed.
-    child = subprocess.Popen(  # noqa: S603
+    child = subprocess.Popen(
         [
             sys.executable,
             "-c",

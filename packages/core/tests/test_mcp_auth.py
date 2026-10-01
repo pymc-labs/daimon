@@ -17,6 +17,13 @@ import jwt as pyjwt
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_internal_mcp_token, mint_jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Agent tokens are minted with a TTL, and the tests below mint them at a fixed
+# `now` so the claims are deterministic. That makes each token's exp a real
+# deadline: once it passes, a verifying decode starts failing on a suite nobody
+# touched. The assertions are about what was minted, not about whether it is
+# still valid, so they decode with the expiry check off.
+_NO_EXP = {"verify_exp": False}
+
 
 def test_mint_jwt_shape() -> None:
     account_id = uuid.uuid4()
@@ -272,8 +279,10 @@ async def test_mint_agent_mcp_token_claim_set_is_exactly_sub_agent_id_jti_exp(
         now=now,
     )
 
-    # exp is in the future — decode with leeway=0
-    decoded = pyjwt.decode(token, secret, algorithms=["HS256"])
+    # The mint time is fixed, so the token's exp is a wall-clock deadline that
+    # passes while the test stays correct. These tests assert on claim
+    # contents, not on validity: decode without the expiry check.
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
     assert set(decoded.keys()) == {"sub", "agent_id", "jti", "exp"}, (
         "A1: minted agent token must carry exactly {sub, agent_id, jti, exp} — "
         "role and tenant_id must NOT be minted (verifier re-derives both from DB)"
@@ -301,7 +310,7 @@ async def test_mint_agent_mcp_token_sub_and_agent_id_claims_match_inputs(
         now=now,
     )
 
-    decoded = pyjwt.decode(token, secret, algorithms=["HS256"])
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
     assert decoded["sub"] == str(account_id), "sub must be the stringified account_id"
     assert decoded["agent_id"] == str(agent_id), "agent_id claim must be str(agent_id UUID)"
     # jti must be a valid UUID
@@ -329,7 +338,7 @@ async def test_mint_agent_mcp_token_exp_is_ttl_days_from_now(
         now=now,
     )
 
-    decoded = pyjwt.decode(token, secret, algorithms=["HS256"])
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
     assert decoded["exp"] == expected_exp, (
         "exp must equal int((now + 90d).timestamp()) — default ttl_days=90"
     )
@@ -356,7 +365,7 @@ async def test_mint_agent_mcp_token_writes_row_readable_by_get_mcp_token(
         now=now,
     )
 
-    decoded = pyjwt.decode(token, secret, algorithms=["HS256"])
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
     jti = uuid.UUID(decoded["jti"])
 
     row = await get_mcp_token(db_session, jti=jti)

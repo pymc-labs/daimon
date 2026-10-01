@@ -28,8 +28,6 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.routing import Route
 
-pytestmark = pytest.mark.asyncio
-
 # A valid Fernet key (base64-urlsafe 32 bytes) — see test_webhooks_github.py.
 _FERNET_KEY = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 

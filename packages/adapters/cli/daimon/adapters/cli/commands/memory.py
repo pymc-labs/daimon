@@ -20,7 +20,7 @@ from rich.console import Console
 
 memory_app = typer.Typer(help="Inspect an agent's persistent memory (read-only)")
 
-_VALID_PLATFORMS = ("discord", "cli", "slack")
+_VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
 
 
 def _validate_platform(value: str) -> Platform:
@@ -112,7 +112,7 @@ async def memory_show_impl(
 
 @memory_app.command("list")
 def memory_list_command(
-    platform: str = typer.Option(..., help="Platform (discord|slack)"),
+    platform: str = typer.Option(..., help="Platform (discord|slack|teams)"),
     workspace: str = typer.Option(..., help="Workspace/guild external id"),
     agent: str = typer.Option(..., help="Agent name"),
     as_json: Annotated[bool, JSON_OPTION] = False,
@@ -138,7 +138,7 @@ def memory_list_command(
 @memory_app.command("show")
 def memory_show_command(
     path: str = typer.Argument(..., help="Memory file path, e.g. /notes/a.md"),
-    platform: str = typer.Option(..., help="Platform (discord|slack)"),
+    platform: str = typer.Option(..., help="Platform (discord|slack|teams)"),
     workspace: str = typer.Option(..., help="Workspace/guild external id"),
     agent: str = typer.Option(..., help="Agent name"),
 ) -> None:

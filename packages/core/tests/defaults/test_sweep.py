@@ -6,8 +6,6 @@ from typing import Any
 import httpx
 import pytest
 from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
     SkillDeleteResponse,
     SkillListResponse,
 )
@@ -25,8 +23,9 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import SkillsListTruncatedError
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, list_response
+from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_agent, ma_environment
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _T8 = str(TENANT_ID)[:8]
@@ -42,23 +41,8 @@ def _tagged_agent(
     if managed:
         metadata[MA_METADATA_KEY_MANAGED] = "true"
     skills = [{"type": "custom", "skill_id": sid, "version": "latest"} for sid in (skill_ids or [])]
-    return BetaManagedAgentsAgent.model_validate(
-        {
-            "id": id_,
-            "type": "agent",
-            "name": name,
-            "model": {"id": "claude-opus-4-7"},
-            "metadata": metadata,
-            "description": None,
-            "archived_at": None,
-            "created_at": "2026-04-21T00:00:00Z",
-            "updated_at": "2026-04-21T00:00:00Z",
-            "version": 1,
-            "mcp_servers": [],
-            "skills": skills,
-            "tools": [],
-            "system": None,
-        }
+    return ma_agent(
+        id=id_, name=name, model="claude-opus-4-7", metadata=metadata, skills=skills
     ).model_dump(mode="json")
 
 
@@ -69,16 +53,7 @@ def _tagged_env(*, id_: str, name: str, managed: bool = True) -> dict[str, Any]:
     }
     if managed:
         metadata[MA_METADATA_KEY_MANAGED] = "true"
-    return BetaEnvironment(
-        id=id_,
-        type="environment",
-        name=name,
-        config=EMPTY_CLOUD_CONFIG,
-        metadata=metadata,
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    ).model_dump(mode="json")
+    return ma_environment(id=id_, name=name, metadata=metadata).model_dump(mode="json")
 
 
 def _skill_row(*, id_: str, display_title: str, source: str = "custom") -> dict[str, Any]:
@@ -110,21 +85,9 @@ async def test_sweep_archives_removed_agents() -> None:
             archived.append("ag_1")
             or httpx.Response(
                 200,
-                json=BetaManagedAgentsAgent(
-                    id="ag_1",
-                    type="agent",
-                    name="gone",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={},
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
-                ).model_dump(mode="json"),
+                json=ma_agent(id="ag_1", name="gone", model="claude-opus-4-7").model_dump(
+                    mode="json"
+                ),
             )
         ),
     )
@@ -228,16 +191,7 @@ async def test_sweep_archives_removed_environments() -> None:
             archived.append("env_1")
             or httpx.Response(
                 200,
-                json=BetaEnvironment(
-                    id="env_1",
-                    type="environment",
-                    name="gone",
-                    config=EMPTY_CLOUD_CONFIG,
-                    metadata={},
-                    description="",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                ).model_dump(mode="json"),
+                json=ma_environment(id="env_1", name="gone").model_dump(mode="json"),
             )
         ),
     )

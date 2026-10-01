@@ -10,23 +10,27 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 import pytest_asyncio
 from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
+    GLOBAL_CAP_NOTICE,
     DaimonBot,
     _compose_queued_content,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import make_bot
 
 
 def _make_runtime(
@@ -49,15 +53,6 @@ def _make_runtime(
         resolver_cache=new_resolver_cache(),
         turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # _handle_mention/_orchestrate stubbed per-test
     )
-
-
-def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
-    intents = discord.Intents.default()
-    bot = DaimonBot(runtime=runtime, intents=intents)
-    bot._connection.user = MagicMock()  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
-    return bot
 
 
 def _make_channel_message(
@@ -157,7 +152,7 @@ async def queued_bot(
     result = await provision_tenant(db_session_factory, platform="discord", workspace_id="123456")
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
-    return _make_bot(runtime)
+    return make_bot(runtime)
 
 
 @pytest.mark.asyncio
@@ -189,6 +184,69 @@ async def test_no_queueing_when_serial_mentions(queued_bot: DaimonBot) -> None:
     assert calls[1][1] is None
     m1.add_reaction.assert_not_called()  # type: ignore[attr-defined]
     m2.add_reaction.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_per_tenant_cap_refuses_before_global_cap(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+    queued_bot._inflight[tenant_id] = 100  # pyright: ignore[reportPrivateUsage]
+    queued_bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+    message = _make_channel_message()
+
+    await queued_bot.on_message(message)
+
+    assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+    message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        "This server has too many chats in flight right now — try again in a moment."
+    )
+
+
+@pytest.mark.asyncio
+async def test_global_cap_refuses_second_turn_and_releases_first(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def stub(message: discord.Message, *_args: object, **_kwargs: object) -> None:
+        started.append(message.id)
+        entered.set()
+        if len(started) == 1:
+            await release.wait()
+
+    queued_bot._orchestrate = stub  # type: ignore[method-assign]
+    first_message = _make_channel_message(channel_id=789)
+    first_message.id = 1
+    second_message = _make_channel_message(channel_id=790)
+    second_message.id = 2
+    first = asyncio.create_task(queued_bot.on_message(first_message))
+    await entered.wait()
+    try:
+        await queued_bot.on_message(second_message)
+        assert started == [1]
+        assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        second_message.channel.send.assert_awaited_once_with(GLOBAL_CAP_NOTICE)
+    finally:
+        release.set()
+        await first
+    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_global_slot_released_when_turn_fails(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("turn failed")
+
+    queued_bot._orchestrate = fail  # type: ignore[method-assign]
+    message = _make_channel_message()
+
+    await queued_bot.on_message(message)
+
+    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+    assert queued_bot._inflight == {}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -448,7 +506,7 @@ async def test_handle_mention_catches_sqlalchemy_error_from_orchestrate(
     """
     tenant_id = uuid.uuid4()
     runtime = _make_runtime(tenant_id, db_session_factory)
-    bot = _make_bot(runtime)
+    bot = make_bot(runtime)
 
     async def _raise_db_error(*args: object, **kwargs: object) -> None:
         raise SQLAlchemyError("db down")
@@ -477,7 +535,7 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
     """
     tenant_id = uuid.uuid4()
     runtime = _make_runtime(tenant_id, db_session_factory)
-    bot = _make_bot(runtime)
+    bot = make_bot(runtime)
 
     async def _raise_unexpected(*args: object, **kwargs: object) -> None:
         raise RuntimeError("boom")
@@ -511,7 +569,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 
     tenant_id = uuid.uuid4()
     runtime = _make_runtime(tenant_id, db_session_factory)
-    bot = _make_bot(runtime)
+    bot = make_bot(runtime)
     message = _make_channel_message()
 
     await bot.on_message(message)  # must not raise
@@ -717,6 +775,7 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
     ) -> None:
         orchestrate_calls.append(content_override)
         if created_thread_ids is not None:
@@ -812,3 +871,222 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
         "attachments from ALL of the author's queued messages must reach the "
         "composite drain turn, not just the first message's"
     )
+
+
+# ---------------------------------------------------------------------------
+# Queue-before-reaction ordering (Discord twin of Slack WR-05).
+# ---------------------------------------------------------------------------
+
+
+def _recording_stub(
+    calls: list[tuple[discord.Message, str | None]],
+    entered: asyncio.Event,
+    release: asyncio.Event,
+):
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+        entered.set()
+        await release.wait()
+
+    return stub
+
+
+@pytest.mark.asyncio
+async def test_queued_mention_survives_turn_ending_during_reaction(
+    queued_bot: DaimonBot,
+) -> None:
+    """A mention queued while the ⌛ reaction is in flight must still be drained.
+
+    If the in-flight turn finishes its drain loop and ``finally`` while the
+    queued mention's ``add_reaction`` await is suspended, appending to
+    ``_pending`` only after the reaction strands the mention: nothing drains
+    that thread until an unrelated later mention arrives.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued_bot._handle_mention = _recording_stub(calls, entered, release)  # type: ignore[method-assign]
+
+    m1 = _make_thread_message(content="first")
+    q1 = _make_thread_message(content="queued")
+    reaction_started = asyncio.Event()
+    reaction_release = asyncio.Event()
+
+    async def slow_reaction(_emoji: str) -> None:
+        reaction_started.set()
+        await reaction_release.wait()
+
+    q1.add_reaction = AsyncMock(side_effect=slow_reaction)
+
+    turn = asyncio.create_task(queued_bot.on_message(m1))
+    await entered.wait()
+    entered.clear()
+
+    queued = asyncio.create_task(queued_bot.on_message(q1))
+    await reaction_started.wait()  # q1 is suspended inside add_reaction
+
+    release.set()  # turn 1 finishes: drain loop + finally run now
+    done, _ = await asyncio.wait({turn}, timeout=5)
+    assert turn in done
+
+    reaction_release.set()
+    await queued
+
+    assert [c[0] for c in calls] == [m1, q1], "queued mention was stranded, not drained"
+    assert calls[1][1] == "queued"
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_queued_mention_survives_reaction_failure(queued_bot: DaimonBot) -> None:
+    """A failed ⌛ reaction (e.g. missing Add Reactions permission) is cosmetic.
+
+    The mention must still be queued and drained, and no error message posted.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued_bot._handle_mention = _recording_stub(calls, entered, release)  # type: ignore[method-assign]
+
+    m1 = _make_thread_message(content="first")
+    q1 = _make_thread_message(content="queued")
+    response = MagicMock(status=403, reason="Forbidden")
+    q1.add_reaction = AsyncMock(side_effect=discord.Forbidden(response, "Missing Permissions"))
+
+    turn = asyncio.create_task(queued_bot.on_message(m1))
+    await entered.wait()
+    entered.clear()
+
+    await queued_bot.on_message(q1)
+
+    release.set()
+    await turn
+
+    assert [c[0] for c in calls] == [m1, q1]
+    q1.channel.send.assert_not_called()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# A mention queued behind an out-of-turn continuation dispatch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    """A mention that lands while a form's continuation turn holds the thread is drained.
+
+    `dispatch_continuations_in_thread` holds `_processing`, so the mention
+    queues behind it with ⌛ exactly as it would behind a mention turn. When
+    the dispatch ends, the queued mention must get its own turn instead of
+    waiting for the next mention in the thread.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+
+    queued_bot._handle_mention = stub  # type: ignore[method-assign]
+    q1 = _make_thread_message(content="and the chart too?")
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 789
+
+    async def _continuation_turn_while_a_mention_arrives(**_kwargs: object) -> None:
+        await queued_bot.on_message(q1)
+        assert queued_bot._pending.get(789) == [q1], (  # pyright: ignore[reportPrivateUsage]
+            "a mention during the dispatch must queue behind it, not run beside it"
+        )
+
+    with patch.object(
+        queued_bot,
+        "_dispatch_continuations",
+        side_effect=_continuation_turn_while_a_mention_arrives,
+    ):
+        await queued_bot.dispatch_continuations_in_thread(
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id="123456"),
+            thread=thread,
+            guild_id="123456",
+        )
+
+    q1.add_reaction.assert_awaited_once_with("⌛")  # type: ignore[attr-defined]
+    assert calls == [(q1, "and the chart too?")], (
+        f"the queued mention must get its own turn once the dispatch ends, got {calls}"
+    )
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_mention_queued_during_a_raising_continuation_dispatch_still_gets_its_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    """A dispatch that raises still drains the mention queued behind it.
+
+    `dispatch_pending_continuations` can raise (a DB error, say), and the
+    spawned dispatch task only logs it. The mention that queued (⌛) during the
+    dispatch must still get its own turn -- the same drain-always contract the
+    mention path keeps when its originating turn fails -- rather than sitting
+    under ⌛ until some later mention in the thread. The dispatch's error
+    still propagates to the caller.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+
+    queued_bot._handle_mention = stub  # type: ignore[method-assign]
+    q1 = _make_thread_message(content="and the chart too?")
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 789
+
+    async def _mention_arrives_then_dispatch_fails(**_kwargs: object) -> None:
+        await queued_bot.on_message(q1)
+        assert queued_bot._pending.get(789) == [q1]  # pyright: ignore[reportPrivateUsage]
+        raise RuntimeError("continuation dispatch failed")
+
+    with (
+        patch.object(
+            queued_bot,
+            "_dispatch_continuations",
+            side_effect=_mention_arrives_then_dispatch_fails,
+        ),
+        pytest.raises(RuntimeError, match="continuation dispatch failed"),
+    ):
+        await queued_bot.dispatch_continuations_in_thread(
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id="123456"),
+            thread=thread,
+            guild_id="123456",
+        )
+
+    q1.add_reaction.assert_awaited_once_with("⌛")  # type: ignore[attr-defined]
+    assert calls == [(q1, "and the chart too?")], (
+        f"the queued mention must get its own turn even when the dispatch raises, got {calls}"
+    )
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]

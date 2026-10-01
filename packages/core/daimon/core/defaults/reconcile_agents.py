@@ -60,17 +60,32 @@ async def reconcile_agent(
     `call_reconcile_for_panel` updating a user fork). Without this guard,
     every panel edit re-stamps the user fork as managed → next `defaults
     apply` sweeps it because it isn't in the seeded spec list.
+
+    `spec.isolated` is a third mode alongside `managed=True/False`: an
+    isolated spec never gains the default daimon-mcp server, the matching
+    `mcp_toolset` tool, or the credential-guidance block. Its sessions are
+    created via `create_isolated_session`, which carries no MCP vault, so
+    there is nothing for either the MCP wiring or the guidance text to point
+    the model at — attaching them would describe machinery the session does
+    not have.
     """
     # Prepend the credential-guidance block so every agent knows where its
     # secrets live (mounted env file) vs MCP vault-bound auth, instead of
     # hallucinating "no key" / hunting for non-existent MCP keys. Applied
     # before the spec-hash computation so the block participates in the hash:
     # existing agents update exactly once to gain it, then stabilise (the
-    # block is idempotent under re-application).
-    spec = spec.model_copy(update={"system": apply_credential_guidance(spec.system or "")})
+    # block is idempotent under re-application). Skipped for isolated specs:
+    # they have no MCP vault and no mounted env file, so the block's guidance
+    # would be actively wrong.
+    if not spec.isolated:
+        spec = spec.model_copy(update={"system": apply_credential_guidance(spec.system or "")})
 
-    merged_mcp = merge_default_mcp_server(spec.mcp_servers, public_url)
-    merged_tools = merge_default_mcp_toolset(spec.tools, public_url)
+    # Gate both merges on `spec.isolated` by passing None instead of
+    # public_url — reuses the existing `public_url is None` early return
+    # already built into both mcp_merge functions rather than adding a new
+    # branch inside mcp_merge.py itself.
+    merged_mcp = merge_default_mcp_server(spec.mcp_servers, None if spec.isolated else public_url)
+    merged_tools = merge_default_mcp_toolset(spec.tools, None if spec.isolated else public_url)
     update: dict[str, object] = {}
     if merged_mcp is not spec.mcp_servers:
         update["mcp_servers"] = merged_mcp
@@ -127,6 +142,7 @@ async def reconcile_agent(
         account_id=account_id,
         managed=managed,
         spec_hash=spec_hash,
+        isolated=spec.isolated,
     )
 
     if ma_match is not None:

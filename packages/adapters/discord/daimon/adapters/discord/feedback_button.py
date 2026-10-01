@@ -112,7 +112,9 @@ class FeedbackButton(
             await interaction.response.send_modal(
                 FeedbackModal(runtime=bot.runtime, feedback_id=uuid.UUID(self.feedback_id))
             )
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("feedback_button.callback_failed", err_type=type(err).__name__)
             # The caught error may have left the interaction already responded
             # (`send_modal` raising `discord.InteractionResponded`, or failing

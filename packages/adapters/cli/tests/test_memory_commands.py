@@ -19,8 +19,6 @@ from daimon.testing.ma import (
 )
 from rich.console import Console
 
-pytestmark = pytest.mark.asyncio
-
 
 async def _setup(db_session, db_session_factory, *, content: str = "alpha"):
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="999")

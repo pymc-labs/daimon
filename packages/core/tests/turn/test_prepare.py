@@ -6,37 +6,61 @@ call, the `thread_sessions` mapping write, and recorder binding.
 from __future__ import annotations
 
 import dataclasses
+import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+import pytest
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
 )
 from cryptography.fernet import Fernet
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
-from daimon.core.stores import usage_events
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    fingerprint_identity,
+    fingerprint_mutable,
+    hash_mcp_servers,
+    hash_skills,
+    hash_tools,
+)
+from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow
+from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_sessions import (
+    create_thread_session,
+    get_live_thread_session,
+    get_thread_session_by_id,
+    mark_turn_active,
+)
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     MARouter,
     build_fake_anthropic,
     make_fake_memory_store_handler,
+)
+from daimon.testing.ma_models import (
+    ma_agent,
+    ma_environment,
+    ma_model_usage,
+    ma_session,
+    ma_session_agent,
 )
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,41 +74,6 @@ from daimon.testing.factories import (  # isort: skip
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 
 
-def _agent(*, agent_id: str, tenant_id: uuid.UUID, name: str = "daimon") -> BetaManagedAgentsAgent:
-    now = datetime.now(UTC)
-    return BetaManagedAgentsAgent(
-        id=agent_id,
-        type="agent",
-        name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at=now,
-        updated_at=now,
-        archived_at=None,
-    )
-
-
-def _env(*, env_id: str, tenant_id: uuid.UUID, name: str = "default") -> BetaEnvironment:
-    now_iso = datetime.now(UTC).isoformat()
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=name,
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
-
-
 def _admission(
     *, account_id: uuid.UUID, agent: BetaManagedAgentsAgent, env: BetaEnvironment
 ) -> Admission:
@@ -94,6 +83,72 @@ def _admission(
         environment=env,
         config=ResolvedConfig(agent_name="daimon", environment_name="default"),
     )
+
+
+def _snapshot(*, ma_agent_id: str, model_id: str, environment_id: str = "env_1") -> SessionSnapshot:
+    """The configuration a session created from `_agent`/`_env` would freeze."""
+    return SessionSnapshot(
+        ma_agent_id=ma_agent_id,
+        model_id=model_id,
+        system_sha256=None,
+        skills_sha256=hash_skills([]),
+        environment_id=environment_id,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tools_sha256=hash_tools([]),
+        mcp_servers_sha256=hash_mcp_servers([]),
+        env_sha256=None,
+        agent_version=1,
+        agent_name="daimon",
+    )
+
+
+async def _make_snapshotted_thread_session(
+    session: AsyncSession,
+    *,
+    tenant: TenantRow,
+    account: AccountRow,
+    thread_id: str,
+    ma_session_id: str,
+    ma_agent_id: str,
+    model_id: str = "claude-sonnet-4-6",
+    environment_id: str = "env_1",
+    watermark_message_id: str | None = None,
+    active_turn: bool = False,
+) -> ThreadSessionRow:
+    """A live mapping row that already records what its session runs.
+
+    `make_thread_session` writes the pre-continuity shape (no
+    `effective_config`), which now costs a backfilling `sessions.retrieve` on
+    reuse. Tests about anything else use this instead, so their routers stay
+    about the thing they test, and `environment_id` must match the admission's
+    environment or the bind reads the row as configuration drift.
+
+    `active_turn` marks the row as mid-turn, which defers every configuration
+    change to the caller's next message — the state a test needs when it wants
+    the drifted session reused rather than replaced.
+    """
+    snapshot = _snapshot(ma_agent_id=ma_agent_id, model_id=model_id, environment_id=environment_id)
+    row = await create_thread_session(
+        session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=thread_id,
+        account_id=account.id,
+        ma_session_id=ma_session_id,
+        ma_agent_id=ma_agent_id,
+        watermark_message_id=watermark_message_id,
+        effective_config=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+        mutable_fingerprint=fingerprint_mutable(snapshot),
+    )
+    if active_turn:
+        await mark_turn_active(
+            session, id=row.id, active_turn_message_id="msg-in-flight", now=datetime.now(UTC)
+        )
+    return row
 
 
 def _router_with_session_create(*, session_bodies: list[dict[str, object]]) -> MARouter:
@@ -173,13 +228,13 @@ async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exi
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    row = await make_thread_session(
+    row = await _make_snapshotted_thread_session(
         db_session,
         tenant=tenant,
         account=account,
-        platform="discord",
         thread_id="thread-1",
         ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
         watermark_message_id="msg-99",
     )
     await db_session.commit()
@@ -190,8 +245,8 @@ async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exi
     router = MARouter()
     router.add("POST", r"/v1/sessions", _explode)
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
     prepared = await bind_session(
@@ -211,6 +266,138 @@ async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exi
     assert prepared.watermark == "msg-99", "must return the row's watermark_message_id"
 
 
+@pytest.mark.parametrize("seal_id", [None, "vault"], ids=["open", "sealed"])
+async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    seal_id: str | None,
+) -> None:
+    """A thread whose channel was sealed mid-conversation keeps its session: the
+    seal must reach that session's stamp, or unsealing later would open a
+    transcript written under the seal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-1",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-99",
+    )
+    await db_session.commit()
+    updates: list[dict[str, object]] = []
+
+    def _update(request: httpx.Request, _match: object) -> httpx.Response:
+        updates.append(json.loads(request.content))
+        return httpx.Response(200, json=ma_session(id="sess_existing").model_dump(mode="json"))
+
+    router = MARouter()
+    router.add("POST", r"/v1/sessions/sess_existing$", _update)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = dataclasses.replace(
+        _admission(account_id=account.id, agent=agent, env=env),
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_ids=frozenset() if seal_id is None else frozenset({seal_id}),
+        memory_read_only=seal_id is not None,
+    )
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-1",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True
+    if seal_id is None:
+        assert updates == [], "an open turn must not touch the session's metadata"
+    else:
+        assert [u.get("metadata") for u in updates] == [
+            {"daimon_channel": "vault", "daimon_thread": "thread-1", "daimon_sealed": "vault"}
+        ]
+
+
+async def test_bind_session_blocks_a_sealed_turn_ma_will_not_stamp_mid_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Running the turn unstamped is the leak; wait for the session instead."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-1",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-99",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Cannot update session while session is running",
+                },
+            },
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_ids=frozenset({"vault"}),
+        memory_read_only=True,
+    )
+
+    with pytest.raises(SessionBusyError):
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            reuse_existing=True,
+        )
+
+
 async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -222,8 +409,8 @@ async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
     prepared = await bind_session(
@@ -279,8 +466,8 @@ async def test_bind_session_always_creates_fresh_session_when_reuse_existing_fal
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
     prepared = await bind_session(
@@ -312,8 +499,8 @@ async def test_bind_session_recorder_writes_usage_event_matching_ma_session_id(
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
     prepared = await bind_session(
@@ -331,12 +518,7 @@ async def test_bind_session_recorder_writes_usage_event_matching_ma_session_id(
         id="evt_1",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=10,
-            output_tokens=20,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=10, output_tokens=20),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -363,6 +545,7 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "watermark",
         "reused",
         "session_account_id",
+        "continuity",
     }, "PreparedTurn must expose exactly the documented public fields"
 
 
@@ -377,20 +560,21 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
     nothing and their live session picks it up on the next turn."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    await make_thread_session(
+    await _make_snapshotted_thread_session(
         db_session,
         tenant=tenant,
         account=account,
-        platform="discord",
         thread_id="thread-reuse-mcp",
         ma_session_id="sess_live",
+        ma_agent_id="ag_reuse",
+        environment_id="env_reuse",
         watermark_message_id="msg-1",
     )
     await db_session.commit()
 
     public_url = "https://mcp.example.com/mcp"
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    agent = _agent(agent_id="ag_reuse", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_reuse", tenant_id=tenant.id)
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_reuse")
 
     # Someone else (the admin) attached the server and stored the token.
@@ -439,6 +623,7 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
                 "data": [
                     {
                         "id": "vcrd_daimon_mcp",
+                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
                         "type": "credential",
                         "vault_id": "vlt_caller",
                         "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -483,7 +668,7 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
         mcp=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
     )
     admission = _admission(
-        account_id=account.id, agent=agent, env=_env(env_id="env_reuse", tenant_id=tenant.id)
+        account_id=account.id, agent=agent, env=ma_environment(id="env_reuse", tenant_id=tenant.id)
     )
 
     prepared = await bind_session(
@@ -516,13 +701,14 @@ async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_creden
     """The common case pays one indexed query and touches MA not at all."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    await make_thread_session(
+    await _make_snapshotted_thread_session(
         db_session,
         tenant=tenant,
         account=account,
-        platform="discord",
         thread_id="thread-reuse-plain",
         ma_session_id="sess_live",
+        ma_agent_id="ag_plain",
+        environment_id="env_plain",
         watermark_message_id="msg-1",
     )
     await db_session.commit()
@@ -545,8 +731,8 @@ async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_creden
     )
     admission = _admission(
         account_id=account.id,
-        agent=_agent(agent_id="ag_plain", tenant_id=tenant.id),
-        env=_env(env_id="env_plain", tenant_id=tenant.id),
+        agent=ma_agent(id="ag_plain", tenant_id=tenant.id),
+        env=ma_environment(id="env_plain", tenant_id=tenant.id),
     )
 
     prepared = await bind_session(
@@ -561,3 +747,503 @@ async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_creden
     )
 
     assert prepared.reused is True, "reuse path unchanged for agents with no external MCP"
+
+
+async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_already_past(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-fresh",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+
+async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-no-orphan",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-no-orphan",
+            account_id=account.id,
+        )
+    assert live is None, "a ceiling breach during bind must not leave a partial mapping row"
+
+
+async def test_bind_session_reuse_path_raises_ceiling_error_when_deadline_already_past(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-ceiling-reuse",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-1",
+    )
+    await db_session.commit()
+
+    router = MARouter()
+
+    def _explode(_request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError("create_session must not be called on a reuse hit")
+
+    router.add("POST", r"/v1/sessions", _explode)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-reuse",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+
+async def test_bind_session_default_deadline_none_still_succeeds_on_the_happy_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`deadline=None` is fail-safe, not off -- it computes a full
+    TURN_CEILING_S-away deadline, so a fast route must still complete
+    normally rather than being mistaken for "no ceiling"."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-ceiling-default-none",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert len(session_bodies) == 1, "deadline=None must not skip create_session"
+    assert prepared.reused is False
+
+
+async def test_bind_session_with_generous_explicit_deadline_matches_no_deadline_outcome(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression pin: passing a generous, far-future deadline changes nothing
+    about the returned PreparedTurn compared to the pre-ceiling behavior."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    future_deadline = datetime.now(UTC) + timedelta(hours=1)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-ceiling-generous",
+        session_account_id=account.id,
+        reuse_existing=True,
+        deadline=future_deadline,
+    )
+
+    assert len(session_bodies) == 1
+    assert prepared.reused is False
+    assert prepared.watermark is None
+    assert prepared.mapping_id is not None
+    assert prepared.ma_session_id == "sess_1"
+
+
+async def test_bind_recorder_bills_the_session_snapshot_model_when_the_agent_model_changed_after_create(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The live defect this wave closes: an MA session executes the agent it
+    froze at creation, so a session created while the agent was on sonnet keeps
+    running sonnet after the agent is moved to opus. Billing the agent's
+    CURRENT model would price that turn at opus rates for work done at sonnet
+    rates.
+
+    A model change now replaces the session — but not while a turn is in
+    flight, which is the state here: the replacement waits for the caller's
+    next message and this turn still runs, and must still be billed, on the
+    session that froze sonnet."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-model-changed",
+        ma_session_id="sess_frozen_on_sonnet",
+        ma_agent_id="ag_1",
+        model_id="claude-sonnet-4-6",
+        active_turn=True,
+    )
+    await db_session.commit()
+
+    router = MARouter()
+
+    def _explode(request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError(f"no MA call expected, got {request.method} {request.url.path}")
+
+    router.add("POST", r"/v1/sessions", _explode)
+    router.add("GET", r"/v1/sessions/.*", _explode)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    # The responder agent has since been moved to opus.
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id, model="claude-opus-5")
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-model-changed",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True, "this must be the reuse path"
+
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_1",
+        is_error=False,
+        model_request_start_id="start_1",
+        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    await prepared._record(event=event)  # pyright: ignore[reportPrivateUsage]
+
+    async with db_session_factory() as s:
+        rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+        entries = await tenant_ledger.list_for_tenant(s, tenant_id=tenant.id)
+    assert [row.model for row in rows] == ["claude-sonnet-4-6"], (
+        "usage must record the model the reused session actually runs, not the agent's new one"
+    )
+    debits = [entry.delta_usd for entry in entries if entry.reason == "turn_debit"]
+    assert debits == [Decimal("-3.000000")], (
+        "1M input tokens must be debited at the sonnet rate the session ran, not opus's"
+    )
+
+
+async def test_fresh_session_records_a_snapshot_with_fingerprints(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The snapshot comes from what `sessions.create` returned — the authority
+    on what the session will execute — not from the agent we asked for."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    # The router's created session reports sonnet whatever we ask for, so an
+    # opus agent here proves the recorded model is read off the response.
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id, model="claude-opus-5")
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-fresh-snapshot",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is False, "this must be the fresh-session path"
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-fresh-snapshot",
+            account_id=account.id,
+        )
+    assert live is not None, "the fresh session must leave a live mapping row"
+    snapshot = live.effective_config
+    assert snapshot is not None, "a fresh session must record the configuration it froze"
+    assert snapshot.model_id == "claude-sonnet-4-6", (
+        "the recorded model must be the created session's, not the agent's current one"
+    )
+    assert snapshot.ma_agent_id == "ag_1", "the snapshot must name the agent the session froze"
+    assert snapshot.environment_id == "env_1", "the snapshot must record the session's environment"
+    assert live.identity_fingerprint == fingerprint_identity(snapshot), (
+        "the stored identity fingerprint must be the one this snapshot hashes to"
+    )
+    assert live.mutable_fingerprint == fingerprint_mutable(snapshot), (
+        "the stored mutable fingerprint must be the one this snapshot hashes to"
+    )
+
+
+@pytest.mark.parametrize("legacy_ma_agent_id", [None, "ag_1"])
+async def test_legacy_row_without_snapshot_is_backfilled_with_one_retrieve(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    legacy_ma_agent_id: str | None,
+) -> None:
+    """A row written before continuity has no snapshot, so the session is read
+    once and the snapshot persisted. Both legacy shapes cost ONE read: with no
+    `ma_agent_id` the identity check already fetched the session and hands it
+    over; with one, this is the only fetch."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-legacy",
+        ma_session_id="sess_legacy",
+        ma_agent_id=legacy_ma_agent_id,
+    )
+    # The session this row points at froze a different model and environment,
+    # so without a turn in flight the bind would replace it rather than read
+    # it. The marker defers that to the caller's next message and leaves this
+    # test about the backfill.
+    await mark_turn_active(
+        db_session, id=row.id, active_turn_message_id="msg-in-flight", now=datetime.now(UTC)
+    )
+    await db_session.commit()
+    assert row.effective_config is None, "the legacy shape is a row with no recorded configuration"
+
+    now = datetime.now(UTC)
+    observed = ma_session(
+        id="sess_legacy",
+        agent=ma_session_agent(id="ag_1", name="daimon", version=3, model="claude-haiku-4-5"),
+        environment_id="env_legacy",
+        vault_ids=["vlt_legacy"],
+        created_at=now,
+    )
+    retrieves: list[str] = []
+
+    def _retrieve(request: httpx.Request, _match: object) -> httpx.Response:
+        retrieves.append(request.url.path)
+        return httpx.Response(200, json=observed.model_dump(mode="json"))
+
+    def _explode(request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError(f"unexpected MA call: {request.method} {request.url.path}")
+
+    router = MARouter()
+    router.add("GET", r"/v1/sessions/sess_legacy", _retrieve)
+    router.add("POST", r"/v1/sessions", _explode)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id, model="claude-opus-5")
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-legacy",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True, "a legacy row is still reused"
+    assert len(retrieves) == 1, "a legacy row must cost exactly one sessions.retrieve"
+
+    async with db_session_factory() as s:
+        backfilled = await get_thread_session_by_id(s, id=row.id)
+    assert backfilled is not None, "the backfill must not replace the row"
+    snapshot = backfilled.effective_config
+    assert snapshot is not None, "the retrieved configuration must be persisted on the row"
+    assert snapshot.model_id == "claude-haiku-4-5", (
+        "the backfilled model must be the session's own, not the agent's current one"
+    )
+    assert snapshot.environment_id == "env_legacy", "the backfill records the session's environment"
+    assert snapshot.vault_id == "vlt_legacy", "the backfill records the session's vault"
+    assert backfilled.identity_fingerprint == fingerprint_identity(snapshot), (
+        "the backfill must store the identity fingerprint alongside the snapshot"
+    )
+    assert backfilled.mutable_fingerprint == fingerprint_mutable(snapshot), (
+        "the backfill must store the mutable fingerprint alongside the snapshot"
+    )
+
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_legacy",
+        is_error=False,
+        model_request_start_id="start_1",
+        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    await prepared._record(event=event)  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as s:
+        rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+    assert [usage.model for usage in rows] == ["claude-haiku-4-5"], (
+        "a backfilled row must bill the model the session was found to be running"
+    )
+
+
+async def test_bind_session_raises_session_busy_when_a_handoff_lands_mid_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The destination agent's turn must not run inside the source agent's
+    session. `bind_session` turns that into an error rather than a
+    `PreparedTurn`, so an adapter cannot accidentally run the turn anyway."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-handoff-busy",
+        ma_session_id="sess_source",
+        ma_agent_id="ag_source",
+        active_turn=True,
+    )
+    binding = await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="channel-1",
+        thread_id="thread-handoff-busy",
+        responder_ma_agent_id="ag_destination",
+        responder_name="research-bot",
+        kind="handoff",
+    )
+    await db_session.commit()
+
+    def _explode(request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError(f"unexpected MA call: {request.method} {request.url.path}")
+
+    router = MARouter()
+    router.add("POST", r"/v1/sessions", _explode)
+    router.add("GET", r"/v1/sessions/sess_source", _explode)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    destination = Admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_destination", tenant_id=tenant.id, name="research-bot"),
+        environment=ma_environment(id="env_1", tenant_id=tenant.id),
+        config=ResolvedConfig(
+            agent_name="research-bot",
+            environment_name="default",
+            thread_binding_id=binding.id,
+        ),
+    )
+
+    before = datetime.now(UTC)
+    with pytest.raises(SessionBusyError) as caught:
+        await bind_session(
+            deps,
+            destination,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-handoff-busy",
+            session_account_id=account.id,
+            reuse_existing=True,
+        )
+
+    assert caught.value.pending_reasons == ("agent_identity",), (
+        "the adapter is told which change is waiting, so it can say what happens next"
+    )
+    assert caught.value.retry_after > before, "and when it will be made"
+
+    async with db_session_factory() as s:
+        untouched = await get_thread_session_by_id(s, id=row.id)
+    assert untouched is not None and untouched.status == "live", (
+        "the source agent's session keeps running its own turn"
+    )

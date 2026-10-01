@@ -51,7 +51,7 @@ def _run_as_uid(
     uid: int, code: str, *, cwd: str | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run ``code`` in a child process dropped into ``uid`` via preexec_fn."""
-    return subprocess.run(  # noqa: S603
+    return subprocess.run(
         [sys.executable, "-c", code],
         cwd=cwd,
         env=env,
@@ -256,7 +256,7 @@ def test_proc_environ_closed_across_uids(tmp_path: Path) -> None:
     the uid split is what actually denies it, verified here directly rather
     than assumed.
     """
-    long_lived = subprocess.Popen(  # noqa: S603
+    long_lived = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(20)"],
         preexec_fn=build_jailed_preexec(_UID_A, rlimit_as_bytes=None, rlimit_cpu_seconds=None),
     )
@@ -296,7 +296,7 @@ def test_uv_and_marimo_run_under_the_dropped_uid(tmp_path: Path) -> None:
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
 
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [uv, "run", "--with", "marimo", "marimo", "--version"],
         cwd=str(paths.workspace),
         env=env,
@@ -312,3 +312,95 @@ def test_uv_and_marimo_run_under_the_dropped_uid(tmp_path: Path) -> None:
     assert "Permission denied" not in combined, (
         f"the dropped-uid run must not hit a permission error: {combined}"
     )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_releasing_a_slug_kills_a_detached_survivor_before_its_uid_is_reused(
+    tmp_path: Path,
+) -> None:
+    """A cell's `Popen(..., start_new_session=True)` escapes marimo's process group.
+
+    Releasing the slug must kill it, or it would sit under whichever slug is
+    handed the uid next and read that notebook's files.
+    """
+    import signal
+    import subprocess
+    import time
+
+    from notebook_host.jail import build_jailed_preexec, get_or_create_slug_uid, remove_slug_tree
+
+    uids = tmp_path / "uids.json"
+    uid = get_or_create_slug_uid(uids, "slug-a", start=_UID_A, end=_UID_A + 5)
+    ensure_slug_jail(tmp_path, "slug-a", uid=uid)
+    survivor = subprocess.Popen(
+        ["sleep", "123457"],
+        preexec_fn=build_jailed_preexec(uid, rlimit_as_bytes=None, rlimit_cpu_seconds=None),
+        start_new_session=True,
+    )
+    try:
+        remove_slug_tree(tmp_path, "slug-a", uids_file=uids)
+        deadline = time.monotonic() + 5
+        while survivor.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert survivor.poll() is not None, "the detached survivor must be dead"
+        assert survivor.returncode == -signal.SIGKILL
+    finally:
+        if survivor.poll() is None:
+            survivor.kill()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_jailed_child_has_no_new_privs_and_a_process_cap() -> None:
+    import subprocess
+
+    from notebook_host.jail import JAIL_RLIMIT_NPROC, build_jailed_preexec
+
+    out = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            "grep NoNewPrivs /proc/self/status; grep 'Max processes' /proc/self/limits",
+        ],
+        preexec_fn=build_jailed_preexec(_UID_A, rlimit_as_bytes=None, rlimit_cpu_seconds=None),
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd="/",
+    ).stdout
+    assert "NoNewPrivs:\t1" in out, "setuid binaries can't hand the notebook privilege back"
+    assert out.strip().splitlines()[-1].split()[2] == str(JAIL_RLIMIT_NPROC)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_jail_uid_cannot_swap_entries_in_its_host_owned_slug_root() -> None:
+    """Renaming home away and planting home -> /etc must fail for the jail uid.
+
+    If it succeeded, the host's next chown of ``home`` would hand ``/etc`` to
+    the jail uid. The data dir is in its own 0711 dir under /tmp so the jail
+    uid can reach it at all (pytest's tmp_path is root-only).
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    from notebook_host.jail import build_jailed_preexec
+
+    base = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        base.chmod(0o711)
+        paths = ensure_slug_jail(base, "slug-a", uid=_UID_A)
+        preexec = build_jailed_preexec(_UID_A, rlimit_as_bytes=None, rlimit_cpu_seconds=None)
+
+        def as_uid(*argv: str) -> int:
+            return subprocess.run(list(argv), preexec_fn=preexec, cwd="/", check=False).returncode
+
+        assert as_uid("/bin/touch", str(paths.home / "ok")) == 0, "its own home is writable"
+        assert as_uid("/bin/mv", str(paths.home), str(paths.root / "h2")) != 0
+        assert as_uid("/bin/ln", "-s", "/etc", str(paths.root / "home2")) != 0
+        assert as_uid("/bin/rm", "-rf", str(paths.log)) != 0 or not paths.log.exists()
+        assert paths.home.is_dir() and not paths.home.is_symlink()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

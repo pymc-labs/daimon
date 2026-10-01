@@ -12,8 +12,6 @@ Patterns enforced:
 
 from __future__ import annotations
 
-import io
-import tarfile
 from io import StringIO
 from typing import cast
 
@@ -33,8 +31,8 @@ from daimon.core.github_credentials import encrypt_token
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.github_credentials import upsert_credential
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.testing import MARouter, build_fake_anthropic, list_response, make_tarball
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
 from pydantic import SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,22 +114,6 @@ def _make_rt(
     return rt
 
 
-def _build_anthropic(router: MARouter) -> AsyncAnthropic:
-    transport = httpx.MockTransport(router.dispatch)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
-
-
-def _make_tarball(files: dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for path, content in files.items():
-            info = tarfile.TarInfo(name=path)
-            info.size = len(content)
-            tf.addfile(info, io.BytesIO(content))
-    return buf.getvalue()
-
-
 # ---------------------------------------------------------------------------
 # _sync_agent_impl — integration test against real Postgres + fakes
 # ---------------------------------------------------------------------------
@@ -161,7 +143,7 @@ async def test_sync_agent_impl_renders_report_after_first_create(
             scopes=("repo",),
         )
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     github_http = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _req: httpx.Response(200, content=tarball))
     )
@@ -187,7 +169,7 @@ async def test_sync_agent_impl_renders_report_after_first_create(
     # agent exists in this fake workspace, so the attach short-circuits and the
     # sync metrics below are unaffected.
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
-    anthropic_client = _build_anthropic(router)
+    anthropic_client = build_fake_anthropic(router.dispatch)
 
     rt = _make_rt(db_session_factory, anthropic_client, fernet_key)
     buf = StringIO()
@@ -220,7 +202,7 @@ async def test_sync_agent_impl_proceeds_without_pat_for_public_repo(
 
     fernet_key = Fernet.generate_key()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     fetched_with_auth: list[bool] = []
 
     def _serve_tarball(req: httpx.Request) -> httpx.Response:
@@ -247,7 +229,7 @@ async def test_sync_agent_impl_proceeds_without_pat_for_public_repo(
         ),
     )
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
-    anthropic_client = _build_anthropic(router)
+    anthropic_client = build_fake_anthropic(router.dispatch)
 
     rt = _make_rt(db_session_factory, anthropic_client, fernet_key)
     buf = StringIO()

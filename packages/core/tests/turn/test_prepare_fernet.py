@@ -17,10 +17,8 @@ from typing import Any
 
 import httpx
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.config import McpSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -32,49 +30,14 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import bind_session
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     MARouter,
     build_fake_anthropic,
     make_fake_memory_store_handler,
 )
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import make_account, make_tenant  # isort: skip
-
-
-def _agent(*, agent_id: str, tenant_id: uuid.UUID, name: str = "daimon") -> BetaManagedAgentsAgent:
-    now = datetime.now(UTC)
-    return BetaManagedAgentsAgent(
-        id=agent_id,
-        type="agent",
-        name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at=now,
-        updated_at=now,
-        archived_at=None,
-    )
-
-
-def _env(*, env_id: str, tenant_id: uuid.UUID, name: str = "default") -> BetaEnvironment:
-    now_iso = datetime.now(UTC).isoformat()
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=name,
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
 
 
 def _admission(
@@ -211,8 +174,8 @@ async def test_bind_session_mounts_github_repo_resource_via_fernet_for_slack_and
         fernet=fernet,
     )
 
-    agent = _agent(agent_id=agent_ma_id, tenant_id=tenant.id)
-    env = _env(env_id="env_repo", tenant_id=tenant.id)
+    agent = ma_agent(id=agent_ma_id, tenant_id=tenant.id)
+    env = ma_environment(id="env_repo", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
     expected_resource = {
@@ -257,8 +220,8 @@ async def test_bind_session_omits_repo_resource_and_does_not_raise_when_fernet_n
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     agent_ma_id = "ag_no_repo"
-    agent = _agent(agent_id=agent_ma_id, tenant_id=tenant.id)
-    env = _env(env_id="env_no_repo", tenant_id=tenant.id)
+    agent = ma_agent(id=agent_ma_id, tenant_id=tenant.id)
+    env = ma_environment(id="env_no_repo", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     await db_session.commit()
 

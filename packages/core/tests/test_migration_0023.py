@@ -52,7 +52,7 @@ async def test_migration_0023_unique_constraint(db_engine: AsyncEngine) -> None:
             sa.text(
                 "SELECT conname FROM pg_constraint "
                 "WHERE conname = 'uq_tenants_platform_external_id' "
-                "AND conrelid = 'tenants'::regclass "
+                "AND conrelid = 'public.tenants'::regclass "
                 "AND contype = 'u'"
             )
         )

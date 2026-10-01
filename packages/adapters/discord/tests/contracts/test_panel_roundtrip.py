@@ -29,9 +29,9 @@ async def _cleanup(client: AsyncAnthropic, *names: str) -> None:
             if a.name in names:
                 try:
                     await client.beta.agents.archive(a.id)  # pyright: ignore[reportUnknownMemberType]
-                except Exception as e:  # noqa: BLE001 - best-effort cleanup
+                except Exception as e:  # best-effort cleanup
                     print(f"    cleanup: failed to archive {a.id}: {e}")
-    except Exception as e:  # noqa: BLE001 - best-effort cleanup
+    except Exception as e:  # best-effort cleanup
         print(f"    cleanup: list failed: {e}")
 
 

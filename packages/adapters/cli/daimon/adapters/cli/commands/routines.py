@@ -6,8 +6,8 @@ forthcoming NOT NULL flip, this command walks every routine whose
 `agent_name IS NULL`, retrieves the agent from MA, and writes the daimon-tag
 into the row.
 
-Routine CRUD itself is exposed through the MCP server (`/agent-setup` + chat),
-not the CLI.
+Routine CRUD itself is exposed through chat tools and the adapters' `/routines`
+command, not the CLI.
 """
 
 from __future__ import annotations

@@ -29,12 +29,14 @@ from daimon.core.github_credentials import build_multifernet, upsert_credential_
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_skill_repo_credentials import (
+    list_skill_repo_credentials_for_repo,
+    set_skill_repo_credential,
+)
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.testing.factories import make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 FERNET_KEY = "x" * 43 + "="  # length-44 urlsafe base64 — valid Fernet key shape
 
@@ -358,4 +360,193 @@ async def test_resolve_sync_token_per_agent_pat_wins_with_zero_lookup_requests(
     assert len(lookup_requests) == 0, (
         "the live installation lookup must be invoked zero times when a per-agent "
         "credential already resolved"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Two-tier credential storage: agent_skill_repo_credentials, then the legacy
+# agent_repo_binding. The fallback is what keeps tenants enrolled before the
+# credential table existed syncing with zero data migration.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_skill_repo_pat(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    repo_url: str,
+    plaintext_pat: str,
+) -> None:
+    """Mirror the skill-repo enrollment write path: credential + PAT overlay."""
+    fernet = build_multifernet((FERNET_KEY,))
+    await upsert_credential_encrypted(
+        sessionmaker=sessionmaker,
+        fernet=fernet,
+        principal_id=agent_id,
+        github_login="(inline-pat)",
+        plaintext_token=plaintext_pat,
+        scopes=("repo",),
+    )
+    async with sessionmaker.begin() as session:
+        await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
+        await set_skill_repo_credential(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_url=repo_url,
+            default_branch="main",
+            path="skills",
+            ma_secret_ref=f"inline-pat:{agent_id}",
+            proof=None,
+        )
+
+
+async def test_sync_token_prefers_a_skill_repo_credential_over_a_working_repo_binding(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Both storage tiers hold a usable PAT for the same repo, on different
+    agents. The skill-repo credential is the one skill sync is about, so it
+    wins; the working-repo binding's PAT must not be reached."""
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(uuid.uuid4()))
+    url = "https://github.com/example-org/example-agent"
+    await _seed_bound_pat(
+        sessionmaker,
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        repo_url=url,
+        plaintext_pat="ghp_working_repo_binding",
+    )
+    await _seed_skill_repo_pat(
+        sessionmaker,
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        repo_url=url,
+        plaintext_pat="ghp_skill_repo_credential",
+    )
+
+    token = await _resolve_sync_token(
+        _make_runtime(sessionmaker, settings=_minimal_settings()),
+        _identity(tenant.id),
+        url,
+        _unreachable_client(),
+    )
+    assert token == "ghp_skill_repo_credential", (
+        "the skill-repo credential must be consulted before the working-repo binding"
+    )
+
+
+async def test_sync_token_falls_back_to_a_legacy_binding_when_no_skill_credential_exists(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A tenant enrolled before the credential table has only an
+    agent_repo_binding row. Its PAT must still resolve — that fallback is
+    what makes this change need no data migration."""
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(uuid.uuid4()))
+    url = "https://github.com/example-org/example-agent"
+    await _seed_bound_pat(
+        sessionmaker,
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        repo_url=url,
+        plaintext_pat="ghp_legacy_binding_pat",
+    )
+
+    async with sessionmaker() as session:
+        credentials = await list_skill_repo_credentials_for_repo(
+            session, tenant_id=tenant.id, repo_url=url
+        )
+    assert credentials == [], "precondition: this tenant has no skill-repo credential row"
+
+    token = await _resolve_sync_token(
+        _make_runtime(sessionmaker, settings=_minimal_settings()),
+        _identity(tenant.id),
+        url,
+        _unreachable_client(),
+    )
+    assert token == "ghp_legacy_binding_pat", (
+        "with no skill-repo credential, the legacy binding's PAT must still resolve"
+    )
+
+
+async def test_sync_token_uses_the_skill_credential_proof_kind(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The App tier's proof gate reads the skill-repo credential's proof: a
+    credential recording proof (and no PAT anywhere, no binding at all) is
+    enough for this tenant to reach a minted installation token."""
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(uuid.uuid4()))
+    url = "https://github.com/example-org/example-agent"
+    async with sessionmaker.begin() as session:
+        await set_skill_repo_credential(
+            session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            repo_url=url,
+            default_branch="main",
+            path="skills",
+            ma_secret_ref="anon:",
+            proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=None),
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/example-org/example-agent/installation":
+            return httpx.Response(200, json={"id": 555})
+        if request.url.path == "/app/installations/555/access_tokens":
+            return httpx.Response(201, json={"token": "ghs_installation_token"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    settings = _minimal_settings(app_id="12345", app_private_key=SecretStr(_generate_rsa_keypair()))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        token = await _resolve_sync_token(
+            _make_runtime(sessionmaker, settings=settings), _identity(tenant.id), url, client
+        )
+    assert token == "ghs_installation_token", (
+        "a proof recorded on the skill-repo credential must open the App tier, exactly "
+        "as a proof recorded on a binding does"
+    )
+
+
+async def test_sync_token_takes_a_legacy_pat_when_the_skill_credential_has_only_a_proof(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A tenant mid-migration: the skill-repo credential records a proof but
+    its agent has no PAT overlay, while a legacy binding still holds a usable
+    PAT. The PAT and the proof resolve independently, so the credential's
+    proof must not suppress the binding's PAT — otherwise enrolling a skill
+    repo would downgrade a tenant that used to sync authenticated."""
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(uuid.uuid4()))
+    url = "https://github.com/example-org/example-agent"
+    await _seed_bound_pat(
+        sessionmaker,
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        repo_url=url,
+        plaintext_pat="ghp_legacy_binding_pat",
+    )
+    async with sessionmaker.begin() as session:
+        await set_skill_repo_credential(
+            session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),  # a different agent, with no PAT overlay
+            repo_url=url,
+            default_branch="main",
+            path="skills",
+            ma_secret_ref="anon:",
+            proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=None),
+        )
+
+    token = await _resolve_sync_token(
+        _make_runtime(sessionmaker, settings=_minimal_settings()),
+        _identity(tenant.id),
+        url,
+        _unreachable_client(),
+    )
+    assert token == "ghp_legacy_binding_pat", (
+        "a skill-repo credential carrying only a proof must still fall through to the "
+        "legacy binding's PAT — the two tiers resolve the PAT and the proof independently"
     )

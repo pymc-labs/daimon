@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import discord
 import pytest
@@ -150,3 +151,20 @@ class TestCancelView:
         view = CancelView(allowed_user_id=123, cancel=cancel)
         btn = _find_button(view, "Cancel")
         assert btn.style == discord.ButtonStyle.grey, "cancel button should be grey"
+
+    @pytest.mark.asyncio
+    async def test_turn_id_custom_id_keeps_the_existing_cancel_handler(self) -> None:
+        turn_id = UUID("12345678-1234-5678-1234-567812345678")
+        cancel = asyncio.Event()
+        view = CancelView(allowed_user_id=123, cancel=cancel, turn_id=turn_id)
+        button = _find_button(view, "Cancel")
+        interaction = _mock_interaction(user_id=123)
+
+        assert button.custom_id == f"daimon:cancel:{turn_id}", (
+            "the durable turn ID should be recoverable from the posted component"
+        )
+        await button.callback(interaction)
+
+        assert cancel.is_set(), "adding a custom ID must preserve cancellation behavior"
+        assert view._handled is True, "the existing handler should still finalize the view"
+        interaction.response.edit_message.assert_called_once_with(view=view)

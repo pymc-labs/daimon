@@ -5,6 +5,36 @@ runs the consume-loop and render-loop concurrently. Every call must declare
 a `BillingPosture`: `Billed(record=...)` meters each `span.model_request_end`
 event through the caller-bound recorder, `BillingExempt(reason=...)` emits a
 single structured exempt-billing log line at turn start and meters nothing.
+
+`_pump`'s reconnect machinery is two levels, for two distinct failure modes:
+
+- Outer `while True:` loop — an unbounded, status-gated reconnect for
+  eventless cycles (the SSE stream ends or stalls with no terminal event).
+  A stream ending or stalling is not itself meaningful: the server closes
+  cleanly every ~600s by design, and a healthy long tool call produces
+  multiple such cycles. The driver asks MA (`sessions.retrieve`) whether the
+  session is still running before deciding anything, so silence alone can
+  never finalize a turn as a quiet, truncated success (Class A). This loop
+  has no attempt cap by design — the per-turn ceiling
+  (`daimon.core.turn.ceiling`), enforced at `bind_session` and
+  `run_prepared_turn` for the chat paths and, for callers that bypass those,
+  `run_turn`'s own optional `deadline`, is the sole backstop.
+- Inner `AsyncRetrying` block — the bounded 2-attempt budget for
+  `_CONNECTION_LOST` (a dropped connection, a genuinely different failure
+  mode from silence). Each outer iteration gets a fresh `AsyncRetrying`, so
+  this budget is per stream generation, not per turn.
+
+What the pump may do inline: the consume loop in `_consume_with_reconnect`
+awaits `lifecycle.on_sse_event(event)` synchronously, so per the hook
+contract in `turn/lifecycle.py` that hook must stay a cheap local tap — no
+network I/O. Exactly ONE piece of I/O is permitted inline in the consume
+loop itself, ahead of that hook call: the per-event billing `record()`
+call (D-06). Unlike chat-API flush I/O, billing is a local Postgres write,
+it is correctness rather than delivery (an unmetered
+`span.model_request_end` is revenue lost, and the recorder is fail-closed
+by design — exceptions propagate), and it carries no retry-after-style
+stall risk. Everything else that wants to talk to the network belongs on
+`on_render`, which runs on the separate, never-stalling render task.
 """
 
 from __future__ import annotations
@@ -13,30 +43,210 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 import anthropic as _anthropic
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsEventParams,
     BetaManagedAgentsImageBlockParam,
+    BetaManagedAgentsSessionStatusIdleEvent,
+    BetaManagedAgentsSpanModelRequestEndEvent,
+    BetaManagedAgentsStreamSessionEvents,
+    BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserMessageEventParams,
+    BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
-from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture
+from daimon.core.turn.approvals import (
+    build_confirmation_events,
+    build_decision_events,
+    pending_confirmation_ids,
+    tool_calls_for,
+)
+from daimon.core.turn.ceiling import ceiling_error, remaining_s
+from daimon.core.turn.degraded import degraded_failure_message
+from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
+from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.posture import (
+    AutoApprove,
+    Billed,
+    BillingExempt,
+    BillingPosture,
+    PolicyApproval,
+    RequireApproval,
+    ToolConfirmation,
+    ToolConfirmationResult,
+)
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
 
-InterruptPhase = Literal["pre-stream", "replay", "reattach"]
+InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+
+# Module-level singleton so `run_turn`'s default arg isn't a function call in
+# the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
+# dataclass, so one shared instance is safe across every call.
+_DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
+
+T = TypeVar("T")
+
+
+def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
+    """Whether this posture answers a `requires_action` idle and keeps going."""
+    return isinstance(tool_confirmation, AutoApprove | PolicyApproval)
+
+
+async def _decide_blocked(
+    tool_confirmation: AutoApprove | PolicyApproval, state: TurnState, fresh: list[str]
+) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
+    """The `user.tool_confirmation` batch for `fresh` under an answering posture.
+
+    `PolicyApproval` awaits its decider once per id, concurrently: two writes
+    in one pause post two cards, and neither waits on the other's click.
+    """
+    match tool_confirmation:
+        case AutoApprove():
+            return build_confirmation_events(fresh)
+        case PolicyApproval(decide=decide):
+            calls = tool_calls_for(state, fresh)
+            results = await asyncio.gather(*(decide(call) for call in calls))
+            return build_decision_events(zip(fresh, results, strict=True))
+
+
+#: Most time one cleanup step (joining a cancelled card hook, sending the
+#: best-effort deny) may take before it is abandoned. Module-level so a test
+#: can shorten it.
+CLEANUP_BUDGET_S: float = 3.0
+
+
+async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
+    """Wait for `task` at most `CLEANUP_BUDGET_S`; cancel it after that.
+
+    Never raises and never waits longer than the budget: `asyncio.wait` with a
+    timeout returns instead of raising, and a task still running then is
+    cancelled and left to unwind on its own — its next await raises
+    `CancelledError`, so it does not linger.
+    """
+    done, _pending = await asyncio.wait({task}, timeout=CLEANUP_BUDGET_S)
+    if task in done:
+        if not task.cancelled() and task.exception() is not None:
+            log.warning(
+                "turn.cleanup_failed",
+                session_id=session_id,
+                step=what,
+                error=str(task.exception()),
+            )
+        return
+    task.cancel()
+    # Retrieve whatever it ends with, so an abandoned task never logs
+    # "exception was never retrieved".
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
+
+
+async def _refuse_blocked(
+    anthropic: AsyncAnthropic, session_id: str, fresh: list[str], *, message: str
+) -> None:
+    """Send `deny` for every id in `fresh`, best effort.
+
+    The session is on a `requires_action` idle, so the send is accepted and
+    the session does not stay paused on calls nobody will answer.
+    """
+    refusals = build_decision_events(
+        (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
+        for tool_use_id in fresh
+    )
+    with contextlib.suppress(_anthropic.APIError):
+        await anthropic.beta.sessions.events.send(session_id, events=refusals)
+
+
+async def _decide_or_refuse_on_cancel(
+    tool_confirmation: AutoApprove | PolicyApproval,
+    state: TurnState,
+    fresh: list[str],
+    *,
+    cancel: asyncio.Event,
+    anthropic: AsyncAnthropic,
+    session_id: str,
+) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
+    """`_decide_blocked`, raced against the turn's cancel signal.
+
+    The one place blocked calls are decided, for the live stream and the
+    replay/eventless path alike. A cancel — before the decision, or landing
+    in the same tick as it — refuses every fresh id instead and raises
+    `_InterruptInConsume` for the normal interrupt path: a stop request never
+    lets an `allow` out.
+
+    This function owns the decide task and its cancel waiter. Whatever ends
+    the wait — a decision, a cancel, or this coroutine itself being cancelled
+    by the turn ceiling or a caller — the `finally` cancels and joins both, so
+    a card hook never outlives the turn; the hooks retire their cards on that
+    cancellation. An outside cancellation also refuses the pending ids
+    (shielded, so the refusal lands even though this task is being torn down)
+    before it propagates.
+    """
+    decide_task = asyncio.create_task(
+        _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
+    )
+    cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
+    # Set once the wait ends on its own (a decision or the cancel event); if
+    # the `finally` runs with it unset, this coroutine is being torn down from
+    # outside (the turn ceiling, a caller) and the pending ids are refused.
+    settled = False
+    try:
+        await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        settled = True
+        if decide_task.done() and not cancel.is_set():
+            return decide_task.result()
+    finally:
+        # Cleanup is bounded: a card hook retiring its card, or the deny
+        # below, talks to a chat API or MA, and an outage there must not hold
+        # the turn past its ceiling or a Stop. Each step gets
+        # `CLEANUP_BUDGET_S`, then is cancelled and abandoned.
+        for task in (decide_task, cancel_task):
+            if not task.done():
+                task.cancel()
+            await _bounded(task, what="decide_task_join", session_id=session_id)
+        if not settled:
+            await _bounded(
+                asyncio.create_task(
+                    _refuse_blocked(
+                        anthropic,
+                        session_id,
+                        fresh,
+                        message="This turn ended before the call was approved; it did not run.",
+                    ),
+                    name="turn.refuse_blocked",
+                ),
+                what="deadline_refusal",
+                session_id=session_id,
+            )
+    await _bounded(
+        asyncio.create_task(
+            _refuse_blocked(
+                anthropic,
+                session_id,
+                fresh,
+                message="The user stopped this turn; the call did not run.",
+            ),
+            name="turn.refuse_blocked",
+        ),
+        what="stop_refusal",
+        session_id=session_id,
+    )
+    raise _InterruptInConsume()
+
 
 # The SDK only wraps httpx failures raised while *opening* a request into
 # `APIConnectionError`. Once an SSE stream is open, a mid-body drop surfaces
@@ -44,6 +254,12 @@ InterruptPhase = Literal["pre-stream", "replay", "reattach"]
 # common "peer closed connection without sending complete message body"
 # case. Both mean the same thing to us (stream died, session still alive
 # server-side), so both take the reconnect-and-replay path.
+#
+# `httpx.ReadTimeout` is deliberately NOT in this tuple. A read stall is
+# handled as an eventless-cycle signal (see `_EventlessCycle` below), not a
+# connection error — the driver asks MA for the session's status before
+# deciding anything, so it does not consume the bounded 2-attempt retry
+# budget reserved for genuine connection loss.
 _CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError)
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
@@ -75,6 +291,98 @@ class _InterruptInConsume(Exception):
     """
 
 
+class _EventlessCycle(Exception):
+    """The SSE stream ended without a terminal event: either a clean close
+    (`StopAsyncIteration`) or a mid-body read stall (`httpx.ReadTimeout`).
+
+    Neither is itself a decision -- a stream can end this way while the
+    session is still healthily running (the server's ~600s clean-close
+    cadence, or a missed keepalive window). `_pump` asks MA for the
+    session's actual status and only then decides to reconnect (status
+    still running/rescheduling) or replay-and-finalize (status idle or
+    terminated).
+
+    Module-private sentinel; excluded from tenacity's retry predicate (not
+    a member of `_CONNECTION_LOST`), so `reraise=True` surfaces it to
+    `_pump` immediately rather than consuming the bounded connection-error
+    retry budget.
+    """
+
+    def __init__(self, *, reason: ReconnectReason) -> None:
+        super().__init__(f"eventless cycle ({reason})")
+        self.reason: ReconnectReason = reason
+
+
+async def _await_or_cancel[T](
+    coro: Coroutine[Any, Any, T],
+    *,
+    cancel_task: asyncio.Task[bool],
+    phase: InterruptPhase,
+    on_cancel_win_result: Callable[[T], Awaitable[None]] | None = None,
+) -> T:
+    """Race a setup await (`coro`) against `cancel_task` (`FIRST_COMPLETED`).
+
+    Reused at every setup call site (stream-open, send-initial) so a cancel
+    signalled while either is in flight is observed promptly instead of
+    being silently ignored the way a plain `await` would ignore it — the
+    same idiom the consume loop already uses for `stream.__anext__()`.
+
+    On a cancel win: if the work task had NOT yet finished, cancel + drain
+    it (`_suppress_task_exc()`). If it HAD already finished with a real
+    result despite losing the race — a genuine tie, e.g. the stream opened
+    right as cancel fired — `on_cancel_win_result` (when given) is awaited
+    with that result so the caller can release it (close the stream) before
+    the interrupt propagates; a work task that finished with an exception is
+    drained silently, since cancel already wins regardless of what the
+    upstream call did. Either way, raises
+    `_InterruptedDuringRecovery(phase=phase)`.
+
+    On the normal path (work task wins), returns the work task's result —
+    keeps both call sites one line each.
+    """
+    work_task: asyncio.Task[T] = asyncio.create_task(coro, name=f"turn.{phase.replace('-', '_')}")
+    try:
+        done, _pending = await asyncio.wait(
+            {work_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    except BaseException:
+        # An OUTER cancellation landed on the race itself -- the ceiling's
+        # `asyncio.wait_for` in `run_turn`, or an adapter tearing the turn task
+        # down -- so neither branch below ever runs. Without this, `work_task`
+        # outlives `run_turn`: nothing cancels it, and when it later completes
+        # it hands a freshly opened SSE stream to nobody. The caller's
+        # `opened_stream` is only assigned once this function RETURNS, so its
+        # `finally` cannot close that stream either; the connection is simply
+        # abandoned. Same two cases as the cancel-wins branch below, for the
+        # same reasons.
+        if not work_task.done():
+            work_task.cancel()
+            with _suppress_task_exc():
+                await work_task
+        elif (
+            not work_task.cancelled()
+            and work_task.exception() is None
+            and on_cancel_win_result is not None
+        ):
+            with _suppress_task_exc():
+                await on_cancel_win_result(work_task.result())
+        raise
+    if cancel_task in done:
+        if work_task in done:
+            if (
+                not work_task.cancelled()
+                and work_task.exception() is None
+                and on_cancel_win_result is not None
+            ):
+                await on_cancel_win_result(work_task.result())
+        else:
+            work_task.cancel()
+            with _suppress_task_exc():
+                await work_task
+        raise _InterruptedDuringRecovery(phase=phase)
+    return work_task.result()
+
+
 async def run_turn(
     *,
     anthropic: AsyncAnthropic,
@@ -84,11 +392,62 @@ async def run_turn(
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
     interrupt_timeout_s: float = 120.0,
+    stream_read_timeout_s: float = 120.0,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
+    deadline: datetime | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
+
+    `stream_read_timeout_s` (default 120.0) is the per-call read timeout
+    passed to `events.stream(...)`. A wire probe found the server sending
+    `:keepalive` SSE comment frames every 30s on every connection from
+    connect; those bytes reset httpx's read clock even though the SDK's SSE
+    decoder drops comment lines before the driver ever sees them. 120s is
+    four missed keepalives — a genuinely dead socket — and the far more
+    common reconnect trigger is expected to be the server's ~600s clean
+    close, not this timeout. Both numbers are non-contractual measurements,
+    which is why this is an injectable param rather than a constant or an
+    env setting.
+
+    `system_blocks` (default empty) is daimon-authored privileged framing
+    for the FIRST send only — the handoff context a replacement session
+    needs before its first user message. When non-empty the initial batch is
+    `[user.message, system.message]`, in that order: the API accepts at most
+    one `system.message` per request, requires it to be the final event, and
+    requires it to immediately follow the `user.message` it accompanies. Only
+    daimon's own words belong here; quoted material from a previous session
+    travels in the user message (see `daimon.core.handoff_context`). Empty is
+    byte-identical to the pre-existing single-event send.
+
+    `deadline` (default `None`) is an optional core-owned wall-clock bound
+    (`daimon.core.turn.ceiling`). `None` means the driver enforces NOTHING —
+    the caller owns the bound — deliberately the OPPOSITE of `bind_session` /
+    `run_prepared_turn`, whose `None` is fail-safe (`turn_deadline(now=now())`
+    is computed for them). The reason: `run_prepared_turn` already wraps this
+    whole call in `asyncio.wait_for`, and its own `TimeoutError` handler is
+    what performs D-09's `mark_dead` on the thread-session mapping, logs
+    `turn.ceiling_exceeded` with the mapping id, and calls the caller's
+    `on_terminal_failure` directly. A driver-level bound that ever won that
+    race would silently bypass all of it — so the driver defers to the
+    enforcement site that also owns the mapping, and the chat adapters, which
+    pass nothing, are byte-identical. The callers that DO pass a deadline are
+    the ones that bypass `run_prepared_turn` entirely:
+    `daimon.core.headless_runner` (routines, post-deploy smoke) and the CLI's
+    `daimon run` — `headless_runner.run_turn` computes its own fail-safe
+    `turn_deadline(now)` one layer up and threads it in here.
+
+    On breach: `_pump` is cancelled via `asyncio.wait_for`, so its own
+    finalizers never run — this is the single delivery of
+    `on_terminal_failure`. No `mark_dead` happens here: a headless routine has
+    no `thread_sessions` mapping and the CLI's session is operator-supplied,
+    so there is nothing to retire. Honesty note: the one interleaving this
+    does not defend against — the timeout landing inside a finalizer's own
+    await, producing a second `on_terminal_failure` — is the same one
+    `run_prepared_turn` already accepts.
 
     Returns the final `TurnState`.
     """
@@ -104,9 +463,22 @@ async def run_turn(
             "type": "user.message",
             "content": content,
         }
-        await anthropic.beta.sessions.events.send(session_id, events=[event])
+        batch: list[BetaManagedAgentsEventParams] = [event]
+        if system_blocks:
+            # LAST, and immediately after the user.message: the live API
+            # rejects the whole request otherwise (at most one per request,
+            # must be final, must follow a user.message / tool result).
+            system_event: BetaManagedAgentsSystemMessageEventParams = {
+                "type": "system.message",
+                "content": list(system_blocks),
+            }
+            batch.append(system_event)
+        await anthropic.beta.sessions.events.send(session_id, events=batch)
+        await acknowledge(lifecycle, "accepted")
 
-    return await _pump(
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = session_id
+    pump_coro = _pump(
         anthropic=anthropic,
         session_id=session_id,
         send_initial=_send_initial,
@@ -116,10 +488,33 @@ async def run_turn(
         cancel=cancel,
         render_interval_s=render_interval_s,
         interrupt_timeout_s=interrupt_timeout_s,
+        stream_read_timeout_s=stream_read_timeout_s,
         now=now,
         entry="run",
         billing=billing,
+        tool_confirmation=tool_confirmation,
     )
+    if deadline is None:
+        return await pump_coro
+
+    try:
+        return await asyncio.wait_for(pump_coro, timeout=remaining_s(deadline, now=now()))
+    except TimeoutError:
+        log.error(
+            "turn.ceiling_exceeded",
+            phase="driver",
+            session_id=session_id,
+            deadline=deadline.isoformat(),
+        )
+        err = ceiling_error()
+        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
+        try:
+            await lifecycle.on_terminal_failure(ceiling_state, err)
+        except Exception as render_err:
+            # Rendering is delivery, not correctness -- a broken adapter hook
+            # must not mask the ceiling error itself.
+            log.warning("turn.ceiling_render_failed", session_id=session_id, error=str(render_err))
+        return ceiling_state
 
 
 async def _pump(
@@ -133,15 +528,28 @@ async def _pump(
     cancel: asyncio.Event,
     render_interval_s: float,
     interrupt_timeout_s: float,
+    stream_read_timeout_s: float,
     now: Callable[[], datetime],
     entry: Literal["run", "resume"],
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
     state_cell: list[TurnState] = [seed_state]
     prev_cell: list[TurnState] = [render_anchor]
     events_folded_cell: list[int] = [0]
+    renders_failed_cell: list[int] = [0]
+    # Per-turn dedup for AutoApprove: lives here (not in
+    # `_consume_with_reconnect`) so it survives a reconnect -- a
+    # re-delivered `requires_action` idle after an eventless-cycle
+    # reconnect must not be double-confirmed (T-19-08-B).
+    confirmed_tool_use_ids: set[str] = set()
+    delivered_event_ids: set[str] = set()
+    # Per-turn billing dedup, shared by the live consume loop and both replay
+    # folds: a model call MA emitted while no stream was attached exists only
+    # in the replay, and must be billed there, once, by this turn's recorder.
+    billed_event_ids: set[str] = set()
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
@@ -149,7 +557,31 @@ async def _pump(
         delta = _diff(prev_cell[0], state)
         if delta.is_empty():
             return
-        await lifecycle.on_render(state)
+        # Named boundary (guideline:architecture): rendering is delivery,
+        # not correctness, and the adapter exceptions it must survive are
+        # open-ended (discord.HTTPException, Slack API errors, whatever a
+        # future adapter raises). `Exception`, not `BaseException` --
+        # CancelledError must still propagate so the render task stays
+        # cancellable; `_suppress_task_exc()` remains the sole
+        # BaseException drain site in this module.
+        #
+        # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
+        # next tick re-diffs from the unchanged anchor and naturally
+        # retries the identical delta -- no retry counter, no backoff, no
+        # extra state. This function always returns `None` either way, and
+        # every finalizer proceeds to its `on_terminal_*` call regardless,
+        # so a render failure can never change the turn's own outcome.
+        try:
+            await lifecycle.on_render(state)
+        except Exception as err:
+            renders_failed_cell[0] += 1
+            log.warning(
+                "turn.render_failed",
+                session_id=session_id,
+                error_type=type(err).__name__,
+                error=str(err),
+            )
+            return
         prev_cell[0] = state
 
     async def _render_loop() -> None:
@@ -164,27 +596,163 @@ async def _pump(
         with _suppress_task_exc():
             await render_task
 
-    # Open + initial-send happen inside the retryable unit on attempt 1 only.
-    # On retry, replay + reattach replace them.
+    # Two-level reconnect structure:
+    #
+    # - Outer `while True:` loop: an unbounded status-gated reconnect for
+    #   eventless cycles (`_EventlessCycle` — a clean close or read-timeout
+    #   with no terminal event). Unbounded on purpose: a healthy long tool
+    #   call produces multiple eventless close/reopen cycles while the
+    #   session is genuinely `running`/`rescheduling`, so silence alone is
+    #   never treated as suspicion. The per-turn ceiling
+    #   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
+    #   `run_prepared_turn` for the chat paths and, for callers that bypass
+    #   those, `run_turn`'s own optional `deadline`, is the sole backstop
+    #   on this loop.
+    # - Inner `AsyncRetrying` block: the bounded 2-attempt budget for
+    #   `_CONNECTION_LOST` (a dropped connection, not silence). Each outer
+    #   iteration gets a FRESH `AsyncRetrying`, so the budget is per stream
+    #   generation, not per turn.
+    #
+    # Open + initial-send happen inside the retryable unit on attempt 1 of
+    # the FIRST generation only. On any later attempt (a connection-error
+    # retry within a generation, or the first attempt of a generation
+    # entered after an eventless cycle), replay + reattach replace them.
     try:
         try:
-            async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(2),
-                retry=retry_if_exception_type(_CONNECTION_LOST),
-                reraise=True,
-            ):
-                with attempt:
-                    await _consume_with_reconnect(
-                        anthropic=anthropic,
+            eventless_reconnect = False
+            eventless_reason: ReconnectReason = "connection_dropped"
+            while True:
+                try:
+                    async for attempt in AsyncRetrying(
+                        stop=stop_after_attempt(2),
+                        retry=retry_if_exception_type(_CONNECTION_LOST),
+                        reraise=True,
+                    ):
+                        with attempt:
+                            first_attempt_of_generation = attempt.retry_state.attempt_number == 1
+                            if eventless_reconnect and first_attempt_of_generation:
+                                attempt_is_retry = True
+                                attempt_reason: ReconnectReason = eventless_reason
+                            else:
+                                attempt_is_retry = not first_attempt_of_generation
+                                attempt_reason = "connection_dropped"
+                            await _consume_with_reconnect(
+                                anthropic=anthropic,
+                                session_id=session_id,
+                                send_initial=send_initial,
+                                is_retry=attempt_is_retry,
+                                reconnect_reason=attempt_reason,
+                                state_cell=state_cell,
+                                events_folded_cell=events_folded_cell,
+                                cancel=cancel,
+                                lifecycle=lifecycle,
+                                billing=billing,
+                                tool_confirmation=tool_confirmation,
+                                confirmed_tool_use_ids=confirmed_tool_use_ids,
+                                delivered_event_ids=delivered_event_ids,
+                                billed_event_ids=billed_event_ids,
+                                stream_read_timeout_s=stream_read_timeout_s,
+                            )
+                    break  # a terminal event was found — exit the outer loop too
+                except _EventlessCycle as cycle:
+                    session = await anthropic.beta.sessions.retrieve(session_id)
+                    if session.status in {"running", "rescheduling"}:
+                        log.info(
+                            "turn.eventless_cycle",
+                            session_id=session_id,
+                            reason=cycle.reason,
+                            status=session.status,
+                        )
+                        eventless_reconnect = True
+                        eventless_reason = cycle.reason
+                        continue
+                    # status in {"idle", "terminated"}: the terminal event
+                    # the driver missed lives in the replay history. Fold it
+                    # in and finalize — do NOT reopen the stream. UNLESS the
+                    # folded state is a `requires_action` idle and
+                    # AutoApprove has unconfirmed ids for it: then this
+                    # branch sends confirmations and reopens instead (below).
+                    log.info(
+                        "turn.eventless_cycle_finalizing",
                         session_id=session_id,
-                        send_initial=send_initial,
-                        is_retry=attempt.retry_state.attempt_number > 1,
-                        state_cell=state_cell,
-                        events_folded_cell=events_folded_cell,
-                        cancel=cancel,
-                        lifecycle=lifecycle,
-                        billing=billing,
+                        reason=cycle.reason,
+                        status=session.status,
                     )
+                    replayed = await replay_events(anthropic, session_id=session_id)
+                    current_turn_events = _events_since_last_turn_boundary(
+                        replayed, tool_confirmation=tool_confirmation
+                    )
+                    # Replay can add events the stream missed, but it must not
+                    # discard events already folded and possibly rendered. A
+                    # replay response is fetched through multiple pages and
+                    # the SDK does not promise a snapshot; fold its current-turn
+                    # suffix onto the monotonic in-memory state instead.
+                    await _bill_replayed(billing, current_turn_events, billed_event_ids)
+                    state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
+                    folded = state_cell[0]
+                    if (
+                        session.status == "terminated"
+                        and folded.stop_reason is None
+                        and folded.error is None
+                    ):
+                        # MA says terminated, but neither the stream nor the
+                        # replay showed this turn ending. Nothing proves it
+                        # finished, so it is the same end as a live
+                        # `session.status_terminated`, never a success.
+                        state_cell[0] = dataclasses.replace(
+                            folded,
+                            error=TurnError(kind="upstream", message="session terminated by MA"),
+                            termination=TerminationReason.SESSION_TERMINATED,
+                        )
+                    if session.status == "idle":
+                        match tool_confirmation:
+                            case AutoApprove() | PolicyApproval():
+                                fresh = pending_confirmation_ids(
+                                    state_cell[0].stop_reason,
+                                    confirmed=confirmed_tool_use_ids,
+                                )
+                                if fresh:
+                                    confirmed_tool_use_ids.update(fresh)
+                                    decisions = await _decide_or_refuse_on_cancel(
+                                        tool_confirmation,
+                                        state_cell[0],
+                                        fresh,
+                                        cancel=cancel,
+                                        anthropic=anthropic,
+                                        session_id=session_id,
+                                    )
+                                    # Safe to send here (and only here on this
+                                    # branch): `session.status` just came back
+                                    # `idle` from the `sessions.retrieve` above,
+                                    # i.e. the session is NOT running — the same
+                                    # not-running precondition the live loop's
+                                    # send documents (a bare `user.*` event sent
+                                    # into a RUNNING session returns HTTP 200 and
+                                    # is silently ignored). A `terminated`
+                                    # session cannot accept events at all, so it
+                                    # is deliberately excluded from this branch
+                                    # and keeps the unchanged finalize path.
+                                    #
+                                    # The fresh-ids guard above is what prevents
+                                    # a confirm-reconnect-confirm spin: a
+                                    # re-delivered `requires_action` for ids
+                                    # already in `confirmed_tool_use_ids` yields
+                                    # no fresh ids and falls through to `break`.
+                                    await anthropic.beta.sessions.events.send(
+                                        session_id, events=decisions
+                                    )
+                                    log.info(
+                                        "turn.tool_confirmation.sent",
+                                        session_id=session_id,
+                                        count=len(fresh),
+                                        via="eventless_cycle",
+                                    )
+                                    eventless_reconnect = True
+                                    eventless_reason = cycle.reason
+                                    continue
+                            case RequireApproval():
+                                pass  # fall through -- unchanged interactive behavior
+                    break
         except _InterruptedDuringRecovery as err:
             await _cancel_render()
             return await _finalize_interrupted(
@@ -193,6 +761,7 @@ async def _pump(
                 render_once=_render_once,
                 session_id=session_id,
                 phase=err.phase,
+                renders_failed=renders_failed_cell[0],
             )
         except _InterruptInConsume:
             await _cancel_render()
@@ -203,6 +772,7 @@ async def _pump(
                 lifecycle=lifecycle,
                 render_once=_render_once,
                 interrupt_timeout_s=interrupt_timeout_s,
+                renders_failed=renders_failed_cell[0],
             )
         except _CONNECTION_LOST as err:
             # tenacity exhausted with reraise=True.
@@ -213,6 +783,7 @@ async def _pump(
                 render_once=_render_once,
                 session_id=session_id,
                 err=err,
+                renders_failed=renders_failed_cell[0],
             )
         except _anthropic.RateLimitError as err:
             await _cancel_render()
@@ -225,6 +796,7 @@ async def _pump(
                 err=err,
                 rate_limit_until=rate_limit[0] if rate_limit else None,
                 retry_after_s=rate_limit[1] if rate_limit else None,
+                renders_failed=renders_failed_cell[0],
             )
         except _anthropic.APIError as err:
             await _cancel_render()
@@ -236,6 +808,7 @@ async def _pump(
                 err=err,
                 rate_limit_until=None,
                 retry_after_s=None,
+                renders_failed=renders_failed_cell[0],
             )
 
         # Normal termination path.
@@ -246,32 +819,156 @@ async def _pump(
             render_once=_render_once,
             session_id=session_id,
             events_folded=events_folded_cell[0],
+            renders_failed=renders_failed_cell[0],
+            tool_confirmation=tool_confirmation,
+            confirmed_tool_use_ids=confirmed_tool_use_ids,
         )
     finally:
         if not render_task.done():
+            # Cancel without draining, unlike `_cancel_render()` on the normal
+            # paths. This `finally` also runs while the ceiling's `wait_for` is
+            # unwinding a cancellation, and awaiting there is the very hazard
+            # `_await_or_cancel`'s own except-branch exists to contain. Safe to
+            # leave: `_render_loop` can only exit via CancelledError (its
+            # per-tick `_render_once` catches Exception), so nothing goes
+            # unretrieved, and the task reaps within a loop turn.
             render_task.cancel()
 
 
 def _events_since_last_turn_boundary(
     events: list[Any],
+    *,
+    tool_confirmation: ToolConfirmation,
 ) -> list[Any]:
     """Return only the events belonging to the current (most recent) turn.
 
     In a reused MA session the event log spans multiple turns. Folding the full
     log from TurnState() leaks prior-turn content into the current render state
-    (Pitfall 2 of multi-turn reconnect). A turn ends with `session.status_idle`;
-    events after the LAST such event belong to the current turn.
+    (Pitfall 2 of multi-turn reconnect). The current turn begins right after the
+    last event that ENDED a previous turn.
 
-    If no `session.status_idle` boundary is found, the whole list is returned
-    (single-turn session — no prior-turn content to filter).
+    The most recent `user.message` anchors the current turn in a complete
+    session log. Only idle events before that message can delimit an earlier
+    turn; an idle after it belongs to this turn, even when a later
+    `session.status_terminated` event follows. The current turn's first terminal
+    event also ends the replay suffix, matching the live stream's stop behavior.
+
+    If an incomplete replay omits every user message, retain the legacy
+    terminal-idle boundary heuristic. The in-memory state is still folded as
+    the base, so already observed current-turn events remain intact.
+
+    Two rules decide which idle events delimit the current turn, and both
+    matter:
+
+    1. Under `AutoApprove`, a `session.status_idle` carrying a `requires_action`
+       stop reason is NOT a turn boundary. It is a mid-turn PAUSE: the driver
+       answers it with `user.tool_confirmation` events and the SAME turn keeps
+       going. Treating it as a boundary slices away the pause event itself, so
+       the folded `stop_reason` comes back `None`, `pending_confirmation_ids`
+       finds nothing to confirm, and a turn genuinely blocked on a tool approval
+       is finalized as a quiet success with truncated content.
+
+       This exemption is posture-scoped because the SAME event means the
+       opposite thing under `RequireApproval` (the default, and what Discord,
+       Slack and `daimon run` use): there the driver has no way to answer, so
+       `_finalize_success_or_error` turns that idle into
+       `TurnError(kind="requires_action")` and the turn really does END on it.
+       Nothing retires the MA session on that error, so the next turn in the
+       same thread replays it -- and exempting it there would fold the previous
+       turn's content, and its `requires_action` stop reason, into the current
+       turn's state. `AutoApprove` cannot hit the mirror-image problem: its one
+       production caller (`headless_runner`) opens a fresh session per fire, so
+       its replays never span two turns.
+
+    2. An idle after the current `user.message` belongs to this turn, including
+       its own terminal idle. This matters when `session.status_terminated`
+       follows the idle in history: the idle still ends the turn, and the later
+       termination event must not make the idle look like a prior-turn boundary
+       or replace the already-complete result. Once the suffix is selected,
+       truncate it at the first turn-terminal idle/termination, matching the
+       live consume loop. The mid-turn reconnect call site is unaffected by
+       terminal truncation because the consume loop returns as soon as it sees
+       a terminal event.
+
+    If the replay omits all `user.message` events, exact attribution is
+    impossible from the remaining event types alone. In that case, the legacy
+    last-idle-before-final-event heuristic is retained; callers fold the result
+    onto their existing state so already observed content is not erased.
     """
+
+    def _ends_turn(event: object) -> bool:
+        if getattr(event, "type", None) == "session.status_terminated":
+            return True
+        if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+            return False
+        return not (
+            _answers_in_turn(tool_confirmation) and event.stop_reason.type == "requires_action"
+        )
+
+    current_start = max(
+        (i for i, ev in enumerate(events) if getattr(ev, "type", None) == "user.message"),
+        default=None,
+    )
+    boundary_candidates = (
+        range(current_start) if current_start is not None else range(len(events) - 1)
+    )
     last_boundary = -1
-    for i, ev in enumerate(events):
-        if getattr(ev, "type", None) == "session.status_idle":
-            last_boundary = i
-    if last_boundary == -1:
-        return events
-    return events[last_boundary + 1 :]
+    for i in boundary_candidates:
+        ev = events[i]
+        if getattr(ev, "type", None) != "session.status_idle":
+            continue
+        if not _ends_turn(ev):
+            continue  # a mid-turn pause, not the end of a turn -- rule 1 above
+        last_boundary = i
+    current_events = events[last_boundary + 1 :]
+
+    # The live consume loop returns immediately at its first terminal event.
+    # A later termination notification is session lifecycle state, not a
+    # second outcome for that already-finished turn.
+    for i, ev in enumerate(current_events):
+        if _ends_turn(ev):
+            return current_events[: i + 1]
+    return current_events
+
+
+async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
+    """Meter one `span.model_request_end` through the turn's recorder, once.
+
+    `billed_event_ids` is per turn and shared across stream generations and
+    replays, so a call is billed exactly once whether the driver first sees
+    it live, in a replay, or both. The recorder is idempotent in the
+    database as well; the set keeps the recorder (and its attribution) from
+    running twice. Exceptions propagate (fail-closed).
+    """
+    if not isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent):
+        return
+    if event.id in billed_event_ids:
+        return
+    if (observation := current_outcome.get()) is not None:
+        observation.note_usage(event, metered=isinstance(billing, Billed))
+    match billing:
+        case Billed(record=record):
+            await record(event=event)
+        case BillingExempt():
+            pass
+    billed_event_ids.add(event.id)
+
+
+async def _bill_replayed(
+    billing: BillingPosture, events: Sequence[object], billed_event_ids: set[str]
+) -> None:
+    """Meter the model calls in a replayed current-turn suffix.
+
+    A call MA emitted while no stream was attached (between a dropped or
+    closed generation and the next, or after a stall when the session then
+    went idle) exists only in the replay. Folding it into the turn state
+    without billing it would leave it to the scheduler's usage sweep, which
+    records it later under the session's account stamp and a `turn_debit`
+    reason instead of this turn's attribution -- or never, where no
+    scheduler runs.
+    """
+    for event in events:
+        await _bill_once(billing, event, billed_event_ids)
 
 
 async def _consume_with_reconnect(
@@ -280,52 +977,116 @@ async def _consume_with_reconnect(
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
     is_retry: bool,
+    reconnect_reason: ReconnectReason,
     state_cell: list[TurnState],
     events_folded_cell: list[int],
     cancel: asyncio.Event,
     lifecycle: TurnLifecycle,
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation,
+    confirmed_tool_use_ids: set[str],
+    delivered_event_ids: set[str],
+    billed_event_ids: set[str],
+    stream_read_timeout_s: float,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
     if cancel.is_set():
         raise _InterruptedDuringRecovery(phase="pre-stream")
 
-    if is_retry:
-        log.info("turn.reconnect.started", session_id=session_id)
-        await lifecycle.on_reconnect("connection_dropped")
-        replayed = await replay_events(anthropic, session_id=session_id)
-        if cancel.is_set():
-            raise _InterruptedDuringRecovery(phase="replay")
-        current_turn_events = _events_since_last_turn_boundary(replayed)
-        state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
-        log.info(
-            "turn.reconnect.completed",
-            session_id=session_id,
-            replayed=len(replayed),
-        )
-
-    stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
-    if cancel.is_set():
-        raise _InterruptedDuringRecovery(phase="reattach")
-
-    if not is_retry:
-        # Send user.message (or user.tool_confirmation on resume) exactly
-        # once, after the first stream open. On retry the server already
-        # has these events in its log.
-        await send_initial()
-
-    # Race each next-event fetch against `cancel.wait()` so the inner loop
-    # is reactive to the interrupt signal even while the stream is idle
-    # (no events arriving). `cancel.is_set()` checked pre-loop for the
-    # already-set case.
-    stream_iter = stream.__aiter__()
+    # One waiter task for the whole attempt: races the stream-open and
+    # send-initial setup awaits below (via `_await_or_cancel`) as well as
+    # every next-event fetch in the consume loop, so a cancel signalled at
+    # ANY point after this line is observed promptly rather than only once
+    # the consume loop starts. Cancelled + drained in the `finally` below,
+    # which now covers the whole attempt (not just the consume loop), so no
+    # waiter task leaks on any exit path.
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.cancel_waiter")
+    # Tracks the stream this attempt successfully opened (assigned right
+    # after `_await_or_cancel` returns it below), so the `finally` can close
+    # it unconditionally regardless of which exit path is taken -- a clean
+    # close, a read timeout, a mid-consume cancel, or a `wait_for` ceiling
+    # cancellation landing inside the consume loop all leave an open SSE
+    # response otherwise. `httpx.Response.aclose()` is idempotent, so this is
+    # safe even when an explicit path above already closed it. Does NOT cover
+    # the stream-open race in `_await_or_cancel` below: a stream that opens on
+    # the losing side of that race never reaches this assignment, and its own
+    # `on_cancel_win_result=lambda s: s.close()` already covers it.
+    opened_stream: _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents] | None = None
+    # The in-flight next-event fetch, if any. `asyncio.wait` below does not
+    # cancel the tasks it waits on when the waiting task itself is cancelled
+    # (a ceiling `wait_for` breach, an adapter tearing the turn down), so the
+    # `finally` drains it explicitly; otherwise the abandoned `__anext__`
+    # lingers as a pending task after the turn has returned.
+    next_task: asyncio.Task[Any] | None = None
     try:
+        if is_retry:
+            log.info(
+                "turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason
+            )
+            await lifecycle.on_reconnect(reconnect_reason)
+            replayed = await replay_events(anthropic, session_id=session_id)
+            if cancel.is_set():
+                raise _InterruptedDuringRecovery(phase="replay")
+            current_turn_events = _events_since_last_turn_boundary(
+                replayed, tool_confirmation=tool_confirmation
+            )
+            # Preserve events already delivered by the previous stream. The
+            # list endpoint is paginated and does not document snapshot
+            # completeness, so rebuilding from empty could regress behind the
+            # adapter's append-only render anchor if a page omits old history.
+            await _bill_replayed(billing, current_turn_events, billed_event_ids)
+            state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
+            log.info(
+                "turn.reconnect.completed",
+                session_id=session_id,
+                replayed=len(replayed),
+            )
+
+        async def _open_stream() -> _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents]:
+            return await anthropic.beta.sessions.events.stream(
+                session_id=session_id,
+                timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
+            )
+
+        stream = await _await_or_cancel(
+            _open_stream(),
+            cancel_task=cancel_task,
+            phase="stream-open",
+            # A stream that opened anyway on the losing side of the race
+            # must not leak the underlying SSE connection.
+            on_cancel_win_result=lambda s: s.close(),
+        )
+        opened_stream = stream
+        if cancel.is_set():
+            raise _InterruptedDuringRecovery(phase="reattach")
+
+        if not is_retry:
+            # Send user.message (or user.tool_confirmation on resume) exactly
+            # once, after the first stream open. On retry the server already
+            # has these events in its log.
+            async def _send_initial() -> None:
+                await send_initial()
+
+            try:
+                await _await_or_cancel(
+                    _send_initial(), cancel_task=cancel_task, phase="send-initial"
+                )
+            except _InterruptedDuringRecovery:
+                # The stream (opened above, on the WINNING side of that
+                # race) is now abandoned -- the `finally` below closes it
+                # unconditionally, so this cancel doesn't leak the connection.
+                raise
+
+        # Race each next-event fetch against the same `cancel_task` so the
+        # inner loop is reactive to the interrupt signal even while the
+        # stream is idle (no events arriving). `cancel.is_set()` checked
+        # pre-loop for the already-set case.
+        stream_iter = stream.__aiter__()
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()
             next_coro = cast(Any, stream_iter).__anext__()
-            next_task: asyncio.Task[Any] = asyncio.create_task(
+            next_task = asyncio.create_task(
                 next_coro,
                 name="turn.stream_next",
             )
@@ -341,27 +1102,97 @@ async def _consume_with_reconnect(
             try:
                 event = next_task.result()
             except StopAsyncIteration:
-                return
-            # Per-event metering. Invoke the caller-bound recorder on
-            # span.model_request_end events. Exceptions propagate (fail-closed).
-            match billing:
-                case Billed(record=record):
-                    if event.type == "span.model_request_end":
-                        await record(event=event)
-                case BillingExempt():
-                    pass
-            await lifecycle.on_sse_event(event)
+                # Clean close, no terminal event: not itself completion.
+                # The `finally` below closes the abandoned stream; hand the
+                # decision to `_pump`'s status check.
+                raise _EventlessCycle(reason="clean_close") from None
+            except httpx.ReadTimeout:
+                # No bytes for `stream_read_timeout_s`: same status-checked
+                # path as a clean close, not an unhandled crash and not a
+                # connection error (it does not consume the bounded
+                # `_CONNECTION_LOST` retry budget). The `finally` below
+                # closes the abandoned stream.
+                raise _EventlessCycle(reason="read_timeout") from None
+            if event.id not in delivered_event_ids:
+                # D-06: the one inline I/O the consume loop is allowed to do.
+                # A local Postgres write, correctness not delivery -- unlike the
+                # chat-API flush I/O this hook contract forbids, an unmetered
+                # event is revenue lost. Exceptions propagate (fail-closed).
+                await _bill_once(billing, event, billed_event_ids)
+                await lifecycle.on_sse_event(event)
+                delivered_event_ids.add(event.id)
             state_cell[0] = apply(state_cell[0], event)
             events_folded_cell[0] += 1
             if event.type == "session.status_terminated":
                 return
-            if terminal_stop_reason(event) is not None:
+            stop = terminal_stop_reason(event)
+            if stop == "requires_action":
+                match tool_confirmation:
+                    case AutoApprove() | PolicyApproval():
+                        assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+                        fresh = pending_confirmation_ids(
+                            event.stop_reason, confirmed=confirmed_tool_use_ids
+                        )
+                        if fresh:
+                            confirmed_tool_use_ids.update(fresh)
+                            # decisions: one `user.tool_confirmation` event per
+                            # fresh id -- `allow` for AutoApprove, the
+                            # decider's own answer for PolicyApproval (built
+                            # in approvals, decision 6 -- driver.py only
+                            # sends). A decider may wait on a person, so the
+                            # wait races the cancel signal; a cancel refuses
+                            # every pending call before the interrupt, so the
+                            # session is not left paused on them.
+                            decisions = await _decide_or_refuse_on_cancel(
+                                tool_confirmation,
+                                state_cell[0],
+                                fresh,
+                                cancel=cancel,
+                                anthropic=anthropic,
+                                session_id=session_id,
+                            )
+                            # Safe to send here (and ONLY here): this is a
+                            # `requires_action` idle, i.e. the session is
+                            # NOT running. A bare `user.*` event sent into a
+                            # RUNNING session returns HTTP 200 and is
+                            # silently ignored (measured 2026-08-26) -- never
+                            # move this send to a running-session position.
+                            await anthropic.beta.sessions.events.send(session_id, events=decisions)
+                            log.info(
+                                "turn.tool_confirmation.sent",
+                                session_id=session_id,
+                                count=len(fresh),
+                            )
+                            continue
+                        # MA is re-asking for ids we already allowed -- stop
+                        # instead of spinning until the ceiling (T-19-08-C).
+                        log.info("turn.tool_confirmation.exhausted", session_id=session_id)
+                        return
+                    case RequireApproval():
+                        pass  # fall through -- unchanged interactive behavior
+            if stop is not None:
                 return
     finally:
         if not cancel_task.done():
             cancel_task.cancel()
             with _suppress_task_exc():
                 await cancel_task
+        if next_task is not None and not next_task.done():
+            next_task.cancel()
+            with _suppress_task_exc():
+                await next_task
+        if opened_stream is not None:
+            # Unconditional close of any stream this attempt opened, on
+            # every exit path -- clean close, read timeout, mid-consume
+            # cancel, and (new) a ceiling `wait_for` cancellation landing
+            # here all leave an open SSE response otherwise.
+            # `httpx.Response.aclose()` is idempotent, so this is safe even
+            # when an explicit path above already closed it. Cleanup
+            # boundary (guideline:architecture): a transport that is
+            # already broken must not replace the real exception with a
+            # close failure.
+            with contextlib.suppress(Exception):
+                await opened_stream.close()
 
 
 # --- Finalizers ----------------------------------------------------------
@@ -374,6 +1205,9 @@ async def _finalize_success_or_error(
     render_once: RenderOnce,
     session_id: str,
     events_folded: int,
+    renders_failed: int,
+    tool_confirmation: ToolConfirmation,
+    confirmed_tool_use_ids: set[str],
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -381,20 +1215,84 @@ async def _finalize_success_or_error(
         and final_state.stop_reason is not None
         and final_state.stop_reason.type == "requires_action"
     ):
-        # No approval/resume UX is wired for interactive surfaces (Discord/CLI):
-        # the driver exits the consume loop on ANY idle, including
-        # requires_action, but pre-fix that idle finalized as blank success.
-        # Surface it as an actionable failure instead of silently dropping the
-        # agent's tool-approval request.
-        err = TurnError(
-            kind="requires_action",
-            message=(
-                "The agent requested tool approval — not supported on this "
-                "surface yet. Interrupt-free approval/resume UX is a future "
-                "feature; routines auto-approve tools."
-            ),
+        # Three distinct paths reach a requires_action idle here:
+        # - RequireApproval (interactive, Discord/CLI): no approval/resume
+        #   UX is wired -- the consume loop exits on ANY idle, including
+        #   requires_action, so this surfaces it as an actionable failure
+        #   instead of silently dropping the agent's tool-approval request.
+        # - AutoApprove, exhausted: MA re-asked for tool_use_ids already in
+        #   `confirmed_tool_use_ids` -- confirmations really were sent, so
+        #   the "already confirmed" wording stays.
+        # - AutoApprove, never sent: the eventless-cycle idle branch found a
+        #   `terminated` session paused on `requires_action` -- it
+        #   deliberately does not send into a session that cannot accept
+        #   events, so those ids are still unconfirmed here. The "already
+        #   confirmed" wording would be a lie in this case; a second wording
+        #   names what actually happened.
+        match tool_confirmation:
+            case AutoApprove() | PolicyApproval():
+                unsent = pending_confirmation_ids(
+                    final_state.stop_reason, confirmed=confirmed_tool_use_ids
+                )
+                if unsent:
+                    message = (
+                        "The agent requested tool approval but the session was "
+                        "no longer accepting events, so the turn was abandoned "
+                        "without sending confirmations."
+                    )
+                else:
+                    message = (
+                        "The agent re-requested approval for tool call(s) already "
+                        "confirmed — the confirmation(s) were sent but not accepted, "
+                        "so the turn was abandoned rather than spin."
+                    )
+            case RequireApproval():
+                message = (
+                    "The agent requested tool approval — not supported on this "
+                    "surface yet. Interrupt-free approval/resume UX is a future "
+                    "feature; routines auto-approve tools."
+                )
+        err = TurnError(kind="requires_action", message=message)
+        final_state = dataclasses.replace(
+            final_state, error=err, termination=TerminationReason.REQUIRES_ACTION
         )
-        final_state = dataclasses.replace(final_state, error=err)
+        state_cell[0] = final_state
+    if final_state.error is None:
+        # #79: an MCP failure the reducer kept out of `error` degrades a turn
+        # that still answered. A turn that answered with nothing is dead
+        # (MA's `exhausted` means exactly that), so name the server here
+        # instead of surfacing a blank success. A `retrying` error that was
+        # never settled is surfaced when nothing was produced, or when MA's
+        # own stop reason says the retries ran out behind a partial answer.
+        retries_exhausted = (
+            final_state.stop_reason is not None
+            and final_state.stop_reason.type == "retries_exhausted"
+        )
+        if not final_state.content and final_state.mcp_failures:
+            err = TurnError(
+                kind="upstream",
+                message=degraded_failure_message(final_state.mcp_failures),
+                cause=final_state.mcp_failures[-1],
+            )
+            final_state = dataclasses.replace(
+                final_state, error=err, termination=TerminationReason.MCP_DEGRADED_EMPTY
+            )
+            state_cell[0] = final_state
+        elif final_state.retrying_error is not None and (
+            not final_state.content or retries_exhausted
+        ):
+            final_state = dataclasses.replace(
+                final_state,
+                error=final_state.retrying_error,
+                termination=TerminationReason.RETRYING_UNSETTLED,
+            )
+            state_cell[0] = final_state
+    if final_state.termination is None:
+        # The reducer names the ends only it can see (MA terminating the
+        # session); everything else follows from the error, or its absence.
+        final_state = dataclasses.replace(
+            final_state, termination=termination_reason(final_state.error)
+        )
         state_cell[0] = final_state
     await render_once(final_state)  # guarded final render (§6)
     if final_state.error is not None:
@@ -403,6 +1301,7 @@ async def _finalize_success_or_error(
             session_id=session_id,
             turn_error_kind=final_state.error.kind,
             error=final_state.error.message,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_failure(final_state, final_state.error)
     else:
@@ -411,8 +1310,15 @@ async def _finalize_success_or_error(
             session_id=session_id,
             stop_reason_type=(final_state.stop_reason.type if final_state.stop_reason else None),
             events_folded=events_folded,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_success(final_state)
+        if (
+            final_state.content
+            and final_state.stop_reason is not None
+            and final_state.stop_reason.type == "end_turn"
+        ):
+            await acknowledge(lifecycle, "done")
     return final_state
 
 
@@ -423,9 +1329,15 @@ async def _finalize_connection_lost(
     render_once: RenderOnce,
     session_id: str,
     err: Exception,
+    renders_failed: int,
 ) -> TurnState:
     turn_err = TurnError(kind="connection_lost", message=str(err), cause=err)
-    state_cell[0] = dataclasses.replace(state_cell[0], error=turn_err, stop_reason=None)
+    state_cell[0] = dataclasses.replace(
+        state_cell[0],
+        error=turn_err,
+        stop_reason=None,
+        termination=TerminationReason.CONNECTION_LOST,
+    )
     await render_once(state_cell[0])
     log.warning("turn.reconnect.failed", session_id=session_id, error=str(err))
     log.warning(
@@ -433,6 +1345,7 @@ async def _finalize_connection_lost(
         session_id=session_id,
         turn_error_kind="connection_lost",
         error=str(err),
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -447,6 +1360,7 @@ async def _finalize_upstream(
     err: Exception,
     rate_limit_until: datetime | None,
     retry_after_s: float | None,
+    renders_failed: int,
 ) -> TurnState:
     turn_err = TurnError(kind="upstream", message=str(err), cause=err)
     state_cell[0] = dataclasses.replace(
@@ -454,6 +1368,11 @@ async def _finalize_upstream(
         error=turn_err,
         stop_reason=None,  # Clear stale stop_reason -- prevents infinite loops in callers
         rate_limit_until=rate_limit_until or state_cell[0].rate_limit_until,
+        termination=(
+            TerminationReason.RATE_LIMITED
+            if isinstance(err, _anthropic.RateLimitError)
+            else TerminationReason.UPSTREAM
+        ),
     )
     await render_once(state_cell[0])
     log.warning(
@@ -461,6 +1380,7 @@ async def _finalize_upstream(
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
+        renders_failed=renders_failed,
     )
     if rate_limit_until is not None:
         log.warning(
@@ -481,16 +1401,23 @@ async def _finalize_interrupted(
     render_once: RenderOnce,
     session_id: str,
     phase: InterruptPhase,
+    renders_failed: int,
 ) -> TurnState:
     log.info("turn.interrupt.during_reconnect", session_id=session_id, phase=phase)
     turn_err = TurnError(kind="interrupted", message=f"interrupted during {phase}")
-    state_cell[0] = dataclasses.replace(state_cell[0], error=turn_err, stop_reason=None)
+    state_cell[0] = dataclasses.replace(
+        state_cell[0],
+        error=turn_err,
+        stop_reason=None,
+        termination=TerminationReason.INTERRUPTED,
+    )
     await render_once(state_cell[0])
     log.warning(
         "turn.failed",
         session_id=session_id,
         turn_error_kind="interrupted",
         error=turn_err.message,
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -504,6 +1431,7 @@ async def _handle_interrupt_in_consume(
     lifecycle: TurnLifecycle,
     render_once: RenderOnce,
     interrupt_timeout_s: float,
+    renders_failed: int,
 ) -> TurnState:
     """Normal-flow interrupt: post user.interrupt, wait for terminal idle,
     route to on_terminal_success on ack or on_terminal_failure on timeout.
@@ -522,13 +1450,16 @@ async def _handle_interrupt_in_consume(
             session_id=session_id,
             timeout_s=interrupt_timeout_s,
         )
-        state_cell[0] = dataclasses.replace(state_cell[0], error=err)
+        state_cell[0] = dataclasses.replace(
+            state_cell[0], error=err, termination=termination_reason(err)
+        )
         await render_once(state_cell[0])
         log.warning(
             "turn.failed",
             session_id=session_id,
             turn_error_kind=err.kind,
             error=err.message,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]
@@ -537,12 +1468,14 @@ async def _handle_interrupt_in_consume(
     await lifecycle.on_interrupt_sent("cancel_event")
     log.info("turn.interrupt.acked", session_id=session_id)
     # Ack arrived -- partial state is "clean" (refinements §5).
+    state_cell[0] = dataclasses.replace(state_cell[0], termination=TerminationReason.INTERRUPTED)
     await render_once(state_cell[0])
     log.info(
         "turn.completed",
         session_id=session_id,
         stop_reason_type=(state_cell[0].stop_reason.type if state_cell[0].stop_reason else None),
         events_folded=None,
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_success(state_cell[0])
     return state_cell[0]

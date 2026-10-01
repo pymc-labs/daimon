@@ -20,6 +20,9 @@ One optional field is populated from the JWT `agent_id` claim:
 The MCP `get_cli_token` tool reads this server-side instead of accepting it as a tool
 parameter (confused-deputy mitigation, T-19-04-01). Path B (most-recent-active-session
 walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
+
+The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
+chat keeps ``agent_id=None``; only the Google token path consumes chat identity.
 """
 
 from __future__ import annotations
@@ -38,10 +41,14 @@ class AuthIdentity:
     platform: str | None = None
     external_id: str | None = None  # guild snowflake from tenant.external_id
     agent_id: uuid.UUID | None = None
+    # Ordinary chat execution identity; consumed only by the Google token broker.
+    chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
     # True when the minted JWT carries is_admin=True.
     # Derived by the adapter from Discord owner/manage_guild/administrator or CLI context.
     is_admin: bool = False
+    # Signed execution grant; never supplied as a tool parameter.
+    slack_turn_context_id: uuid.UUID | None = None
 
 
 def resolve_role(role_str: str | None) -> Role:

@@ -30,9 +30,6 @@ from anthropic.types.beta.beta_managed_agents_mcp_toolset import (
 from anthropic.types.beta.beta_managed_agents_mcp_toolset_default_config import (
     BetaManagedAgentsMCPToolsetDefaultConfig,
 )
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig,
-)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -41,6 +38,7 @@ from daimon.core.defaults.spec_merge import (
     merge_skills_with_ma,
     merge_tools_with_ma,
 )
+from daimon.testing.ma_models import ma_agent
 
 
 def _ma_agent(
@@ -50,21 +48,13 @@ def _ma_agent(
     tools: list[BetaManagedAgentsMCPToolset] | None = None,
 ) -> BetaManagedAgentsAgent:
     now = datetime.now(UTC)
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id="ag_x",
-        type="agent",
         name="daimon",
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={},
+        tools=cast(list, tools or []),
         mcp_servers=mcp_servers or [],
         skills=skills or [],
-        tools=cast(list, tools or []),
         created_at=now,
-        updated_at=now,
-        archived_at=None,
     )
 
 

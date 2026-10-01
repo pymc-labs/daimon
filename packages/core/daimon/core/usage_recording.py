@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
+from typing import Literal
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
@@ -30,6 +31,13 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+TurnLedgerReason = Literal["turn_debit", "checkpoint_debit"]
+"""`tenant_ledger.reason` values a turn-shaped debit may carry.
+
+The column is free text in the schema (no CHECK constraint), so this literal
+is the only gate — keep it closed.
+"""
+
 
 async def record_turn_usage(
     *,
@@ -41,6 +49,7 @@ async def record_turn_usage(
     event: BetaManagedAgentsSpanModelRequestEndEvent,
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
+    reason: TurnLedgerReason = "turn_debit",
 ) -> None:
     """Write one usage_events row and one debit ledger row.
 
@@ -48,6 +57,15 @@ async def record_turn_usage(
     (TOPUP-01). Writes a negative delta_usd row to tenant_ledger in the SAME
     transaction as the usage write. The debit is idempotent on
     (managed_session_id, event.id) — mirroring the usage_events dedup grain.
+
+    `reason` names the ledger row's kind. It is a closed literal, not free
+    text: a new debit kind is a deliberate, reviewable edit here rather than
+    something a caller invents inline. `checkpoint_debit` is the billed
+    checkpoint turn a workspace transfer spends on the OLD session
+    (`daimon.core.workspace_transfer`) — real model work the tenant pays for,
+    but not a turn anyone asked for in a thread, so it is separable in the
+    ledger. The idempotency key keeps the `turn:` prefix for every reason:
+    it is keyed on (session, event), which is already unique per debit.
 
     tenant_id=None is the DM signal — no tenant, no usage row, no ledger row.
     """
@@ -69,12 +87,12 @@ async def record_turn_usage(
             s,
             tenant_id=tenant_id,
             delta_usd=-debit,
-            reason="turn_debit",
+            reason=reason,
             idempotency_key=f"turn:{managed_session_id}:{event.id}",
         )
 
 
-async def record_media_usage(
+async def _record_tool_model_usage(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
@@ -83,30 +101,27 @@ async def record_media_usage(
     input_tokens: int,
     output_tokens: int,
     cache_read_input_tokens: int,
-    managed_session_id: str | None = None,
-    event_id: str | None = None,
-    markup: Decimal = Decimal("1.0"),
-    pricing: ModelRates | None = None,
+    managed_session_id: str | None,
+    event_id: str | None,
+    markup: Decimal,
+    pricing: ModelRates | None,
+    reason: str,
+    session_prefix: str,
+    idempotency_prefix: str,
 ) -> None:
-    """Write one usage_events row and one media_debit ledger row for Gemini media spend.
+    """One usage_events row plus one debit ledger row for a model call made outside a turn.
 
-    Sibling to `record_turn_usage`, but takes plain ints instead of an SDK
-    event — callers (the MCP media tools) resolve token counts from a
-    `google-genai` response before calling this; `daimon.core` never imports
-    `google-genai`.
-
-    `managed_session_id`/`event_id` default to fresh synthetic ids
-    (`gemini:{uuid4()}` / `uuid4()`) when not supplied, so each call is its
-    own billing unit unless the caller explicitly threads ids for a test's
-    idempotency assertion.
-
-    `tenant_id` is non-optional — this is only called on the billed path;
-    the trusted-path skip (no tenant, no metering) happens adapter-side.
-
-    Per the module docstring: exceptions are NOT swallowed — no try/except.
+    Takes plain ints: callers resolve token counts from their own SDK response
+    first. `managed_session_id`/`event_id` default to fresh synthetic ids
+    (`{session_prefix}:{uuid4()}` / `uuid4()`), so each call is its own
+    billing unit unless the caller threads ids for an idempotency assertion.
+    `idempotency_prefix` is separate from `session_prefix` because the ledger
+    key is a stored identity: media debits were keyed `media:` before this
+    function existed and must keep that prefix.
+    Exceptions are NOT swallowed (see module docstring).
     """
     if managed_session_id is None:
-        managed_session_id = f"gemini:{uuid.uuid4()}"
+        managed_session_id = f"{session_prefix}:{uuid.uuid4()}"
     if event_id is None:
         event_id = str(uuid.uuid4())
     model_usage = BetaManagedAgentsSpanModelUsage(
@@ -131,6 +146,103 @@ async def record_media_usage(
             s,
             tenant_id=tenant_id,
             delta_usd=-debit,
-            reason="media_debit",
-            idempotency_key=f"media:{managed_session_id}:{event_id}",
+            reason=reason,
+            idempotency_key=f"{idempotency_prefix}:{managed_session_id}:{event_id}",
         )
+
+
+async def record_media_usage(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    managed_session_id: str | None = None,
+    event_id: str | None = None,
+    markup: Decimal = Decimal("1.0"),
+    pricing: ModelRates | None = None,
+) -> None:
+    """Gemini media spend from the MCP media tools. `daimon.core` never imports `google-genai`."""
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=managed_session_id,
+        event_id=event_id,
+        markup=markup,
+        pricing=pricing,
+        reason="media_debit",
+        session_prefix="gemini",
+        idempotency_prefix="media",
+    )
+
+
+async def record_classifier_usage(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    markup: Decimal = Decimal("1.0"),
+    pricing: ModelRates | None = None,
+) -> None:
+    """The thread-participation classifier call, metered to the tenant like any model spend."""
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=None,
+        event_id=None,
+        markup=markup,
+        pricing=pricing,
+        reason="classifier_debit",
+        session_prefix="classifier",
+        idempotency_prefix="classifier",
+    )
+
+
+async def record_thread_naming_usage(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    managed_session_id: str | None = None,
+    event_id: str | None = None,
+    markup: Decimal = Decimal("1.0"),
+    pricing: ModelRates | None = None,
+) -> None:
+    """The Haiku call behind an automatic thread title, billed to the message's author."""
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=managed_session_id,
+        event_id=event_id,
+        markup=markup,
+        pricing=pricing,
+        reason="thread_naming_debit",
+        session_prefix="thread-naming",
+        idempotency_prefix="thread-naming",
+    )

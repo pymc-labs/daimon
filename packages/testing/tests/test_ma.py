@@ -7,6 +7,12 @@ shared constants.
 
 from __future__ import annotations
 
+import contextlib
+import re
+import uuid
+from collections.abc import Iterator
+
+import anthropic
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -26,6 +32,18 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
+from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+
+
+@contextlib.contextmanager
+def _transport_assertion(match: str) -> Iterator[None]:
+    """The SDK wraps an exception raised inside the transport in
+    `APIConnectionError`; the fake's AssertionError is its `__cause__`."""
+    with pytest.raises(anthropic.APIConnectionError) as excinfo:
+        yield
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, AssertionError), f"expected the fake's AssertionError, got {cause!r}"
+    assert re.search(match, str(cause)), f"{str(cause)!r} does not match {match!r}"
 
 
 def test_combine_handlers_dispatches_to_matching_handler() -> None:
@@ -208,3 +226,151 @@ def test_ma_router_environment_retrieve_route_matches_path() -> None:
         "MARouter should dispatch environment-retrieve to the handler"
     )
     assert response.json()["id"] == "env_test456", "response id should match the path segment"
+
+
+# ---------------------------------------------------------------------------
+# Router conveniences and shared handlers
+# ---------------------------------------------------------------------------
+
+
+async def test_resolved_agent_env_router_serves_list_and_retrieve_for_both() -> None:
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+    from daimon.testing.ma import resolved_agent_env_router
+
+    tenant_id = uuid.uuid4()
+    client = build_fake_anthropic(resolved_agent_env_router(tenant_id=tenant_id).dispatch)
+
+    agents = [agent async for agent in client.beta.agents.list()]
+    assert [agent.id for agent in agents] == [ma_agent().id], "list must serve the default agent"
+    assert agents[0].metadata[MA_METADATA_KEY_TENANT] == str(tenant_id), (
+        "the served agent must be stamped for the tenant so the resolver's tag lookup finds it"
+    )
+    assert (await client.beta.agents.retrieve(ma_agent().id)).id == ma_agent().id, (
+        "retrieve must serve the same agent by its exact id"
+    )
+    environments = [env async for env in client.beta.environments.list()]
+    assert [env.id for env in environments] == [ma_environment().id], "list must serve the env"
+    assert (await client.beta.environments.retrieve(ma_environment().id)).metadata[
+        MA_METADATA_KEY_TENANT
+    ] == str(tenant_id), "retrieve must serve the same tenant-stamped environment"
+
+
+async def test_resolved_agent_env_router_uses_given_shapes_and_exact_ids() -> None:
+    from daimon.testing.ma import resolved_agent_env_router
+
+    agent = ma_agent(id="ag_given", name="given")
+    environment = ma_environment(id="env_given")
+    router = MARouter()
+    returned = resolved_agent_env_router(agent, environment, router=router)
+    assert returned is router, "router= must add the routes to the given router and return it"
+
+    client = build_fake_anthropic(router.dispatch)
+    assert (await client.beta.agents.retrieve("ag_given")).name == "given", "given agent served"
+    assert (await client.beta.environments.retrieve("env_given")).id == "env_given", "given env"
+    with _transport_assertion("no route for GET /v1/agents/ag_other"):
+        await client.beta.agents.retrieve("ag_other")
+
+
+async def test_marouter_add_session_serves_the_exact_session_id() -> None:
+    router = MARouter()
+    router.add_session(ma_session(id="sess_exact", agent_id="ag_frozen"))
+    client = build_fake_anthropic(router.dispatch)
+
+    session = await client.beta.sessions.retrieve("sess_exact")
+    assert session.agent.id == "ag_frozen", "the served session must carry its frozen agent"
+    with _transport_assertion("no route for GET /v1/sessions/sess_other"):
+        await client.beta.sessions.retrieve("sess_other")
+
+
+async def test_marouter_add_agent_list_serves_every_given_agent() -> None:
+    router = MARouter()
+    router.add_agent_list(ma_agent(id="ag_1"), ma_agent(id="ag_2"))
+    router.add_environment_list()
+    client = build_fake_anthropic(router.dispatch)
+
+    assert [agent.id async for agent in client.beta.agents.list()] == ["ag_1", "ag_2"], (
+        "add_agent_list must serve the agents in the given order"
+    )
+    assert [env.id async for env in client.beta.environments.list()] == [], (
+        "an empty add_environment_list must serve an empty list"
+    )
+
+
+async def test_make_agent_env_echo_handler_returns_the_requested_ids() -> None:
+    from daimon.testing.ma import make_agent_env_echo_handler
+
+    client = build_fake_anthropic(make_agent_env_echo_handler(tenant_id="tenant-x"))
+
+    agent = await client.beta.agents.retrieve("ag_asked")
+    assert agent.id == "ag_asked", "the echo handler must answer with the id that was asked for"
+    assert agent.metadata["daimon_tenant"] == "tenant-x", "tenant_id= must stamp the agent"
+    assert (await client.beta.environments.retrieve("env_asked")).id == "env_asked", (
+        "environments echo their id too"
+    )
+    assert (await client.beta.sessions.retrieve("sess_asked")).id == "sess_asked", (
+        "with_session=True (the default) serves session retrieves"
+    )
+    with _transport_assertion("unhandled GET /v1/agents"):
+        [agent async for agent in client.beta.agents.list()]
+
+
+async def test_make_agent_env_echo_handler_without_session_rejects_session_reads() -> None:
+    from daimon.testing.ma import make_agent_env_echo_handler
+
+    client = build_fake_anthropic(make_agent_env_echo_handler(with_session=False))
+    assert (await client.beta.agents.retrieve("ag_asked")).metadata == {}, (
+        "without tenant_id= the echoed agent carries no metadata"
+    )
+    with _transport_assertion("unhandled GET /v1/sessions/sess_asked"):
+        await client.beta.sessions.retrieve("sess_asked")
+
+
+async def test_make_archive_agent_handler_archives_the_requested_agent_and_composes() -> None:
+    from daimon.testing.ma import make_archive_agent_handler
+
+    client = build_fake_anthropic(
+        combine_handlers(make_archive_agent_handler(name="gone"), make_fake_ma_handler())
+    )
+    archived = await client.beta.agents.archive("ag_doomed")
+    assert archived.id == "ag_doomed", "the archive response must name the archived agent"
+    assert archived.archived_at is not None, "the archived agent must carry archived_at"
+    assert archived.name == "gone" and archived.version == 2, "name= and the bumped version"
+
+    created = await client.beta.agents.create(name="still-here", model="claude-sonnet-4-6")
+    assert created.name == "still-here", (
+        "non-archive requests must fall through to the next handler"
+    )
+
+
+async def test_build_no_retry_anthropic_does_not_retry_a_conflict() -> None:
+    from daimon.testing.ma import build_no_retry_anthropic
+
+    hits: list[str] = []
+
+    def conflict(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        hits.append(request.url.path)
+        return httpx.Response(
+            409, json={"type": "error", "error": {"type": "conflict_error", "message": "stale"}}
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents/[^/]+", conflict)
+    client = build_no_retry_anthropic(router)
+    with pytest.raises(anthropic.APIStatusError):
+        await client.beta.agents.retrieve("ag_x")
+    assert hits == ["/v1/agents/ag_x"], "max_retries=0: the SDK must not retry the 409"
+
+    client_from_handler = build_no_retry_anthropic(router.dispatch)
+    with pytest.raises(anthropic.APIStatusError):
+        await client_from_handler.beta.agents.retrieve("ag_y")
+    assert hits[-1] == "/v1/agents/ag_y", "a plain handler must be accepted too"
+
+
+def test_require_api_key_skips_without_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.testing.ma import require_api_key
+
+    monkeypatch.delenv("DAIMON_TEST_ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        require_api_key()
+    monkeypatch.setenv("DAIMON_TEST_ANTHROPIC_API_KEY", "sk-live")
+    assert require_api_key() == "sk-live", "the key must be returned when set"

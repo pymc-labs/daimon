@@ -15,35 +15,32 @@ owning human's platform_user_id for per-member reporting).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import httpx
-import pytest
-from anthropic.types.beta import BetaManagedAgentsModelConfig, BetaManagedAgentsSession
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
+import structlog
+import structlog.testing
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
+from daimon.core._models import TenantLedger, UsageEvent
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_TENANT,
 )
-from daimon.core._models import UsageEvent
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
-from daimon.core.usage_sweep import sweep_headless_usage
-from daimon.testing.factories import make_platform_principal
+from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
+from daimon.testing.factories import make_account, make_platform_principal
 from daimon.testing.ma import (
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
     MARouter,
     build_fake_anthropic,
     list_response,
 )
+from daimon.testing.ma_models import ma_model_usage, ma_session, ma_session_agent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC)
 
@@ -51,43 +48,97 @@ NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC)
 def _session_dict(
     *,
     session_id: str,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
+    tenant_id: uuid.UUID | str,
+    account_id: uuid.UUID | str,
     model: str = "claude-sonnet-4-6",
+    billing_exempt: str | None = None,
+    updated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """A headless MA session tagged the way create_session tags it."""
-    s = BetaManagedAgentsSession(
-        outcome_evaluations=[],
+    metadata = {
+        MA_METADATA_KEY_TENANT: str(tenant_id),
+        MA_METADATA_KEY_ACCOUNT: str(account_id),
+    }
+    if billing_exempt is not None:
+        metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
+    s = ma_session(
         id=session_id,
-        agent=BetaManagedAgentsSessionAgent(
-            id="agent_headless1",
-            description=None,
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id=model),
-            name="headless-agent",
-            skills=[],
-            system=None,
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        archived_at=None,
-        created_at=NOW,
+        agent=ma_session_agent(id="agent_headless1", name="headless-agent", model=model),
         environment_id="env_headless1",
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_ACCOUNT: str(account_id),
-        },
-        resources=[],
-        stats=EMPTY_SESSION_STATS,
-        status="idle",
-        title=None,
-        type="session",
-        updated_at=NOW,
-        usage=EMPTY_SESSION_USAGE,
-        vault_ids=[],
+        metadata=metadata,
+        created_at=NOW,
+        updated_at=updated_at,
     )
     return s.model_dump(mode="json")
+
+
+async def test_sweep_reads_recent_sessions_and_rescans_after_restart_or_hour(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="watermark-user"
+    )
+    sessions = [
+        _session_dict(
+            session_id="sesn_old",
+            tenant_id=principal.tenant_id,
+            account_id=principal.account_id,
+            updated_at=NOW - timedelta(days=1),
+        ),
+        _session_dict(
+            session_id="sesn_recent",
+            tenant_id=principal.tenant_id,
+            account_id=principal.account_id,
+            updated_at=NOW,
+        ),
+    ]
+    reads: list[str] = []
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response(sessions))
+
+    def events(req: httpx.Request, match: Any) -> httpx.Response:
+        reads.append(req.url.path)
+        return list_response([])
+
+    router.add("GET", r"/v1/sessions/[^/]+/events", events)
+    client = build_fake_anthropic(router.dispatch)
+    watermark = UsageSweepWatermark()
+
+    await sweep_headless_usage(
+        client, db_session_factory, markup=Decimal("1"), watermark=watermark, now=NOW
+    )
+    assert len(reads) == 2, "the first pass reads every stamped session"
+    reads.clear()
+
+    await sweep_headless_usage(
+        client,
+        db_session_factory,
+        markup=Decimal("1"),
+        watermark=watermark,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert reads == ["/v1/sessions/sesn_recent/events"], "idle sessions are not re-read"
+    reads.clear()
+
+    await sweep_headless_usage(
+        client,
+        db_session_factory,
+        markup=Decimal("1"),
+        watermark=UsageSweepWatermark(),
+        now=NOW + timedelta(minutes=2),
+    )
+    assert len(reads) == 2, "a restarted scheduler does a full pass"
+    reads.clear()
+
+    await sweep_headless_usage(
+        client,
+        db_session_factory,
+        markup=Decimal("1"),
+        watermark=watermark,
+        now=NOW + timedelta(hours=1),
+    )
+    assert len(reads) == 2, "the hourly backstop does a full pass"
 
 
 def _model_request_end_dict(
@@ -97,12 +148,7 @@ def _model_request_end_dict(
         id=event_id,
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=input_tokens, output_tokens=output_tokens),
         processed_at=NOW,
         type="span.model_request_end",
     )
@@ -208,33 +254,11 @@ async def test_sweep_skips_session_without_tenant_tag(
 ) -> None:
     """An untagged session (no daimon_tenant — e.g. a DM or foreign session) is
     skipped: no usage row, and its events are never even fetched."""
-    s = BetaManagedAgentsSession(
-        outcome_evaluations=[],
+    s = ma_session(
         id="sesn_untagged",
-        agent=BetaManagedAgentsSessionAgent(
-            id="agent_x",
-            description=None,
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-            name="x",
-            skills=[],
-            system=None,
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        archived_at=None,
-        created_at=NOW,
+        agent=ma_session_agent(id="agent_x", name="x"),
         environment_id="env_x",
-        metadata={},
-        resources=[],
-        stats=EMPTY_SESSION_STATS,
-        status="idle",
-        title=None,
-        type="session",
-        updated_at=NOW,
-        usage=EMPTY_SESSION_USAGE,
-        vault_ids=[],
+        created_at=NOW,
     )
     router = MARouter()
     router.add("GET", r"/v1/sessions", lambda req, m: list_response([s.model_dump(mode="json")]))
@@ -295,8 +319,6 @@ async def test_sweep_records_with_null_platform_user_when_account_has_no_discord
 ) -> None:
     """An account with no discord principal still bills the tenant: the usage row
     is written with platform_user_id=None (the ledger debit keys on tenant_id)."""
-    from daimon.testing.factories import make_account
-
     account = await make_account(db_session)  # account + tenant, no discord principal
 
     router = MARouter()
@@ -328,3 +350,395 @@ async def test_sweep_records_with_null_platform_user_when_account_has_no_discord
     assert len(rows) == 1, "usage is recorded even without a resolvable platform user"
     assert rows[0].platform_user_id is None, "platform_user_id is None when no discord principal"
     assert rows[0].tenant_id == account.tenant_id, "tenant attribution still correct"
+
+
+async def test_sweep_skips_malformed_tenant_and_continues_to_later_valid_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A malformed tenant tag cannot abort billing for later valid sessions."""
+    account = await make_account(db_session)
+    sessions = [
+        _session_dict(
+            session_id="sesn_bad_tenant",
+            tenant_id="not-a-uuid",
+            account_id=account.id,
+        ),
+        _session_dict(
+            session_id="sesn_after_bad_tenant",
+            tenant_id=account.tenant_id,
+            account_id=account.id,
+        ),
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response(sessions))
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [
+                _model_request_end_dict(
+                    event_id="evt_after_bad_tenant", input_tokens=7, output_tokens=3
+                )
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    with structlog.testing.capture_logs() as logs:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    rows = (await db_session.execute(select(UsageEvent))).scalars().all()
+    debits = (await db_session.execute(select(TenantLedger))).scalars().all()
+    assert recorded == 1, "sweep should record the valid event after malformed tenant metadata"
+    assert [(row.managed_session_id, row.tenant_id) for row in rows] == [
+        ("sesn_after_bad_tenant", account.tenant_id)
+    ], "malformed tenant metadata must be skipped without guessing a billing tenant"
+    assert len(debits) == 1, "the valid later event should produce exactly one debit"
+    assert debits[0].tenant_id == account.tenant_id, "debit must stay on the valid session tenant"
+    assert debits[0].delta_usd == Decimal("-0.000066"), (
+        "valid later event debit must match its 7 input and 3 output tokens"
+    )
+    matching = [entry for entry in logs if entry.get("event") == "usage_sweep.session_skipped"]
+    assert len(matching) == 1, "malformed tenant metadata should emit one structured warning"
+    assert matching[0]["log_level"] == "warning", "malformed tenant warning should be a warning"
+    assert matching[0]["session_id"] == "sesn_bad_tenant", (
+        "malformed tenant warning should identify the session"
+    )
+    assert matching[0]["reason"] == "invalid_tenant_metadata", (
+        "malformed tenant warning should provide a stable reason"
+    )
+    assert "not-a-uuid" not in repr(matching[0]), "warning must not include raw malformed metadata"
+
+
+async def test_sweep_bills_valid_tenant_with_malformed_account_and_retry_is_idempotent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bad optional account metadata drops member attribution, not tenant billing."""
+    account = await make_account(db_session)
+    principal = await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="discord-user-after-bad-account",
+        account=account,
+    )
+    sessions = [
+        _session_dict(
+            session_id="sesn_bad_account",
+            tenant_id=account.tenant_id,
+            account_id="not-a-uuid",
+        ),
+        _session_dict(
+            session_id="sesn_after_bad_account",
+            tenant_id=account.tenant_id,
+            account_id=account.id,
+        ),
+    ]
+    events = {
+        "sesn_bad_account": _model_request_end_dict(
+            event_id="evt_bad_account", input_tokens=7, output_tokens=3
+        ),
+        "sesn_after_bad_account": _model_request_end_dict(
+            event_id="evt_after_bad_account", input_tokens=11, output_tokens=4
+        ),
+    }
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response(sessions))
+    router.add(
+        "GET",
+        r"/v1/sessions/(?P<session_id>[^/]+)/events",
+        lambda req, m: list_response([events[m.group("session_id")]]),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    with structlog.testing.capture_logs() as logs:
+        first_recorded = await sweep_headless_usage(
+            client, db_session_factory, markup=Decimal("1.0")
+        )
+        retry_recorded = await sweep_headless_usage(
+            client, db_session_factory, markup=Decimal("1.0")
+        )
+
+    rows = (
+        (await db_session.execute(select(UsageEvent).order_by(UsageEvent.managed_session_id)))
+        .scalars()
+        .all()
+    )
+    debits = (
+        (
+            await db_session.execute(
+                select(TenantLedger)
+                .where(TenantLedger.reason == "turn_debit")
+                .order_by(TenantLedger.idempotency_key)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert first_recorded == 2, (
+        "valid-tenant sessions should both be billed despite bad account metadata"
+    )
+    assert retry_recorded == 2, "retry replays both events through the idempotent recorder"
+    assert [(row.managed_session_id, row.tenant_id, row.platform_user_id) for row in rows] == [
+        ("sesn_after_bad_account", account.tenant_id, principal.external_id),
+        ("sesn_bad_account", account.tenant_id, None),
+    ], "both usage rows use the valid tenant and omit unavailable member attribution"
+    assert len(debits) == 2, "each distinct model event should have exactly one debit after retry"
+    assert {debit.tenant_id for debit in debits} == {account.tenant_id}, (
+        "every debit must be attributed to the session's valid tenant"
+    )
+    assert {debit.idempotency_key for debit in debits} == {
+        "turn:sesn_bad_account:evt_bad_account",
+        "turn:sesn_after_bad_account:evt_after_bad_account",
+    }, "debits must retain one event-specific idempotency key each"
+    assert {debit.idempotency_key: debit.delta_usd for debit in debits} == {
+        "turn:sesn_bad_account:evt_bad_account": Decimal("-0.000066"),
+        "turn:sesn_after_bad_account:evt_after_bad_account": Decimal("-0.000093"),
+    }, "each tenant debit must exactly match the corresponding model usage cost"
+    account_warnings = [
+        entry for entry in logs if entry.get("event") == "usage_sweep.member_attribution_omitted"
+    ]
+    assert len(account_warnings) == 2, "each sweep should warn about the malformed account tag"
+    assert all(entry["reason"] == "invalid_account_metadata" for entry in account_warnings), (
+        "malformed account warnings should use a stable reason"
+    )
+    assert all(entry["session_id"] == "sesn_bad_account" for entry in account_warnings), (
+        "malformed account warnings should identify the affected session"
+    )
+    assert all("not-a-uuid" not in repr(entry) for entry in account_warnings), (
+        "warnings must not include raw malformed metadata"
+    )
+
+
+async def test_sweep_omits_platform_user_from_account_owned_by_another_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A valid foreign account UUID must not cross tenant attribution boundaries."""
+    account_a = await make_account(db_session)
+    account_b = await make_account(db_session)
+    principal_b = await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="discord-user-tenant-b",
+        account=account_b,
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_tenant_a_foreign_account",
+                    tenant_id=account_a.tenant_id,
+                    account_id=account_b.id,
+                )
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_tenant_a", input_tokens=7, output_tokens=3)]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    with structlog.testing.capture_logs() as logs:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    rows = (await db_session.execute(select(UsageEvent))).scalars().all()
+    debits = (await db_session.execute(select(TenantLedger))).scalars().all()
+    assert recorded == 1, "foreign account attribution must not suppress valid tenant billing"
+    assert len(rows) == 1, "the valid tenant session should produce one usage row"
+    assert rows[0].tenant_id == account_a.tenant_id, (
+        "usage must remain attributed to session tenant A"
+    )
+    assert rows[0].platform_user_id is None, (
+        "a principal owned by tenant B must not be attributed to tenant A's session"
+    )
+    assert len(debits) == 1, "the session should create exactly one matching debit"
+    assert debits[0].tenant_id == account_a.tenant_id, "the debit must remain on session tenant A"
+    assert debits[0].tenant_id != account_b.tenant_id, (
+        "the foreign account tenant must not be debited"
+    )
+    assert debits[0].delta_usd == Decimal("-0.000066"), (
+        "the debit must match the session's 7 input and 3 output tokens"
+    )
+    assert principal_b.external_id == "discord-user-tenant-b", (
+        "the test's foreign account resolves to a real tenant B principal"
+    )
+    warnings = [
+        entry for entry in logs if entry.get("event") == "usage_sweep.member_attribution_omitted"
+    ]
+    assert len(warnings) == 1, "cross-tenant account metadata should emit one structured warning"
+    assert warnings[0]["log_level"] == "warning", "cross-tenant attribution should warn"
+    assert warnings[0]["session_id"] == "sesn_tenant_a_foreign_account", (
+        "cross-tenant warning should identify the session"
+    )
+    assert warnings[0]["reason"] == "account_tenant_mismatch", (
+        "cross-tenant warning should give a stable reason"
+    )
+    assert account_b.id.hex not in repr(warnings[0]), (
+        "cross-tenant warning must not expose raw account metadata"
+    )
+
+
+def _two_session_router(*, tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
+    """One exempt session and one billed session of the same tenant.
+
+    The exempt one has two model calls priced at claude-sonnet-4-6
+    ($3/M input, $15/M output): 1M in + 100k out ($4.50) and 200k in + 20k out
+    ($0.90), so its would-be cost is exactly $5.40.
+    """
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_exempt",
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    billing_exempt="mcp-internal-caller",
+                ),
+                _session_dict(
+                    session_id="sesn_billed",
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                ),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_exempt/events",
+        lambda req, m: list_response(
+            [
+                _model_request_end_dict(
+                    event_id="evt_ex1", input_tokens=1_000_000, output_tokens=100_000
+                ),
+                _model_request_end_dict(
+                    event_id="evt_ex2", input_tokens=200_000, output_tokens=20_000
+                ),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_billed/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_b1", input_tokens=10, output_tokens=5)]
+        ),
+    )
+    return router
+
+
+async def test_sweep_does_not_debit_billing_exempt_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session stamped daimon_billing_exempt (created for a BillingExempt
+    caller) is not replayed: no usage row and no tenant_ledger debit. The
+    operator absorbs that usage (docs/billing.md)."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-exempt"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    exempt_usage = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(UsageEvent)
+            .where(UsageEvent.managed_session_id == "sesn_exempt")
+        )
+    ).scalar_one()
+    exempt_debits = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(TenantLedger)
+            .where(TenantLedger.idempotency_key.like("turn:sesn_exempt:%"))
+        )
+    ).scalar_one()
+    assert exempt_debits == 0, (
+        f"a BillingExempt session must not be debited to the tenant, got {exempt_debits} debits"
+    )
+    assert exempt_usage == 0, f"a BillingExempt session must not get usage rows, got {exempt_usage}"
+
+
+async def test_sweep_still_debits_billed_session_next_to_exempt_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The backstop is unchanged for billed sessions: skipping an exempt
+    session does not skip the tenant's other sessions."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-billed"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    keys = (
+        (
+            await db_session.execute(
+                select(TenantLedger.idempotency_key).where(
+                    TenantLedger.idempotency_key.like("turn:%")
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert keys == ["turn:sesn_billed:evt_b1"], (
+        f"only the billed session's call is debited, got {keys}"
+    )
+
+
+async def test_sweep_logs_absorbed_cost_of_exempt_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The skipped session's would-be spend is logged per session
+    (usage_sweep.exempt_skipped) and totalled in the pass summary
+    (usage_sweep.completed), so the absorbed cost stays visible."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-log"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.5"))
+
+    assert recorded == 1, f"only the billed session's event is replayed, got {recorded}"
+    skipped = [e for e in logs if e["event"] == "usage_sweep.exempt_skipped"]
+    assert len(skipped) == 1, f"one skip line for the one exempt session, got {logs!r}"
+    line = skipped[0]
+    assert line["tenant_id"] == str(principal.tenant_id), "skip line names the tenant"
+    assert line["managed_session_id"] == "sesn_exempt", "skip line names the session"
+    assert line["reason"] == "mcp-internal-caller", "skip line carries the stamped reason"
+    assert line["model_id"] == "claude-sonnet-4-6", "skip line names the priced model"
+    assert line["model_calls"] == 2, "both model calls are counted"
+    assert line["input_tokens"] == 1_200_000, "input tokens are summed"
+    assert line["output_tokens"] == 120_000, "output tokens are summed"
+    assert line["cost_usd"] == "5.400000", "cost is the raw price of both calls"
+    assert line["would_be_debit_usd"] == "8.100000", "would-be debit applies the markup"
+
+    summary = [e for e in logs if e["event"] == "usage_sweep.completed"]
+    assert len(summary) == 1, f"one summary line per pass, got {logs!r}"
+    assert summary[0]["recorded"] == 1, "summary counts replayed events"
+    assert summary[0]["exempt_sessions"] == 1, "summary counts skipped exempt sessions"
+    assert summary[0]["exempt_model_calls"] == 2, "summary counts their model calls"
+    assert summary[0]["exempt_cost_usd"] == "5.400000", "summary totals the absorbed cost"

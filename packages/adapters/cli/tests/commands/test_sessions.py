@@ -11,7 +11,6 @@ import jwt as pyjwt
 import pytest
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import (
-    BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsModelConfig,
     BetaManagedAgentsSession,
@@ -28,8 +27,9 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.testing import ma_environment
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     EMPTY_SESSION_STATS,
     EMPTY_SESSION_USAGE,
     MARouter,
@@ -38,6 +38,8 @@ from daimon.testing.ma import (
 from pydantic import HttpUrl, SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import build_cli_runtime
 
 
 class _FakeCli:
@@ -50,23 +52,11 @@ class _FakeMcp:
 
 
 class _FakeSettings:
+    tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _FakeMcp()
     github = GithubSettings()
     defaults_root = Path("defaults")
-
-
-def _build_rt(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    anthropic: AsyncAnthropic,
-) -> CliRuntime:
-    return CliRuntime(
-        settings=cast(Settings, _FakeSettings()),
-        anthropic=anthropic,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
 
 
 def _session_body(
@@ -152,19 +142,9 @@ def _create_router(
         system=None,
     ).model_dump(mode="json")
 
-    env_item = BetaEnvironment(
-        id="env_sys",
-        type="environment",
-        name="env-sys",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: "env-sys",
-        },
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    ).model_dump(mode="json")
+    env_item = ma_environment(id="env_sys", name="env-sys", tenant_id=tenant_id).model_dump(
+        mode="json"
+    )
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent_item]))
@@ -197,9 +177,10 @@ async def test_sessions_create_json_prints_session_id_agent_env(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     tenant_id = await _seed_system_defaults(db_session)
-    rt = _build_rt(
+    rt = build_cli_runtime(
         db_session_factory,
-        make_stub_anthropic(_create_router(tenant_id, "sess_test_01").dispatch),
+        anthropic=make_stub_anthropic(_create_router(tenant_id, "sess_test_01").dispatch),
+        settings=_FakeSettings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -227,9 +208,10 @@ async def test_sessions_create_bare_prints_session_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     tenant_id = await _seed_system_defaults(db_session)
-    rt = _build_rt(
+    rt = build_cli_runtime(
         db_session_factory,
-        make_stub_anthropic(_create_router(tenant_id, "sess_bare_42").dispatch),
+        anthropic=make_stub_anthropic(_create_router(tenant_id, "sess_bare_42").dispatch),
+        settings=_FakeSettings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
@@ -251,7 +233,7 @@ async def test_sessions_create_without_defaults_exits_one_with_apply_hint(
 ) -> None:
     from daimon.adapters.cli.sessions_bootstrap import SessionBootstrapError
 
-    rt = _build_rt(db_session_factory, stub_anthropic)
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
     with pytest.raises(SessionBootstrapError) as exc_info:
@@ -288,7 +270,11 @@ async def test_sessions_get_json_prints_session_body(
     db_session_factory: async_sessionmaker[AsyncSession],
     make_stub_anthropic: Any,
 ) -> None:
-    rt = _build_rt(db_session_factory, make_stub_anthropic(_retrieve_handler("sess_xyz")))
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=make_stub_anthropic(_retrieve_handler("sess_xyz")),
+        settings=_FakeSettings(),
+    )
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
 
@@ -305,7 +291,11 @@ async def test_sessions_get_human_renders_table(
     db_session_factory: async_sessionmaker[AsyncSession],
     make_stub_anthropic: Any,
 ) -> None:
-    rt = _build_rt(db_session_factory, make_stub_anthropic(_retrieve_handler("sess_human")))
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=make_stub_anthropic(_retrieve_handler("sess_human")),
+        settings=_FakeSettings(),
+    )
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, highlight=False, width=120)
 
@@ -326,7 +316,9 @@ async def test_sessions_get_missing_raises_api_error(
             404, json={"error": {"type": "not_found_error", "message": "not found"}}
         )
 
-    rt = _build_rt(db_session_factory, make_stub_anthropic(not_found))
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=make_stub_anthropic(not_found), settings=_FakeSettings()
+    )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
     with pytest.raises(APIError):
@@ -339,6 +331,7 @@ class _ConfiguredMcp:
 
 
 class _ConfiguredSettings:
+    tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _ConfiguredMcp()
     github = GithubSettings()
@@ -450,9 +443,10 @@ async def test_cli_sessions_create_back_compat_when_mcp_settings_unset(
     tenant_id = await _seed_system_defaults(db_session)
     router = _create_router(tenant_id, "sess_cli_nomcp_01")
 
-    rt = _build_rt(
+    rt = build_cli_runtime(
         db_session_factory,
-        make_stub_anthropic(router.dispatch),
+        anthropic=make_stub_anthropic(router.dispatch),
+        settings=_FakeSettings(),
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 

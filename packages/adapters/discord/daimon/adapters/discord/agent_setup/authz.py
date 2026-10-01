@@ -16,7 +16,7 @@ the field it writes is part of the agent spec:
   reconciler's spec hash: an admin bypass would leave permanent, silent drift
   against the repo defaults that reconcile never notices.
 
-- Per-agent attachments — the repo binding and the env vars — route through
+- Per-agent attachments — the repo binding and the keys — route through
   `refuse_if_shared_and_not_admin`. Attachments never enter the agent spec, so
   the system-agent absolutism above does not apply to them, and an admin
   binding a repo to the seeded agent is the first-run onboarding step. That
@@ -48,27 +48,30 @@ from __future__ import annotations
 import structlog
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import ADMIN_NOUN, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.stores.scoped_config_read import (
+    is_agent_reachable_in_tenant,
+    is_agent_shared_for_key_changes,
+)
 
 import discord
 
 log = structlog.get_logger()
 
 _SYSTEM_AGENT_MESSAGE = (
-    "This agent ships with the deployment and is managed from the repo defaults. "
-    "Fork it to make an editable copy."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 _REACHABLE_AGENT_MESSAGE = (
-    "This agent is currently the default for this channel or the server, so "
-    "changing its setup needs Manage Server. Fork it to make an editable copy."
+    f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
+    "Ask me and I'll write the request for them."
 )
 _SHARED_AGENT_MESSAGE = (
-    "This agent is shared — it either ships with the deployment or is the "
-    "current default for this channel or the server — so changing its repo or "
-    "environment variables needs Manage Server. Fork it to make an editable "
-    "copy; the fork starts with no environment variables of its own."
+    "This agent answers for other people here, so changing its repo or its keys "
+    f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
+    "to make you a new agent of your own."
 )
 
 
@@ -98,24 +101,36 @@ async def refuse_if_reachable_and_not_admin(
     3. A live guild admin -> allow, without reading the database.
     4. Otherwise, read reachability fresh from the database and refuse when
        the target currently resolves for some channel or the workspace.
+
+    The decision itself is `daimon.core.operation_policy.decide_operation`'s;
+    this function only supplies the facts and renders the outcome.
     """
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    if entry.is_system:
+    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_daimon_managed = entry.is_system
+    reachable = False
+    if needs_reachability_read(
+        "agent_spec_edit", is_admin=is_admin, is_daimon_managed=is_daimon_managed
+    ):
+        tenant_id = await resolve_tenant_for_panel(runtime, interaction)
+        async with runtime.sessionmaker() as session:
+            reachable = await is_agent_reachable_in_tenant(
+                session,
+                tenant_id=tenant_id,
+                agent_name=entry.name,
+                default=runtime.deployment_default,
+            )
+    outcome = decide_operation(
+        "agent_spec_edit",
+        is_admin=is_admin,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+    if outcome == "managed_agent":
         await _send_ephemeral(interaction, _SYSTEM_AGENT_MESSAGE)
         return True
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
-        return False
-    tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    async with runtime.sessionmaker() as session:
-        reachable = await is_agent_reachable_in_tenant(
-            session,
-            tenant_id=tenant_id,
-            agent_name=entry.name,
-            default=runtime.deployment_default,
-        )
-    if reachable:
+    if outcome == "needs_admin":
         await _send_ephemeral(interaction, _REACHABLE_AGENT_MESSAGE)
         return True
     return False
@@ -145,24 +160,37 @@ async def refuse_if_shared_and_not_admin(
     Both refusals carry the same message on purpose: telling the caller which
     limb fired would say nothing they can act on, and either way the fix is the
     same — ask an admin, or fork.
+
+    The decision itself is `daimon.core.operation_policy.decide_operation`'s;
+    this function only supplies the facts and renders the outcome.
     """
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    if is_admin:
         return False
-    if entry.is_system:
-        await _send_ephemeral(interaction, _SHARED_AGENT_MESSAGE)
-        return True
-    tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    async with runtime.sessionmaker() as session:
-        reachable = await is_agent_reachable_in_tenant(
-            session,
-            tenant_id=tenant_id,
-            agent_name=entry.name,
-            default=runtime.deployment_default,
-        )
-    if reachable:
+    is_daimon_managed = entry.is_system
+    reachable = False
+    if needs_reachability_read(
+        "key_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
+    ):
+        tenant_id = await resolve_tenant_for_panel(runtime, interaction)
+        async with runtime.sessionmaker() as session:
+            reachable = await is_agent_shared_for_key_changes(
+                session,
+                tenant_id=tenant_id,
+                agent_names=(entry.name, entry.routing_name),
+                ma_agent_id=entry.ma_agent_id,
+                default=runtime.deployment_default,
+                caller_platform_user_id=str(interaction.user.id),
+            )
+    outcome = decide_operation(
+        "key_replace",
+        is_admin=is_admin,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+    if outcome in ("managed_agent", "needs_admin"):
         await _send_ephemeral(interaction, _SHARED_AGENT_MESSAGE)
         return True
     return False

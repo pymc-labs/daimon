@@ -8,7 +8,10 @@ import pytest
 import pytest_asyncio
 import structlog
 from daimon.testing.db import (  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    db_clean,
     db_engine,
+    db_nullpool_engine,
+    db_schema,
     db_session,
 )
 from daimon.testing.factories import make_tenant
@@ -38,8 +41,9 @@ async def db_session_factory(
     db_session: AsyncSession,  # noqa: F811  # fixture dependency; db_session is imported above for discovery
     request: pytest.FixtureRequest,
 ) -> async_sessionmaker[AsyncSession]:
-    """Session factory bound to the per-test schema, with the `cli:local`
-    tenant pre-seeded.
+    """Session factory bound to `db_session`'s connection, with the `cli:local`
+    tenant pre-seeded (the seed runs after `db_clean` has wiped the worker
+    schema, via the `db_session -> db_clean` dependency chain).
 
     Since 58.4-05 `discover_tenant` is a pure read: it derives the `cli:local`
     tenant id and raises `defaults_missing` when no such row exists — it never

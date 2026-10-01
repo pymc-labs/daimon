@@ -23,9 +23,9 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
-    find_agent_by_daimon_tag,
     find_attach_mount_collision,
     find_skill_by_display_title,
     list_agents_by_tenant,
@@ -42,6 +42,9 @@ from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
+from daimon.core.stores.agent_skill_repo_credentials import (
+    list_skill_repo_credentials_for_repo,
+)
 from daimon.core.stores.domain import RepoProofKind
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -70,7 +73,7 @@ class SkillDetail(BaseModel):
 
 
 class SkillSyncResult(BaseModel):
-    """Outcome of a ``skills_sync`` call, carrying provenance AND attachment state.
+    """Outcome of a ``sync_skills`` call, carrying provenance AND attachment state.
 
     Synced skills land in the tenant-wide skill registry, so the result echoes
     where they came from (``source_url`` / ``branch`` / ``path``) — the model
@@ -86,6 +89,11 @@ class SkillSyncResult(BaseModel):
     The counts stayed permanently lopsided while the tool had no way to
     attach: ``attached_count`` was structurally 0 and the summary could only
     describe the gap it could not close. ``agent_name`` closes it.
+
+    ``attached_count`` is tenant-wide, not per-call: re-importing a skill that
+    some agent already mounts counts it, even with no ``agent_name``. Only
+    ``summary`` distinguishes "this call attached it" from "it was already
+    attached", so do not read the count as this call's effect.
     """
 
     source_url: str
@@ -113,14 +121,33 @@ async def _resolve_sync_token(
     """Resolve a GitHub token for syncing ``url``, or None (anonymous fetch).
 
     The session JWT carries no agent_id claim (SC-4), so the credential is
-    resolved from the URL instead: the caller-tenant's ``agent_repo_binding``
-    rows for this repo → that agent's PAT overlay, and (independently) any
-    recorded proof of access this tenant established for the same repo.
-    Other tenants' bindings for the same repo never resolve a per-agent PAT
-    and never count as this tenant's proof — no cross-tenant credential
-    bleed. Because the loop returns on the first non-``None`` overlay PAT,
-    an agent whose overlay resolves short-circuits the loop — correct, since
-    only one per-agent credential is needed.
+    resolved from the URL instead, over two storage tiers read in order:
+
+    1. ``agent_skill_repo_credentials`` — the caller-tenant's skill-repo
+       enrollments of this exact repo (one per agent, any number of repos
+       per agent) → that agent's PAT overlay, plus the first recorded proof
+       of access among them. This is where enrolling a skill repo writes
+       today, so it is consulted first.
+    2. ``agent_repo_binding`` — the legacy home, where skill enrollment used
+       to record its PAT because there was nowhere else to put it. Read when
+       tier 1 left the PAT or the proof unresolved, and it supplies only the
+       one(s) still missing — the two are resolved independently, so a
+       skill-repo credential carrying a proof but no usable PAT overlay
+       still picks up a legacy binding's PAT (and vice versa) instead of
+       suppressing it. The fallback is load-bearing, not transitional
+       politeness: every tenant enrolled through the old path keeps syncing
+       with zero data migration, and a binding row is still the only record
+       such a tenant has. Removing it silently drops those tenants to
+       anonymous fetches on private repos.
+
+    Either tier resolves the PAT the same way — ``get_pat`` on the row's
+    agent — and reads the proof independently of it. Other tenants' rows for
+    the same repo never resolve a per-agent PAT and never count as this
+    tenant's proof — no cross-tenant credential bleed (tier 1's store query
+    is tenant-scoped; tier 2 filters the install-agnostic result itself).
+    Because each loop stops on the first non-``None`` overlay PAT, an agent
+    whose overlay resolves short-circuits it — correct, since only one
+    per-agent credential is needed.
 
     The full precedence decision (per-agent token -> GitHub App installation
     -> operator fallback -> anonymous) is delegated to
@@ -147,17 +174,18 @@ async def _resolve_sync_token(
         else None
     )
     async with runtime.session_factory() as session:
-        bindings = await get_bindings_for_repo(session, repo_url=url)
-    tenant_bindings = [binding for binding in bindings if binding.tenant_id == auth.tenant_id]
+        credentials = await list_skill_repo_credentials_for_repo(
+            session, tenant_id=auth.tenant_id, repo_url=url
+        )
     proof_kind: RepoProofKind | None = next(
-        (binding.proof_kind for binding in tenant_bindings if binding.proof_kind is not None),
+        (credential.proof_kind for credential in credentials if credential.proof_kind is not None),
         None,
     )
     per_agent_pat: str | None = None
-    for binding in tenant_bindings:
+    for credential in credentials:
         token = await get_pat(
-            principal_id=binding.agent_id,
-            agent_id=binding.agent_id,
+            principal_id=credential.agent_id,
+            agent_id=credential.agent_id,
             sessionmaker=runtime.session_factory,
             fernet=runtime.fernet,
             allow_service_default=False,
@@ -166,6 +194,38 @@ async def _resolve_sync_token(
         if token is not None:
             per_agent_pat = token
             break
+
+    if per_agent_pat is None or proof_kind is None:
+        # Tier 2 — the legacy binding home, filling in only what tier 1 left
+        # unresolved. A tenant that enrolled before the credential table
+        # existed has its PAT and its proof here; one mid-migration may have
+        # each in a different tier, so neither is allowed to suppress the
+        # other.
+        async with runtime.session_factory() as session:
+            bindings = await get_bindings_for_repo(session, repo_url=url)
+        tenant_bindings = [binding for binding in bindings if binding.tenant_id == auth.tenant_id]
+        if proof_kind is None:
+            proof_kind = next(
+                (
+                    binding.proof_kind
+                    for binding in tenant_bindings
+                    if binding.proof_kind is not None
+                ),
+                None,
+            )
+        if per_agent_pat is None:
+            for binding in tenant_bindings:
+                token = await get_pat(
+                    principal_id=binding.agent_id,
+                    agent_id=binding.agent_id,
+                    sessionmaker=runtime.session_factory,
+                    fernet=runtime.fernet,
+                    allow_service_default=False,
+                    fallback_pat=None,
+                )
+                if token is not None:
+                    per_agent_pat = token
+                    break
 
     github_app_id = runtime.settings.github.app_id
     github_app_private_key = runtime.settings.github.app_private_key
@@ -208,6 +268,7 @@ async def _attach_synced_skills(
     *,
     agent_name: str,
     skill_ids: set[str],
+    expected_ma_agent_id: str | None = None,
 ) -> str:
     """Attach ``skill_ids`` to ``agent_name``, returning a one-line outcome.
 
@@ -216,11 +277,12 @@ async def _attach_synced_skills(
     and the caller must report both halves truthfully rather than lose the
     successful import behind an exception.
     """
-    agent = await find_agent_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=agent_name
-    )
-    if agent is None:
-        return f"Could not attach: agent '{agent_name}' not found. The skills are in the registry."
+    try:
+        agent = await resolve_setup_agent(
+            runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+    except ToolError as exc:
+        return f"Could not attach: {exc} The skills are in the registry."
 
     new_skills: list[BetaManagedAgentsSkillParams] = [
         {"type": "custom", "skill_id": skill_id} for skill_id in sorted(skill_ids)
@@ -256,8 +318,14 @@ async def _sync_impl(
     branch: str,
     path: str,
     agent_name: str | None = None,
+    expected_ma_agent_id: str | None = None,
 ) -> SkillSyncResult:
     _require_admin(auth)
+    if agent_name is not None:
+        agent = await resolve_setup_agent(
+            runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+        expected_ma_agent_id = agent.id
     async with httpx.AsyncClient(timeout=30.0) as http:
         token = await _resolve_sync_token(runtime, auth, url, http)
         try:
@@ -288,7 +356,7 @@ async def _sync_impl(
                     f"No GitHub credential was available for {url!r}, and an "
                     "unauthenticated fetch got HTTP 404 — which GitHub returns "
                     "for a private repo as well as a missing one. If this repo "
-                    "is private, call `request_skill_repo_credential` with this "
+                    "is private, call `request_skill_repo_token` with this "
                     "url/branch/path to post a button the user can paste a "
                     "token into; it syncs on submit. If it is public, re-check "
                     "the url and branch."
@@ -305,23 +373,31 @@ async def _sync_impl(
     attach_note = ""
     if agent_name is not None and registry_ids:
         attach_note = " " + await _attach_synced_skills(
-            runtime, auth, agent_name=agent_name, skill_ids=registry_ids
+            runtime,
+            auth,
+            agent_name=agent_name,
+            skill_ids=registry_ids,
+            expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    # Recounted AFTER any attach, so attached_count reflects this call's own
-    # effect rather than the state it observed on the way in.
+    # Recounted AFTER any attach so this call's own attach is included. Note the
+    # count is tenant-wide -- "of what I imported, how much is attached to some
+    # agent" -- so it can be non-zero on an import that attached nothing. The
+    # summary has to say which of the two it is, or the caller reads a re-import
+    # of already-attached skills as an attach it just performed.
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     attached_ids = {skill.skill_id for agent in agents for skill in agent.skills}
     attached = registry_ids & attached_ids
 
-    summary = (
-        f"{len(registry_ids)} skill(s) imported into the workspace's shared skill "
-        f"library; {len(attached)} attached to an agent."
-        + (
-            attach_note
-            or " Importing and attaching are separate steps — pass agent_name to do both."
+    library = f"{len(registry_ids)} skill(s) imported into the workspace's shared skill library"
+    if agent_name is not None:
+        summary = f"{library}; {len(attached)} now attached to an agent." + attach_note
+    else:
+        summary = (
+            f"{library}. This call attached nothing: {len(attached)} of the "
+            f"{len(registry_ids)} are already attached to an agent. Pass agent_name "
+            "to import and attach in one step."
         )
-    )
     return SkillSyncResult(
         source_url=url,
         branch=branch,
@@ -396,40 +472,22 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         branch: str = "main",
         path: str = "",
         agent_name: str | None = None,
+        expected_ma_agent_id: str | None = None,
     ) -> SkillSyncResult:
-        """Import skills from a GitHub repo into this workspace's shared skill library.
+        """Install skills from a GitHub repo into the workspace's shared skill library.
 
-        Discovers SKILL.md files and creates or updates them. This is an IMPORT,
-        not a per-agent change: the library is visible to every agent in the
-        workspace, and importing alone attaches nothing.
+        First use ``list_skills`` and prefer existing skills; import only a repository
+        the user requested. If the skills repo is private, use ``request_skill_repo_token``;
+        ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
 
-        Pass ``agent_name`` to also attach everything imported to that agent —
-        which is almost always what someone means by "add this skill to my
-        agent". Omit it only to stock the library without touching any agent.
-        Existing skills on the agent are preserved; the attach is a union.
-
-        LOCAL-FIRST: before importing an external repo, call ``list_skills`` to
-        see what is already in the library and prefer an existing skill over
-        pulling a near-duplicate. Only import a repo the user explicitly asked for.
-
-        Report where the skills came from — the returned
-        ``source_url``/``branch``/``path`` echo that provenance, and ``summary``
-        states both what was imported and what was attached.
-
-        Before calling, inspect the repo structure to determine the correct ``path``
-        parameter (empty string = repo root). ``branch`` defaults to ``"main"``.
-
-        IF THIS FAILS BECAUSE THE REPO IS PRIVATE AND UNREADABLE, call
-        ``request_repo_binding`` for that repo — do not report the sync as
-        blocked and do not ask the user to paste a token here. This tool
-        deliberately has no token parameter: the credential is supplied
-        out-of-band through a button and modal so it never passes through tool
-        arguments. Once the binding exists, the per-agent tier short-circuits
-        every later sync of that repo with zero GitHub I/O. Credential
-        precedence is documented on ``_resolve_skill_sync_credentials`` above,
-        which delegates to ``resolve_skill_sync_token``; a missing GitHub App
-        installation is NOT a blocker, it is just a later tier."""
-        return await _sync_impl(runtime, await _auth(ctx), url, branch, path, agent_name)
+        Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
+        also attach them, preserving existing skills; omit it only to stock the library.
+        Importing alone attaches nothing. Report returned source, branch, path and
+        summary. Inspect the repo to choose ``path`` (empty means root); ``branch``
+        defaults to main. Importing is admin-only."""
+        return await _sync_impl(
+            runtime, await _auth(ctx), url, branch, path, agent_name, expected_ma_agent_id
+        )
 
     @mcp.tool
     async def list_skills(ctx: Context) -> list[SkillInfo]:  # pyright: ignore[reportUnusedFunction]
@@ -443,39 +501,8 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin"})
     async def delete_skill(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Delete a skill and all its versions."""
-        await _delete_impl(runtime, await _auth(ctx), name)
+        """Delete a skill such as eda from the workspace, destroying all versions for every agent.
 
-    # Back-compat aliases under the old noun-first names. Each delegates to the
-    # same ``_*_impl`` so dispatch is identical; the docstring steers search
-    # toward the canonical verb-first name.
-    @mcp.tool(tags={"admin"})
-    async def skills_sync(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context,
-        url: str,
-        branch: str = "main",
-        path: str = "",
-        agent_name: str | None = None,
-    ) -> SkillSyncResult:
-        """Import skills from a GitHub repo into the shared library (alias of ``sync_skills``).
-
-        Discovers SKILL.md and creates or updates them. Pass ``agent_name`` to
-        also attach them to that agent; importing alone attaches nothing."""
-        return await _sync_impl(runtime, await _auth(ctx), url, branch, path, agent_name)
-
-    @mcp.tool
-    async def skills_list(ctx: Context) -> list[SkillInfo]:  # pyright: ignore[reportUnusedFunction]
-        """List all custom skills (alias of ``list_skills``)."""
-        return await _list_impl(runtime, await _auth(ctx))
-
-    @mcp.tool
-    async def skills_get(ctx: Context, name: str) -> SkillDetail:  # pyright: ignore[reportUnusedFunction]
-        """Look up a skill by name (alias of ``get_skill``).
-
-        Returns detail including version count."""
-        return await _get_impl(runtime, await _auth(ctx), name)
-
-    @mcp.tool(tags={"admin"})
-    async def skills_delete(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Delete a skill and all its versions (alias of ``delete_skill``)."""
+        For detaching one agent's reference, use ``remove_skill`` instead.
+        Deleting the shared skill resource is admin-only."""
         await _delete_impl(runtime, await _auth(ctx), name)

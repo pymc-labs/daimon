@@ -7,42 +7,68 @@ recorder, and on an upstream 404 with a live mapping row, mark-dead + recreate
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import json
+import os
 import re
+import subprocess
+import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import NoReturn
 
 import anthropic
 import httpx
+import pytest
+import structlog
+from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
+    BetaManagedAgentsAgentMessageEvent,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_text_block import BetaManagedAgentsTextBlock
+from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import (
+    BetaManagedAgentsUserMessageEvent,
+)
+from daimon.core._models import ThreadSession
 from daimon.core.config import McpSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import TurnError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.domain import ThreadSessionRow
+from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
+    get_thread_session_by_id,
+)
+from daimon.core.turn import run as run_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.prepare import PreparedTurn, bind_recorder
-from daimon.core.turn.run import _is_dead_session, run_prepared_turn
+from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
+from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
+from daimon.testing.db import build_test_engine
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     MARouter,
     build_fake_anthropic,
+    list_response,
     make_fake_memory_store_handler,
     not_found_response,
     send_events_response,
     sse_response,
 )
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
+from daimon.testing.turn_fakes import RecordingLifecycle
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 from .conftest import make_status_idle
-from .fakes import RecordingLifecycle
 
 from daimon.testing.factories import (  # isort: skip
     make_account,
@@ -51,41 +77,6 @@ from daimon.testing.factories import (  # isort: skip
 )
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
-
-
-def _agent(*, agent_id: str, tenant_id: uuid.UUID, name: str = "daimon") -> BetaManagedAgentsAgent:
-    now = datetime.now(UTC)
-    return BetaManagedAgentsAgent(
-        id=agent_id,
-        type="agent",
-        name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at=now,
-        updated_at=now,
-        archived_at=None,
-    )
-
-
-def _env(*, env_id: str, tenant_id: uuid.UUID, name: str = "default") -> BetaEnvironment:
-    now_iso = datetime.now(UTC).isoformat()
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=name,
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=None,
-    )
 
 
 def _admission(
@@ -136,10 +127,10 @@ def _prepared_turn(
     mapping_id=None negative case bind_session never actually produces."""
     record = bind_recorder(
         deps,
-        admission,
         tenant_id=tenant_id,
         external_user_id=external_user_id,
         ma_session_id=ma_session_id,
+        model_id=admission.agent.model.id,
     )
     return PreparedTurn(
         admission=admission,
@@ -156,11 +147,28 @@ def _router(
     *,
     session_bodies: list[dict[str, object]],
     dead_session_ids: set[str],
+    sent_batches: list[tuple[str, list[dict[str, object]]]] | None = None,
+    archived_session_ids: set[str] | None = None,
+    events_by_session: dict[str, list[dict[str, object]]] | None = None,
+    created_model: str = "claude-sonnet-4-6",
 ) -> MARouter:
     """A router serving memory-store cold-provision, session-create (each
-    call assigns the next `sess_N` id), events.send, and events.stream --
-    returning a 404 not_found for any session id in `dead_session_ids`, else
-    one terminal `session.status_idle` (end_turn) event."""
+    call assigns the next `sess_N` id), events.send, events.list and
+    events.stream -- returning a 404 not_found for any session id in
+    `dead_session_ids`, else one terminal `session.status_idle` (end_turn)
+    event.
+
+    `archived_session_ids` is the OTHER dead-session signature: the stream
+    opens, and `events.send` answers with MA's archived-session 400. That is
+    the signature whose event log is still readable (capability matrix
+    P9.d/P9.c), which `events_by_session` supplies -- a session absent from
+    that mapping 404s on `events.list`, exactly as a deleted one does.
+
+    `created_model` is the model every session created through this router
+    freezes; it decides whether the replacement can be sent a
+    `system.message` at all."""
+    archived = archived_session_ids or set()
+    listable_events = events_by_session or {}
     router = MARouter()
     memory_handler = make_fake_memory_store_handler()
 
@@ -181,7 +189,7 @@ def _router(
                 "agent": {
                     "id": body["agent"],
                     "mcp_servers": [],
-                    "model": {"id": "claude-sonnet-4-6"},
+                    "model": {"id": created_model},
                     "name": "daimon",
                     "skills": [],
                     "tools": [],
@@ -203,10 +211,32 @@ def _router(
 
     router.add("POST", r"/v1/sessions", _session_create)
 
-    def _send(_request: httpx.Request, _match: object) -> httpx.Response:
+    def _send(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        sid = match.group("sid")
+        if sid in archived:
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": f"Cannot send events to archived session: {sid}",
+                    },
+                },
+            )
+        if sent_batches is not None:
+            sent_batches.append((sid, json.loads(request.content)["events"]))
         return send_events_response()
 
-    router.add("POST", r"/v1/sessions/[^/]+/events", _send)
+    router.add("POST", r"/v1/sessions/(?P<sid>[^/]+)/events", _send)
+
+    def _events_list(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        sid = match.group("sid")
+        if sid not in listable_events:
+            return not_found_response("session gone")
+        return list_response(listable_events[sid])
+
+    router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events", _events_list)
 
     def _stream(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         sid = match.group("sid")
@@ -228,6 +258,45 @@ def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
     return RecordingLifecycle()
 
 
+class _AlwaysRaisingRenderLifecycle:
+    """`on_render` always raises; every other hook forwards to an inner
+    `RecordingLifecycle` so terminal-hook firing is still observable.
+
+    Used to prove the driver's per-tick render error policy composes
+    cleanly with D-08 recovery: a render failure inside the recovery
+    turn's own render loop must not derail `run_prepared_turn`'s outcome
+    -- `on_render`'s exceptions are swallowed inside `run_turn`'s render
+    loop itself, long before `run_prepared_turn`'s own error handling
+    could ever see them.
+    """
+
+    def __init__(self) -> None:
+        self.inner = RecordingLifecycle()
+        self.render_calls = 0
+
+    async def on_render(self, state: TurnState) -> None:
+        self.render_calls += 1
+        raise RuntimeError("adapter render boom")
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        await self.inner.on_terminal_success(state)
+
+    async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        await self.inner.on_terminal_failure(state, err)
+
+    async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
+        await self.inner.on_sse_event(event)
+
+    async def on_reconnect(self, reason: ReconnectReason) -> None:
+        await self.inner.on_reconnect(reason)
+
+    async def on_rate_limited(self, until: datetime | None) -> None:
+        await self.inner.on_rate_limited(until)
+
+    async def on_interrupt_sent(self, source: InterruptSource) -> None:
+        await self.inner.on_interrupt_sent(source)
+
+
 async def test_happy_path_runs_once_and_returns_recovered_false(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -247,8 +316,8 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     session_bodies: list[dict[str, object]] = []
     router = _router(session_bodies=session_bodies, dead_session_ids=set())
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -279,7 +348,75 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert outcome.ma_session_id == "sess_1", "must report the original session id"
     assert outcome.mapping_id == row.id, "must report the original mapping id"
     assert outcome.state.error is None, "a clean idle-end-turn run has no error"
+    assert outcome.termination is TerminationReason.COMPLETED
     assert len(session_bodies) == 0, "no create_session call on the happy path"
+
+
+async def test_a_dead_session_replacement_is_sealed_when_its_seal_cannot_be_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The recovery replays what it can of the dead session's log; with the
+    dead session's own seal unreadable, the successor is sealed to its thread."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-2",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_old",
+        lambda _r, _m: httpx.Response(
+            404, json={"type": "error", "error": {"type": "not_found_error", "message": "gone"}}
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="chan-2",
+        origin_thread_id="thread-2",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-2",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True
+    metadata = session_bodies[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata.get("daimon_sealed") == "thread-2"
 
 
 async def test_dead_session_recovers_once_and_rebinds_recorder(
@@ -301,8 +438,8 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     session_bodies: list[dict[str, object]] = []
     router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -329,6 +466,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
         render_interval_s=0.001,
     )
 
+    assert outcome.termination is TerminationReason.COMPLETED, "the recovered run is what ended"
     assert outcome.recovered is True, "a dead-session signature must trigger exactly one recovery"
     assert outcome.ma_session_id != "sess_old", "the final session id must be the new one"
     assert outcome.mapping_id != row.id, "the final mapping id must be the new row"
@@ -357,6 +495,77 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     assert len(rows) == 0, "no span.model_request_end event fired during either run"
 
 
+async def test_render_failure_during_recovery_does_not_prevent_recovery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Plan 19-06's per-tick render error policy composes cleanly with D-08
+    recovery. Note on scoping: the doomed FIRST attempt in this scenario
+    404s directly at stream-open (see `_router`'s `dead_session_ids`
+    handling), so it never calls `on_render` at all -- there is nothing
+    for `_DeferredFailureLifecycle` to hold back. The render failure this
+    test exercises is inside the RECOVERY turn's own render loop instead,
+    reached via the `recovery_lifecycle` factory `run_prepared_turn` calls
+    once recovery starts.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-render-fail",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    recovery_lc = _AlwaysRaisingRenderLifecycle()
+
+    def _raising_recovery_lifecycle(_cancel: asyncio.Event) -> TurnLifecycle:
+        return recovery_lc
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-render-fail",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_raising_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True, (
+        "a render failure inside the recovery turn's own render loop must "
+        "not prevent run_prepared_turn from reporting a successful recovery"
+    )
+    assert outcome.state.error is None, "the recovered re-run completes cleanly"
+    assert recovery_lc.render_calls >= 1, "on_render must have been attempted (and failed)"
+    assert len(recovery_lc.inner.terminal_success) == 1, (
+        "terminal hooks must still fire despite every render attempt failing"
+    )
+
+
 async def test_dead_session_recorder_rebind_targets_new_session_id(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -366,9 +575,6 @@ async def test_dead_session_recorder_rebind_targets_new_session_id(
     event through the recovered run and reading the row back."""
     from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
         BetaManagedAgentsSpanModelRequestEndEvent,
-    )
-    from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-        BetaManagedAgentsSpanModelUsage,
     )
 
     tenant = await make_tenant(db_session)
@@ -441,12 +647,7 @@ async def test_dead_session_recorder_rebind_targets_new_session_id(
                 id="evt_span",
                 is_error=False,
                 model_request_start_id="start_1",
-                model_usage=BetaManagedAgentsSpanModelUsage(
-                    input_tokens=10,
-                    output_tokens=20,
-                    cache_creation_input_tokens=0,
-                    cache_read_input_tokens=0,
-                ),
+                model_usage=ma_model_usage(input_tokens=10, output_tokens=20),
                 processed_at=datetime.now(UTC),
                 type="span.model_request_end",
             )
@@ -458,8 +659,8 @@ async def test_dead_session_recorder_rebind_targets_new_session_id(
 
     router = _router_with_usage_event({"sess_old"})
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -498,6 +699,153 @@ async def test_dead_session_recorder_rebind_targets_new_session_id(
     )
 
 
+async def test_recovery_rebinds_the_recorder_to_the_recreated_sessions_model(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The replacement session freezes its own agent snapshot, which need not
+    be the model the dead session ran — so the rebound recorder must bill what
+    `sessions.create` returned, not what the admission asked for."""
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+        BetaManagedAgentsSpanModelRequestEndEvent,
+    )
+    from daimon.core.stores import tenant_ledger
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-model",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = MARouter()
+    memory_handler = make_fake_memory_store_handler()
+
+    def _memory(request: httpx.Request, _match: object) -> httpx.Response:
+        return memory_handler(request)
+
+    router.add("POST", r"/v1/memory_stores", _memory)
+
+    def _session_create(request: httpx.Request, _match: object) -> httpx.Response:
+        body = json.loads(request.content)
+        session_bodies.append(body)
+        # MA reports the model the NEW session froze — opus, while the
+        # admission below is still carrying sonnet.
+        return httpx.Response(
+            200,
+            json={
+                "id": "sess_new",
+                "type": "session",
+                "agent": {
+                    "id": body["agent"],
+                    "mcp_servers": [],
+                    "model": {"id": "claude-opus-5"},
+                    "name": "daimon",
+                    "skills": [],
+                    "tools": [],
+                    "type": "agent",
+                    "version": 2,
+                },
+                "created_at": "2026-07-28T00:00:00Z",
+                "outcome_evaluations": [],
+                "environment_id": body["environment_id"],
+                "metadata": {},
+                "resources": [],
+                "stats": {},
+                "status": "idle",
+                "updated_at": "2026-07-28T00:00:00Z",
+                "usage": {},
+                "vault_ids": [],
+            },
+        )
+
+    router.add("POST", r"/v1/sessions", _session_create)
+
+    def _send(_request: httpx.Request, _match: object) -> httpx.Response:
+        return send_events_response()
+
+    router.add("POST", r"/v1/sessions/[^/]+/events", _send)
+
+    def _stream(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        if match.group("sid") == "sess_old":
+            return not_found_response("session gone")
+        usage_evt = BetaManagedAgentsSpanModelRequestEndEvent(
+            id="evt_span",
+            is_error=False,
+            model_request_start_id="start_1",
+            model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+            processed_at=datetime.now(UTC),
+            type="span.model_request_end",
+        )
+        idle = make_status_idle(event_id="evt_idle")
+        return sse_response([usage_evt.model_dump(mode="json"), idle.model_dump(mode="json")])
+
+    router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events/stream", _stream)
+
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    assert admission.agent.model.id == "claude-sonnet-4-6", (
+        "the admission must differ from the recreated session's model for this test to bite"
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-recovery-model",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True, "the dead session must be recovered exactly once"
+    async with db_session_factory() as s:
+        rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+        entries = await tenant_ledger.list_for_tenant(s, tenant_id=tenant.id)
+    assert [usage.model for usage in rows] == ["claude-opus-5"], (
+        "the rebound recorder must bill the recreated session's model, not the admission's"
+    )
+    assert [entry.delta_usd for entry in entries if entry.reason == "turn_debit"] == [
+        Decimal("-5.000000")
+    ], "1M input tokens must be debited at the recreated session's opus rate"
+
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-model",
+            account_id=account.id,
+        )
+    assert live is not None, "recovery must leave a live mapping row"
+    assert live.effective_config is not None, "the replacement row must record its configuration"
+    assert live.effective_config.model_id == "claude-opus-5", (
+        "the replacement row's snapshot must be the model the new session froze"
+    )
+
+
 async def test_dead_session_without_mapping_id_does_not_recover(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -509,8 +857,8 @@ async def test_dead_session_without_mapping_id_does_not_recover(
     session_bodies: list[dict[str, object]] = []
     router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -576,8 +924,8 @@ async def test_non_404_upstream_error_does_not_recover(
     router.add("POST", r"/v1/sessions", _explode)
 
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -675,6 +1023,11 @@ async def test_second_consecutive_dead_session_does_not_loop(
 
     router.add("POST", r"/v1/sessions/[^/]+/events", _send)
 
+    def _events_gone(_request: httpx.Request, _match: object) -> httpx.Response:
+        return not_found_response("session gone")  # deleted: its log went with it
+
+    router.add("GET", r"/v1/sessions/[^/]+/events", _events_gone)
+
     def _stream(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         sid = match.group("sid")
         stream_calls.append(sid)
@@ -683,8 +1036,8 @@ async def test_second_consecutive_dead_session_does_not_loop(
     router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events/stream", _stream)
 
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -790,8 +1143,8 @@ async def test_recovered_turn_never_shows_the_user_a_failure(
 
     router = _router(session_bodies=[], dead_session_ids={"sess_old"})
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -826,6 +1179,67 @@ async def test_recovered_turn_never_shows_the_user_a_failure(
     )
 
 
+async def test_a_failed_recovery_tells_the_caller_recovery_failed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When replacing the dead session raises, the held failure is replayed as
+    `recovery_failed`, not the first attempt's upstream error: that one would
+    tell the person their workspace was kept."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-fails",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    async def _replacement_fails(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("replacement failed")
+
+    monkeypatch.setattr(run_module, "_replace_dead_session", _replacement_fails)
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=env),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    caller_lifecycle = RecordingLifecycle()
+
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-fails",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=caller_lifecycle,
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert len(caller_lifecycle.terminal_failures) == 1
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_FAILED
+    )
+
+
 async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -854,8 +1268,8 @@ async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events/stream", _400)
 
     deps = _deps(sessionmaker=db_session_factory, router=router)
-    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
-    env = _env(env_id="env_1", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
     prepared = _prepared_turn(
         deps=deps,
@@ -887,3 +1301,1586 @@ async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     assert len(caller_lifecycle.terminal_failures) == 1, (
         "a turn that is not recovered must still deliver its failure exactly once"
     )
+
+
+async def test_ceiling_breach_on_first_attempt_returns_ceiling_error_and_marks_mapping_dead(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-first",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    caller_lifecycle = RecordingLifecycle()
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-first",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=past_deadline,
+    )
+
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "ceiling"
+    assert outcome.recovered is False, "a first-attempt breach never entered recovery"
+    assert outcome.termination is TerminationReason.CEILING
+    assert caller_lifecycle.terminal_failures[0][0].termination is TerminationReason.CEILING
+    assert outcome.mapping_id == row.id, "must report the originally prepared mapping id"
+    assert outcome.ma_session_id == "sess_1"
+    assert len(session_bodies) == 0, "a first-attempt breach must never call create_session"
+    assert len(caller_lifecycle.terminal_failures) == 1, (
+        "on_terminal_failure must be delivered exactly once on the caller's own lifecycle"
+    )
+    assert caller_lifecycle.terminal_failures[0][1].kind == "ceiling"  # type: ignore[attr-defined]
+
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-first",
+            account_id=account.id,
+        )
+    assert live is None, "a ceiling breach must mark the mapping dead (no longer live)"
+
+
+async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the_old_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """First attempt returns a dead-session 404, so recovery recreates a new
+    session/mapping; the ceiling then breaches inside the recovery run_turn
+    call itself. The NEW mapping must be marked dead, not the stale one the
+    ordinary recovery cycle already marked dead on its own."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+
+    # The first attempt's 404 and the recreate are cheap in-process/DB calls;
+    # the SECOND run_turn call's stream open is the one deliberately slowed
+    # down (real asyncio.sleep, not a past deadline) so the ceiling breaches
+    # specifically inside the recovery attempt rather than the first one.
+    # create_fresh_session always allocates the router's next sequential id,
+    # and this is the router's only create_session call in this test, so the
+    # recreated session id is deterministically "sess_1".
+    async def _slow_stream_for_recovered_session(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/sess_1/events/stream":
+            await asyncio.Event().wait()  # never opens: only the ceiling can end it
+        return router.dispatch(request)
+
+    transport = httpx.MockTransport(_slow_stream_for_recovered_session)
+    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=anthropic.AsyncAnthropic(api_key="test", http_client=http_client),
+    )
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    # Ten times the slowest observed first attempt + recovery setup (~0.18 s):
+    # the ceiling must land on the recovered stream, never inside setup.
+    deadline = datetime.now(UTC) + timedelta(seconds=2.0)
+
+    caller_lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-recovery",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=deadline,
+    )
+
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "ceiling"
+    assert len(session_bodies) == 1, "recovery must still have created exactly one new session"
+    assert outcome.mapping_id != row.id, "the reported mapping id must be the NEW one"
+    assert outcome.ma_session_id != "sess_old", "the reported session id must be the NEW one"
+
+    async with db_session_factory() as s:
+        old_live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-recovery",
+            account_id=account.id,
+        )
+    assert old_live is None, (
+        "the NEW mapping must be marked dead too (get_live_thread_session excludes both)"
+    )
+
+
+async def test_ceiling_breach_never_triggers_dead_session_recovery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """D-10 / T-19-03-B pin: a ceiling breach must never be mistaken for a
+    dead-session (404) signal, which would re-run a 45-minute turn as a fresh
+    one -- create_fresh_session must be called zero times on a first-attempt
+    ceiling breach."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-no-loop",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-no-loop",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=past_deadline,
+    )
+
+    assert outcome.recovered is False
+    assert len(session_bodies) == 0, "a ceiling error must never trigger create_fresh_session"
+
+
+async def test_run_prepared_turn_default_deadline_none_still_succeeds_on_the_happy_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression pin: deadline=None must not change happy-path behavior."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-default-none",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-default-none",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is False
+    assert outcome.state.error is None
+    assert outcome.ma_session_id == "sess_1"
+    assert outcome.mapping_id == row.id
+
+
+# --- D-07: cancel coverage over the dead-session recovery cycle (19-05) ----
+#
+# Both tests below monkeypatch `daimon.core.turn.run.run_turn` itself rather
+# than racing a real driver call against a real cancel signal. The driver's
+# OWN cancel race (stream-open, send-initial, consume loop) is already
+# pinned by test_driver_cancel.py -- what's under test here is
+# run_prepared_turn's OWN orchestration: does it abort recovery when cancel
+# is already set, and does the mirror task actually forward a late cancel
+# into the recovery turn's own event. Faking `run_turn` isolates that from
+# the driver's internal race timing, which would otherwise make the exact
+# moment cancel becomes visible to the FIRST attempt's own stream-open race
+# nondeterministic (see 19-05-PLAN.md's Task 1 for that race's mechanics).
+
+
+def _leaked_turn_task_names() -> list[str]:
+    return [
+        t.get_name()
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("turn.") and not t.done()
+    ]
+
+
+async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_held_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-07(a): a cancel already signalled by the time the dead-session
+    signature is observed must abort recovery -- no create_fresh_session
+    call, no second run_turn -- and still deliver the withheld first-attempt
+    failure to the caller's lifecycle exactly once."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-cancel-before-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    cancel = asyncio.Event()
+    dead_session_cause = _api_status_error(404, "not found")
+    call_count = 0
+
+    async def _fake_run_turn(
+        *,
+        anthropic: object,
+        session_id: str,
+        user_message: str,
+        lifecycle: TurnLifecycle,
+        cancel: asyncio.Event,
+        render_interval_s: object,
+        billing: object,
+        image_blocks: object,
+        system_blocks: object = (),
+        tool_confirmation: object = None,
+    ) -> TurnState:
+        nonlocal call_count
+        call_count += 1
+        err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)
+        state = TurnState(error=err)
+        await lifecycle.on_terminal_failure(state, err)
+        # Cancel arrives right as the first attempt observes the
+        # dead-session signature -- strictly before run_prepared_turn's own
+        # recovery-abort check runs.
+        cancel.set()
+        return state
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+
+    caller_lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-cancel-before-recovery",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=cancel,
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert call_count == 1, "recovery must never call run_turn a second time"
+    assert outcome.recovered is False, (
+        "an already-cancelled dead-session signature must not recover"
+    )
+    assert len(session_bodies) == 0, "no create_fresh_session call when cancel already fired"
+    assert outcome.ma_session_id == "sess_old", "must report the original (unrecovered) session id"
+    assert outcome.mapping_id == row.id, "must report the original (unrecovered) mapping id"
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "upstream", (
+        "the withheld dead-session failure is returned as-is"
+    )
+    assert len(caller_lifecycle.terminal_failures) == 1, (
+        "the withheld first-attempt failure must still be delivered exactly once"
+    )
+    assert outcome.termination is TerminationReason.RECOVERY_CANCELLED
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_CANCELLED
+    ), "the caller's hook and the outcome must agree on how the turn ended"
+
+
+async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interrupts_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-07(b): a cancel set on the ORIGINAL event while the recovery turn is
+    in flight must still interrupt the recovery turn -- proving the
+    `turn.cancel_mirror` task forwards it into `fresh_cancel`, the event the
+    RECOVERY run_turn call actually owns (not the original `cancel`)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-cancel-during-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    dead_session_cause = _api_status_error(404, "not found")
+    call_count = 0
+
+    async def _fake_run_turn(
+        *,
+        anthropic: object,
+        session_id: str,
+        user_message: str,
+        lifecycle: TurnLifecycle,
+        cancel: asyncio.Event,
+        render_interval_s: object,
+        billing: object,
+        image_blocks: object,
+        system_blocks: object = (),
+        tool_confirmation: object = None,
+    ) -> TurnState:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)
+            state = TurnState(error=err)
+            await lifecycle.on_terminal_failure(state, err)
+            return state
+        # Recovery attempt: this `cancel` kwarg IS `fresh_cancel` (the event
+        # run_prepared_turn built for the recovery turn) -- block until it
+        # fires, proving the mirror is what unblocks it, since the ORIGINAL
+        # event is never passed to this call directly.
+        await cancel.wait()
+        return TurnState(error=TurnError(kind="interrupted", message="interrupted during recovery"))
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+
+    original_cancel = asyncio.Event()
+
+    async def _cancel_soon() -> None:
+        await asyncio.sleep(0.02)
+        original_cancel.set()
+
+    caller_lifecycle = RecordingLifecycle()
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_cancel_soon())
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-cancel-during-recovery",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=caller_lifecycle,
+            cancel=original_cancel,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert call_count == 2, "the recovery must have actually run a second attempt"
+    assert outcome.recovered is True
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "interrupted", "the mirror must have forwarded the cancel"
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    assert _leaked_turn_task_names() == [], (
+        "no turn.cancel_mirror task may linger after the call returns"
+    )
+
+
+async def test_recovery_happy_path_unaffected_by_the_cancel_mirror_and_leaks_no_task(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: an ordinary recovery (cancel never set) still recreates
+    the session, rebinds the recorder, and returns recovered=True -- adding
+    the mirror task must not change happy-path behavior or leak a task."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-happy-path-mirror",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-recovery-happy-path-mirror",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True
+    assert outcome.ma_session_id != "sess_old"
+    assert outcome.state.error is None
+    assert len(session_bodies) == 1
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    assert _leaked_turn_task_names() == [], (
+        "no turn.cancel_mirror task may linger after a clean recovery"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A replacement session's first turn: the framing it cannot answer without
+# ---------------------------------------------------------------------------
+
+
+def _replacement_continuity() -> ContinuityOutcome:
+    """What the bind hands over after it replaced this caller's session."""
+    return ContinuityOutcome(
+        state="replaced",
+        transfer_kind="full",
+        user_prefix='<previous_session from="analysis-bot" trust="untrusted">\n'
+        '<turn role="user">fit the hierarchical model</turn>\n</previous_session>',
+        system_blocks=(
+            {"type": "text", "text": "This conversation continues work started elsewhere."},
+        ),
+    )
+
+
+async def test_a_replacement_sends_its_framing_with_the_first_user_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The successor has no conversation and no files of its own, so the first
+    send carries both channels: the quoted prior conversation in front of the
+    user message, and daimon's own words as a trailing system.message."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-framing",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    continuity = _replacement_continuity()
+    prepared = dataclasses.replace(
+        _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_1",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        ),
+        continuity=continuity,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-framing",
+        external_user_id="user-1",
+        user_message="carry on please",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.state.error is None
+    assert len(sent) == 1, "one turn, one send"
+    session_id, batch = sent[0]
+    assert session_id == "sess_1"
+    assert [event["type"] for event in batch] == ["user.message", "system.message"], (
+        "the API takes at most one system.message and it must come last"
+    )
+    text = "".join(
+        block["text"]
+        for block in batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == f"{continuity.user_prefix}\ncarry on please", (
+        "the prior conversation goes in front of the message the person actually sent"
+    )
+    assert batch[1]["content"] == list(continuity.system_blocks), (
+        "daimon's own framing rides the privileged channel verbatim"
+    )
+    assert outcome.continuity == continuity, "the adapter is told what the bind decided"
+
+
+async def test_an_ordinary_turn_sends_exactly_the_user_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The default continuity is every turn that changed nothing. Those must
+    send byte-identical bytes to before continuity existed."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-plain",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-plain",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    _, batch = sent[0]
+    assert [event["type"] for event in batch] == ["user.message"], (
+        "no framing means no system.message"
+    )
+    text = "".join(
+        block["text"]
+        for block in batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == "hello", "an ordinary turn sends the message and nothing else"
+    assert outcome.continuity.state == "continued"
+
+
+async def test_recovery_reports_a_replacement_after_loss_and_keeps_the_framing_prefix(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When the bound session is gone, the successor the recovery cycle builds
+    mounts nothing: the workspace was lost, not handed over. The state says so
+    (so the copy stays honest), while the quoted conversation -- the one thing
+    that still crosses -- stays in front of the reseeded message."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-loss",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"}, sent_batches=sent)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    continuity = _replacement_continuity()
+    prepared = dataclasses.replace(
+        _prepared_turn(
+            deps=deps,
+            admission=_admission(
+                account_id=account.id,
+                agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+                env=ma_environment(id="env_1", tenant_id=tenant.id),
+            ),
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        ),
+        continuity=continuity,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-loss",
+        external_user_id="user-1",
+        user_message="carry on please",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True
+    assert outcome.continuity.state == "replaced_after_loss", (
+        "the session was lost, so the copy must not claim a planned replacement"
+    )
+    assert outcome.continuity.transfer_kind == "history", (
+        "a deleted session's log is gone too (P9.e), so nothing but the thread crossed"
+    )
+    assert continuity.user_prefix not in outcome.continuity.user_prefix, (
+        "the bind's framing described the workspace that just died; it is not restated"
+    )
+
+    recovery_session, recovery_batch = sent[-1]
+    assert recovery_session == outcome.ma_session_id
+    assert [event["type"] for event in recovery_batch] == ["user.message"], (
+        "sonnet-4-6 rejects a system.message, so the framing travels in the message"
+    )
+    text = "".join(
+        block["text"]
+        for block in recovery_batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == f"{outcome.continuity.user_prefix}\nfull history reseed", (
+        "the loss framing leads the reseeded message"
+    )
+    assert text.startswith("The workspace this conversation was running in was lost"), (
+        "and it is this loss's framing, not the overtaken bind's"
+    )
+    assert "<previous_session" not in text, "there was no readable log to quote"
+
+
+def _archived_session_log() -> list[dict[str, object]]:
+    """The lost session's event log, still listable because MA archived it
+    rather than deleting it (capability matrix P9.d)."""
+    return [
+        BetaManagedAgentsUserMessageEvent(
+            id="sevt_user_1",
+            type="user.message",
+            content=[BetaManagedAgentsTextBlock(type="text", text="remember MARKER-K7VD22")],
+            processed_at=None,
+        ).model_dump(mode="json"),
+        BetaManagedAgentsAgentMessageEvent(
+            id="sevt_agent_1",
+            type="agent.message",
+            content=[BetaManagedAgentsTextBlock(type="text", text="Noted: MARKER-K7VD22")],
+            processed_at=_NOW,
+        ).model_dump(mode="json"),
+    ]
+
+
+async def _recover_from_archived_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    thread_id: str,
+    created_model: str,
+    events_by_session: dict[str, list[dict[str, object]]],
+) -> tuple[RunOutcome, list[tuple[str, list[dict[str, object]]]], ThreadSessionRow]:
+    """Drive one recovery whose dead-session signal is MA's archived-400."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id=thread_id,
+        ma_session_id="sess_archived",
+    )
+    await db_session.commit()
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        sent_batches=sent,
+        archived_session_ids={"sess_archived"},
+        events_by_session=events_by_session,
+        created_model=created_model,
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_archived",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=thread_id,
+        external_user_id="user-1",
+        user_message="what was the marker?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+    return outcome, sent, row
+
+
+async def test_recovery_quotes_the_archived_sessions_transcript_to_the_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Observed on staging: a session archived out from under a live thread
+    healed silently, and the replacement was handed the platform history and
+    nothing else -- it answered correctly only because the marker happened to
+    be visible in the Discord thread. An archived session's event log is still
+    listable, so the conversation can cross, quoted and untrusted, and the
+    replacement can be told what it lost."""
+    outcome, sent, _row = await _recover_from_archived_session(
+        db_session,
+        db_session_factory,
+        thread_id="thread-archived-transcript",
+        created_model="claude-sonnet-5",
+        events_by_session={"sess_archived": _archived_session_log()},
+    )
+
+    assert outcome.recovered is True
+    assert outcome.continuity.state == "replaced_after_loss", (
+        "the workspace was lost, not handed over"
+    )
+    assert outcome.continuity.transfer_kind == "transcript", (
+        "the conversation crossed and the files did not -- the middle rung, not the bottom one"
+    )
+
+    _, recovery_batch = sent[-1]
+    assert [event["type"] for event in recovery_batch] == ["user.message", "system.message"], (
+        "daimon's own words about the loss ride the privileged channel on a model that takes one"
+    )
+    text = "".join(
+        block["text"]
+        for block in recovery_batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert "<previous_session" in text, "the quoted conversation leads the reseeded message"
+    assert "MARKER-K7VD22" in text, "including the exchange the person is about to ask about"
+    assert text.endswith("\nfull history reseed"), "and the reseeded message follows it"
+
+    system_text = "".join(
+        block["text"]
+        for block in recovery_batch[1]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert "was lost" in system_text, "the replacement is told what happened"
+    assert "say plainly what is missing" in system_text, "and told to say so before continuing"
+    assert "MARKER-K7VD22" not in system_text, (
+        "quoted material never reaches the privileged channel"
+    )
+
+
+async def test_recovery_puts_the_loss_framing_in_the_message_without_system_support(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """haiku rejects a request carrying a `system.message`, so the framing has
+    to degrade onto the ordinary channel rather than fail the recovered turn."""
+    outcome, sent, _row = await _recover_from_archived_session(
+        db_session,
+        db_session_factory,
+        thread_id="thread-archived-haiku",
+        created_model="claude-haiku-4-5",
+        events_by_session={"sess_archived": _archived_session_log()},
+    )
+
+    assert outcome.continuity.transfer_kind == "transcript"
+    _, recovery_batch = sent[-1]
+    assert [event["type"] for event in recovery_batch] == ["user.message"], (
+        "a system.message would 400 the whole recovered turn on this model"
+    )
+    text = "".join(
+        block["text"]
+        for block in recovery_batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text.startswith("The workspace this conversation was running in was lost"), (
+        "the framing still reaches the model, just on the ordinary channel"
+    )
+    assert "<previous_session" in text, "with the quoted conversation after it"
+
+
+async def test_recovery_falls_back_to_history_when_the_log_cannot_be_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bottom rung: nothing readable is left of the old session, so the
+    platform-history reseed is all the replacement gets -- and the copy says
+    `history`, never `transcript`."""
+    outcome, sent, _row = await _recover_from_archived_session(
+        db_session,
+        db_session_factory,
+        thread_id="thread-archived-gone",
+        created_model="claude-sonnet-5",
+        events_by_session={},
+    )
+
+    assert outcome.recovered is True
+    assert outcome.continuity.transfer_kind == "history", (
+        "an unreadable log is a worse gap than a quoted one and must not be described as one"
+    )
+    _, recovery_batch = sent[-1]
+    text = "".join(
+        block["text"]
+        for block in recovery_batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == "full history reseed", (
+        "with a system.message available, the reseeded message carries no prefix at all"
+    )
+    system_text = "".join(
+        block["text"]
+        for block in recovery_batch[1]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert "The previous session's log could not be read either" in system_text
+
+
+async def test_recovery_records_the_dead_session_as_the_replacements_predecessor(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Observed on staging: after an unexpected loss the two rows for the
+    thread sat side by side with no link between them — `predecessor_id=None`,
+    `replaced_by_id=None`, `transfer_kind=None` — so nothing downstream could
+    tell the successor apart from a first session, or say how much of the old
+    one reached it. A loss is a replacement too, and the chain must say so."""
+    outcome, _sent, dead_row = await _recover_from_archived_session(
+        db_session,
+        db_session_factory,
+        thread_id="thread-loss-lineage",
+        created_model="claude-sonnet-5",
+        events_by_session={"sess_archived": _archived_session_log()},
+    )
+
+    assert outcome.recovered is True
+    assert outcome.mapping_id is not None
+
+    async with db_session_factory() as s:
+        successor = await get_thread_session_by_id(s, id=outcome.mapping_id)
+        dead = await get_thread_session_by_id(s, id=dead_row.id)
+
+    assert successor is not None
+    assert successor.predecessor_id == dead_row.id, (
+        "the successor must point back at the session it was created to replace"
+    )
+    assert successor.transfer_kind == "transcript", (
+        "the row records the rung the successor actually came in on"
+    )
+    assert successor.transfer_file_id is None, "no bundle crosses an unexpected loss"
+    assert dead is not None
+    assert dead.replaced_by_id == outcome.mapping_id, "and the chain closes from the other end"
+    assert dead.status == "dead", (
+        "the old row still says the session was lost, not deliberately superseded"
+    )
+
+
+async def test_recovery_records_the_history_rung_when_the_old_log_is_unreadable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The successor's row must not claim a transcript crossed when none did."""
+    outcome, _sent, dead_row = await _recover_from_archived_session(
+        db_session,
+        db_session_factory,
+        thread_id="thread-loss-lineage-history",
+        created_model="claude-sonnet-5",
+        events_by_session={},
+    )
+
+    assert outcome.mapping_id is not None
+    async with db_session_factory() as s:
+        successor = await get_thread_session_by_id(s, id=outcome.mapping_id)
+
+    assert successor is not None
+    assert successor.predecessor_id == dead_row.id
+    assert successor.transfer_kind == "history", (
+        "an unreadable log is the bottom rung and the row must say so"
+    )
+
+
+async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
+    db_session: AsyncSession,
+    db_schema: str,
+) -> None:
+    """Two turns bound to one mapping (a Discord wizard submit does not queue
+    behind a mention) both see its session die and both recover. Each used to
+    mark the row dead and create its own replacement outside the bind lock,
+    leaving two live rows for one (tenant, platform, thread, account): one MA
+    session orphaned, and reads silently picking the newer one. Separate
+    engines, because the per-thread advisory lock is connection-scoped and the
+    shared-connection fixture would hide it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-double-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    both_failed = asyncio.Event()
+    dead_streams = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal dead_streams
+        if request.method == "GET" and request.url.path == "/v1/sessions/sess_old/events/stream":
+            # Both first attempts fail together, so both recoveries overlap.
+            dead_streams += 1
+            if dead_streams == 2:
+                both_failed.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_failed.wait(), timeout=5)
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            # A slow sessions.create: the window a second recovery lands in.
+            await asyncio.sleep(0.2)
+        return router.dispatch(request)
+
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    engines = [build_test_engine(url, db_schema, poolclass=NullPool) for _ in range(2)]
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    async def one_turn(engine: AsyncEngine, user: str) -> RunOutcome:
+        deps = dataclasses.replace(
+            _deps(
+                sessionmaker=async_sessionmaker(bind=engine, expire_on_commit=False), router=router
+            ),
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id=user,
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        return await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-double-recovery",
+            external_user_id=user,
+            user_message=f"hello from {user}",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    try:
+        mention, submit = await asyncio.gather(
+            one_turn(engines[0], "user-mention"), one_turn(engines[1], "user-submit")
+        )
+        async with async_sessionmaker(bind=engines[0])() as s:
+            live_rows = (
+                (
+                    await s.execute(
+                        select(ThreadSession).where(
+                            ThreadSession.tenant_id == tenant.id,
+                            ThreadSession.thread_id == "thread-double-recovery",
+                            ThreadSession.status == "live",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        for engine in engines:
+            await engine.dispose()
+
+    assert mention.recovered and submit.recovered, "both turns healed onto a live session"
+    assert len(live_rows) == 1, (
+        f"one thread must keep one live session row; got {len(live_rows)} "
+        f"({[r.ma_session_id for r in live_rows]})"
+    )
+    assert len(session_bodies) == 1, "the second recovery adopts the first one's replacement"
+    assert mention.mapping_id == submit.mapping_id == live_rows[0].id, (
+        "both turns report the one live replacement"
+    )
+
+
+async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement row used to be committed in its own transaction, inside
+    the recovery's locked one. A ceiling (or any cancel) landing after that
+    commit rolled back the dead-mark and the lineage link but left the new row
+    LIVE and unlinked: the next mention continued on it without the
+    lost-workspace framing. Mark-dead, insert and link must commit or roll
+    back together. A separate engine, because the shared-connection fixture
+    folds the inner commit into the outer transaction and hides the orphan."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-in-setup",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+
+    real_link = run_module.link_replacement
+
+    async def slow_link(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)  # the ceiling fires here, after the replacement exists
+        await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(run_module, "link_replacement", slow_link)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+        deps = _deps(sessionmaker=sessionmaker, router=router)
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-in-setup",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+        )
+        async with sessionmaker() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(ThreadSession).where(
+                            ThreadSession.tenant_id == tenant.id,
+                            ThreadSession.thread_id == "thread-ceiling-in-setup",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    live = [(r.ma_session_id, r.replaced_by_id) for r in rows if r.status == "live"]
+    assert live == [], f"a replacement survived the rolled-back recovery: {live}"
+    assert [r.ma_session_id for r in rows] == ["sess_old"], (
+        "the replacement row must roll back with the dead-mark and the link"
+    )
+
+
+async def test_a_rolled_back_recovery_archives_the_session_it_created(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the locked recovery transaction rolls back after the upstream
+    session was created, no row names that session any more, so nothing would
+    ever archive it. The recovery archives it on the way out (best effort)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-orphan-archive",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    archived: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        m = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)/archive", request.url.path)
+        if request.method == "POST" and m is not None:
+            archived.append(m.group("id"))
+            return httpx.Response(500, json={"type": "error", "error": {"type": "api_error"}})
+        return router.dispatch(request)
+
+    real_link = run_module.link_replacement
+
+    async def slow_link(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)  # the ceiling fires here, after the session exists
+        await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(run_module, "link_replacement", slow_link)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        deps = dataclasses.replace(
+            _deps(
+                sessionmaker=async_sessionmaker(bind=engine, expire_on_commit=False),
+                router=router,
+            ),
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-orphan-archive",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+        )
+    finally:
+        await engine.dispose()
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert len(session_bodies) == 1, "recovery created one upstream session"
+    assert archived == ["sess_1"], (
+        "the session the rolled-back recovery created must be archived; "
+        "a failing archive call is logged, not raised (this one answers 500)"
+    )
+
+
+async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait timeout bounds the caller but leaves the shielded SDK request alive."""
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    completed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await finish.wait()
+        completed.set()
+        return httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "late failure"}},
+        )
+
+    anthropic_client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.01)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            started_at = loop.time()
+            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            elapsed = loop.time() - started_at
+            assert started.is_set(), "the archive request should have started before timeout"
+            assert elapsed < 0.5, "timeout should bound the caller's wait"
+            assert not completed.is_set(), "the shielded archive request should still be in flight"
+
+            finish.set()
+            await asyncio.wait_for(completed.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+        failures = [
+            event for event in logs if event["event"] == "turn.recovery_orphan_archive_failed"
+        ]
+        assert len(failures) == 2, (
+            f"the timeout and the request's later 500 must each be logged; got {failures}"
+        )
+    finally:
+        finish.set()
+        await anthropic_client.close()
+
+
+def test_orphan_archive_returns_after_successful_archive_with_timeout() -> None:
+    """A successful archive must return instead of spinning on its completed task."""
+    script = """
+import asyncio
+import anthropic
+import httpx
+from daimon.core.turn.run import _archive_orphaned_session
+from daimon.testing.ma_models import ma_session
+
+async def handler(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=ma_session(id="sess_orphan").model_dump(mode="json"))
+
+async def main() -> None:
+    client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    await _archive_orphaned_session(client, session_id="sess_orphan")
+    await client.close()
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=3.0, check=False
+    )
+    assert result.returncode == 0, (
+        "a successful archive should finish within three seconds; "
+        f"stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
+
+
+async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await finish.wait()
+        return httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "archive failed"}},
+        )
+
+    anthropic_client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 30.0)
+
+    async def unwind() -> None:
+        try:
+            raise ValueError("original transaction failure")
+        except BaseException:
+            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            raise
+
+    try:
+        unwind_task = asyncio.create_task(unwind())
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        unwind_task.cancel("second cancellation")
+        assert not unwind_task.done(), "the cleanup should keep waiting after a second cancel"
+        finish.set()
+        with pytest.raises(ValueError, match="original transaction failure"):
+            await unwind_task
+    finally:
+        finish.set()
+        await anthropic_client.close()
+
+
+async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrapper(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SYS-038 x SYS-081: `run_prepared_turn` observes, `run_prepared_turn_impl`
+    runs; the adapter's card hook and `attended` must survive the hop."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-hook-threading",
+        ma_session_id="sess_hook",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_hook",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-hook-threading",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+    )
+    assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"

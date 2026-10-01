@@ -7,7 +7,6 @@ DAIMON_DATABASE__TEST_URL is missing. Tests call real MA API and real Postgres.
 from __future__ import annotations
 
 import os
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
@@ -20,18 +19,15 @@ from daimon.adapters.cli.commands import agents as agents_cmd
 from daimon.adapters.cli.commands import defaults as defaults_cmd
 from daimon.adapters.cli.commands import environments as environments_cmd
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core._models import Base
 from daimon.core.config import Settings
 from daimon.core.ma import delete_entire_workspace_for_testing
 from daimon.testing.factories import make_tenant
-from sqlalchemy import text
+from daimon.testing.workspace_sentinel import require_disposable_workspace
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 # Each test module in this package must set:
 #   pytestmark = pytest.mark.contract
@@ -61,62 +57,22 @@ async def anthropic_client() -> AsyncAnthropic:
     return AsyncAnthropic(api_key=api_key)
 
 
-# ---- DB fixtures (schema-per-test isolation, NullPool for multi-loop safety) ----
-
-
-@pytest_asyncio.fixture(scope="session")
-async def db_engine() -> AsyncIterator[AsyncEngine]:
-    _api_key, url = require_flow_prerequisites()
-    # NullPool: each asyncio.run() (inside Typer commands) gets a fresh
-    # asyncpg connection bound to its own event loop.
-    engine = create_async_engine(url, poolclass=NullPool)
-
-    async with engine.connect() as conn:
-        result = await conn.execute(
-            text("SELECT to_regclass('public.alembic_version') IS NOT NULL AS has_alembic")
-        )
-        has_alembic = result.scalar_one()
-        if not has_alembic:
-            await engine.dispose()
-            raise RuntimeError(
-                "alembic_version table is missing on the test DB. Run "
-                "`uv run alembic upgrade head` against "
-                "DAIMON_DATABASE_URL=<test DSN> before invoking pytest."
-            )
-
-    try:
-        yield engine
-    finally:
-        await engine.dispose()
+# ---- DB fixtures (worker schema, NullPool for multi-loop safety) ----
 
 
 @pytest_asyncio.fixture
 async def db_session_factory(
-    db_engine: AsyncEngine,
-) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Fresh schema + sessionmaker bound to the engine (not a connection).
+    db_nullpool_engine: AsyncEngine,
+    db_clean: None,  # orders the factory after the per-test wipe
+) -> async_sessionmaker[AsyncSession]:
+    """NullPool sessionmaker on the wiped worker schema.
 
-    NullPool on db_engine ensures each loop gets a fresh asyncpg connection.
+    Each asyncio.run() inside a Typer command gets a fresh asyncpg connection
+    bound to its own event loop; every connection is pinned to the worker
+    schema by `daimon.testing.db.build_test_engine`.
     """
-    schema = f"test_{uuid.uuid4().hex}"
-
-    async with db_engine.connect() as conn:
-        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        conn2 = await conn.execution_options(schema_translate_map={None: schema})
-        await conn2.run_sync(Base.metadata.create_all)
-        await conn.commit()
-
-    sessionmaker = async_sessionmaker(
-        db_engine.execution_options(schema_translate_map={None: schema}),
-        expire_on_commit=False,
-        class_=AsyncSession,
-    )
-    try:
-        yield sessionmaker
-    finally:
-        async with db_engine.connect() as conn:
-            await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            await conn.commit()
+    require_flow_prerequisites()
+    return async_sessionmaker(db_nullpool_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -129,6 +85,7 @@ async def seed_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> N
 @pytest_asyncio.fixture(scope="module", autouse=True)
 async def _cleanup(anthropic_client: AsyncAnthropic) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
     """Nuke all MA resources before and after each test module."""
+    await require_disposable_workspace(anthropic_client)
     await delete_entire_workspace_for_testing(
         anthropic_client, i_understand_this_destroys_all_tenants=True
     )
@@ -178,7 +135,7 @@ def install_runtime(
     """Patch build_runtime and load_settings across CLI command modules for flow tests.
 
     Wires the real AsyncAnthropic client (from test API key) and the test
-    sessionmaker (schema-per-test DB) into every CLI command that flow tests exercise.
+    sessionmaker (worker-schema DB) into every CLI command that flow tests exercise.
     """
     api_key, db_url = require_flow_prerequisites()
     settings = _build_settings_for_flow(api_key=api_key, db_url=db_url)

@@ -9,7 +9,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -19,6 +18,8 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import make_bot
 
 
 def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
@@ -36,14 +37,6 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
     )
 
 
-def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
-    intents = discord.Intents.default()
-    bot = DaimonBot(runtime=runtime, intents=intents)
-    bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    return bot
-
-
 def _make_guild(guild_id: int) -> MagicMock:
     guild = MagicMock(spec=discord.Guild)
     guild.id = guild_id
@@ -59,7 +52,7 @@ async def test_on_guild_remove_soft_archives_without_delete(
     await provision_tenant(db_session_factory, platform="discord", workspace_id=guild_id)
 
     runtime = _make_runtime(db_session_factory)
-    bot = _make_bot(runtime)
+    bot = make_bot(runtime)
 
     await bot.on_guild_remove(_make_guild(int(guild_id)))
 

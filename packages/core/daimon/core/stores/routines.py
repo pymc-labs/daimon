@@ -14,14 +14,16 @@ companion `advance_stale` call recovers those plus any rows whose
 from __future__ import annotations
 
 import uuid as _uuid
+from collections.abc import Mapping
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
-from daimon.core._models import Routine
+from daimon.core._models import Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.stores.domain import RoutineRow
-from sqlalchemy import delete, func, or_, select, update
+from daimon.core.errors import StoreError
+from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
+from sqlalchemy import and_, delete, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,8 +41,14 @@ async def create_routine(
     timezone_: str,
     trigger_message: str,
     enabled: bool = True,
+    catch_up_policy: CatchUpPolicy = "skip",
     next_fire_at: datetime | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
 ) -> RoutineRow:
+    if catch_up_policy not in ("skip", "run-once"):
+        raise StoreError("catch_up_policy must be skip or run-once")
+    _check_destination(destination_kind, destination_id)
     orm = Routine(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
@@ -50,7 +58,10 @@ async def create_routine(
         timezone=timezone_,
         trigger_message=trigger_message,
         enabled=enabled,
+        catch_up_policy=catch_up_policy,
         next_fire_at=next_fire_at,
+        destination_kind=destination_kind,
+        destination_id=destination_id,
     )
     session.add(orm)
     await session.flush()
@@ -107,11 +118,48 @@ async def update_routine(
     timezone_: str | None = None,
     trigger_message: str | None = None,
     enabled: bool | None = None,
+    catch_up_policy: CatchUpPolicy | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
     next_fire_at: datetime | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
+    clear_destination: bool = False,
 ) -> RoutineRow | None:
-    values: dict[str, str | bool | datetime] = {}
+    """PATCH: `None` leaves a field alone. A destination is set as a pair;
+    `clear_destination=True` removes it (and any pending delivery)."""
+    values: dict[str, str | bool | datetime | None] = {}
+    if clear_destination:
+        if destination_kind is not None or destination_id is not None:
+            raise StoreError("clear_destination cannot be combined with a new destination")
+        values.update(
+            destination_kind=None,
+            destination_id=None,
+            delivery_status=None,
+            delivery_payload=None,
+            delivery_note=None,
+        )
+    elif destination_kind is not None or destination_id is not None:
+        _check_destination(destination_kind, destination_id)
+        values.update(destination_kind=destination_kind, destination_id=destination_id)
+        current = await get_routine(session, routine_id, tenant_id=tenant_id)
+        if (
+            current is not None
+            and current.delivery_status == "pending"
+            and (current.destination_kind, current.destination_id)
+            != (destination_kind, destination_id)
+        ):
+            # A result queued for the old destination is not posted to the
+            # new one.
+            values.update(
+                delivery_status="skipped",
+                delivery_note="destination_changed",
+                delivery_payload=None,
+            )
+    if catch_up_policy is not None:
+        if catch_up_policy not in ("skip", "run-once"):
+            raise StoreError("catch_up_policy must be skip or run-once")
+        values["catch_up_policy"] = catch_up_policy
     if cron_expr is not None:
         values["cron_expr"] = cron_expr
     if timezone_ is not None:
@@ -132,7 +180,7 @@ async def update_routine(
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(**values)
+        .values(**values, updated_at=func.now())
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
@@ -247,7 +295,7 @@ async def pause_routine(
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=False, next_fire_at=None)
+        .values(enabled=False, next_fire_at=None, updated_at=func.now())
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
@@ -278,7 +326,7 @@ async def resume_routine(
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=True, next_fire_at=nxt)
+        .values(enabled=True, next_fire_at=nxt, updated_at=func.now())
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
@@ -295,18 +343,132 @@ async def record_result(
     *,
     tail: str | None,
     error: str | None,
+    delivery: Literal["pending", "skipped"] | None = None,
+    delivery_note: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
     `error=None` clears `last_error` (sets NULL); `error="..."` sets it.
     `tail` is written as-is (None or str).
+
+    `delivery` is only passed for a routine with a destination (FEAT-085):
+    `pending` queues this fire's tail for the adapter to post (copied into
+    `delivery_payload`), `skipped` records why it will not be
+    (`delivery_note`). Either replaces whatever an earlier fire left in the
+    outbox, so only the newest result is ever posted. Omitted, the outbox
+    columns are untouched — a routine without a destination, a failed fire,
+    and an older scheduler all write exactly what they wrote before, and a
+    result still pending from an earlier successful fire stays pending.
     """
+    values: dict[str, object] = {"last_result_tail": tail, "last_error": error}
+    if delivery is not None:
+        values.update(
+            delivery_status=delivery,
+            delivery_note=delivery_note,
+            delivery_payload=tail if delivery == "pending" else None,
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+            delivered_at=None,
+        )
+    await session.execute(update(Routine).where(Routine.id == routine_id).values(**values))
+    await session.flush()
+
+
+def _check_destination(kind: str | None, destination_id: str | None) -> None:
+    if (kind is None) != (destination_id is None):
+        raise StoreError("destination_kind and destination_id are set together")
+    if kind is not None and kind not in ("channel", "thread"):
+        raise StoreError("destination_kind must be channel or thread")
+    if destination_id is not None and not destination_id.strip():
+        raise StoreError("destination_id must not be empty")
+
+
+async def claim_routine_deliveries(
+    session: AsyncSession,
+    *,
+    platform: str,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+    limit: int = 20,
+) -> list[RoutineRow]:
+    """Claim pending result posts for `platform`'s tenants, oldest first.
+
+    At most once: a claim whose lease ran out is never handed out again — the
+    owner may have posted before it died — it is settled `skipped` with note
+    `interrupted` first. Pending rows are then claimed with `FOR UPDATE SKIP
+    LOCKED`, so two adapter processes never take the same row.
+    """
+    # Archived tenants are left alone: their rows stay pending and post if
+    # the workspace comes back.
+    tenant_ids = select(Tenant.id).where(Tenant.platform == platform, Tenant.archived_at.is_(None))
     await session.execute(
         update(Routine)
-        .where(Routine.id == routine_id)
-        .values(last_result_tail=tail, last_error=error)
+        .where(
+            Routine.delivery_status == "claimed",
+            Routine.delivery_lease_expires_at < now,
+            Routine.tenant_id.in_(tenant_ids),
+        )
+        .values(
+            delivery_status="skipped",
+            delivery_note="interrupted",
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+        )
+    )
+    due = (
+        select(Routine.id)
+        .where(Routine.delivery_status == "pending", Routine.tenant_id.in_(tenant_ids))
+        .order_by(Routine.last_fired_at.asc().nulls_first())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    result = await session.execute(
+        update(Routine)
+        .where(Routine.id.in_(due))
+        .values(
+            delivery_status="claimed",
+            delivery_lease_owner=owner,
+            delivery_lease_expires_at=now + lease,
+        )
+        .returning(Routine)
+        .execution_options(synchronize_session=False)
+    )
+    rows = [RoutineRow.model_validate(orm) for orm in result.scalars().all()]
+    await session.flush()
+    return rows
+
+
+async def settle_routine_delivery(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    owner: str,
+    status: Literal["delivered", "skipped"],
+    now: datetime,
+    note: str | None = None,
+) -> bool:
+    """Finish a claim `owner` still holds. False = the claim was lost."""
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.delivery_status == "claimed",
+                Routine.delivery_lease_owner == owner,
+            )
+            .values(
+                delivery_status=status,
+                delivery_note=note,
+                delivered_at=now if status == "delivered" else None,
+                delivery_lease_owner=None,
+                delivery_lease_expires_at=None,
+            )
+        ),
     )
     await session.flush()
+    return result.rowcount == 1
 
 
 async def set_last_fired_at(
@@ -331,6 +493,7 @@ async def claim_due_fireable(
     now: datetime,
     max_age: timedelta = timedelta(minutes=15),
     limit: int = 20,
+    exclude_ids: frozenset[_uuid.UUID] = frozenset(),
 ) -> list[RoutineRow]:
     """Step 1: atomically claim due rows. Step 2: recompute next_fire_at.
 
@@ -348,7 +511,8 @@ async def claim_due_fireable(
         .where(
             Routine.enabled.is_(True),
             Routine.next_fire_at.is_not(None),
-            Routine.next_fire_at >= window_start,
+            or_(Routine.catch_up_policy == "run-once", Routine.next_fire_at >= window_start),
+            Routine.id.not_in(exclude_ids),
             Routine.next_fire_at <= now,
         )
         .order_by(Routine.next_fire_at)
@@ -388,22 +552,45 @@ async def advance_stale(
     now: datetime,
     max_age: timedelta = timedelta(minutes=15),
     limit: int = 200,
+    in_flight_versions: Mapping[_uuid.UUID, datetime] | None = None,
 ) -> int:
-    """Recover stale (next_fire_at < now-max_age) and orphan (NULL) rows.
+    """Roll forward skipped-policy stale slots, active-run slots, and NULL orphans.
 
-    Recomputes `next_fire_at` per row. Returns count touched.
+    Run-once stale slots remain due for claiming. Record skipped ranges without
+    overwriting the result of an active run. Returns count touched.
     """
     cutoff = now - max_age
+    versions = in_flight_versions or {}
+    in_flight_ids = frozenset(versions)
+    unchanged_active = or_(
+        false(),
+        *(
+            and_(Routine.id == key, Routine.updated_at == version)
+            for key, version in versions.items()
+        ),
+    )
     stmt = (
         select(Routine)
         .where(
             Routine.enabled.is_(True),
             or_(
-                Routine.next_fire_at < cutoff,
-                Routine.next_fire_at.is_(None),
+                and_(
+                    Routine.id.not_in(in_flight_ids),
+                    or_(
+                        and_(Routine.catch_up_policy == "skip", Routine.next_fire_at < cutoff),
+                        Routine.next_fire_at.is_(None),
+                    ),
+                ),
+                and_(unchanged_active, Routine.next_fire_at <= now),
             ),
         )
+        .order_by(
+            Routine.id.in_(in_flight_ids).desc(),
+            Routine.next_fire_at.asc().nullsfirst(),
+            Routine.id,
+        )
         .limit(limit)
+        .with_for_update(skip_locked=True)
     )
     rows_orm = (await session.execute(stmt)).scalars().all()
     rows = [RoutineRow.model_validate(r) for r in rows_orm]
@@ -412,12 +599,68 @@ async def advance_stale(
     for row in rows:
         try:
             nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
-            await session.execute(
-                update(Routine).where(Routine.id == row.id).values(next_fire_at=nxt)
-            )
+            values: dict[str, datetime | str] = {"next_fire_at": nxt}
+            if row.next_fire_at is not None:
+                reason = "in_flight" if row.id in in_flight_ids else "stale"
+                values.update(
+                    last_skipped_from=row.next_fire_at,
+                    last_skipped_until=now,
+                    last_skip_reason=reason,
+                )
+                log.info(
+                    "scheduler.slots_skipped",
+                    routine_id=str(row.id),
+                    skipped_from=row.next_fire_at.isoformat(),
+                    skipped_until=now.isoformat(),
+                    reason=reason,
+                )
+            await session.execute(update(Routine).where(Routine.id == row.id).values(**values))
             touched += 1
         except Exception:
             log.exception("advance_stale recompute failed", routine_id=str(row.id))
 
     await session.flush()
     return touched
+
+
+async def skip_slots_during_fire(
+    session: AsyncSession,
+    *,
+    routine_id: _uuid.UUID,
+    finished_at: datetime,
+    expected_updated_at: datetime,
+) -> None:
+    """Skip slots due before completion, unless the user edited this run's schedule."""
+    orm = (
+        await session.execute(
+            select(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.enabled.is_(True),
+                Routine.updated_at == expected_updated_at,
+                Routine.next_fire_at <= finished_at,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if orm is None:
+        return
+    skipped_from = orm.next_fire_at
+    nxt = next_slot_at_or_after(orm.cron_expr, orm.timezone, finished_at)
+    await session.execute(
+        update(Routine)
+        .where(Routine.id == routine_id)
+        .values(
+            next_fire_at=nxt,
+            last_skipped_from=skipped_from,
+            last_skipped_until=finished_at,
+            last_skip_reason="in_flight",
+        )
+    )
+    log.info(
+        "scheduler.slots_skipped",
+        routine_id=str(routine_id),
+        skipped_from=skipped_from,
+        skipped_until=finished_at,
+        reason="in_flight",
+    )

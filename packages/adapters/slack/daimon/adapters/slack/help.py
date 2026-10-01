@@ -15,8 +15,10 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
 from slack_sdk.errors import SlackApiError
 
@@ -26,7 +28,7 @@ log = structlog.get_logger()
 # Slack mrkdwn: *bold* instead of **bold**; -# (Discord small text) replaced by plain text.
 _BODY = """\
 *Agent management*
-/agent-setup — Manage this workspace's agents
+/agent-setup — See your agents, who answers where, and make changes
 
 *Routines*
 /routines — Show scheduled routines for this workspace
@@ -35,7 +37,7 @@ _BODY = """\
 /billing — Show your billing usage (admins see per-member breakdown)
 
 *Privacy*
-/privacy — See, export, or delete what daimon stores about you
+/privacy — See, export, or delete what {display_name} stores about you
 
 *Meta*
 /help — List commands and the @bot conversational entrypoint\
@@ -43,21 +45,33 @@ _BODY = """\
 
 _CONVERSATIONAL = """\
 💬 *Or just talk to your agent*
-@daimon help me set up
-@daimon make a routine that runs daily\
+@{display_name} help me set up
+@{display_name} make a routine that runs daily\
 """
 
 
-def build_help_blocks() -> list[dict[str, Any]]:
+def build_help_blocks(*, display_name: str = "daimon") -> list[dict[str, Any]]:
     """Build the static /help Block Kit blocks.
 
-    Pure — no I/O, zero args. Returns raw dicts (S4 convention; no
+    Pure — no I/O. Returns raw dicts (S4 convention; no
     slack_sdk.models.blocks types). Mirrors Discord's build_help_view().
     """
     return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": _BODY}},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": _BODY.format(display_name=escape_mrkdwn(display_name)),
+            },
+        },
         {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": _CONVERSATIONAL}},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": _CONVERSATIONAL.format(display_name=escape_mrkdwn(display_name)),
+            },
+        },
     ]
 
 
@@ -88,8 +102,18 @@ async def handle_help_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             user=user_id,
-            text="daimon command reference",  # fallback for accessibility / notifications
-            blocks=build_help_blocks(),
+            text=f"{resolve_bot_display_name(runtime.settings)} command reference",
+            blocks=build_help_blocks(display_name=resolve_bot_display_name(runtime.settings)),
         )
     except (DaimonError, SlackApiError) as exc:
-        log.error("slack.help_command.failed", team_id=team_id, exc_info=exc)
+        request_id = generate_request_id()
+        log.error("slack.help_command.failed", team_id=team_id, request_id=request_id, exc_info=exc)
+        await surface_command_error(
+            client,
+            exc,
+            request_id=request_id,
+            title="Help",
+            view_id="",
+            channel_id=channel_id,
+            user_id=user_id,
+        )

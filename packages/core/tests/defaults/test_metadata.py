@@ -5,6 +5,7 @@ import uuid
 
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
     build_metadata,
@@ -43,6 +44,22 @@ def test_build_metadata_stamps_account_when_provided() -> None:
     assert md[MA_METADATA_KEY_TENANT] == str(tenant_id)
     assert md[MA_METADATA_KEY_NAME] == "user-agent"
     assert len(md) == 3
+
+
+def test_build_metadata_omits_isolated_when_false() -> None:
+    tenant_id = uuid.UUID("70121a77-33ce-566b-a2ee-47d93bc422ae")
+    md = build_metadata(tenant_id=tenant_id, name="daimon")
+    assert MA_METADATA_KEY_ISOLATED not in md, (
+        "isolated defaults to False and must not stamp daimon_isolated at all"
+    )
+
+
+def test_build_metadata_stamps_isolated_when_true() -> None:
+    tenant_id = uuid.UUID("70121a77-33ce-566b-a2ee-47d93bc422ae")
+    md = build_metadata(tenant_id=tenant_id, name="reader", isolated=True)
+    assert md[MA_METADATA_KEY_ISOLATED] == "true", (
+        "isolated=True must stamp daimon_isolated='true' (string, MA metadata values are strings)"
+    )
 
 
 # ---------------------------------------------------------------------------

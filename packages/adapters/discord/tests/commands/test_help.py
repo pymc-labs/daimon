@@ -125,7 +125,7 @@ class TestBuildHelpView:
 class TestHelpCog:
     def test_help_cog_is_not_a_group(self) -> None:
         """HelpCog is a flat Cog, not a GroupCog."""
-        assert not issubclass(HelpCog, commands.GroupCog), (  # noqa: F821 — see import below
+        assert not issubclass(HelpCog, commands.GroupCog), (  # see import below
             "HelpCog must be a plain Cog (D-SHAPE-01); the one-subcommand group was deleted"
         )
 

@@ -1,6 +1,6 @@
 [project]
 name = "notebook-host"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]
@@ -11,7 +11,9 @@ dependencies = [
     "websockets>=13",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
-    "marimo>=0.23,<0.30",
+    # Exact: the Docker image installs from this file without uv.lock, and
+    # the per-notebook token auth depends on marimo's session behaviour.
+    "marimo==0.23.8",
 ]
 
 [project.optional-dependencies]

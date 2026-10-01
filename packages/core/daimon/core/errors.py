@@ -5,7 +5,10 @@ Adapters catch `DaimonError | anthropic.APIError` at their edge. The SDK's
 `APIConnectionError` for network failures) is already a good taxonomy — we
 don't re-wrap it. The one conversion boundary is the turn driver, which maps
 `anthropic.APIError` to `TurnError(kind="upstream")` so the state machine has
-a renderable block; the SDK exception is preserved as `__cause__`.
+a renderable block; the SDK exception is preserved as `__cause__`. The one
+exception to that boundary is `"ceiling"` (`daimon.core.turn.ceiling`): a
+core-raised kind with no upstream cause, produced when the per-turn
+wall-clock ceiling fires rather than by converting an MA response.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ TurnKind = Literal[
     "upstream",
     "reducer_bug",
     "requires_action",
+    "ceiling",
 ]
 
 

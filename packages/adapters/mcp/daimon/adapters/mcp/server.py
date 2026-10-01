@@ -10,14 +10,18 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
+from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
     ClaimResolver,
@@ -29,6 +33,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_subject_resolver,
     production_tenant_resolver,
 )
+from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
@@ -51,17 +56,28 @@ from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
+from daimon.adapters.mcp.tools.publish import register_publish_tools
+from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
+from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
+from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
+from daimon.adapters.mcp.tools.teams._client import build_teams_client
+from daimon.adapters.mcp.tools.thread_participation import (
+    register_thread_participation_tools,
+)
+from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -162,7 +178,11 @@ def create_mcp_app(
     effective_sessionmaker = sessionmaker
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
-        effective_sessionmaker = build_session_factory(engine)
+        effective_sessionmaker = build_session_factory(
+            engine,
+            crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys),
+            allow_plaintext=effective_settings.crypto.allow_plaintext,
+        )
 
     effective_auth = auth
     if effective_auth is None:
@@ -185,8 +205,18 @@ def create_mcp_app(
 
     effective_anthropic = anthropic
     if effective_anthropic is None:
+        # This client drives real turns (start_turn/continue_turn), so it
+        # needs the same retry budget every other adapter runtime passes --
+        # the SDK's own default of 2 is not enough to ride out a sustained
+        # provider overage (see MA_MAX_RETRIES's docstring).
         effective_anthropic = AsyncAnthropic(
-            api_key=effective_settings.anthropic.api_key.get_secret_value()
+            api_key=effective_settings.anthropic.api_key.get_secret_value(),
+            max_retries=MA_MAX_RETRIES,
+            http_client=DefaultAsyncHttpxClient(
+                transport=SkillsRateLimitedTransport(
+                    effective_settings.anthropic.skills_requests_per_minute
+                )
+            ),
         )
 
     effective_billing_config = billing_config
@@ -195,24 +225,34 @@ def create_mcp_app(
         # Stripe webhook route is only mounted when billing_config is not None (see below).
         effective_billing_config = load_billing_config()
 
-    mcp = FastMCP(name="daimon", auth=effective_auth)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=effective_resolver,
-            tenant_resolver=effective_tenant_resolver,
-            role_resolver=effective_role_resolver,
-            agent_id_resolver=effective_agent_id_resolver,
-            is_admin_resolver=effective_is_admin_resolver,
-            internal_resolver=effective_internal_resolver,
-            sessionmaker=effective_sessionmaker,
-        )
+    identity_middleware = IdentityMiddleware(
+        subject_resolver=effective_resolver,
+        tenant_resolver=effective_tenant_resolver,
+        role_resolver=effective_role_resolver,
+        agent_id_resolver=effective_agent_id_resolver,
+        is_admin_resolver=effective_is_admin_resolver,
+        internal_resolver=effective_internal_resolver,
+        sessionmaker=effective_sessionmaker,
     )
+
+    @asynccontextmanager
+    async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await identity_middleware.drain_audit()
+
+    mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=audit_lifespan)
+    mcp.add_middleware(identity_middleware)
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
     # structured ToolError instead of an opaque internal error (issue #14).
     mcp.add_middleware(MaErrorMiddleware())
 
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
+    mcp.add_transform(Visibility(False, tags={"discord"}))
+    mcp.add_transform(Visibility(False, tags={"slack"}))
+    mcp.add_transform(Visibility(False, tags={"teams"}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
@@ -232,6 +272,9 @@ def create_mcp_app(
     notebook_rate_limiter = RateLimiter(
         max_requests=effective_settings.notebook.publish_rate_per_hour,
     )
+    bundle_rate_limiter = RateLimiter(
+        max_requests=effective_settings.mcp.bundle_uploads_per_hour,
+    )
 
     fernet = (
         build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
@@ -240,6 +283,11 @@ def create_mcp_app(
     )
 
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
+    artifact_store = (
+        build_artifact_store(effective_settings.artifacts)
+        if effective_settings.artifacts is not None
+        else None
+    )
 
     runtime = McpRuntime(
         session_factory=effective_sessionmaker,
@@ -248,13 +296,23 @@ def create_mcp_app(
         deployment_default=deployment_default,
         gemini_client=gemini_client,
         notebook_rate_limiter=notebook_rate_limiter,
+        bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
+        artifact_store=artifact_store,
+        teams_client=(
+            build_teams_client(effective_settings.teams)
+            if effective_settings.teams is not None
+            else None
+        ),
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
+    register_repo_binding_tools(mcp, runtime)  # bind a public repo from chat
     environments.register_environment_tools(mcp, runtime)
     vault.register_vault_tools(mcp, runtime)
     register_credential_request_tools(mcp, runtime)
+    register_setup_target_tools(mcp, runtime)
+    register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
     register_github_app_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
@@ -262,14 +320,17 @@ def create_mcp_app(
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
+    register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
-    if effective_settings.discord is not None or effective_settings.slack is not None:
+    if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
     else:
-        log.info("channel tools disabled", reason="no discord or slack settings")
+        log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
+    register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
+    register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
 
     register_upload_tool(mcp, runtime=runtime)
 
@@ -292,6 +353,19 @@ def create_mcp_app(
         build_upload_route(effective_sessionmaker),
         methods=["PUT"],
     )
+    # No token path segment (unlike /uploads/{token}): the bearer IS the
+    # credential here, so there is nothing else to put in the path.
+    app.add_route(
+        "/bundles",
+        build_bundles_route(
+            anthropic=effective_anthropic,
+            session_factory=effective_sessionmaker,
+            auth=effective_auth,
+            mcp_settings=effective_settings.mcp,
+            rate_limiter=bundle_rate_limiter,
+        ),
+        methods=["PUT"],
+    )
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     if effective_billing_config is not None:
@@ -300,6 +374,7 @@ def create_mcp_app(
             build_stripe_webhook(
                 sessionmaker=effective_sessionmaker,
                 billing_config=effective_billing_config,
+                alert_webhook_url=effective_settings.ops.alert_webhook_url,
             ),
             methods=["POST"],
         )
@@ -358,6 +433,28 @@ def create_mcp_app(
     else:
         log.info("slack oauth disabled", reason="no slack settings or crypto keys")
 
+    # Per-person MCP OAuth: needs the crypto keys (a confidential client's
+    # secret is stored encrypted) and the public URL the callback hangs off.
+    if fernet is not None and effective_settings.mcp.app_root_url is not None:
+        mcp_oauth_start, mcp_oauth_callback = build_oauth_mcp_routes(
+            runtime=runtime,
+            fernet=fernet,
+            http_client_factory=lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False),
+        )
+        app.add_route("/oauth/mcp/start", mcp_oauth_start, methods=["GET"])
+        app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])
+    else:
+        log.info("mcp oauth disabled", reason="no crypto keys or public url")
+
+    mount_hub_apps(
+        app,
+        settings=effective_settings,
+        runtime=runtime,
+        sessionmaker=effective_sessionmaker,
+        billing_config=effective_billing_config,
+        fernet=fernet,
+    )
+
     # GitHub App clone-auth: App-clone boots with only app_id +
     # app_private_key — no webhook required. The /webhooks/github mount is
     # required only by skill-sync's push-driven resync and is gated separately
@@ -390,8 +487,6 @@ def create_mcp_app(
             build_github_webhook(
                 sessionmaker=effective_sessionmaker,
                 github_settings=github_cfg,
-                anthropic=effective_anthropic,
-                fernet=fernet,
             ),
             methods=["POST"],
         )

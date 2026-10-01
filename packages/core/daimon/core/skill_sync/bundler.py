@@ -66,7 +66,7 @@ def _reserved_word_in_skill_md(skill_dir: Path) -> str | None:
     try:
         text = skill_md.read_text(encoding="utf-8", errors="replace")
         fields, _body = parse_skill_frontmatter(text)
-    except Exception:  # noqa: BLE001 — malformed SKILL.md is not our problem here
+    except Exception:  # malformed SKILL.md is not our problem here
         return None
     md_name = fields.get("name", "").lower()
     for word in RESERVED_SKILL_NAME_WORDS:
@@ -162,7 +162,7 @@ def _extract_and_bundle_sync(
                         md.read_text(encoding="utf-8", errors="replace")
                     )
                     manifest_name = fields.get("name") or None
-                except Exception:  # noqa: BLE001 — malformed frontmatter is not fatal here
+                except Exception:  # malformed frontmatter is not fatal here
                     manifest_name = None
                 break
         if manifest_name is not None:

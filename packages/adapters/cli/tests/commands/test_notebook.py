@@ -19,8 +19,6 @@ from daimon.core.config import NotebookSettings
 from pydantic import HttpUrl, SecretStr
 from rich.console import Console
 
-pytestmark = pytest.mark.asyncio
-
 
 def _settings() -> NotebookSettings:
     return NotebookSettings(host_url=HttpUrl("http://nb:8001"), admin_secret=SecretStr("op-secret"))

@@ -13,7 +13,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import discord
-import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
@@ -29,9 +28,6 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant, make_usage_event
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
-
 
 # ---- _resolve_member_name ----
 

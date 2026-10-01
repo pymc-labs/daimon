@@ -39,6 +39,17 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # the binding side (repo-access proven at bind). Unfiltered get_for_repo
     # is issue #1 — this exemption documents the structural gap, not safety.
     "github_app_installations": "no Daimon tenant at GitHub-install time; see #1",
+    # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
+    # tenant data. Resync resolves each tenant's bindings and scoped credentials
+    # at execution time from the canonical repository/ref.
+    "github_push_deliveries": "global GitHub delivery IDs; no tenant or credential payload",
+    "github_push_resyncs": "global canonical repo/ref work; bindings and credentials are tenant-scoped at execution",
+    # An installation and its repository listing belong to the GitHub App
+    # installation, before any Daimon tenant binds a repository. Refresh jobs
+    # and webhook receipts contain only deployment-wide identifiers; tenant
+    # clone authorization still requires the tenant-local recorded proof.
+    "github_installation_reconciliations": "deployment-wide installation refresh state; tenant clone authorization remains proof-gated",
+    "github_installation_deliveries": "deployment-wide GitHub delivery receipts; no tenant-owned payload",
     # Slack-native tables keyed by team_id, which is 1:1 with a tenant's
     # external_id (tenant = uuid5('slack', team_id)).
     "slack_bot_tokens": "keyed by team_id (1:1 with tenant external_id)",
@@ -51,9 +62,25 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # File-GC queue keyed by server-minted file_id; rows are transient and
     # reference no tenant-owned data beyond the opaque handle.
     "pending_file_deletes": "keyed by server-minted file_id; transient GC queue",
+    # A signed Stripe refund/dispute can arrive before Checkout completion.
+    # The event has no tenant identity yet; the verified payment_intent links
+    # it to the tenant-scoped credit when that credit is committed.
+    "pending_payment_clawbacks": "keyed by verified Stripe event_id/payment_intent until the tenant credit exists",
+    # Keyed by mapping_id, an FK to thread_sessions.id — a globally unique UUID
+    # that belongs to exactly one tenant, and the only way a preparation is ever
+    # looked up. The row holds no tenant-owned data of its own beyond opaque
+    # MA handles, and it cascades away with the mapping.
+    "session_preparations": "keyed by mapping_id (FK to thread_sessions.id, globally unique, one tenant)",
     # Cross-tenant BY DESIGN: links a CLI principal to a platform principal for
     # operator impersonation. Both endpoints are globally unique principal UUIDs.
     "principal_links": "cross-principal link table (both PKs globally unique UUIDs)",
+    # FastMCP OAuthProxy state (client registrations, authorization codes,
+    # upstream and issued tokens), keyed by (collection, key) and
+    # Fernet-encrypted. A row belongs to one platform login, not a tenant; the
+    # caller's tenant scope lives inside the issued token's claims, so
+    # per-tenant isolation is enforced at request time by the hub middleware
+    # rather than by a column.
+    "hub_oauth_kv": "OAuthProxy login state keyed by (collection, key); tenant lives in the token claims, not the row",
 }
 
 

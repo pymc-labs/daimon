@@ -8,5 +8,18 @@ config:
     # typst-cli` would). The artifact-style skill bundles the PyMC report class
     # and its fonts, and needs a compiler present to render them; without this
     # every report turn spends its first minute on `pip install typst`.
+    #
+    # `duckdb` and `pyarrow` are the only two every data skill needs. The image
+    # already ships pandas 3.0, numpy, scipy, scikit-learn, matplotlib, seaborn,
+    # openpyxl and tabulate (probed, 2026-08-19), but `pd.read_parquet` raises
+    # ImportError without pyarrow and parquet is this pipeline's own artifact
+    # format, while duckdb is how anything larger than memory gets aggregated —
+    # and via `INSTALL <engine>; LOAD; ATTACH` it reaches Postgres, MySQL and
+    # SQLite without a per-vendor driver baked in here. A database queried in
+    # place needs `sqlalchemy` plus that vendor's driver; the data-ingestion
+    # skill installs both on the turn that needs them, because which vendor it
+    # is depends on the deployment, and network access is unrestricted.
     pip:
       - typst
+      - duckdb
+      - pyarrow

@@ -7,6 +7,7 @@ queries re-keyed on tenant_id.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -22,7 +23,8 @@ from daimon.core._models import (
     UsageEvent,
 )
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import Platform, TenantDependentCounts, TenantRow
+from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
+from daimon.core.stores.security_audit import erase_tenant
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,6 +36,14 @@ async def get_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow |
     if row is None:
         return None
     return TenantRow.model_validate(row)
+
+
+async def get_tenants(session: AsyncSession, tenant_ids: Sequence[uuid.UUID]) -> list[TenantRow]:
+    """Return the rows that exist among `tenant_ids`, in no particular order."""
+    if not tenant_ids:
+        return []
+    rows = (await session.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))).scalars()
+    return [TenantRow.model_validate(row) for row in rows]
 
 
 async def list_all_tenant_ids(session: AsyncSession) -> set[uuid.UUID]:
@@ -51,6 +61,17 @@ async def get_tenant_liveness(
     """Bot hot-path wrapper — opens its own session and returns TenantRow | None."""
     async with session_factory() as session:
         return await get_tenant(session, tenant_id)
+
+
+async def get_turn_cap(
+    session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, default: int
+) -> int:
+    """Read the tenant override, falling back to the adapter's configured cap."""
+    async with session_factory() as session:
+        override = (
+            await session.execute(select(Tenant.turn_cap).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+    return override if override is not None else default
 
 
 _LAST_RECONCILE_ERROR_MAX_LENGTH = 2000
@@ -136,6 +157,7 @@ async def delete_tenant(
 
     Raises StoreError when the tenant does not exist.
     """
+    await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)
     if cast(CursorResult[Any], result).rowcount == 0:
@@ -217,3 +239,45 @@ async def get_tenant_dependent_counts(
         tenant_config=tenant_config,
         channel_config=channel_config,
     )
+
+
+async def set_funding_mode(
+    session: AsyncSession, *, tenant_id: uuid.UUID, funding_mode: FundingMode
+) -> TenantRow:
+    """Set one tenant's funding policy without changing its ledger or caps."""
+    if funding_mode not in ("prepaid", "operator_funded"):
+        raise StoreError("funding_mode must be prepaid or operator_funded")
+    row = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(funding_mode=funding_mode)
+            .returning(Tenant)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise StoreError(f"tenant {tenant_id} not found")
+    await session.flush()
+    return TenantRow.model_validate(row)
+
+
+async def set_turn_cap(
+    session: AsyncSession, *, tenant_id: uuid.UUID, cap: int | None
+) -> TenantRow:
+    """Set or clear a tenant's concurrent-turn override."""
+    if cap is not None and cap < 1:
+        raise StoreError("turn cap must be positive")
+    row = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(turn_cap=cap)
+            .returning(Tenant)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise StoreError(f"tenant {tenant_id} not found")
+    await session.flush()
+    return TenantRow.model_validate(row)

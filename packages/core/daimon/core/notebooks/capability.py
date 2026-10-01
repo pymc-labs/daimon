@@ -7,6 +7,10 @@ signed payload, so a tampered URL path cannot redirect bytes to another slug.
 
 Pure: the caller injects ``now`` (clock) and ``jti`` (nonce) — no I/O, no clock,
 no RNG here, so the token is deterministic given its inputs.
+
+The ``"report"`` operation is verified by ``report_host.capability`` instead —
+a separate standalone app with its own duplicated verify side, kept in lockstep
+by tests on both sides.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Literal
 
-Op = Literal["blog", "notebook", "data"]
+Op = Literal["blog", "notebook", "notebook_edit", "data", "report"]
 
 
 def _b64(raw: bytes) -> str:
@@ -35,6 +39,7 @@ def mint_token(
     jti: str,
     ttl_seconds: int = 300,
     name: str | None = None,
+    tenant: str | None = None,
 ) -> str:
     """Return a ``<payload_b64>.<sig_b64>`` capability token for one upload."""
     if now.tzinfo is None:
@@ -47,6 +52,11 @@ def mint_token(
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
         "jti": jti,
     }
+    # The notebook host serves one tenant unless it has per-notebook origins,
+    # so it needs to know whose upload this is. Omitted when unknown, so the
+    # report host's claims (which have no tenant) are unchanged.
+    if tenant is not None:
+        payload["tenant"] = tenant
     # Compact/canonical JSON — no whitespace. These exact bytes are what gets
     # signed, so the separators are load-bearing; do not reformat.
     payload_json = json.dumps(payload, separators=(",", ":"))

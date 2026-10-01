@@ -25,8 +25,6 @@ set_unjailed_test_env: Callable[[pytest.MonkeyPatch], None] = runpy.run_path(
     str(Path(__file__).parent / "conftest.py")
 )["set_unjailed_test_env"]
 
-pytestmark = pytest.mark.asyncio
-
 
 def _make_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, alive: bool = True
@@ -51,6 +49,7 @@ def _make_state(
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -60,7 +59,7 @@ def _make_state(
         proc.pid = 7777
         return proc  # type: ignore[return-value]
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(main_mod, "wait_for_port", _fake_wait)
@@ -117,7 +116,9 @@ async def test_sweep_once_respawns_dead_blog(
         "pre-radar",
         8600,
         _dead_proc(),
+        access_token="t",
         mode="run",
+        permanent=True,
     )
     state.processes["pre-radar"] = dead
 
@@ -137,7 +138,7 @@ async def test_sweep_once_reaps_dead_edit_notebook(
     paths = get_slug_paths(tmp_path, "ephemeral")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# x", encoding="utf-8")
-    dead = state.make_process("ephemeral", 8601, _dead_proc(), mode="edit")
+    dead = state.make_process("ephemeral", 8601, _dead_proc(), access_token="t", mode="edit")
     state.processes["ephemeral"] = dead
 
     await _sweep_once(state)
@@ -167,7 +168,7 @@ async def test_sweep_once_removes_attachments_and_workspace_when_reaping(
     (paths.workspace / "data").symlink_to(Path("..") / "data")
     (paths.workspace / "notebook.py").symlink_to(Path("..") / "notebook.py")
 
-    dead = state.make_process("leaky", 8602, _dead_proc(), mode="edit")
+    dead = state.make_process("leaky", 8602, _dead_proc(), access_token="t", mode="edit")
     state.processes["leaky"] = dead
 
     await _sweep_once(state)
@@ -357,6 +358,7 @@ async def test_create_app_lifespan_migrates_flat_layout_and_respawns_blog(
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         sandbox: bool = False,
         rlimit_as_bytes: int | None = None,
@@ -369,7 +371,7 @@ async def test_create_app_lifespan_migrates_flat_layout_and_respawns_blog(
         proc.pid = 8888
         return proc  # type: ignore[return-value]
 
-    async def fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(main_mod, "spawn_marimo", fake_spawn_marimo)

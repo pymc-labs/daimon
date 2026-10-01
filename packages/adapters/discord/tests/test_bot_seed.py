@@ -18,7 +18,6 @@ import anthropic as _anthropic
 import discord
 import httpx
 import structlog.testing
-from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.provisioning import provision_tenant
@@ -27,6 +26,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
+from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -82,20 +82,11 @@ def _make_guild(*, guild_id: int) -> MagicMock:
 
 
 def _agent_matching_tenant(tenant_id: uuid.UUID, *, name: str) -> dict[str, object]:
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id="ag_1",
-        type="agent",
         name=name,
-        model={"id": "claude-opus-4-7"},
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
-        description=None,
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
+        model="claude-opus-4-7",
+        tenant_id=tenant_id,
     ).model_dump(mode="json")
 
 

@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core._models import TenantLedger
+from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores.domain import TenantLedgerRow
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -58,6 +58,18 @@ async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal
     return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
 
 
+async def get_prepaid_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal | None:
+    """Return the current balance for a prepaid tenant in one query."""
+    stmt = (
+        select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0")))
+        .select_from(Tenant)
+        .outerjoin(TenantLedger, TenantLedger.tenant_id == Tenant.id)
+        .where(Tenant.id == tenant_id, Tenant.funding_mode == "prepaid")
+        .group_by(Tenant.id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def get_clawed_back_total(session: AsyncSession, *, payment_intent: str) -> Decimal:
     """Positive total already clawed back for a payment_intent.
 
@@ -83,13 +95,14 @@ async def list_for_tenant(
 
 
 async def get_by_payment_intent(
-    session: AsyncSession, *, payment_intent: str
+    session: AsyncSession, *, payment_intent: str, for_update: bool = False
 ) -> TenantLedgerRow | None:
     """Find the original topup credit row by its Stripe payment_intent.
 
-    Used by the clawback path (Plan 03) to resolve the tenant + original amount
+    Used by the clawback path to resolve the tenant + original amount
     for a charge.refunded / charge.dispute.created event, which carries the
     payment_intent but not the original Checkout metadata.
+    Lock the credit row while calculating a clawback to serialize distinct events.
     """
     stmt = (
         select(TenantLedger)
@@ -99,6 +112,8 @@ async def get_by_payment_intent(
         )
         .limit(1)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     orm = (await session.execute(stmt)).scalar_one_or_none()
     if orm is None:
         return None

@@ -17,6 +17,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot, opt-in logical backup. Schedule externally and copy off-host.
+  backup:
+    image: postgres:18-alpine
+    profiles: ["backup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-daimon}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}
+      PGDATABASE: ${POSTGRES_DB:-daimon}
+    volumes:
+      - ./scripts/backup:/backup-tools:ro
+      - ${DAIMON_BACKUP_DIR:-./backups}:/backups
+    entrypoint: ["sh", "/backup-tools/postgres.sh"]
+    command: ["backup", "/backups/latest"]
+    restart: "no"
+
   init:
     build: .
     depends_on:
@@ -74,7 +93,8 @@ services:
 
   # Opt-in: `docker compose --profile slack up -d`. Needs DAIMON_SLACK__* and
   # DAIMON_CRYPTO__KEYS in .env — no `:?` guards here, or Discord-only
-  # deployments would fail to interpolate the file.
+  # deployments would fail to interpolate the file. Agent environment storage
+  # remains plaintext without keys; configured keys enable its encryption.
   # Setup: docs/slack-app-manifest.yaml.
   slack:
     build: .
@@ -90,6 +110,28 @@ services:
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
       DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
     entrypoint: ["python", "-m", "daimon.adapters.slack"]
+    restart: unless-stopped
+
+  # Opt-in: `docker compose --profile teams up -d`. Needs DAIMON_TEAMS__* and
+  # DAIMON_CRYPTO__KEYS in .env — no `:?` guards here, or Teams-less
+  # deployments would fail to interpolate the file. Unlike Slack (Socket Mode
+  # dials out), Teams ingress is HTTP: the Bot Framework messaging endpoint
+  # must reach the published port. Setup: docs/teams-app-manifest.yaml.
+  teams:
+    build: .
+    profiles: ["teams"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    ports:
+      - "127.0.0.1:${DAIMON_TEAMS__PORT:-3978}:${DAIMON_TEAMS__PORT:-3978}"
+    entrypoint: ["python", "-m", "daimon.adapters.teams"]
     restart: unless-stopped
 
   scheduler:

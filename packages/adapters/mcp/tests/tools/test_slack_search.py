@@ -14,10 +14,12 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.slack._search import (  # pyright: ignore[reportPrivateUsage]
     _slack_search_messages_impl,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
@@ -33,6 +35,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_turn_contexts import create_slack_turn_context
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -71,6 +74,7 @@ def _auth(**overrides: object) -> AuthIdentity:
         "platform": "slack",
         "external_id": "T_TEST",
         "platform_user_id": "U_CALLER",
+        "slack_turn_context_id": uuid.uuid4(),
     }
     base.update(overrides)
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
@@ -151,6 +155,7 @@ async def _seed_turn_context(
             account_id=auth.account_id,
             channel_id=channel_id,
             thread_ts="1.0",
+            id=auth.slack_turn_context_id,
             started_at=datetime.now(tz=UTC),
         )
         await session.commit()
@@ -213,6 +218,7 @@ async def test_search_non_dm_destination_filters_dm_hits(
     assert [x.text for x in result.matches] == ["channel hit", "group dm hit"], (
         "a non-DM destination must drop 1:1 DM hits but keep channel and group-DM hits"
     )
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 @pytest.mark.asyncio
@@ -272,3 +278,125 @@ async def test_dispatch_slack_search_rejects_discord_only_filters(
     async with Client(mcp) as client:
         with pytest.raises(ToolError, match="slack"):
             await client.call_tool("search_messages", {"content": "q", "author_ids": ["U1"]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin_channel_ids", "expected_texts", "expected_total"),
+    [
+        (frozenset(), ["open hit"], 1),
+        (frozenset({"C_SEALED"}), ["sealed hit", "open hit"], 2),
+    ],
+    ids=["outside-withheld", "inside-kept"],
+)
+async def test_search_withholds_sealed_channel_hits_outside_the_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    origin_channel_ids: frozenset[str],
+    expected_texts: list[str],
+    expected_total: int,
+) -> None:
+    """SYS-029: a sealed channel's hits reach only a turn inside it, and a
+    withheld hit drops out of the total too."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(
+        policy=TenantAccessPolicy(sealed_channel_ids=("C_SEALED",)),
+        origin_channel_ids=origin_channel_ids,
+    )
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 20, "total": 2, "page": 1, "pages": 1},
+                    "matches": [
+                        {
+                            "channel": {"id": "C_SEALED", "name": "vault"},
+                            "ts": "1.0",
+                            "text": "sealed hit",
+                        },
+                        {
+                            "channel": {"id": "C_OPEN", "name": "general"},
+                            "ts": "2.0",
+                            "text": "open hit",
+                        },
+                    ],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="q", limit=10, read_policy=read_policy
+        )
+    assert [x.text for x in result.matches] == expected_texts, "sealed hits follow the origin"
+    assert result.total == expected_total, "the total is only what is shown"
+
+
+@pytest.mark.asyncio
+async def test_search_withholds_hits_from_a_thread_sealed_on_its_own(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reply's permalink names its thread; a thread sealed as channel:thread_ts
+    loses both its root and its replies from outside results."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=("C_OPEN:1.0",)))
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 20, "total": 3, "page": 1, "pages": 1},
+                    "matches": [
+                        {"channel": {"id": "C_OPEN"}, "ts": "1.0", "text": "sealed root"},
+                        {
+                            "channel": {"id": "C_OPEN"},
+                            "ts": "1.5",
+                            "text": "sealed reply",
+                            "permalink": "https://x.slack.com/archives/C_OPEN/p15?thread_ts=1.0&cid=C_OPEN",
+                        },
+                        {"channel": {"id": "C_OPEN"}, "ts": "2.0", "text": "open hit"},
+                    ],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="q", limit=10, read_policy=read_policy
+        )
+    assert [x.text for x in result.matches] == ["open hit"], "the sealed thread is withheld"
+    assert result.total == 1, "withheld hits must not be counted"
+
+
+@pytest.mark.asyncio
+async def test_search_total_does_not_count_sealed_hits_beyond_the_page(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """40 sealed matches, a page of 1, searched from outside: Slack's total (40)
+    would still answer 'does the sealed channel mention this?'. The total must
+    not exceed what is shown."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=("C_VAULT",)))
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 1, "total": 40, "page": 1, "pages": 40},
+                    "matches": [{"channel": {"id": "C_VAULT"}, "ts": "1.0", "text": "sealed"}],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="word in:#vault", limit=1, read_policy=read_policy
+        )
+    assert result.matches == [], "the sealed hit is withheld"
+    assert result.total == 0, "the total must not reveal sealed matches on other pages"

@@ -1,5 +1,6 @@
 """Discord-action MCP tools: read_thread, read_channel, list_channels,
-list_threads, search_messages, parse_link, get_message, send_message.
+list_threads, search_messages, parse_link, get_message, send_message,
+create_thread, rename_thread, set_display_identity.
 
 Mirrors ``tools/routines.py`` shape: each ``@mcp.tool`` closure delegates to a
 module-private ``_*_impl`` function that takes ``(runtime, auth, **kwargs)``.
@@ -31,6 +32,9 @@ from daimon.adapters.mcp.tools.discord._client import (
 from daimon.adapters.mcp.tools.discord._credential_button import (
     _post_credential_button_impl as _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._identity import (
+    _set_display_identity_impl as _set_display_identity_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.discord._models import (
     AttachmentRow as AttachmentRow,  # pyright: ignore[reportPrivateUsage]
 )
@@ -38,10 +42,16 @@ from daimon.adapters.mcp.tools.discord._models import (
     ChannelRow as ChannelRow,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import (
+    DisplayIdentityRow as DisplayIdentityRow,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._models import (
     MessageRow as MessageRow,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import (
     ParsedLink as ParsedLink,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._models import (
+    ReadChannelResult as ReadChannelResult,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import (
     ReadThreadResult as ReadThreadResult,  # pyright: ignore[reportPrivateUsage]
@@ -51,6 +61,9 @@ from daimon.adapters.mcp.tools.discord._models import (
 )
 from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow as ThreadRow,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._participation import (
+    verify_participation_scope as verify_participation_scope,
 )
 from daimon.adapters.mcp.tools.discord._read import (
     _get_message_impl as _get_message_impl,  # pyright: ignore[reportPrivateUsage]
@@ -84,6 +97,12 @@ from daimon.adapters.mcp.tools.discord._send import (
 )
 from daimon.adapters.mcp.tools.discord._send import (
     _send_message_impl as _send_message_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._threads import (
+    _create_thread_impl as _create_thread_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._threads import (
+    _rename_thread_impl as _rename_thread_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._wizard import (
     PostedWizard as PostedWizard,

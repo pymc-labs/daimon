@@ -23,8 +23,6 @@ from daimon.core.notebooks.publish import (
 )
 from pydantic import HttpUrl, SecretStr
 
-pytestmark = pytest.mark.asyncio
-
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))

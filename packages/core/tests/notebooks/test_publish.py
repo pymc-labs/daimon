@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
-import pytest
 from daimon.core.config import NotebookSettings
 from daimon.core.notebooks.publish import (
     _principal_prefix,  # pyright: ignore[reportPrivateUsage]
@@ -16,8 +15,6 @@ from daimon.core.notebooks.publish import (
     list_notebooks,
 )
 from pydantic import HttpUrl, SecretStr
-
-pytestmark = pytest.mark.asyncio
 
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:

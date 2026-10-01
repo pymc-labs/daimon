@@ -9,8 +9,6 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.core.stores.domain import Role
 
-pytestmark = pytest.mark.asyncio
-
 
 def test_resolve_role_admin_claim_returns_admin() -> None:
     assert resolve_role("admin") is Role.ADMIN

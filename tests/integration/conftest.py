@@ -9,14 +9,15 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from daimon.core._models import Base
-from daimon.core.db import build_engine, build_session_factory
+from daimon.core.db import build_session_factory
 from daimon.core.stores import tenant_ledger
-from daimon.testing.db import db_engine as db_engine  # noqa: F401
-from daimon.testing.db import db_session as db_session  # noqa: F401
-from daimon.testing.db import db_session_factory as db_session_factory  # noqa: F401
+from daimon.testing.db import build_test_engine
+from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_engine as db_engine
+from daimon.testing.db import db_schema as db_schema
+from daimon.testing.db import db_session as db_session
+from daimon.testing.db import db_session_factory as db_session_factory
 from daimon.testing.factories import make_tenant
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -28,33 +29,21 @@ def _schema_engine_test_dsn() -> str:
 
 
 @pytest_asyncio.fixture
-async def schema_engine() -> AsyncIterator[
-    tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID]
-]:
-    """Engine + sessionmaker scoped to a per-test schema, seeded with a funded tenant.
+async def schema_engine(
+    db_schema: str,
+    db_clean: None,  # orders the seed after the per-test wipe
+) -> AsyncIterator[tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID]]:
+    """Own pooled engine on the worker schema + sessionmaker, seeded with a funded tenant.
 
-    The engine is configured with ``schema_translate_map`` so all DDL + DML
-    lands in ``test_<uuid>``; the schema is created here and dropped on
-    teardown. Used by the routines end-to-end suite, whose scheduler ``run``
-    is invoked with this engine via ``_engine_override`` so it shares the
-    per-test schema with the test body's seed/verify code.
+    Used by the routines end-to-end suite, whose scheduler ``run`` is invoked
+    with this engine via ``_engine_override`` so it shares the schema with the
+    test body's seed/verify code. It is a separate pooled engine (not
+    ``db_engine``) because the scheduler holds an advisory-lock connection
+    plus sessions at once. Every connection is pinned to the worker schema,
+    which ``db_clean`` has just wiped.
     """
     dsn = _schema_engine_test_dsn()
-    raw_engine = build_engine(dsn)
-    schema = f"test_{uuid.uuid4().hex}"
-    async with raw_engine.connect() as conn:
-        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        mapped = await conn.execution_options(schema_translate_map={None: schema})
-        await mapped.run_sync(Base.metadata.create_all)
-        await mapped.commit()
-    await raw_engine.dispose()
-
-    # Build the *real* engine the test body and the scheduler will share.
-    # `execution_options(schema_translate_map=...)` returns a wrapper engine
-    # whose checked-out connections all carry the translate map.
-    engine = build_engine(dsn).execution_options(
-        schema_translate_map={None: schema},
-    )
+    engine = build_test_engine(dsn, db_schema, pool_pre_ping=True)
     sm = build_session_factory(engine)
 
     # Seed a Tenant — the routine row's tenant_id FK points at it.
@@ -75,12 +64,6 @@ async def schema_engine() -> AsyncIterator[
         yield engine, sm, tenant_id
     finally:
         await engine.dispose()
-        # Teardown — drop schema on a fresh raw engine.
-        cleanup_engine = build_engine(dsn)
-        async with cleanup_engine.connect() as conn:
-            await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            await conn.commit()
-        await cleanup_engine.dispose()
 
 
 @pytest.fixture(autouse=True)

@@ -5,8 +5,14 @@ Builds XML context from a Slack thread's message history via
 responding in an existing thread.
 
 Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
-- ``build_context_xml``: first-turn fetch, capped at 100 messages.
+- ``build_context_xml``: first-turn fetch, one page from the thread root.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
+
+Both fetch a single page. Slack caps non-Marketplace apps at
+``THREAD_PAGE_LIMIT`` objects per ``conversations.replies`` call and one call
+per minute, so paginating inside a turn is not viable; when Slack reports
+``has_more`` the block is marked ``truncated="true"`` so the model knows the
+window is partial.
 
 All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
 No try/except — exceptions propagate to the listener boundary.
@@ -14,12 +20,30 @@ No try/except — exceptions propagate to the listener boundary.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
 from xml.sax.saxutils import escape, quoteattr
 
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
 from daimon.adapters.slack.vision import SlackFile
+from daimon.core.turn_keys import render_keys_element
+from daimon.core.untrusted import untrusted_block
 from slack_sdk.web.async_client import AsyncWebClient
+
+# Slack's ceiling for non-Marketplace apps on conversations.replies (both the
+# default and the maximum accepted value of ``limit``; larger values are clamped
+# server-side). Socket Mode apps cannot list on the Marketplace, so daimon is
+# always in this class.
+THREAD_PAGE_LIMIT = 15
+
+
+def _history_attrs(*, truncated: bool) -> dict[str, str]:
+    """Replayed messages come from everyone in the thread, so they ride in the
+    shared untrusted envelope; only the `<user_query>` after it is the request."""
+    attrs = {"source": "slack"}
+    if truncated:
+        attrs["truncated"] = "true"
+    return attrs
 
 
 def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
@@ -61,11 +85,21 @@ def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> li
     return lines
 
 
-def _user_query_open_tag(author_id: str) -> str:
-    """Opening <user_query> tag, with a quoted author_id attribute when present."""
+def _user_query_open_tag(author_id: str, is_admin: bool) -> str:
+    """Opening <user_query> tag, with quoted author_id/is_admin attributes when present.
+
+    ``is_admin`` is rendered as the lowercase literal ``"true"``/``"false"``
+    (``is_admin="true|false"``, matching Discord's rendering
+    byte-for-byte), never Python's ``True``/``False``. When ``author_id`` is
+    empty the tag stays bare (back-compat) and ``is_admin`` is not rendered —
+    there is no caller identity to attach it to.
+    """
     if not author_id:
         return "<user_query>"
-    return f"<user_query author_id={quoteattr(author_id)}>"
+    return (
+        f"<user_query author_id={quoteattr(author_id)}"
+        f" is_admin={quoteattr('true' if is_admin else 'false')}>"
+    )
 
 
 async def build_context_xml(
@@ -75,37 +109,44 @@ async def build_context_xml(
     thread_ts: str,
     user_query: str,
     author_id: str = "",
+    is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
+    key_names: Sequence[str] = (),
 ) -> str:
     """Build XML context from thread history for the first turn.
 
-    Fetches up to 100 messages via ``conversations.replies`` (cap
-    mirroring Discord ``build_context_xml(limit=100)``).  Returns a string
-    with a ``<context>/<thread_history>`` block containing the replayed
-    messages followed by a ``<user_query>`` element.
+    Fetches one page of ``THREAD_PAGE_LIMIT`` messages via
+    ``conversations.replies``. Returns a string with a
+    ``<context>/<thread_history>`` block containing the replayed messages
+    followed by a ``<user_query>`` element.
 
-    Truncation note: ``conversations.replies`` with no cursor returns
-    the *first* page — the oldest 100 messages ascending from the thread root.
-    For threads longer than 100 messages the model does not see recent messages.
-    This is deliberate (mirrors Discord's 100-message cap) and avoids the
-    latency of full pagination on the first turn.
+    Window: ``conversations.replies`` always returns oldest-first from the
+    thread root, and ``oldest``/``latest`` only filter, so the newest window
+    cannot be requested in one call. A thread longer than one page therefore
+    replays the root and the first replies, and the block carries
+    ``truncated="true"`` so the model knows the recent tail is missing.
+    Discord's equivalent replays 100 messages; the gap is Slack's rate policy.
+
+    ``key_names`` names this agent's stored keys, names only (see
+    `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel, ts=thread_ts, limit=100
+        channel=channel, ts=thread_ts, limit=THREAD_PAGE_LIMIT
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+    truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
     lines: list[str] = [
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        "<thread_history>",
+        render_keys_element(key_names),
     ]
-    for msg in messages:
-        lines.extend(_render_message(msg, proxy=proxy))
-    lines.append("</thread_history>")
+    lines = [line for line in lines if line]
+    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    lines.extend(untrusted_block("thread_history", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id)}{escape(user_query)}</user_query>")
+    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
 
     return "\n".join(lines)
 
@@ -118,7 +159,9 @@ async def build_delta_xml(
     watermark_ts: str,
     user_query: str,
     author_id: str = "",
+    is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
+    key_names: Sequence[str] = (),
 ) -> str:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -126,25 +169,33 @@ async def build_delta_xml(
     with ``oldest=watermark_ts, inclusive=False`` (mirroring Discord
     ``build_delta_xml``'s ``after_message_id`` path).  Returns a string with a
     ``<context>/<thread_delta>`` block and a ``<user_query>`` element.
+
+    One page of ``THREAD_PAGE_LIMIT`` messages, oldest-first from the
+    watermark; a delta longer than that is marked ``truncated="true"``.
+
+    ``key_names`` names this agent's stored keys, names only (see
+    `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
         channel=channel,
         ts=thread_ts,
         oldest=watermark_ts,
         inclusive=False,
+        limit=THREAD_PAGE_LIMIT,
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+    truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
     lines: list[str] = [
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        "<thread_delta>",
+        render_keys_element(key_names),
     ]
-    for msg in messages:
-        lines.extend(_render_message(msg, proxy=proxy))
-    lines.append("</thread_delta>")
+    lines = [line for line in lines if line]
+    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id)}{escape(user_query)}</user_query>")
+    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
 
     return "\n".join(lines)

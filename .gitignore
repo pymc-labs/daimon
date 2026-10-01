@@ -23,10 +23,13 @@ node_modules/
 .learning/
 .claude
 graphify-out/
+site/
 
-# Local symlinks into the private companion repo.
+# Local symlinks into the private companion repo. CLAUDE.md is tracked: it
+# carries the repo-wide conventions every contributor and coding agent needs.
 /infra
-/CLAUDE.md
+/AGENTS.md
+/.agents
 
 # Per-deployment Fly configs derived from *.example.toml templates.
 apps/notebook-host/fly.notebook.toml
@@ -40,3 +43,7 @@ err.txt
 agents_err.txt
 download.html
 .playwright-mcp/
+formal/tla2tools.jar
+
+# Operator backups contain credentials and private data.
+/backups/

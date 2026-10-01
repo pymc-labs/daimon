@@ -1,11 +1,11 @@
-"""Pure scheduler decision functions. Loop/lifecycle lives in adapters/scheduler/."""
+"""Routine dispatch and task ownership. Process lifecycle lives in adapters/scheduler/."""
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from collections.abc import Awaitable, Callable, Coroutine
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import structlog
@@ -16,7 +16,10 @@ from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
     record_result,
+    skip_slots_during_fire,
 )
+from daimon.core.turn.outcomes import TurnObservation
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -27,6 +30,63 @@ class CapsCheck(Protocol):
 
 
 FireFn = Callable[[RoutineRow], Awaitable[None]]
+
+
+class RoutineDispatcher:
+    """Own a bounded batch of running and queued fires across ticks."""
+
+    def __init__(
+        self, max_concurrent_fires: int, *, clock: Callable[[], datetime] | None = None
+    ) -> None:
+        if max_concurrent_fires < 1:
+            raise ValueError("max_concurrent_fires must be positive")
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.max_concurrent_fires = max_concurrent_fires
+        self.semaphore = asyncio.Semaphore(max_concurrent_fires)
+        self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        self._versions: dict[uuid.UUID, datetime] = {}
+
+    @property
+    def in_flight_ids(self) -> frozenset[uuid.UUID]:
+        return frozenset(key for key, task in self._tasks.items() if not task.done())
+
+    @property
+    def in_flight_versions(self) -> dict[uuid.UUID, datetime]:
+        return {key: self._versions[key] for key in self.in_flight_ids}
+
+    @property
+    def available(self) -> int:
+        # Preserve the predecessor's 20-row claim batch even when some fires
+        # must wait for the semaphore. Already-eligible slots must not age out
+        # merely because the concurrency limit is smaller than the batch.
+        return max(0, max(20, self.max_concurrent_fires) - len(self.in_flight_ids))
+
+    def start(
+        self, routine_id: uuid.UUID, work: Coroutine[object, object, None], *, updated_at: datetime
+    ) -> None:
+        task = asyncio.create_task(work)
+        self._tasks[routine_id] = task
+        self._versions[routine_id] = updated_at
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if self._tasks.get(routine_id) is done:
+                del self._tasks[routine_id]
+                del self._versions[routine_id]
+
+        task.add_done_callback(finished)
+
+    async def drain(self) -> None:
+        """Wait for already-dispatched work (one-shot execution)."""
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks.values()))
+
+    async def close(self) -> None:
+        """Cancel and join fires before releasing database/client resources."""
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _record_fire_error(
@@ -49,30 +109,44 @@ async def run_one_tick(
     max_age: timedelta,
     max_concurrent_fires: int,
     dispatch_timeout_s: float,
-) -> None:
-    """One scheduler tick. All collaborators injected; no module-level state.
+    dispatcher: RoutineDispatcher | None = None,
+    wait_for_completion: bool = False,
+) -> RoutineDispatcher:
+    """Claim and dispatch a tick without awaiting routine completion.
 
-    Decision flow:
-      1. advance_stale (recover orphans + stale rows)
-      2. claim_due_fireable (atomic 2-phase claim)
-      3. Pre-gather cap check: skip capped rows, build fireable list
-      4. await asyncio.gather(*(_fire_guarded(r) for r in fireable))
-         Each guarded member acquires the semaphore, wraps fire(row) in
-         asyncio.wait_for(timeout=dispatch_timeout_s), catches TimeoutError /
-         Exception internally, and returns None — gather never raises.
+    Reuse the returned dispatcher across ticks and close it on shutdown.
+    Set wait_for_completion=True for a one-shot batch. Active routines are
+    excluded and their intervening slots are recorded as skipped.
+    Retain a bounded claimed batch, including work waiting for the semaphore.
     """
+    one_shot = wait_for_completion
+    loop = asyncio.get_running_loop()
+    tick_started = loop.time()
+    dispatcher = dispatcher or RoutineDispatcher(
+        max_concurrent_fires, clock=lambda: now + timedelta(seconds=loop.time() - tick_started)
+    )
+    active_versions = dispatcher.in_flight_versions
+    active_ids = frozenset(active_versions)
     async with sm() as session, session.begin():
         try:
-            await advance_stale(session, now=now, max_age=max_age)
+            await advance_stale(
+                session, now=now, max_age=max_age, in_flight_versions=active_versions
+            )
         except Exception:
             log.exception("advance_stale failed")
         try:
-            rows = await claim_due_fireable(session, now=now, max_age=max_age)
+            rows = await claim_due_fireable(
+                session,
+                now=now,
+                max_age=max_age,
+                limit=min(20, dispatcher.available),
+                exclude_ids=active_ids,
+            )
         except Exception:
             log.exception("claim_due_fireable failed")
-            return
+            return dispatcher
 
-    # Pre-gather sequential cap check (cheaper
+    # Sequential cap check (cheaper
     # than checking inside the semaphore boundary; keeps the existing cap path).
     fireable: list[RoutineRow] = []
     for row in rows:
@@ -87,6 +161,9 @@ async def run_one_tick(
                 log.exception("caps.is_over_cap failed", routine_id=str(row.id))
                 continue
         if over:
+            TurnObservation(
+                sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
+            ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             try:
                 async with sm() as s, s.begin():
                     await record_result(s, row.id, tail=None, error="cap_exceeded")
@@ -95,39 +172,67 @@ async def run_one_tick(
             continue
         fireable.append(row)
 
-    # Build semaphore FRESH inside run_one_tick — no module/global state (DI rule).
-    sem = asyncio.Semaphore(max_concurrent_fires)
+    # A persistent semaphore bounds fires across every tick.
+    sem = dispatcher.semaphore
+    clock = dispatcher.clock
 
     async def _fire_guarded(row: RoutineRow) -> None:
         # Per-fire correlation context: every log line emitted inside this
         # fire — claim/advance/record-result and the turn body — carries a fresh
         # rid and the row's tenant_id. Unbind in finally so the context is clean
         # even on the error paths.
+        observation = TurnObservation(
+            sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
+        )
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid, tenant_id=str(row.tenant_id))
         try:
             async with sem:
                 try:
-                    await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                    with observation.activate():
+                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
+                    observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —
-                    # gather never raises and record_result still runs.
+                    # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"timeout: exceeded {dispatch_timeout_s}s")
                 except Exception as err:
+                    observation.finish(error=err)
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"{type(err).__name__}: {err}"[:500])
+        except asyncio.CancelledError as err:
+            observation.finish(error=err)
+            # Includes cancellation while waiting for a dispatch slot.
+            await _record_fire_error(sm, row.id, "scheduler_shutdown")
+            raise
         finally:
-            structlog.contextvars.unbind_contextvars("rid", "tenant_id")
+            observation.finish(reason=TerminationReason.UNKNOWN)
+            try:
+                async with sm() as session, session.begin():
+                    await skip_slots_during_fire(
+                        session,
+                        routine_id=row.id,
+                        finished_at=clock(),
+                        expected_updated_at=row.updated_at,
+                    )
+            except Exception:
+                log.exception("scheduler.completion_skip_failed", routine_id=str(row.id))
+            finally:
+                structlog.contextvars.unbind_contextvars("rid", "tenant_id")
 
     # Pitfall 2: spawn each fire as its own task so asyncio.create_task copies the
     # current contextvars context at creation — concurrent fires then bind into
     # ISOLATED contexts and never cross-contaminate rids. Bare coroutines in gather
     # would share one context (the semaphore alone does NOT fix this).
-    await asyncio.gather(*(asyncio.create_task(_fire_guarded(r)) for r in fireable))
+    for row in fireable:
+        dispatcher.start(row.id, _fire_guarded(row), updated_at=row.updated_at)
+    if one_shot:
+        await dispatcher.drain()
 
     log.info(
         "scheduler.tick",
         claimed=len(rows),
         fired=len(fireable),
     )
+    return dispatcher

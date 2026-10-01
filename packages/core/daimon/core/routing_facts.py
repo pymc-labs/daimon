@@ -8,11 +8,13 @@ that makes it true. The deliberate design is for the product to answer the
 routing question at the moment the belief forms (right after a default is
 set or cleared), rather than for a system prompt to assert it up front.
 
-Both functions are pure: no I/O, no clock, same inputs always produce the
+Everything here is pure: no I/O, no clock, same inputs always produce the
 same output.
 """
 
 from __future__ import annotations
+
+from typing import Final
 
 
 def build_set_default_note(*, agent_name: str, scope_label: str) -> str:
@@ -73,3 +75,35 @@ def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_i
         f"reach it only by @mentioning the bot there — there is one bot for the "
         f"whole workspace, not one bot per agent."
     )
+
+
+# The one-line statement of "nothing routes to this agent", rendered by the
+# Discord and Slack setup panels and by the MCP create/fork outcome. Splitting
+# the fact from the next step lets a caller that knows the channel name append a
+# concrete request instead of the generic one.
+UNROUTED_LINE: Final = "Not answering in any channel yet."
+UNROUTED_NEXT_STEP: Final = "An admin can ask Daimon to make it answer in a channel."
+PRECEDENCE_LINE: Final = "A channel's own choice beats the workspace default."
+
+
+def build_routing_request(*, agent_name: str, channel_label: str) -> str:
+    """The sentence a person says to Daimon to route ``agent_name`` somewhere.
+
+    Rendered on its own under the routing map, where it is a standalone
+    instruction rather than the tail of a longer sentence.
+    """
+    return f"Make {agent_name} answer in {channel_label}."
+
+
+def build_unrouted_note(*, agent_name: str, channel_label: str | None, is_admin: bool) -> str:
+    """State that ``agent_name`` is routed nowhere, plus the next step.
+
+    With ``channel_label`` known the next step is the exact request to make,
+    in the caller's own voice: an admin can say it themselves, a member has to
+    ask one. With no channel in hand there is nothing concrete to name, so the
+    generic next step stands in.
+    """
+    if channel_label is None:
+        return f"{UNROUTED_LINE}\n{UNROUTED_NEXT_STEP}"
+    lead = "Tell Daimon" if is_admin else "An admin can tell Daimon"
+    return f"{UNROUTED_LINE}\n{lead}: make {agent_name} answer in {channel_label}."

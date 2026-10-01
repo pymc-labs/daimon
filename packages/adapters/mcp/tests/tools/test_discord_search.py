@@ -29,6 +29,7 @@ from daimon.core.config import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
@@ -42,11 +43,9 @@ patch_discord_http = _tools_conftest.patch_discord_http
 
 _search_messages_impl = _search_mod._search_messages_impl  # pyright: ignore[reportPrivateUsage]
 
-pytestmark = pytest.mark.asyncio
-
 
 # ---------------------------------------------------------------------------
-# Helpers (per-file copies — inline at every call site per guideline:testing)
+# Helpers
 # ---------------------------------------------------------------------------
 
 _VIEW_CHANNEL = 1 << 10  # 1024
@@ -329,6 +328,7 @@ async def test_search_params_encoding_all_filters_server_side(
         "offset": 5,
     }, f"all filters must reach the wire as server-side params; got {captured_params}"
     assert result.total_results == 1
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 # ---------------------------------------------------------------------------

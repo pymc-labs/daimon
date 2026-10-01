@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import structlog
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.ma_index import (
     _SKILLS_PAGE_LIMIT,  # pyright: ignore[reportPrivateUsage]
     find_agent_by_daimon_tag,
@@ -16,6 +17,7 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_agent
 
 
 async def test_find_agent_returns_match() -> None:
@@ -26,35 +28,19 @@ async def test_find_agent_returns_match() -> None:
         r"/v1/agents",
         lambda req, _m: list_response(
             [
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id="ag_1",
-                    type="agent",
                     name="daimon",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                    model="claude-opus-4-7",
+                    tenant_id=tenant_id,
+                    created_at=datetime(2026, 4, 21, tzinfo=UTC),
                 ).model_dump(mode="json"),
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id="ag_2",
-                    type="agent",
                     name="other",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "other"},
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                    model="claude-opus-4-7",
+                    tenant_id=tenant_id,
+                    created_at=datetime(2026, 4, 21, tzinfo=UTC),
                 ).model_dump(mode="json"),
             ]
         ),
@@ -81,35 +67,15 @@ async def test_find_agent_multi_match_returns_most_recent_and_warns() -> None:
         r"/v1/agents",
         lambda req, _m: list_response(
             [
-                BetaManagedAgentsAgent(
-                    id="ag_old",
-                    type="agent",
-                    name="dupe",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "dupe"},
-                    description=None,
-                    created_at="2026-01-01T00:00:00Z",
-                    updated_at="2026-01-01T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                ma_agent(
+                    id="ag_old", name="dupe", model="claude-opus-4-7", tenant_id=tenant_id
                 ).model_dump(mode="json"),
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id="ag_new",
-                    type="agent",
                     name="dupe",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "dupe"},
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                    model="claude-opus-4-7",
+                    tenant_id=tenant_id,
+                    created_at=datetime(2026, 4, 21, tzinfo=UTC),
                 ).model_dump(mode="json"),
             ]
         ),
@@ -137,43 +103,20 @@ async def test_find_agent_resolver_ambiguous_name_emits_account_aware_warning() 
         r"/v1/agents",
         lambda req, _m: list_response(
             [
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id="ag_old",
-                    type="agent",
                     name="dupe",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={
-                        "daimon_tenant": str(tenant_id),
-                        "daimon_name": "dupe",
-                        "daimon_account": account_a,
-                    },
-                    description=None,
-                    created_at="2026-01-01T00:00:00Z",
-                    updated_at="2026-01-01T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                    model="claude-opus-4-7",
+                    tenant_id=tenant_id,
+                    metadata={"daimon_account": account_a},
                 ).model_dump(mode="json"),
-                BetaManagedAgentsAgent(
+                ma_agent(
                     id="ag_new",
-                    type="agent",
                     name="dupe",
-                    model={"id": "claude-opus-4-7"},
-                    metadata={
-                        "daimon_tenant": str(tenant_id),
-                        "daimon_name": "dupe",
-                        "daimon_account": account_b,
-                    },
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                    model="claude-opus-4-7",
+                    tenant_id=tenant_id,
+                    metadata={"daimon_account": account_b},
+                    created_at=datetime(2026, 4, 21, tzinfo=UTC),
                 ).model_dump(mode="json"),
             ]
         ),
@@ -200,20 +143,13 @@ async def test_find_agent_by_daimon_tag_paginates_past_first_page() -> None:
     router = MARouter()
 
     def _agent(ag_id: str, name: str, tag: str) -> dict[str, object]:
-        return BetaManagedAgentsAgent(
+        return ma_agent(
             id=ag_id,
-            type="agent",
             name=name,
-            model={"id": "claude-opus-4-7"},
-            metadata={"daimon_tenant": str(tenant_id), "daimon_name": tag},
-            description=None,
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            version=1,
-            mcp_servers=[],
-            skills=[],
-            tools=[],
-            system=None,
+            model="claude-opus-4-7",
+            tenant_id=tenant_id,
+            metadata={"daimon_name": tag},
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
         ).model_dump(mode="json")
 
     def handle(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -329,6 +265,30 @@ async def test_list_skills_strict_returns_rows_on_partial_page() -> None:
     client = build_fake_anthropic_http(router.dispatch)
     rows = await list_skills_strict(client)
     assert len(rows) == partial, "strict list must return every row from a partial page"
+
+
+async def test_list_skills_strict_follows_cursor_past_first_full_page() -> None:
+    first_page = _make_filler_skills(_SKILLS_PAGE_LIMIT)
+    second_page = _make_filler_skills(1)
+    second_page[0]["id"] = "sk_after_cursor"
+    requested_pages: list[str | None] = []
+    router = MARouter()
+
+    def on_list(req: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        cursor = req.url.params.get("page")
+        requested_pages.append(cursor)
+        if cursor is None:
+            return httpx.Response(200, json={"data": first_page, "next_page": "next"})
+        assert cursor == "next"
+        return httpx.Response(200, json={"data": second_page, "next_page": None})
+
+    router.add("GET", r"/v1/skills", on_list)
+    client = build_fake_anthropic_http(router.dispatch)
+    rows = await list_skills_strict(client)
+
+    assert len(rows) == _SKILLS_PAGE_LIMIT + 1
+    assert rows[-1].id == "sk_after_cursor"
+    assert requested_pages == [None, "next"]
 
 
 # ---------------------------------------------------------------------------

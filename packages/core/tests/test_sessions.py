@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -19,16 +19,20 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
+from daimon.core.credential_requests import mint_request_token
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.sessions import create_session
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
+from daimon.core.stores import credential_requests as requests_store
+from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import RepoAccessProof
+from daimon.core.turn.posture import ExemptReason
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     FakeMemoryStoreState,
     NotHandled,
     combine_handlers,
@@ -36,6 +40,7 @@ from daimon.testing.ma import (
     make_fake_memory_store_handler,
 )
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -49,31 +54,10 @@ def _session_body(
     model_id: str = "claude-opus-4-7",
 ) -> dict[str, Any]:
     """Build a BetaManagedAgentsSession JSON body via validated SDK models."""
-    return BetaManagedAgentsSession.model_validate(
-        {
-            "id": session_id,
-            "agent": {
-                "id": agent_id,
-                "mcp_servers": [],
-                "model": {"id": model_id},
-                "name": agent_name,
-                "skills": [],
-                "tools": [],
-                "type": "agent",
-                "version": 1,
-            },
-            "created_at": "2026-04-21T00:00:00Z",
-            "outcome_evaluations": [],
-            "environment_id": environment_id,
-            "metadata": {},
-            "resources": [],
-            "stats": {},
-            "status": "idle",
-            "type": "session",
-            "updated_at": "2026-04-21T00:00:00Z",
-            "usage": {},
-            "vault_ids": [],
-        }
+    return ma_session(
+        id=session_id,
+        agent=ma_session_agent(id=agent_id, name=agent_name, model=model_id),
+        environment_id=environment_id,
     ).model_dump(mode="json")
 
 
@@ -105,25 +89,8 @@ def _make_agent(
     anthropic_id: str = "ag_1",
     name: str = "a",
 ) -> BetaManagedAgentsAgent:
-    """Inline BetaManagedAgentsAgent construction — no DB needed."""
-    return BetaManagedAgentsAgent.model_validate(
-        {
-            "id": anthropic_id,
-            "type": "agent",
-            "name": name,
-            "model": {"id": "claude-opus-4-7"},
-            "metadata": {},
-            "description": None,
-            "archived_at": None,
-            "created_at": "2026-04-21T00:00:00Z",
-            "updated_at": "2026-04-21T00:00:00Z",
-            "version": 1,
-            "mcp_servers": [],
-            "skills": [],
-            "tools": [],
-            "system": None,
-        }
-    )
+    """An agent with this file's defaults — no DB needed."""
+    return ma_agent(id=anthropic_id, name=name, model="claude-opus-4-7")
 
 
 def _make_env(
@@ -131,17 +98,8 @@ def _make_env(
     anthropic_id: str = "env_1",
     name: str = "e",
 ) -> BetaEnvironment:
-    """Inline BetaEnvironment construction — no DB needed."""
-    return BetaEnvironment(
-        id=anthropic_id,
-        type="environment",
-        name=name,
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={},
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    )
+    """An environment with this file's defaults — no DB needed."""
+    return ma_environment(id=anthropic_id, name=name)
 
 
 async def test_create_session_calls_ma_api_and_returns_sdk_type() -> None:
@@ -255,6 +213,7 @@ async def test_create_session_calls_ensure_agent_mcp_vault_when_public_url_set(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -436,7 +395,12 @@ async def test_create_session_mounts_env_resource_when_agent_has_secrets(
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
     await put_agent_file(
-        db_session, tenant_id=tenant.id, agent_id=agent_uuid, key="API_KEY", content="secret"
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        key="API_KEY",
+        content="secret",
+        set_by_account_id=None,
     )
     await db_session.commit()
 
@@ -571,6 +535,94 @@ async def test_create_session_tags_metadata_with_account_and_tenant_when_both_pr
     )
 
 
+@pytest.mark.parametrize(
+    ("billing_exempt", "expected"),
+    [(None, None), ("mcp-internal-caller", "mcp-internal-caller")],
+    ids=["billed-caller-unstamped", "exempt-caller-stamped"],
+)
+async def test_create_session_stamps_billing_exempt_reason_only_when_given(
+    billing_exempt: ExemptReason | None, expected: str | None
+) -> None:
+    """``billing_exempt`` becomes ``daimon_billing_exempt=<reason>``, the marker
+    the usage sweep skips; a billed caller's session has no such key."""
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured_bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_exempt",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=_make_agent(anthropic_id="ag_ex"),
+        environment=_make_env(anthropic_id="env_ex"),
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
+        billing_exempt=billing_exempt,
+    )
+
+    metadata = captured_bodies[0]["metadata"]
+    assert metadata.get(MA_METADATA_KEY_BILLING_EXEMPT) == expected, (
+        f"billing_exempt={billing_exempt!r} must stamp {expected!r}; got {metadata!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "sealed", "expected"),
+    [
+        (None, None, {"daimon_channel": "chan-1"}),
+        ("thr-1", None, {"daimon_channel": "chan-1", "daimon_thread": "thr-1"}),
+        (
+            "thr-1",
+            "thr-1",
+            {"daimon_channel": "chan-1", "daimon_thread": "thr-1", "daimon_sealed": "thr-1"},
+        ),
+    ],
+    ids=["channel", "thread", "sealed-thread"],
+)
+async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
+    thread_id: str | None, sealed: str | None, expected: dict[str, str]
+) -> None:
+    """The transcript tools apply the channel seal from these stamps."""
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured_bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_origin",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=_make_agent(anthropic_id="ag_origin"),
+        environment=_make_env(anthropic_id="env_origin"),
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
+        origin_channel_id="chan-1",
+        origin_thread_id=thread_id,
+        origin_seal_ids=() if sealed is None else (sealed,),
+    )
+
+    metadata = captured_bodies[0]["metadata"]
+    stamped = {
+        k: v
+        for k, v in metadata.items()
+        if k in {"daimon_channel", "daimon_thread", "daimon_sealed"}
+    }
+    assert stamped == expected
+
+
 async def test_create_session_omits_metadata_when_account_and_tenant_both_none() -> None:
     agent = _make_agent(anthropic_id="ag_notag")
     env = _make_env(anthropic_id="env_notag")
@@ -615,7 +667,12 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     agent_uuid = uuid.uuid4()
     account_id = uuid.UUID("00000000-0000-0000-0000-000000000055")
     await put_agent_file(
-        db_session, tenant_id=tenant.id, agent_id=agent_uuid, key="API_KEY", content="secret"
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        key="API_KEY",
+        content="secret",
+        set_by_account_id=None,
     )
     await db_session.commit()
 
@@ -655,6 +712,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -1138,6 +1196,7 @@ def _warm_vault_copilot_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1454,6 +1513,7 @@ def _warm_vault_copilot_500_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1914,6 +1974,7 @@ def _warm_vault_mirror_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_caller",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1943,11 +2004,12 @@ def _warm_vault_mirror_handler(
         if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
             body = json.loads(request.content)
             session_create_bodies.append(body)
+            sent_agent = body["agent"]
             return httpx.Response(
                 200,
                 json=_session_body(
                     session_id=session_id,
-                    agent_id=body["agent"],
+                    agent_id=sent_agent if isinstance(sent_agent, str) else sent_agent["id"],
                     environment_id=body["environment_id"],
                 ),
             )
@@ -2068,3 +2130,172 @@ async def test_create_session_mirrors_nothing_when_agent_has_no_stored_mcp_crede
     assert cred_bodies == [], "no stored credentials means no credential POSTs"
     assert cred_deletes == [], "and nothing deleted"
     assert len(session_bodies) == 1, "the session is still created"
+
+
+async def _record_personal_sign_in(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_uuid: uuid.UUID
+) -> None:
+    """One member's finished OAuth sign-in for the agent's `docs` server."""
+    now = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
+    request = await requests_store.create_credential_request(
+        session,
+        token=mint_request_token(),
+        kind="mcp_oauth",
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        account_id=account_id,
+        target="docs",
+        mcp_server_url="https://mcp.example.com/docs",
+        requester_platform_user_id="requester-connected",
+        channel_id="chan-1",
+        expires_at=now + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_personal",
+        target_name="daimon",
+        requested_work=None,
+    )
+    flow = await flows_store.create_flow(
+        session,
+        state="st_" + uuid.uuid4().hex,
+        request_token=request.token,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_id=agent_uuid,
+        server_name="docs",
+        mcp_server_url="https://mcp.example.com/docs",
+        redirect_uri="https://d.example/oauth/mcp/callback",
+        code_verifier="verifier",
+        expires_at=now + timedelta(minutes=10),
+    )
+    await flows_store.consume_flow(session, state=flow.state, now=now)
+    await flows_store.mark_flow_completed(session, state=flow.state, now=now)
+    await session.commit()
+
+
+def _agent_with_personal_server() -> BetaManagedAgentsAgent:
+    """An agent carrying a `docs` server one member connected by OAuth."""
+    toolset: dict[str, Any] = {
+        "type": "mcp_toolset",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    return ma_agent(
+        id="ag_personal",
+        name="a",
+        model="claude-opus-4-7",
+        mcp_servers=[
+            {"name": "docs", "type": "url", "url": "https://mcp.example.com/docs"},
+            {"name": "daimon-mcp", "type": "url", "url": "https://mcp.example.com/mcp"},
+        ],
+        tools=[
+            {**toolset, "mcp_server_name": "docs"},
+            {**toolset, "mcp_server_name": "daimon-mcp"},
+        ],
+    )
+
+
+async def test_create_session_leaves_off_a_server_only_another_member_signed_in_to(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An OAuth grant lives in one member's vault, but the server it unlocked
+    is attached to the agent everyone shares. Mounting it on a bystander's
+    session only earns them a failed MCP init and the degraded-turn notice
+    under every reply."""
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    connected_account_id = uuid.UUID("00000000-0000-0000-0000-00000000dd01")
+    bystander_account_id = uuid.UUID("00000000-0000-0000-0000-00000000dd02")
+    public_url = "https://mcp.example.com/mcp"
+    await _record_personal_sign_in(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=connected_account_id,
+        agent_uuid=agent_uuid,
+    )
+
+    session_bodies: list[dict[str, Any]] = []
+    client = build_fake_anthropic_http(
+        _warm_vault_mirror_handler(
+            account_id=bystander_account_id,
+            agent_uuid=agent_uuid,
+            public_url=public_url,
+            credential_post_bodies=[],
+            credential_deletes=[],
+            session_create_bodies=session_bodies,
+            session_id="sess_bystander",
+        )
+    )
+
+    await create_session(
+        client,
+        agent=_agent_with_personal_server(),
+        environment=_make_env(anthropic_id="env_personal"),
+        account_id=bystander_account_id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+
+    sent_agent = session_bodies[0]["agent"]
+    assert sent_agent["type"] == "agent_with_overrides", (
+        "a bystander's session must override the agent's server list"
+    )
+    assert sent_agent["id"] == "ag_personal" and "version" not in sent_agent, (
+        "the overrides name the agent and let MA pin the latest version, as a bare id does"
+    )
+    assert [server["name"] for server in sent_agent["mcp_servers"]] == ["daimon-mcp"], (
+        "the personally-connected server is left off"
+    )
+    assert [tool["mcp_server_name"] for tool in sent_agent["tools"]] == ["daimon-mcp"], (
+        "and its toolset with it — MA rejects a toolset whose server is absent"
+    )
+
+
+async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Hiding is per caller: the person who drove the sign-in still gets the
+    server, and their session is created the plain way — by agent id."""
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    connected_account_id = uuid.UUID("00000000-0000-0000-0000-00000000dd03")
+    public_url = "https://mcp.example.com/mcp"
+    await _record_personal_sign_in(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=connected_account_id,
+        agent_uuid=agent_uuid,
+    )
+
+    session_bodies: list[dict[str, Any]] = []
+    client = build_fake_anthropic_http(
+        _warm_vault_mirror_handler(
+            account_id=connected_account_id,
+            agent_uuid=agent_uuid,
+            public_url=public_url,
+            credential_post_bodies=[],
+            credential_deletes=[],
+            session_create_bodies=session_bodies,
+            session_id="sess_connected",
+        )
+    )
+
+    await create_session(
+        client,
+        agent=_agent_with_personal_server(),
+        environment=_make_env(anthropic_id="env_personal"),
+        account_id=connected_account_id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+
+    assert session_bodies[0]["agent"] == "ag_personal", (
+        "nothing hidden means the call shape does not change at all"
+    )

@@ -1,25 +1,14 @@
-"""Credential-request tools: request_env_credential, request_mcp_credential,
-request_repo_binding.
+"""Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 
-These three tools replace the "go open /agent-setup" redirect for a task that
-needs an env secret, an auth-required MCP server, or a repo bound to an
-agent: the agent mints a single-use, TTL-bounded ``credential_requests`` row
-and posts a target-naming button in the thread
-(``tools/discord/_credential_button.py``). Clicking the button opens a
-native Discord modal in a different process (the Discord bot, worker VM) —
-the secret itself never travels through either process's tool arguments, so
-none of the three tools below has a token/secret/value parameter, and none
-should ever be added.
+These tools create single-use, expiring request rows and post a target-naming
+card through the caller's platform. Secret values never enter tool arguments.
+Submission checks requester identity; these enrollment paths deliberately do
+not inherit the admin gate for direct agent-spec mutations.
 
-Deliberately NOT admin-gated — the chat-mutation admin check other tools call
-at the top of their impl is intentionally absent here. Authorization for the
-actual credential write happens at click time instead, when the Discord
-button's ``interaction_check`` compares the clicking user against
-``requester_platform_user_id`` on the minted row. This widens today's
-admin-only credential writes (``/agent-setup``'s mutation buttons are
-``is_admin``-only) in exchange for one-click UX — a deliberate, accepted
-trade documented here so a future reviewer does not "fix" the omission by
-adding that admin gate back.
+Replacing a key that already exists is the one exception: it destroys shared
+state, so `daimon.core.operation_policy` decides it here, *before* the mint,
+and a refusal posts no card at all — nobody is asked for a secret they were
+never going to be allowed to save.
 """
 
 from __future__ import annotations
@@ -27,33 +16,96 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import Annotated, Final
 from urllib.parse import urlparse
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._credential_button import (
+    edit_card_replaced as edit_discord_card_replaced,
+)
+from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
+from daimon.adapters.mcp.tools.slack._credential_button import (
+    _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.slack._credential_button import (
+    edit_card_replaced as edit_slack_card_replaced,
+)
+from daimon.adapters.mcp.tools.teams._send import (
+    _post_teams_credential_card_impl,  # pyright: ignore[reportPrivateUsage]
+    edit_teams_card_state,
+)
+from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
+    ENV_FILE_TARGET,
     CredentialRequestKind,
     build_skill_repo_target,
     mint_request_token,
 )
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
+    env_alias_shadowed,
+    env_name_problem,
+    env_shadow_phrase,
+)
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.credential_requests import create_credential_request
+from daimon.core.mcp_attach import decide_mcp_connect
+from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
+from daimon.core.operation_policy import (
+    TargetFacts,
+    decide_operation,
+    needs_reachability_read,
+)
+from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
+from daimon.core.stores.credential_requests import (
+    create_credential_request,
+    list_live_credential_requests,
+    supersede_credential_request,
+    update_credential_request_message,
+)
+from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
+from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Mirrors packages/adapters/discord/daimon/adapters/discord/agent_setup/credentials.py's
 # _POSIX_KEY_RE. Duplicated rather than imported: the Discord adapter and the
 # MCP adapter cannot import each other (import-linter's independence
 # contract), and this rule is small enough not to warrant a core lift.
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _caller_is_admin(auth: AuthIdentity) -> bool:
+    """Whether this caller may REQUEST a key outside the member allowlist.
+
+    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    ADMIN, or the token is an internal CLI/scheduler/headless token carrying
+    the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
+    role from the account that owns it, which may be an admin — so it is
+    treated as a member here regardless, as `self_write_file` is.
+
+    This only decides whether the card may be minted. The value is written
+    when a person submits the form, and the Discord and Slack submit paths
+    re-check that person's live platform admin status against the same name
+    policy, so a mint by an admin-capable token never lets a member store an
+    admin-only name.
+    """
+    return auth.is_admin and auth.agent_id is None
+
 
 # `normalize_owner_repo` does not truncate to two path segments (it only
 # strips a known prefix/suffix), so a URL like
@@ -63,6 +115,46 @@ _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # normalization sees the same shape this tool validated.
 _OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
+_PENDING_TASK_DESCRIPTION = (
+    "The work that should run once the value is saved, in the person's words "
+    "— a script, a file, a question. Omit it when they only asked to save "
+    "or replace the key; the request itself is never a task."
+)
+
+#: Words that mark work beyond the save itself. A `pending_task` that names the
+#: key, server or repo but carries none of these is the request restated, not a
+#: task waiting on it.
+_WORK_WORDS: Final[tuple[str, ...]] = (
+    "run",
+    "finish",
+    "append",
+    "write",
+    "fetch",
+    "pull",
+    "analy",
+    "plot",
+    "report",
+    "build",
+    "test",
+    "deploy",
+    "continue",
+    "update",
+    "generate",
+    "compute",
+    "query",
+    "summar",
+)
+
+#: What the model should say once the card is up. The card already carries the
+#: expiry as a live timestamp, the requester restriction and who can use the
+#: value; a model paraphrasing any of those writes a sentence that stops being
+#: true as it ages, and repeats what the reader can already see.
+_REPLY_POINTS_AT_THE_FORM = (
+    "Reply with at most one short sentence pointing to the form below, or "
+    "nothing more if a form was all they asked for. Do not mention when it "
+    "expires, who can open it, or who can use the key — the card says that."
+)
+
 
 class RequestCredentialResult(BaseModel):
     """Result of minting and posting a credential-request button."""
@@ -71,21 +163,226 @@ class RequestCredentialResult(BaseModel):
 
     kind: CredentialRequestKind
     target: str
-    expires_at: datetime
     message_id: str
+    instruction: str
+    """What to say about the posted card."""
+
+
+def _named_single_key(text: str) -> str | None:
+    """Return the one key name `text` spells out, or None when it names none.
+
+    A file form is for several keys; a sentence carrying an UPPER_SNAKE word
+    (`TOGGL_API_TOKEN`) names exactly one, and handing that person a whole
+    `.env` upload is the mismatch this catches. A service name on its own
+    ("the Higgsfield key") carries no underscore and names nothing here — the
+    file form is still the right answer when the key argument is omitted.
+    """
+    for word in re.split(r"[^A-Za-z0-9_]+", text):
+        if "_" in word and word.isupper() and _POSIX_KEY_RE.fullmatch(word):
+            return word
+    return None
+
+
+def _require_requestable_platform(auth: AuthIdentity) -> str:
+    """Refuse before the mint when the click could never be dispatched.
+
+    The row is minted before the button is posted, so a caller whose platform
+    context cannot carry a button (no bound identity, or a Slack caller with
+    no workspace) must be refused here — after the mint the failure surfaces
+    as "created but posting failed", leaving a dead row behind.
+    """
+    if auth.platform_user_id is None:
+        raise ToolError("credential requests require a platform-bound identity")
+    if auth.platform == "slack" and auth.external_id is None:
+        raise ToolError("credential requests require a workspace context")
+    return auth.platform_user_id
+
+
+def _bounded_pending_task(pending_task: str | None, *, echoes: tuple[str, ...]) -> str | None:
+    """Return the waiting task to persist, or None when it says nothing.
+
+    `sanitize_requested_work` nulls out an empty, too-short, or name-echoing
+    string; the slice is the caller's half of that contract (the sanitizer
+    deliberately does not truncate). The echoes are the agent name and the
+    target, the two strings a model restates instead of describing work.
+
+    On top of that sits a heuristic backstop for a save-only request: text that
+    names one of those and carries no word signalling work beyond the save
+    ("give daimon a HIGGSFIELD_API_KEY so people can try it here") is the ask
+    itself, and persisting it would buy a billed continuation for a request
+    that ended at the card. The guidance in `defaults/` is the rule; this only
+    catches the case where the model passed the ask back anyway. Text that does
+    name work is kept even when it repeats the key name ("once
+    TOGGL_API_TOKEN is saved, run /root/work/toggl_report.py").
+    """
+    work = sanitize_requested_work(pending_task, echoes=echoes)
+    if work is None:
+        return None
+    normalized = work.lower()
+    names_a_target = any(echo.strip().lower() in normalized for echo in echoes if echo.strip())
+    describes_work = any(word in normalized for word in _WORK_WORDS)
+    if names_a_target and not describes_work:
+        return None
+    return work[:MAX_REQUESTED_WORK]
 
 
 async def _resolve_agent_uuid(
     runtime: McpRuntime,
     auth: AuthIdentity,
     agent_name: str,
-) -> uuid.UUID:
-    ma_agent = await find_agent_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=agent_name
+    expected_ma_agent_id: str | None,
+    origin: TurnOriginRow,
+) -> tuple[uuid.UUID, BetaManagedAgentsAgent]:
+    """Return the derived agent UUID and the MA agent it was derived from.
+
+    The MA agent is threaded back out rather than discarded because the minted
+    row now records which agent the control targets (`target_ma_agent_id` /
+    `target_name`), and re-resolving it at the mint site would be a second
+    round trip that could disagree with this one.
+    """
+    if expected_ma_agent_id is None:
+        if agent_name == origin.configuration_target_name:
+            expected_ma_agent_id = origin.configuration_target_ma_agent_id
+        elif agent_name == origin.responder_name:
+            expected_ma_agent_id = origin.responder_ma_agent_id
+    ma_agent = await resolve_setup_agent(
+        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
-    if ma_agent is None:
-        raise ToolError(f"agent '{agent_name}' not found in this tenant")
-    return derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id))
+    agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id))
+    return agent_uuid, ma_agent
+
+
+async def _require_key_replacement_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+    key: str,
+    adding: str | None = None,
+) -> None:
+    """Raise before the mint when this caller may not replace an existing key.
+
+    `adding` is set when `key` is not being overwritten but shadowed: a
+    different name (`adding`) the same tool reads as `key`.
+
+    `key_replace` is an attachment operation: an admin is allowed on any
+    target (that is the first-run onboarding step), a non-admin is refused on
+    a defaults-managed agent and on one that currently answers somewhere in
+    the tenant. The reachability read is paid for only when the policy says
+    the answer actually depends on it.
+    """
+    is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    reachable = False
+    if needs_reachability_read(
+        "key_replace", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
+    ):
+        async with runtime.session_factory() as session:
+            reachable = await is_agent_shared_for_key_changes(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(ma_agent.id),
+                default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
+            )
+    outcome = decide_operation(
+        "key_replace",
+        is_admin=auth.is_admin,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+    if outcome in ("managed_agent", "needs_admin") and adding is not None:
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
+            f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
+            "admin, and the caller is not "
+            f"one. Nothing changed: the existing '{key}' is still in use and no card "
+            f"was posted. Tell them an admin can ask Daimon to replace '{key}' on "
+            f"'{ma_agent.name}'. Do not ask anyone for the value here and do not retry."
+        )
+    if outcome in ("managed_agent", "needs_admin"):
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
+            f"'{key}' it already has needs an admin, and the caller "
+            f"is not one. Nothing changed: the existing '{key}' is still in use and no "
+            "card was posted. Tell them an admin can ask Daimon to replace the "
+            f"'{key}' key on '{ma_agent.name}'. Do not ask anyone for the value here "
+            "and do not retry."
+        )
+
+
+async def _require_mcp_replacement_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+    agent_id: uuid.UUID,
+    server_name: str,
+    url: str,
+    shares_token: bool,
+) -> None:
+    """Raise before the mint when this connection would replace what a non-admin may not.
+
+    `mcp_replace` is an attachment operation: repointing an existing server
+    name, or overwriting the agent's shared token for a URL, on an agent that
+    answers somewhere in the tenant (or a defaults-managed one) needs an admin.
+    The submit path decides it again against the person who submits.
+    """
+    decision = await decide_mcp_connect(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        is_admin=auth.is_admin,
+        default=runtime.deployment_default,
+        shares_token=shares_token,
+    )
+    if decision.refused:
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here and already has the MCP server "
+            f"'{server_name}' (or a token for {url}), so replacing it needs a server or "
+            "workspace admin, and the caller is not one. Nothing changed and no card was "
+            f"posted. Tell them an admin can ask Daimon to replace '{server_name}' on "
+            f"'{ma_agent.name}'. Do not retry under another name."
+        )
+
+
+async def _supersede_live_siblings(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    requester_platform_user_id: str,
+    origin_thread_id: str,
+    now: datetime,
+) -> list[CredentialRequestRow]:
+    """Retire every form this person already has open here, and return them.
+
+    A corrected request used to leave its predecessor live, so one thread held
+    two buttons for one intent and the stale one asked for the wrong thing.
+    Scope is deliberately narrow — same requester, same thread, same agent —
+    so a second person's form and another agent's form are untouched.
+
+    Runs in the mint's own transaction, so the retirement and the new row
+    commit together: there is never a moment with no live form at all. A row
+    someone is submitting right this second wins its own UPDATE and is left
+    out of the returned list, so no card is edited out from under them.
+    """
+    live = await list_live_credential_requests(
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        requester_platform_user_id=requester_platform_user_id,
+        origin_thread_id=origin_thread_id,
+        now=now,
+    )
+    retired: list[CredentialRequestRow] = []
+    for row in live:
+        if await supersede_credential_request(session, token=row.token, now=now) is not None:
+            retired.append(row)
+    return retired
 
 
 async def _mint_and_post(
@@ -96,14 +393,50 @@ async def _mint_and_post(
     target: str,
     mcp_server_url: str | None,
     agent_id: uuid.UUID,
+    ma_agent: BetaManagedAgentsAgent,
     requester_platform_user_id: str,
     agent_name: str,
     purpose: str,
     channel_id: str,
+    origin: TurnOriginRow,
+    requested_work: str | None,
+    replaces_updated_at: datetime | None = None,
+    branch: str | None = None,
 ) -> RequestCredentialResult:
+    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
+    # A tool-supplied channel cannot redirect a private-input request.
+    channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
+    if auth.platform == "teams" and runtime.teams_client is None:
+        raise ToolError("Teams tools are not configured on this server")
     token = mint_request_token()
-    expires_at = datetime.now(UTC) + DEFAULT_TTL
+    now = datetime.now(UTC)
+    expires_at = now + DEFAULT_TTL
+    # The card says who will pick the work back up; an origin with no
+    # responder name is the headless case, where the built-in agent's name is
+    # the only honest thing to print.
+    responder_name = origin.responder_name or "Daimon"
     async with runtime.session_factory.begin() as session:
+        active_origin = await get_active_origin(
+            session,
+            origin_id=origin.id,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=origin.platform,
+            now=now,
+            for_update=True,
+        )
+        if active_origin is None:
+            raise ToolError(
+                "This turn origin expired before the request; retry in that conversation."
+            )
+        retired = await _supersede_live_siblings(
+            session,
+            tenant_id=auth.tenant_id,
+            agent_id=agent_id,
+            requester_platform_user_id=requester_platform_user_id,
+            origin_thread_id=origin.thread_id,
+            now=now,
+        )
         row = await create_credential_request(
             session,
             token=token,
@@ -116,18 +449,50 @@ async def _mint_and_post(
             requester_platform_user_id=requester_platform_user_id,
             channel_id=channel_id,
             expires_at=expires_at,
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id=str(ma_agent.id),
+            target_name=ma_agent.name,
+            requested_work=requested_work,
+            responder_name=responder_name,
+            replaces_updated_at=replaces_updated_at,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            origin_thread_id=origin.thread_id,
         )
     try:
-        message_id = await _post_credential_button_impl(
-            runtime,
-            auth,
-            channel_id=channel_id,
-            kind=kind,
-            target=target,
-            token=token,
-            agent_name=agent_name,
-            purpose=purpose,
-        )
+        if auth.platform == "slack":
+            message_id = await _post_slack_credential_button_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                thread_ts=origin.thread_id,
+                kind=kind,
+                target=target,
+                token=token,
+                agent_name=agent_name,
+                purpose=purpose,
+                expires_at=expires_at,
+                responder_name=responder_name,
+                mcp_server_url=mcp_server_url,
+                branch=branch,
+            )
+        elif auth.platform == "teams":
+            message_id = await _post_teams_credential_card_impl(runtime, auth, row=row)
+        else:
+            message_id = await _post_credential_button_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                kind=kind,
+                target=target,
+                token=token,
+                agent_name=agent_name,
+                purpose=purpose,
+                expires_at=expires_at,
+                responder_name=responder_name,
+                mcp_server_url=mcp_server_url,
+                branch=branch,
+            )
     except ToolError as exc:
         # The row already exists (single-use + TTL bound it regardless), but
         # with no live button it is silently unusable — say so rather than
@@ -135,45 +500,147 @@ async def _mint_and_post(
         raise ToolError(
             f"credential request was created but posting the button failed: {exc}"
         ) from exc
+    async with runtime.session_factory.begin() as session:
+        await update_credential_request_message(session, token=token, posted_message_id=message_id)
+    # Only now that the replacement is visible: an edit that lands first would
+    # point the reader at a "newer form below" that does not exist yet.
+    for old in retired:
+        if auth.platform == "slack":
+            await edit_slack_card_replaced(runtime, auth, row=old)
+        elif auth.platform == "teams":
+            await edit_teams_card_state(runtime, row=old, state="replaced")
+        else:
+            await edit_discord_card_replaced(runtime, row=old)
     return RequestCredentialResult(
-        kind=kind, target=target, expires_at=row.expires_at, message_id=message_id
+        kind=kind,
+        target=target,
+        message_id=message_id,
+        instruction=_REPLY_POINTS_AT_THE_FORM,
     )
 
 
-async def _request_env_credential_impl(
+async def _request_agent_key_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
     agent_name: str,
-    key: str,
+    key: str | None,
     purpose: str,
     channel_id: str,
+    pending_task: str | None = None,
+    origin_context_id: str | None = None,
+    expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_env_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
-    if not _POSIX_KEY_RE.match(key):
+    requester = _require_requestable_platform(auth)
+    if key is not None:
+        problem = env_name_problem(key, is_admin=_caller_is_admin(auth))
+        if problem == "bad_name":
+            raise ToolError(
+                "key must match [A-Za-z_][A-Za-z0-9_]* "
+                "(letters, digits, underscores; must not start with a digit)"
+            )
+        if problem == "reserved_name":
+            raise ToolError(
+                f"{key} is a reserved name: it changes how the agent's shell, git, "
+                "interpreters or HTTP clients run, so it cannot be stored as a key."
+            )
+        if problem == "not_credential_name":
+            raise ToolError(
+                f"{key} is not a secret name a member can add. Use a name ending in "
+                f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, "
+                "region and URL names."
+            )
+    if key is None:
+        named = _named_single_key(purpose)
+        if named is not None:
+            raise ToolError(
+                f"You named one key ({named}); pass it as `key` instead of requesting a file."
+            )
+        if auth.platform == "teams":
+            # A Teams dialog has no file input, so the upload form cannot exist here.
+            raise ToolError(
+                "Teams cannot take a .env file upload. Request each key by name with `key`."
+            )
+    async with runtime.session_factory() as session:
+        writable = agent_env_writes_allowed(session)
+    if not writable:
+        # Fail closed before anyone is asked for a value that could not be stored
+        # encrypted. Tell the model plainly so it relays the operator step.
         raise ToolError(
-            "env key must match [A-Za-z_][A-Za-z0-9_]* "
-            "(letters, digits, underscores; must not start with a digit)"
+            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
+            "can't be saved and no card was posted. Tell them the operator must set "
+            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
         )
-    agent_id = await _resolve_agent_uuid(runtime, auth, agent_name)
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    agent_id, ma_agent = await _resolve_agent_uuid(
+        runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
+    # No key name means a whole-file import, which names no single key and
+    # replaces nothing by compare-and-set: the file form merges.
+    kind: CredentialRequestKind = "env_file" if key is None else "env"
+    target = ENV_FILE_TARGET if key is None else key
+    replaces_updated_at: datetime | None = None
+    if key is not None:
+        async with runtime.session_factory() as session:
+            existing = await get_agent_file(
+                session, tenant_id=auth.tenant_id, agent_id=agent_id, key=key
+            )
+        if existing is not None:
+            await _require_key_replacement_allowed(runtime, auth, ma_agent=ma_agent, key=key)
+            # The card promises "the value as it stands right now"; the
+            # submit path compares against this timestamp and refuses a
+            # write that would clobber someone else's later change.
+            replaces_updated_at = existing.updated_at
+        else:
+            # A different name the same tool reads as this credential (GH_TOKEN
+            # beside GITHUB_TOKEN) retargets it as surely as an overwrite, so it
+            # takes the same gate. The submit path re-decides it for the person
+            # who actually submits.
+            async with runtime.session_factory() as session:
+                held = await list_turn_key_names(
+                    session, tenant_id=auth.tenant_id, agent_id=agent_id
+                )
+            shadowed = env_alias_shadowed(key, held)
+            if shadowed is not None:
+                await _require_key_replacement_allowed(
+                    runtime, auth, ma_agent=ma_agent, key=shadowed, adding=key
+                )
     return await _mint_and_post(
         runtime,
         auth,
-        kind="env",
-        target=key,
+        kind=kind,
+        target=target,
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
+        origin=origin,
+        requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, target)),
+        replaces_updated_at=replaces_updated_at,
     )
 
 
-async def _request_mcp_credential_impl(
+def _reject_reserved_server(runtime: McpRuntime, *, server_name: str, url: str) -> None:
+    """The deployment's own daimon-mcp entry can never be the target of a credential.
+
+    Same gate as `attach_mcp_server`: a grant or token stored at the public URL
+    would take the slot the per-agent JWT needs, and the vault bootstrap
+    would 409 on every session create with nothing to heal it.
+    """
+    public_url = runtime.settings.mcp.public_url
+    rejection = get_reserved_mcp_rejection(
+        server_name=server_name,
+        url=url,
+        public_url=str(public_url) if public_url is not None else None,
+    )
+    if rejection is not None:
+        raise ToolError(rejection)
+
+
+async def _request_mcp_token_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -181,13 +648,18 @@ async def _request_mcp_credential_impl(
     server_name: str,
     url: str,
     channel_id: str,
+    pending_task: str | None = None,
+    origin_context_id: str | None = None,
+    expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_mcp_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(url).scheme not in ("http", "https"):
         raise ToolError("mcp server url must be http or https")
+    try:
+        assert_public_host(url, what="mcp server url")
+    except McpUrlError as err:
+        raise ToolError(str(err)) from err
+    _reject_reserved_server(runtime, server_name=server_name, url=url)
     # Normalise the trailing slash once, here, before the URL is persisted.
     # The vault stores it as the credential's `auth.mcp_server_url` and
     # mcp_vault's idempotent replace matches on that string exactly, so
@@ -195,7 +667,19 @@ async def _request_mcp_credential_impl(
     # would stack rather than replace. Observed live: request row held the
     # slashed form while the vault held the bare one.
     url = url.rstrip("/")
-    agent_id = await _resolve_agent_uuid(runtime, auth, agent_name)
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    agent_id, ma_agent = await _resolve_agent_uuid(
+        runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
+    await _require_mcp_replacement_allowed(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        shares_token=True,
+    )
     return await _mint_and_post(
         runtime,
         auth,
@@ -203,19 +687,71 @@ async def _request_mcp_credential_impl(
         target=server_name,
         mcp_server_url=url,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=f"connecting the MCP server '{server_name}'",
         channel_id=channel_id,
+        origin=origin,
+        requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
     )
 
 
-# No `default_branch` parameter here: the credential_requests row has no
-# column to hold one, and none is being added, so an argument accepted here
-# would be silently discarded — the exact class of surface-that-lies this
-# tool exists not to become. The modal collects the branch instead,
-# defaulting to `main`.
-async def _request_skill_repo_credential_impl(
+async def _request_mcp_oauth_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    server_name: str,
+    url: str,
+    channel_id: str,
+    pending_task: str | None = None,
+    origin_context_id: str | None = None,
+    expected_ma_agent_id: str | None = None,
+) -> RequestCredentialResult:
+    requester = _require_requestable_platform(auth)
+    # OAuth only ever happens over TLS: the code and the tokens travel in the
+    # browser and the callback, and no authorization server accepts a plain
+    # http redirect target.
+    if urlparse(url).scheme != "https":
+        raise ToolError("an OAuth MCP server url must be https")
+    try:
+        assert_public_host(url, what="mcp server url")
+    except McpUrlError as err:
+        raise ToolError(str(err)) from err
+    _reject_reserved_server(runtime, server_name=server_name, url=url)
+    url = url.rstrip("/")
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    agent_id, ma_agent = await _resolve_agent_uuid(
+        runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
+    await _require_mcp_replacement_allowed(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        shares_token=False,
+    )
+    return await _mint_and_post(
+        runtime,
+        auth,
+        kind="mcp_oauth",
+        target=server_name,
+        mcp_server_url=url,
+        agent_id=agent_id,
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
+        agent_name=agent_name,
+        purpose=f"connecting the MCP server '{server_name}' with your account",
+        channel_id=channel_id,
+        origin=origin,
+        requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
+    )
+
+
+async def _request_skill_repo_token_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -225,11 +761,11 @@ async def _request_skill_repo_credential_impl(
     path: str,
     purpose: str,
     channel_id: str,
+    pending_task: str | None = None,
+    origin_context_id: str | None = None,
+    expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_skill_repo_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(repo_url).scheme not in ("http", "https"):
         raise ToolError("repo url must be http or https, e.g. https://github.com/owner/repo")
     if not _OWNER_REPO_RE.fullmatch(normalize_owner_repo(repo_url)):
@@ -242,7 +778,10 @@ async def _request_skill_repo_credential_impl(
         raise ToolError("branch must not contain '@' or '#'")
     if "#" in path:
         raise ToolError("path must not contain '#'")
-    agent_id = await _resolve_agent_uuid(runtime, auth, agent_name)
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    agent_id, ma_agent = await _resolve_agent_uuid(
+        runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
     return await _mint_and_post(
         runtime,
         auth,
@@ -250,10 +789,14 @@ async def _request_skill_repo_credential_impl(
         target=build_skill_repo_target(repo_url, branch, path),
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
+        origin=origin,
+        requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, repo_url)),
+        branch=branch,
     )
 
 
@@ -265,120 +808,228 @@ async def _request_repo_binding_impl(
     repo_url: str,
     purpose: str,
     channel_id: str,
+    branch: str = "main",
+    pending_task: str | None = None,
+    origin_context_id: str | None = None,
+    expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_repo_binding is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(repo_url).scheme not in ("http", "https"):
         raise ToolError("repo url must be http or https, e.g. https://github.com/owner/repo")
     if not _OWNER_REPO_RE.fullmatch(normalize_owner_repo(repo_url)):
         raise ToolError(
             "repo url must name exactly one owner/repo, e.g. https://github.com/owner/repo"
         )
-    agent_id = await _resolve_agent_uuid(runtime, auth, agent_name)
+    # Same delimiter rule `request_skill_repo_token` applies: the branch rides
+    # in the packed `target`, so a branch carrying one would round-trip as a
+    # different repo.
+    if "@" in branch or "#" in branch:
+        raise ToolError("branch must not contain '@' or '#'")
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    agent_id, ma_agent = await _resolve_agent_uuid(
+        runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
     return await _mint_and_post(
         runtime,
         auth,
         kind="repo",
-        target=repo_url,
+        target=build_skill_repo_target(repo_url, branch, ""),
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
+        origin=origin,
+        requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, repo_url)),
+        branch=branch,
     )
 
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
-    async def request_env_credential(  # pyright: ignore[reportUnusedFunction]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    async def request_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        key: str,
         purpose: str,
-        channel_id: str,
+        channel_id: Annotated[
+            str,
+            Field(description="Compatibility field; origin controls the posting destination."),
+        ],
+        origin_context_id: str,
+        expected_ma_agent_id: str,
+        key: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "The exact key name (e.g. TOGGL_API_TOKEN). Pass it whenever the "
+                    "person named or implied ONE key. Omit ONLY when they want to "
+                    "upload a .env file holding several keys."
+                )
+            ),
+        ] = None,
+        pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Request an environment secret from the user via a private modal.
+        """Give an agent an API key or token for any service: Toggl, OpenAI,
+        Higgsfield, or a platform that just launched. Unknown services work too.
 
-        Call this INSTEAD of ever accepting a secret value in chat. Posts a
-        button in the thread naming the exact env key; clicking it opens a
-        native Discord modal where the user enters the value privately — it
-        never appears in this channel or in your context. Once added, the
-        credential becomes usable by everyone who talks to ``agent_name``.
-        """
-        return await _request_env_credential_impl(
+        Never accept secret values in chat; ask for rotation if pasted. One named key
+        → pass `key`. To load, upload or import a whole `.env` file of several keys at
+        once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
+        uses ``request_repo_binding``.
+
+        Posts a card naming the agent and the key. Only the requester can open its
+        private form; it expires in 30 minutes. Values never appear in chat. Anyone
+        who talks to the agent can use added keys. Members can add new keys, including
+        to built-in Daimon; replacing one a shared agent already has needs an admin.
+        Pass the waiting task as `pending_task` so it resumes after the value is
+        saved; call this before any clarifying question about that task, even when
+        the task is underspecified."""
+        return await _request_agent_key_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             key=key,
             purpose=purpose,
             channel_id=channel_id,
+            pending_task=pending_task,
+            origin_context_id=origin_context_id,
+            expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool
-    async def request_mcp_credential(  # pyright: ignore[reportUnusedFunction]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    async def request_mcp_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        server_name: str,
-        url: str,
-        channel_id: str,
+        server_name: Annotated[
+            str,
+            Field(description="Connection name; reuse at a new URL replaces it (admin if shared)."),
+        ],
+        url: Annotated[
+            str,
+            Field(
+                description="MCP endpoint URL accepting bearer authentication, e.g. https://mcp.example.com/mcp."
+            ),
+        ],
+        channel_id: Annotated[
+            str,
+            Field(description="Compatibility field; origin controls the posting destination."),
+        ],
+        origin_context_id: str,
+        expected_ma_agent_id: str,
+        pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Request an auth-required MCP server's credential via a private modal.
+        """Connect an agent such as research-bot to Linear or GitHub through an MCP
+        endpoint with a bearer token, not browser OAuth. For a server that only
+        signs people in through a browser (Notion, Slack, Atlassian) use
+        ``request_mcp_oauth`` instead; such servers reject a pasted key.
+        Match supported authentication; an API key is not automatically an MCP token.
 
-        Call this INSTEAD of ever accepting a token value in chat, and instead
-        of ``attach_mcp_server`` when the server requires authentication.
-        Posts a button in the thread naming the exact server; clicking it
-        opens a native Discord modal where the user enters the token
-        privately — it never appears in this channel or in your context.
-        Once added, the credential becomes usable by everyone who talks to
-        ``agent_name``.
-        """
-        return await _request_mcp_credential_impl(
+        Use ``attach_mcp_server`` for public servers without tokens. Never accept
+        credentials in chat. Members can use this form on shared agents and built-in
+        Daimon to add a server; replacing one the agent already has (same name at
+        another URL, or a new token for a connected URL) needs an admin there.
+
+        Posts a requester-only card naming the agent and the server, opening a private
+        form, expiring in 30 minutes. Submission attaches the server to the agent, not
+        this session's toolset. Check tool availability before promising use here.
+        Values never appear in chat; everyone talking to the agent can use the
+        connection. Pass the waiting task as `pending_task` so it resumes after the
+        value is saved."""
+        return await _request_mcp_token_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             server_name=server_name,
             url=url,
             channel_id=channel_id,
+            pending_task=pending_task,
+            origin_context_id=origin_context_id,
+            expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    # The docstring below deliberately does NOT name the skill-import tool.
-    # That tool is admin-gated; this one is not (matching its sibling
-    # `request_*` tools), so naming it would disclose a gated tool's existence
-    # to every principal that can discover this one —
-    # `test_chat_session_tool_reachability` asserts against exactly that by
-    # searching the rendered tool text for the gated name. Kept as a comment
-    # rather than a docstring paragraph because the docstring IS prompt
-    # context: it is rendered into every model's tool list, where an internal
-    # rationale is noise.
-    @mcp.tool
-    async def request_skill_repo_credential(  # pyright: ignore[reportUnusedFunction]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    async def request_mcp_oauth(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        repo_url: str,
-        purpose: str,
-        channel_id: str,
-        branch: str = "main",
-        path: str = "",
+        server_name: Annotated[
+            str,
+            Field(description="Connection name; reuse at a new URL replaces it (admin if shared)."),
+        ],
+        url: Annotated[
+            str,
+            Field(
+                description="MCP endpoint URL that signs people in through OAuth, e.g. https://mcp.notion.com/mcp."
+            ),
+        ],
+        channel_id: Annotated[
+            str,
+            Field(description="Compatibility field; origin controls the posting destination."),
+        ],
+        origin_context_id: str,
+        expected_ma_agent_id: str,
+        pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Ask for a GitHub token so a skill import can read a PRIVATE repo.
+        """Connect an agent to an MCP server that signs people in through the browser,
+        such as Notion, Slack or Atlassian. Each person connects their own account:
+        the grant is theirs alone, and other members connect separately when asked.
 
-        Call this when importing skills from a repo reports that no
-        credential was available — NOT ``request_repo_binding``. Importing
-        skills from a repo and binding a repo for the agent to check out are
-        different things: this one writes no ``agent_repo_binding`` row, so
-        it will not make the agent start cloning the skill repo. The stored
-        token is shared between the two, so a user who has already bound a
-        repo with a token that can also read this one will not be asked
-        twice.
+        Use ``request_mcp_token`` for servers that take a pasted bearer token and
+        ``attach_mcp_server`` for public servers. Members can use this on shared
+        agents and built-in Daimon; repointing an existing server name at another
+        URL needs an admin there.
 
-        Pass the same repo url, branch, and path the failed import used —
-        they are carried through the click, and the import re-runs
-        automatically on submit, so there is nothing to call afterwards.
-        """
-        return await _request_skill_repo_credential_impl(
+        Posts a requester-only card; its button opens a private sign-in link that
+        expires in ten minutes. Finishing sign-in stores the grant for that person
+        and attaches the server to the agent, not this session's toolset. Check
+        tool availability before promising use here. Pass the waiting task as
+        `pending_task` so it resumes after the connection is made."""
+        return await _request_mcp_oauth_impl(
+            runtime,
+            await _auth(ctx),
+            agent_name=agent_name,
+            server_name=server_name,
+            url=url,
+            channel_id=channel_id,
+            pending_task=pending_task,
+            origin_context_id=origin_context_id,
+            expected_ma_agent_id=expected_ma_agent_id,
+        )
+
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    async def request_skill_repo_token(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        agent_name: str,
+        repo_url: Annotated[
+            str,
+            Field(description="GitHub repo or repository URL, e.g. https://github.com/owner/repo."),
+        ],
+        purpose: str,
+        channel_id: Annotated[
+            str,
+            Field(description="Compatibility field; origin controls the posting destination."),
+        ],
+        origin_context_id: str,
+        expected_ma_agent_id: str,
+        branch: Annotated[
+            str, Field(description="Branch the skills are read from, e.g. main.")
+        ] = "main",
+        path: str = "",
+        pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
+    ) -> RequestCredentialResult:
+        """The skills repo is private: collect a GitHub token to import its skills.
+
+        After ``sync_skills`` cannot read a private skill repository, use this form.
+        The skill repo is separate from the working repo; for that one use
+        ``request_repo_binding``.
+
+        Posts a requester-only card naming the agent and the repo, expiring in 30
+        minutes. Its private form retries import and attachment; tokens never appear
+        in chat. Anyone talking to the agent can use the imported skills. Pass the
+        same repo URL, branch and path, and the waiting task as `pending_task` so it
+        resumes after the value is saved."""
+        return await _request_skill_repo_token_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
@@ -387,25 +1038,43 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             path=path,
             purpose=purpose,
             channel_id=channel_id,
+            pending_task=pending_task,
+            origin_context_id=origin_context_id,
+            expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_repo_binding(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        repo_url: str,
+        repo_url: Annotated[
+            str,
+            Field(description="GitHub repo or repository URL, e.g. https://github.com/owner/repo."),
+        ],
         purpose: str,
-        channel_id: str,
+        channel_id: Annotated[
+            str,
+            Field(description="Compatibility field; origin controls the posting destination."),
+        ],
+        origin_context_id: str,
+        expected_ma_agent_id: str,
+        branch: Annotated[
+            str, Field(description="Branch the agent checks out, e.g. main.")
+        ] = "main",
+        pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Request a repo binding for an agent via a private modal.
+        """Let an agent read a GitHub working repo or repository, public or private.
 
-        Call this INSTEAD of ever telling the user to open ``/agent-setup``
-        to bind a repository. Posts a button in the thread naming the exact
-        repo and agent; clicking it opens a native Discord modal where the
-        user confirms the branch and, only if the repo is private and not
-        otherwise readable, pastes a GitHub token that never appears in this
-        channel or in your context.
-        """
+        For a private skill repo use ``request_skill_repo_token``. If the user has
+        no working token, ``post_github_app_install_link`` offers a GitHub App install;
+        installing alone does not bind the repo or verify this tenant's access.
+
+        Posts a requester-only card naming the agent and the repo, expiring in 30
+        minutes. Only the requester can open its private form, which collects a GitHub
+        token only when needed; values never appear in chat. Saving binds the working
+        repository on `branch` for future sessions. Existing working tokens remain in
+        use. Pass the waiting task as `pending_task` so it resumes after the value is
+        saved."""
         return await _request_repo_binding_impl(
             runtime,
             await _auth(ctx),
@@ -413,4 +1082,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             repo_url=repo_url,
             purpose=purpose,
             channel_id=channel_id,
+            branch=branch,
+            pending_task=pending_task,
+            origin_context_id=origin_context_id,
+            expected_ma_agent_id=expected_ma_agent_id,
         )

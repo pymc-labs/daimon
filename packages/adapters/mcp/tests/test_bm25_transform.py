@@ -8,12 +8,9 @@ those are FastMCP's responsibility (validated in spikes 004-006).
 
 from __future__ import annotations
 
-import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_bm25_transform_collapses_catalog() -> None:

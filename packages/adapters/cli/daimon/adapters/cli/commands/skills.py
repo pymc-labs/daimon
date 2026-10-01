@@ -192,8 +192,8 @@ async def sync_agent(
     if not rt.settings.crypto.keys:
         console.print(
             "[red]settings.crypto.keys is empty -- cannot decrypt GitHub PAT. "
-            "Configure DAIMON_CRYPTO__KEYS and re-bind the PAT via the agent-setup "
-            "repo-auth panel.[/red]"
+            "Configure DAIMON_CRYPTO__KEYS and re-bind the PAT with "
+            "request_repo_binding in chat.[/red]"
         )
         raise typer.Exit(code=3)
     fernet = build_multifernet(tuple(k.get_secret_value() for k in rt.settings.crypto.keys))
@@ -224,8 +224,8 @@ async def sync_agent(
                 report = await _run(http)
     except PATMissingError as err:
         console.print(
-            "[red]No GitHub PAT bound for principal. Bind a PAT via the "
-            f"agent-setup repo-auth panel first. ({err})[/red]"
+            "[red]No GitHub PAT bound for principal. Bind one with "
+            f"request_repo_binding in chat first. ({err})[/red]"
         )
         raise typer.Exit(code=4) from err
 

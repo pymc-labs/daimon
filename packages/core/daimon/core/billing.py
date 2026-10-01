@@ -82,8 +82,8 @@ def load_billing_config() -> BillingConfig | None:
     )
 
 
-def _calendar_month_start_utc(now: datetime) -> datetime:
-    """First day of the calendar month at 00:00 UTC."""
+def month_start(now: datetime) -> datetime:
+    """First day of the calendar month at 00:00 UTC: the cap period the panels report."""
     return datetime(now.year, now.month, 1, tzinfo=UTC)
 
 
@@ -98,15 +98,13 @@ async def is_over_cap(
     """Adapter-edge admission decision.
 
     Returns True iff the user has spent at-or-above their effective cap
-    in the calendar-month UTC window containing ``now``. Returns False when
-    billing_config is None (billing disabled). Exceptions propagate.
+    in the calendar-month UTC window containing ``now``. Caps apply even when
+    Stripe is not configured. Exceptions propagate.
 
     ``now`` is injected by the caller (the adapter edge) rather than read from
     the clock here, per guideline:architecture — keeps the decision pure and
     testable without monkeypatching.
     """
-    if billing_config is None:
-        return False
     async with sessionmaker() as s:
         cap = await tenant_user_caps.get_effective_cap(
             s,
@@ -115,7 +113,7 @@ async def is_over_cap(
         )
         if cap is None:
             return False  # no row = uncapped
-        period_start = _calendar_month_start_utc(now)
+        period_start = month_start(now)
         spent = await usage_events.cost_for_user_in_tenant_since(
             s,
             tenant_id=tenant_id,

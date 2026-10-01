@@ -19,179 +19,27 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-import httpx
-import pytest
-from anthropic.types.beta import BetaManagedAgentsSession
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
-    BetaManagedAgentsAgentMessageEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
-    BetaManagedAgentsSessionEndTurn,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import (
-    BetaManagedAgentsSessionStatusIdleEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
-    BetaManagedAgentsTextBlock,
-)
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
+from daimon.core.turn.deps import build_turn_deps
+from daimon.testing import build_turn_router, ma_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
-    list_response,
-    send_events_response,
-    sse_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
-
 
 _AGENT_TEXT = "Hello from the agent!"
 _AGENT_ID = "ag_e2e_test"
 _AGENT_ID_2 = "ag_e2e_retrieve"
 _ENV_ID = "env_e2e_test"
 _SESSION_ID = "sess_e2e_test"
-
-
-def _make_fake_session() -> BetaManagedAgentsSession:
-    """Construct a real BetaManagedAgentsSession for the create_session stub."""
-    return BetaManagedAgentsSession(
-        id=_SESSION_ID,
-        agent=BetaManagedAgentsSessionAgent(
-            id=_AGENT_ID_2,
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-            name="test-agent",
-            skills=[],
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        created_at="2026-06-14T00:00:00Z",
-        environment_id=_ENV_ID,
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at="2026-06-14T00:00:00Z",
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
-        outcome_evaluations=[],
-    )
-
-
-def _build_router(tenant_id_str: str) -> MARouter:
-    """Build a MARouter handling all routes the E2E exercises.
-
-    Routes registered:
-      GET  /v1/agents               — list for resolver tag lookup
-      GET  /v1/agents/{id}          — retrieve for re-fetch after resolve
-      GET  /v1/environments         — list for resolver tag lookup
-      GET  /v1/environments/{id}    — retrieve for re-fetch after resolve
-      POST /v1/sessions/{id}/events — send-initial event (run_turn)
-      GET  /v1/sessions/{id}/events/stream — SSE turn stream (run_turn)
-    """
-    from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-    from anthropic.types.beta.beta_cloud_config import BetaCloudConfig
-    from anthropic.types.beta.beta_packages import BetaPackages
-    from anthropic.types.beta.beta_unrestricted_network import BetaUnrestrictedNetwork
-
-    empty_cloud_config = BetaCloudConfig(
-        type="cloud",
-        networking=BetaUnrestrictedNetwork(type="unrestricted"),
-        packages=BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
-    )
-
-    agent_item = BetaManagedAgentsAgent(
-        id=_AGENT_ID,
-        type="agent",
-        name="test-agent",
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        metadata={
-            MA_METADATA_KEY_TENANT: tenant_id_str,
-            MA_METADATA_KEY_NAME: "test-agent",
-        },
-        description=None,
-        created_at="2026-06-14T00:00:00Z",  # pyright: ignore[reportArgumentType]
-        updated_at="2026-06-14T00:00:00Z",  # pyright: ignore[reportArgumentType]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
-    ).model_dump(mode="json")
-
-    env_item = BetaEnvironment(
-        id=_ENV_ID,
-        type="environment",
-        name="test-env",
-        config=empty_cloud_config,
-        metadata={
-            MA_METADATA_KEY_TENANT: tenant_id_str,
-            MA_METADATA_KEY_NAME: "test-env",
-        },
-        description="",
-        created_at="2026-06-14T00:00:00Z",
-        updated_at="2026-06-14T00:00:00Z",
-    ).model_dump(mode="json")
-
-    agent_message_event = BetaManagedAgentsAgentMessageEvent(
-        id="evt_msg_e2e",
-        type="agent.message",
-        processed_at=datetime.now(UTC),
-        content=[BetaManagedAgentsTextBlock(type="text", text=_AGENT_TEXT)],
-    ).model_dump(mode="json")
-
-    idle_event = BetaManagedAgentsSessionStatusIdleEvent(
-        id="evt_idle_e2e",
-        type="session.status_idle",
-        processed_at=datetime.now(UTC),
-        stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
-    ).model_dump(mode="json")
-
-    router = MARouter()
-
-    # Resolver list endpoints
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent_item]))
-    router.add(
-        "GET",
-        r"/v1/agents/[^/]+",
-        lambda req, _m: httpx.Response(200, json=agent_item),
-    )
-    router.add("GET", r"/v1/environments", lambda req, _m: list_response([env_item]))
-    router.add(
-        "GET",
-        r"/v1/environments/[^/]+",
-        lambda req, _m: httpx.Response(200, json=env_item),
-    )
-
-    # run_turn endpoints
-    router.add(
-        "POST",
-        r"/v1/sessions/[^/]+/events",
-        lambda req, _m: send_events_response(),
-    )
-    router.add(
-        "GET",
-        r"/v1/sessions/[^/]+/events/stream",
-        lambda req, _m: sse_response([agent_message_event, idle_event]),
-    )
-
-    return router
 
 
 def _make_runtime(
@@ -317,7 +165,13 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
     await db_session.flush()
     await db_session.commit()
 
-    router = _build_router(str(tenant.id))
+    router = build_turn_router(
+        str(tenant.id),
+        agent_id=_AGENT_ID,
+        env_id=_ENV_ID,
+        agent_text=_AGENT_TEXT,
+        usage_event_id=None,
+    )
     runtime = _make_runtime(db_session_factory, router)
     bot = _make_bot(runtime)
     message = _make_thread_message(guild_id=123456)
@@ -330,7 +184,9 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
 
     # create_session is boundary-stubbed: the heavy vault/cred
     # provisioning in sessions.py is not what TC-1 tests. run_turn is NOT stubbed.
-    mock_create_session.return_value = _make_fake_session()
+    mock_create_session.return_value = ma_session(
+        id=_SESSION_ID, agent_id=_AGENT_ID_2, environment_id=_ENV_ID
+    )
 
     await bot.on_message(message)
 

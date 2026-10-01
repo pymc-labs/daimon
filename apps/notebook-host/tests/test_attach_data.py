@@ -45,6 +45,7 @@ def _make_stub_spawner() -> unittest.mock.MagicMock:
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -75,7 +76,7 @@ def _make_test_app(
     settings = load_settings(_env_file=None)
     stub_spawner = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -150,7 +151,7 @@ def test_atomic_write_cleans_tmp_on_partial_failure(
         assert Path(str(src)).exists(), "tmp must exist before os.replace is called"
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(admin_module.os, "replace", failing_replace)
+    monkeypatch.setattr(os, "replace", failing_replace)
 
     with pytest.raises(OSError, match="No space left on device"):
         admin_module._atomic_write_bytes(target, b"x" * 10)  # pyright: ignore[reportPrivateUsage]
@@ -161,7 +162,7 @@ def test_atomic_write_cleans_tmp_on_partial_failure(
         f"failed write must clean its .tmp orphan; found leftover: {tmp_artifacts}"
     )
     # Sanity: restoring os.replace and retrying lets the write succeed.
-    monkeypatch.setattr(admin_module.os, "replace", real_replace)
+    monkeypatch.setattr(os, "replace", real_replace)
     admin_module._atomic_write_bytes(target, b"recovered")  # pyright: ignore[reportPrivateUsage]
     assert target.read_bytes() == b"recovered"
 
@@ -178,7 +179,7 @@ def test_put_data_before_publish_lands_under_data_dir_owned_by_resolved_uid(
     import notebook_host.admin as admin_mod
 
     self_uid = os.getuid()
-    monkeypatch.setattr(admin_mod, "resolve_jail_uid", lambda *a, **kw: self_uid)  # noqa: ARG005
+    monkeypatch.setattr(admin_mod, "resolve_jail_uid", lambda *a, **kw: self_uid)
 
     client, _, _, _ = _make_test_app(tmp_path, monkeypatch)
     resp = client.put(

@@ -13,7 +13,7 @@ class _FakeCtx:
     def __init__(self, state: dict[str, Any]) -> None:
         self._state = state
 
-    async def get_state(self, key: str) -> Any:  # noqa: ANN401  # mirrors fastmcp.Context.get_state
+    async def get_state(self, key: str) -> Any:  # mirrors fastmcp.Context.get_state
         return self._state.get(key)
 
 

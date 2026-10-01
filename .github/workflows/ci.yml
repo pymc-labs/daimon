@@ -11,14 +11,18 @@ permissions:
 
 # Reusable Postgres service block + shared bootstrap (checkout, uv sync,
 # alembic upgrade) are duplicated across pytest-* jobs by necessity —
-# GitHub Actions doesn't support YAML anchors. The org enforces a ~6min
-# per-job budget that our combined test suite can't fit, so we split
-# pytest across parallel jobs (each gets its own 6min).
+# GitHub Actions doesn't support YAML anchors. The suites are split across
+# parallel jobs rather than run as one: together they take longer than a
+# reviewer should wait, and a split run names the failing area in the job
+# list instead of somewhere inside a single long log.
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Silences pyright-python's "newer version available" nag in the log.
+      PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -44,11 +48,17 @@ jobs:
       - name: lint migrations
         run: uv run python scripts/lint_migrations.py
 
-      - name: lint companion-repo leakage
+      - name: lint private material leakage
         run: bash scripts/lint_designators.sh
 
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
+
+      - name: config reference check
+        run: uv run python scripts/generate_config_reference.py --check
+
+      - name: mcp tool catalogue check
+        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
   pytest-core:
     runs-on: ubuntu-latest
@@ -194,6 +204,42 @@ jobs:
       - name: pytest (slack)
         run: uv run pytest packages/adapters/slack -n auto
 
+  pytest-teams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (teams)
+        run: uv run pytest packages/adapters/teams -n auto
+
   pytest-parity:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -241,6 +287,39 @@ jobs:
       - run: uv sync --all-extras --all-packages
       - name: pytest (notebook-host)
         run: uv run pytest apps/notebook-host -n auto
+      # The real-browser isolation test: two real marimo notebooks on their own
+      # *.localhost origins in headless Chromium. Playwright stays out of the
+      # locked dependencies; it is only needed here.
+      - name: playwright chromium
+        run: uv run --with playwright==1.63.0 playwright install --with-deps chromium
+      - name: pytest (notebook-host, real browser)
+        run: >-
+          uv run --with playwright==1.63.0 pytest
+          apps/notebook-host/tests/test_notebook_origin_browser.py -m slow
+
+  pytest-report-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: pytest (report-host)
+        run: uv run pytest apps/report-host -n auto
+
+  pytest-mux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: pytest (mux)
+        run: uv run pytest packages/mux -n auto
 
   docker-build:
     runs-on: ubuntu-latest
@@ -252,7 +331,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-parity, pytest-notebook-host, docker-build]
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-teams, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-build]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

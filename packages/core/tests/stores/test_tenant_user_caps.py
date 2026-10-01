@@ -5,15 +5,12 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
 import pytest_asyncio
 from daimon.core._models import TenantUserCap
 from daimon.core.stores import tenant_user_caps
 from daimon.testing.factories import make_tenant
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
 
 
 @pytest_asyncio.fixture

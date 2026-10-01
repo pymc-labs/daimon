@@ -53,6 +53,7 @@ from daimon.testing.factories import (
     make_tenant,
 )
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent, ma_session
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -440,65 +441,25 @@ def _make_fake_anthropic_with_sessions(
     from datetime import UTC, datetime
     from typing import Any as _Any
 
-    from anthropic.types.beta import (
-        BetaManagedAgentsAgent,
-        BetaManagedAgentsModelConfig,
-        BetaManagedAgentsSession,
-    )
-    from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-    from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-    from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-
     now = datetime.now(UTC)
 
-    agent = BetaManagedAgentsAgent(
+    agent = ma_agent(
         id="agent_test1",
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={"daimon_tenant": str(tenant_id)},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
         name="test-agent",
-        skills=[],
-        system=None,
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+        metadata={"daimon_tenant": str(tenant_id)},
+        created_at=now,
     )
     agent_dict: dict[str, _Any] = agent.model_dump(mode="json")
 
     session_dicts: list[dict[str, _Any]] = []
     for i in range(sessions_count):
         sid = f"sesn_target{i}"
-        s = BetaManagedAgentsSession(
-            outcome_evaluations=[],
+        s = ma_session(
             id=sid,
-            agent=BetaManagedAgentsSessionAgent(
-                id="agent_test1",
-                description=None,
-                mcp_servers=[],
-                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-                name="test-agent",
-                skills=[],
-                system=None,
-                tools=[],
-                type="agent",
-                version=1,
-            ),
-            archived_at=None,
-            created_at=now,
+            agent=agent,
             environment_id="env_test1",
             metadata={"daimon_account": str(account_id)},
-            resources=[],
-            stats=BetaManagedAgentsSessionStats(),
-            status="idle",
-            title=None,
-            type="session",
-            updated_at=now,
-            usage=BetaManagedAgentsSessionUsage(),
-            vault_ids=[],
+            created_at=now,
         )
         session_dicts.append(s.model_dump(mode="json"))
 
@@ -616,15 +577,6 @@ async def test_purge_account_deletes_sessions_across_all_principal_tenants(
     from datetime import UTC, datetime
     from typing import Any as _Any
 
-    from anthropic.types.beta import (
-        BetaManagedAgentsAgent,
-        BetaManagedAgentsModelConfig,
-        BetaManagedAgentsSession,
-    )
-    from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-    from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-    from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-
     tenant_a = await make_tenant(db_session, workspace_id="mt-guild-a")
     tenant_b = await make_tenant(db_session, workspace_id="mt-guild-b")
     account = await make_account(db_session, tenant=tenant_a)
@@ -646,52 +598,21 @@ async def test_purge_account_deletes_sessions_across_all_principal_tenants(
         ("agent_tenantA", tenant_a.id, 1),
         ("agent_tenantB", tenant_b.id, 2),
     ):
-        agent = BetaManagedAgentsAgent(
+        agent = ma_agent(
             id=agent_id,
-            archived_at=None,
-            created_at=now,
-            description=None,
-            mcp_servers=[],
-            metadata={"daimon_tenant": str(tenant_uuid)},
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
             name=f"test-{agent_id}",
-            skills=[],
-            system=None,
-            tools=[],
-            type="agent",
-            updated_at=now,
-            version=1,
+            metadata={"daimon_tenant": str(tenant_uuid)},
+            created_at=now,
         )
         agent_dicts.append(agent.model_dump(mode="json"))
         sessions: list[dict[str, _Any]] = []
         for i in range(session_count):
-            s = BetaManagedAgentsSession(
-                outcome_evaluations=[],
+            s = ma_session(
                 id=f"sesn_{agent_id}_{i}",
-                agent=BetaManagedAgentsSessionAgent(
-                    id=agent_id,
-                    description=None,
-                    mcp_servers=[],
-                    model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-                    name=f"test-{agent_id}",
-                    skills=[],
-                    system=None,
-                    tools=[],
-                    type="agent",
-                    version=1,
-                ),
-                archived_at=None,
-                created_at=now,
+                agent=agent,
                 environment_id="env_test1",
                 metadata={"daimon_account": str(account.id)},
-                resources=[],
-                stats=BetaManagedAgentsSessionStats(),
-                status="idle",
-                title=None,
-                type="session",
-                updated_at=now,
-                usage=BetaManagedAgentsSessionUsage(),
-                vault_ids=[],
+                created_at=now,
             )
             sessions.append(s.model_dump(mode="json"))
         session_dicts_by_agent[agent_id] = sessions
@@ -1216,65 +1137,25 @@ def _make_fake_anthropic_with_sessions_for_principal(
     from datetime import UTC, datetime
     from typing import Any as _Any
 
-    from anthropic.types.beta import (
-        BetaManagedAgentsAgent,
-        BetaManagedAgentsModelConfig,
-        BetaManagedAgentsSession,
-    )
-    from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-    from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-    from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-
     now = datetime.now(UTC)
 
-    agent = BetaManagedAgentsAgent(
+    agent = ma_agent(
         id="agent_principal_test",
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={"daimon_tenant": str(tenant_id)},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
         name="test-agent",
-        skills=[],
-        system=None,
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+        metadata={"daimon_tenant": str(tenant_id)},
+        created_at=now,
     )
     agent_dict: dict[str, _Any] = agent.model_dump(mode="json")
 
     session_dicts: list[dict[str, _Any]] = []
     for i in range(sessions_count):
         sid = f"sesn_principal_target{i}"
-        s = BetaManagedAgentsSession(
-            outcome_evaluations=[],
+        s = ma_session(
             id=sid,
-            agent=BetaManagedAgentsSessionAgent(
-                id="agent_principal_test",
-                description=None,
-                mcp_servers=[],
-                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-                name="test-agent",
-                skills=[],
-                system=None,
-                tools=[],
-                type="agent",
-                version=1,
-            ),
-            archived_at=None,
-            created_at=now,
+            agent=agent,
             environment_id="env_test1",
             metadata={"daimon_account": str(account_id)},
-            resources=[],
-            stats=BetaManagedAgentsSessionStats(),
-            status="idle",
-            title=None,
-            type="session",
-            updated_at=now,
-            usage=BetaManagedAgentsSessionUsage(),
-            vault_ids=[],
+            created_at=now,
         )
         session_dicts.append(s.model_dump(mode="json"))
 
@@ -1421,6 +1302,10 @@ async def test_purge_principal_platform_deletes_credential_request_and_reports_c
         requester_platform_user_id="user-cred-req",
         channel_id="C1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_test",
+        target_name="tester",
+        requested_work=None,
     )
     await db_session.commit()
 
@@ -1476,6 +1361,10 @@ async def test_purge_principal_credential_requests_does_not_delete_same_user_in_
         requester_platform_user_id="shared-user-id",
         channel_id="C1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_test",
+        target_name="tester",
+        requested_work=None,
     )
     await credential_requests_store.create_credential_request(
         db_session,
@@ -1489,6 +1378,10 @@ async def test_purge_principal_credential_requests_does_not_delete_same_user_in_
         requester_platform_user_id="shared-user-id",
         channel_id="C1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_test",
+        target_name="tester",
+        requested_work=None,
     )
     await db_session.commit()
 

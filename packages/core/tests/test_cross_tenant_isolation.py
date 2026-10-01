@@ -13,7 +13,6 @@ keyed by the same metadata) crosses the boundary.
 from __future__ import annotations
 
 import pytest
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_environment_by_daimon_tag,
@@ -21,8 +20,9 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache, resolve_agent
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, list_response
+from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -51,23 +51,8 @@ async def test_cross_tenant_find_agent_returns_own_only(
         r"/v1/agents",
         lambda req, _m: list_response(
             [
-                BetaManagedAgentsAgent(
-                    id="ag_a",
-                    type="agent",
-                    name="daimon",
-                    model={"id": "claude-opus-4-7"},  # pyright: ignore[reportArgumentType]
-                    metadata={
-                        "daimon_tenant": str(result_a.tenant_id),
-                        "daimon_name": "daimon",
-                    },
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",  # pyright: ignore[reportArgumentType]
-                    updated_at="2026-04-21T00:00:00Z",  # pyright: ignore[reportArgumentType]
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                ma_agent(
+                    id="ag_a", name="daimon", model="claude-opus-4-7", tenant_id=result_a.tenant_id
                 ).model_dump(mode="json"),
             ]
         ),
@@ -100,19 +85,9 @@ async def test_cross_tenant_find_environment_returns_own_only(
         r"/v1/environments",
         lambda req, _m: list_response(
             [
-                BetaEnvironment(
-                    id="env_a",
-                    type="environment",
-                    name="default",
-                    config=EMPTY_CLOUD_CONFIG,
-                    metadata={
-                        "daimon_tenant": str(result_a.tenant_id),
-                        "daimon_name": "default",
-                    },
-                    description="",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                ).model_dump(mode="json"),
+                ma_environment(id="env_a", name="default", tenant_id=result_a.tenant_id).model_dump(
+                    mode="json"
+                ),
             ]
         ),
     )
@@ -149,23 +124,8 @@ async def test_cross_tenant_resolve_agent_misses_for_other_tenant(
         r"/v1/agents",
         lambda req, _m: list_response(
             [
-                BetaManagedAgentsAgent(
-                    id="ag_a",
-                    type="agent",
-                    name="daimon",
-                    model={"id": "claude-opus-4-7"},  # pyright: ignore[reportArgumentType]
-                    metadata={
-                        "daimon_tenant": str(result_a.tenant_id),
-                        "daimon_name": "daimon",
-                    },
-                    description=None,
-                    created_at="2026-04-21T00:00:00Z",  # pyright: ignore[reportArgumentType]
-                    updated_at="2026-04-21T00:00:00Z",  # pyright: ignore[reportArgumentType]
-                    version=1,
-                    mcp_servers=[],
-                    skills=[],
-                    tools=[],
-                    system=None,
+                ma_agent(
+                    id="ag_a", name="daimon", model="claude-opus-4-7", tenant_id=result_a.tenant_id
                 ).model_dump(mode="json"),
             ]
         ),

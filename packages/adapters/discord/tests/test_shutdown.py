@@ -14,13 +14,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
-from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from .harness import make_bot
 
 
 def _make_runtime() -> DiscordRuntime:
@@ -41,16 +42,6 @@ def _make_runtime() -> DiscordRuntime:
         resolver_cache=new_resolver_cache(),
         turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # shutdown tests never run a turn
     )
-
-
-def _make_bot() -> DaimonBot:
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = DaimonBot(runtime=_make_runtime(), intents=intents)
-    bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
-    return bot
 
 
 def _make_mention_message(
@@ -81,7 +72,7 @@ async def test_on_message_rejects_when_draining() -> None:
     The drain gate must prevent new mentions from being admitted to _processing
     and must not invoke _handle_mention.
     """
-    bot = _make_bot()
+    bot = make_bot(_make_runtime())
     bot.draining = True
     message = _make_mention_message()
 
@@ -95,7 +86,7 @@ async def test_on_message_rejects_when_draining() -> None:
 @pytest.mark.asyncio
 async def test_drain_sets_flag_then_closes() -> None:
     """_drain_and_close sets draining=True before awaiting and calls close() exactly once."""
-    bot = _make_bot()
+    bot = make_bot(_make_runtime())
     bot.close = AsyncMock()  # type: ignore[method-assign]
 
     assert bot.draining is False, "draining must start False"
@@ -113,7 +104,7 @@ async def test_drain_awaits_inflight_then_closes() -> None:
     removes it (simulating the in-flight turn completing). The drain must wait
     for the set to empty (within a short test grace window), then call close().
     """
-    bot = _make_bot()
+    bot = make_bot(_make_runtime())
     bot.close = AsyncMock()  # type: ignore[method-assign]
 
     thread_id = 789
@@ -142,7 +133,7 @@ async def test_drain_proceeds_to_close_on_grace_window_expiry() -> None:
 
     A cut turn is acceptable (retryable); the process must not hang past the grace window.
     """
-    bot = _make_bot()
+    bot = make_bot(_make_runtime())
     bot.close = AsyncMock()  # type: ignore[method-assign]
 
     thread_id = 789

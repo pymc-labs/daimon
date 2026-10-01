@@ -6,12 +6,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.config import Settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -27,12 +30,20 @@ class CliRuntime:
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
     engine = build_engine(str(settings.database.url))
-    sessionmaker = build_session_factory(engine)
+    sessionmaker = build_session_factory(
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
+    )
     deployment_default = parse_deployment_default(settings.defaults_root)
     resolver_cache = new_resolver_cache()
     async with AsyncAnthropic(
         api_key=settings.anthropic.api_key.get_secret_value(),
         base_url=str(settings.anthropic.base_url),
+        max_retries=MA_MAX_RETRIES,
+        http_client=DefaultAsyncHttpxClient(
+            transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
+        ),
     ) as anthropic:
         try:
             yield CliRuntime(
@@ -43,4 +54,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
                 resolver_cache=resolver_cache,
             )
         finally:
+            await drain_outcomes()
             await engine.dispose()

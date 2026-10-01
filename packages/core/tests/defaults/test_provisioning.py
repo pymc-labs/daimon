@@ -16,8 +16,6 @@ from typing import Any
 
 import httpx
 from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
     BetaManagedAgentsModelConfig,
     SkillListResponse,
 )
@@ -27,7 +25,6 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
-    MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
     tenant_scoped_display_title,
 )
@@ -41,8 +38,9 @@ from daimon.core.defaults.provisioning import (
 from daimon.core.defaults.report import Action, classify_verification
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, list_response
+from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -107,16 +105,7 @@ def _create_serving_router(
         r"/v1/environments",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaEnvironment(
-                id="env_1",
-                type="environment",
-                name="default",
-                config=EMPTY_CLOUD_CONFIG,
-                metadata={},
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-            ).model_dump(mode="json"),
+            json=ma_environment(id="env_1", name="default").model_dump(mode="json"),
         ),
     )
     router.add(
@@ -124,20 +113,8 @@ def _create_serving_router(
         r"/v1/agents",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_1",
-                type="agent",
-                name="daimon",
-                model=_AGENT_MODEL,
-                metadata={},
-                description=None,
-                created_at=_CREATED_AT,
-                updated_at=_CREATED_AT,
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
+            json=ma_agent(
+                id="ag_1", name="daimon", model=_AGENT_MODEL, created_at=_CREATED_AT
             ).model_dump(mode="json"),
         ),
     )
@@ -147,20 +124,8 @@ def _create_serving_router(
         r"/v1/agents/[^/]+/archive",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_1",
-                type="agent",
-                name="daimon",
-                model=_AGENT_MODEL,
-                metadata={},
-                description=None,
-                created_at=_CREATED_AT,
-                updated_at=_CREATED_AT,
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
+            json=ma_agent(
+                id="ag_1", name="daimon", model=_AGENT_MODEL, created_at=_CREATED_AT
             ).model_dump(mode="json"),
         ),
     )
@@ -184,30 +149,15 @@ def _existing_resources_router(*, tenant_id: uuid.UUID) -> MARouter:
         updated_at=created_at_str,
         source="custom",
     ).model_dump(mode="json")
-    existing_env = BetaEnvironment(
-        id="env_1",
-        type="environment",
-        name="default",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={MA_METADATA_KEY_TENANT: tenant_id_str, MA_METADATA_KEY_NAME: "default"},
-        description="",
-        created_at=created_at_str,
-        updated_at=created_at_str,
+    existing_env = ma_environment(
+        id="env_1", name="default", tenant_id=tenant_id_str, created_at=created_at_str
     ).model_dump(mode="json")
-    existing_agent = BetaManagedAgentsAgent(
+    existing_agent = ma_agent(
         id="ag_1",
-        type="agent",
         name="daimon",
         model=_AGENT_MODEL,
-        metadata={MA_METADATA_KEY_TENANT: tenant_id_str, MA_METADATA_KEY_NAME: "daimon"},
-        description=None,
+        tenant_id=tenant_id_str,
         created_at=_CREATED_AT,
-        updated_at=_CREATED_AT,
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     ).model_dump(mode="json")
     router = MARouter()
     router.add("GET", r"/v1/skills", lambda req, _m: list_response([existing_skill]))
@@ -396,20 +346,12 @@ async def test_reconcile_tenant_defaults_uses_passed_tenant_not_bootstrap(
             real_agent_payload.update(body)
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id="ag_1",
-                type="agent",
                 name="daimon",
                 model=_AGENT_MODEL,
                 metadata=body.get("metadata", {}),
-                description=None,
                 created_at=_CREATED_AT,
-                updated_at=_CREATED_AT,
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
             ).model_dump(mode="json"),
         )
 
@@ -493,20 +435,11 @@ async def test_reconcile_tenant_defaults_stamps_guild_account_on_agents(
             agent_metadata.update(body.get("metadata", {}))
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
+            json=ma_agent(
                 id="ag_rbac",
-                type="agent",
                 name="daimon",
-                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
                 metadata=body.get("metadata", {}),
-                description=None,
                 created_at=datetime(2026, 4, 21),
-                updated_at=datetime(2026, 4, 21),
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
             ).model_dump(mode="json"),
         )
 
@@ -515,15 +448,8 @@ async def test_reconcile_tenant_defaults_stamps_guild_account_on_agents(
         env_metadata.update(body.get("metadata", {}))
         return httpx.Response(
             200,
-            json=BetaEnvironment(
-                id="env_rbac",
-                type="environment",
-                name="default",
-                config=EMPTY_CLOUD_CONFIG,
-                metadata=body.get("metadata", {}),
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
+            json=ma_environment(
+                id="env_rbac", name="default", metadata=body.get("metadata", {})
             ).model_dump(mode="json"),
         )
 
@@ -625,21 +551,9 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
             agent_payloads.append(body)
         return httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_sc1",
-                type="agent",
-                name="daimon",
-                model={"id": "claude-sonnet-4-6"},
-                metadata=body.get("metadata", {}),
-                description=None,
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
-            ).model_dump(mode="json"),
+            json=ma_agent(id="ag_sc1", name="daimon", metadata=body.get("metadata", {})).model_dump(
+                mode="json"
+            ),
         )
 
     router = MARouter()
@@ -652,16 +566,7 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
         r"/v1/environments",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaEnvironment(
-                id="env_sc1",
-                type="environment",
-                name="default",
-                config=EMPTY_CLOUD_CONFIG,
-                metadata={},
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-            ).model_dump(mode="json"),
+            json=ma_environment(id="env_sc1", name="default").model_dump(mode="json"),
         ),
     )
     router.add("POST", r"/v1/agents", agent_create)
@@ -670,21 +575,7 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
         r"/v1/agents/[^/]+/archive",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_sc1",
-                type="agent",
-                name="daimon",
-                model={"id": "claude-sonnet-4-6"},
-                metadata={},
-                description=None,
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
-            ).model_dump(mode="json"),
+            json=ma_agent(id="ag_sc1", name="daimon").model_dump(mode="json"),
         ),
     )
     router.add("DELETE", r"/v1/skills/[^/]+", skill_delete)
@@ -795,16 +686,7 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
         r"/v1/environments",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaEnvironment(
-                id="env_sc5",
-                type="environment",
-                name="default",
-                config=EMPTY_CLOUD_CONFIG,
-                metadata={},
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-            ).model_dump(mode="json"),
+            json=ma_environment(id="env_sc5", name="default").model_dump(mode="json"),
         ),
     )
     router.add(
@@ -812,21 +694,7 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
         r"/v1/agents",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_sc5",
-                type="agent",
-                name="daimon",
-                model={"id": "claude-sonnet-4-6"},
-                metadata={},
-                description=None,
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
-            ).model_dump(mode="json"),
+            json=ma_agent(id="ag_sc5", name="daimon").model_dump(mode="json"),
         ),
     )
     router.add(
@@ -834,21 +702,7 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
         r"/v1/agents/[^/]+/archive",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaManagedAgentsAgent(
-                id="ag_sc5",
-                type="agent",
-                name="daimon",
-                model={"id": "claude-sonnet-4-6"},
-                metadata={},
-                description=None,
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
-            ).model_dump(mode="json"),
+            json=ma_agent(id="ag_sc5", name="daimon").model_dump(mode="json"),
         ),
     )
 
@@ -1011,15 +865,11 @@ def _build_stateful_router(
     def create_env(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         write_count[0] += 1
         body: dict[str, Any] = json.loads(req.content)
-        env = BetaEnvironment(
+        env = ma_environment(
             id="env_v1",
-            type="environment",
             name=body["name"],
-            config=EMPTY_CLOUD_CONFIG,
             metadata=body.get("metadata", {}),
             description=body.get("description") or "",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
         ).model_dump(mode="json")
         state["environment"] = env
         return httpx.Response(200, json=env)
@@ -1040,20 +890,12 @@ def _build_stateful_router(
             # Stash it so the immediately-following archive call has a valid
             # object to echo back — the SDK validates the archive response body
             # against the same schema as create.
-            probe = BetaManagedAgentsAgent(
+            probe = ma_agent(
                 id="ag_preflight",
-                type="agent",
                 name=body["name"],
                 model=_model_config(body["model"]),
                 metadata=metadata,
-                description=None,
                 created_at=_CREATED_AT,
-                updated_at=_CREATED_AT,
-                version=1,
-                mcp_servers=[],
-                skills=[],
-                tools=[],
-                system=None,
             ).model_dump(mode="json")
             state["preflight_probe"] = probe
             return httpx.Response(200, json=probe)
@@ -1064,20 +906,14 @@ def _build_stateful_router(
         # SKIPPED decision (only `daimon_spec_hash` in `metadata` does, and
         # `ma_has_corruption` short-circuits when `public_url` is None, as it
         # is throughout this test), so a fixed empty shape is a valid stand-in.
-        agent = BetaManagedAgentsAgent(
+        agent = ma_agent(
             id="ag_v1",
-            type="agent",
             name=body["name"],
             model=_model_config(body["model"]),
             metadata=metadata,
             description=body.get("description"),
-            created_at=_CREATED_AT,
-            updated_at=_CREATED_AT,
-            version=1,
-            mcp_servers=[],
-            skills=[],
-            tools=[],
             system=body.get("system"),
+            created_at=_CREATED_AT,
         ).model_dump(mode="json")
         state["agent"] = agent
         return httpx.Response(200, json=agent)
@@ -1164,19 +1000,9 @@ async def test_verify_tenant_defaults_classifies_missing_agent_as_diverged(
         r"/v1/environments",
         lambda req, _m: list_response(
             [
-                BetaEnvironment(
-                    id="env_v1",
-                    type="environment",
-                    name="default",
-                    config=EMPTY_CLOUD_CONFIG,
-                    metadata={
-                        MA_METADATA_KEY_TENANT: str(result.tenant_id),
-                        MA_METADATA_KEY_NAME: "default",
-                    },
-                    description="",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                ).model_dump(mode="json")
+                ma_environment(id="env_v1", name="default", tenant_id=result.tenant_id).model_dump(
+                    mode="json"
+                )
             ]
         ),
     )

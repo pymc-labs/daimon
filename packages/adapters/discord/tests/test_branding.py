@@ -17,6 +17,7 @@ import pytest
 from daimon.adapters.discord.bot import (
     _build_welcome_embed,  # pyright: ignore[reportPrivateUsage]
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]
+    _responder_handle,  # pyright: ignore[reportPrivateUsage]
     _setting_up_message,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.discord.commands.help import build_help_view
@@ -90,6 +91,7 @@ def _make_preview() -> PurgePreview:
         credential_requests=zero,
         wizard_sessions=zero,
         message_feedback=zero,
+        support_escalations=zero,
     )
 
 
@@ -130,6 +132,26 @@ class TestMentionReplacement:
         assert "@daimon-staging" in result, "set bot_display_name must change the @mention"
 
 
+class TestResponderHandle:
+    """The turn controls carry the handle history shows, not just the agent name."""
+
+    def test_unset_renders_at_daimon(self) -> None:
+        settings = MagicMock()
+        settings.discord = DiscordSettings(bot_token=SecretStr("test-bot-token"))
+        assert _responder_handle(settings) == "@daimon", (
+            "unset bot_display_name must render the handle context.py writes"
+        )
+
+    def test_set_name_changes_the_handle(self) -> None:
+        settings = MagicMock()
+        settings.discord = DiscordSettings(
+            bot_token=SecretStr("test-bot-token"), bot_display_name="daimon-staging"
+        )
+        assert _responder_handle(settings) == "@daimon-staging", (
+            "a renamed bot account must reach the controls as the handle people mention"
+        )
+
+
 class TestSettingUpMessage:
     def test_unset_matches_todays_text(self) -> None:
         assert _setting_up_message("daimon") == (
@@ -147,14 +169,14 @@ class TestWelcomeEmbedOnceReadyField:
         embed = _build_welcome_embed("daimon")
         field = embed.fields[0]
         assert field.value == (
-            "Mention `@daimon` anywhere to chat, or run `/agent-setup` to manage your agents."
+            "Mention `@daimon` anywhere to chat, or run `/agent-setup` to see who answers here."
         ), "unset bot_display_name must render byte-identical welcome copy"
 
     def test_set_name_changes_text(self) -> None:
         embed = _build_welcome_embed("daimon-staging")
         field = embed.fields[0]
         assert field.value == (
-            "Mention `@daimon-staging` anywhere to chat, or run `/agent-setup` to manage your agents."
+            "Mention `@daimon-staging` anywhere to chat, or run `/agent-setup` to see who answers here."
         )
 
 

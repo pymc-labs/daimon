@@ -2,27 +2,28 @@
 
 from __future__ import annotations
 
+import dataclasses
+from typing import Literal
+
 from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
-    TrailEntry,
     TurnPhase,
     _fmt_tokens,
     to_embed_data,
-    to_preview_embed_data,
     update,
+    update_activity,
 )
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
+    COLOR_IN_PROGRESS,
     COLOR_RED,
-    COLOR_THINKING,
-    COLOR_TOOL_RUNNING,
 )
+from daimon.core.turn.state import ToolUseBlock, TurnState
 
 
 def _make_state(
     phase: TurnPhase = TurnPhase.THINKING,
-    trail: tuple[TrailEntry, ...] = (),
     agent_name: str = "test-agent",
     started_at: float = 0.0,
     usage_in: int = 0,
@@ -31,7 +32,6 @@ def _make_state(
 ) -> EmbedState:
     return EmbedState(
         phase=phase,
-        trail=trail,
         agent_name=agent_name,
         started_at=started_at,
         usage_in=usage_in,
@@ -40,114 +40,69 @@ def _make_state(
     )
 
 
+def _call(name: str, status: Literal["pending", "complete", "failed"] = "pending") -> ToolUseBlock:
+    return ToolUseBlock(
+        kind="tool_use", id=f"tu_{name}", type="agent.tool_use", name=name, input={}, status=status
+    )
+
+
 class TestUpdate:
-    def test_thinking_event_updates_phase_but_adds_no_trail_entry(self) -> None:
-        # agent.thinking is a contentless progress ping (MA carries no thinking
-        # text). The title reflects the phase; a trail line would be empty noise.
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="thinking"))
-        assert result.trail == (), "thinking must not add a trail entry"
-        assert result.phase == TurnPhase.THINKING
-
-    def test_thinking_event_preserves_existing_trail(self) -> None:
-        state = _make_state(trail=(TrailEntry(emoji="⚙️", text="Bash"),))
-        result = update(state, EmbedEvent(kind="thinking"))
-        assert result.trail == (TrailEntry(emoji="⚙️", text="Bash"),), (
-            "thinking must leave prior activity lines untouched"
-        )
-        assert result.phase == TurnPhase.THINKING
-
-    def test_tool_use_event_transitions_to_tool_running(self) -> None:
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="tool_use", label="Bash"))
-        assert result.phase == TurnPhase.TOOL_RUNNING
-        assert len(result.trail) == 1
-        assert result.trail[0].emoji == "⚙️"
-        assert result.trail[0].text == "Bash"
-
-    def test_done_event_transitions_to_done(self) -> None:
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="done"))
-        assert result.phase == TurnPhase.DONE
-        assert len(result.trail) == 1
-        assert result.trail[0].emoji == "✅"
-        assert result.trail[0].text == "complete"
-
-    def test_error_event_transitions_to_error(self) -> None:
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="error", label="upstream timeout"))
-        assert result.phase == TurnPhase.ERROR
-        assert len(result.trail) == 1
-        assert result.trail[0].emoji == "❌"
-        assert result.trail[0].text == "upstream timeout"
-
-    def test_trail_limited_to_last_5_entries(self) -> None:
-        state = _make_state()
-        tools = ["tool_a", "tool_b", "tool_c", "tool_d", "tool_e", "tool_f", "tool_g"]
-        for tool in tools:
-            state = update(state, EmbedEvent(kind="tool_use", label=tool))
-        assert len(state.trail) == 5
-        # Last 5 entries should be tool_c through tool_g
-        trail_texts = [e.text for e in state.trail]
-        assert trail_texts == ["tool_c", "tool_d", "tool_e", "tool_f", "tool_g"]
-
-    def test_multiple_tool_events_accumulate(self) -> None:
-        state = _make_state()
-        state = update(state, EmbedEvent(kind="tool_use", label="Read"))
-        state = update(state, EmbedEvent(kind="tool_use", label="Write"))
-        state = update(state, EmbedEvent(kind="tool_use", label="Bash"))
-        assert len(state.trail) == 3
-        assert state.trail[0].text == "Read"
-        assert state.trail[1].text == "Write"
-        assert state.trail[2].text == "Bash"
-
-    def test_tool_use_shows_name_only_no_args(self) -> None:
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="tool_use", label="Bash"))
-        assert result.trail[0].text == "Bash"
-        assert "(" not in result.trail[0].text
-        assert ")" not in result.trail[0].text
-        assert "=" not in result.trail[0].text
-
-    def test_message_event_sets_text_preview_not_trail(self) -> None:
-        state = _make_state()
+    def test_message_event_sets_draft_without_touching_phase(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
         result = update(state, EmbedEvent(kind="message", label="I'll look that up for you"))
-        assert result.trail == (), "messages render in the preview embed, not the trail"
-        assert result.text_preview == "I'll look that up for you"
-        assert result.phase == TurnPhase.THINKING
+        assert result.text_preview == "I'll look that up for you", "message text becomes the draft"
+        assert result.phase == TurnPhase.TOOL_RUNNING, "the phase comes from the turn state only"
 
-    def test_message_event_with_empty_label_keeps_previous_preview(self) -> None:
-        state = _make_state()
-        with_preview = update(state, EmbedEvent(kind="message", label="earlier reasoning"))
-        result = update(with_preview, EmbedEvent(kind="message", label=""))
-        assert result.text_preview == "earlier reasoning", "empty message must not clear preview"
-        assert result.trail == ()
+    def test_message_event_with_empty_label_keeps_previous_draft(self) -> None:
+        with_draft = update(_make_state(), EmbedEvent(kind="message", label="earlier reasoning"))
+        result = update(with_draft, EmbedEvent(kind="message", label=""))
+        assert result.text_preview == "earlier reasoning", "empty message must not clear the draft"
 
-    def test_message_event_truncates_preview_at_250_chars(self) -> None:
-        state = _make_state()
-        result = update(state, EmbedEvent(kind="message", label="x" * 400))
+    def test_message_event_clips_draft_at_300_chars(self) -> None:
+        result = update(_make_state(), EmbedEvent(kind="message", label="x" * 400))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 251, "250 chars + ellipsis"
+        assert len(result.text_preview) == 301, "300 chars + ellipsis"
         assert result.text_preview.endswith("…")
 
-    def test_message_event_does_not_change_phase_from_thinking(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING)
-        result = update(state, EmbedEvent(kind="message", label="snippet"))
-        assert result.phase == TurnPhase.THINKING
+    def test_done_event_transitions_to_done(self) -> None:
+        result = update(_make_state(), EmbedEvent(kind="done"))
+        assert result.phase == TurnPhase.DONE, "done moves the card to its terminal phase"
+
+    def test_error_event_records_reason(self) -> None:
+        result = update(_make_state(), EmbedEvent(kind="error", label="upstream timeout"))
+        assert result.phase == TurnPhase.ERROR, "error moves the card to its terminal phase"
+        assert result.error_reason == "upstream timeout", "the label is the footer's reason"
+
+
+class TestUpdateActivity:
+    def test_running_call_reads_as_working(self) -> None:
+        result = update_activity(
+            _make_state(), TurnState(content=[_call("bash", "complete"), _call("read")])
+        )
+        assert result.phase == TurnPhase.TOOL_RUNNING, "a pending call means the turn is working"
+        assert result.tool_lines == ("✔️ Ran a command", "🔍 Reading a file"), (
+            "tool lines come from the turn state"
+        )
+
+    def test_no_running_call_reads_as_thinking(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
+        result = update_activity(state, TurnState(content=[_call("bash", "complete")]))
+        assert result.phase == TurnPhase.THINKING, "once every call finished the turn is thinking"
+
+    def test_terminal_state_is_left_alone(self) -> None:
+        done = _make_state(phase=TurnPhase.DONE)
+        assert update_activity(done, TurnState(content=[_call("bash")])) is done, (
+            "a late render must not reopen a finished card"
+        )
 
 
 class TestToEmbedData:
-    def test_thinking_phase_grey_color(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING)
-        data = to_embed_data(state)
-        assert data.color == COLOR_THINKING
-        assert data.color == 0x95A5A6
-
-    def test_tool_running_phase_blue_color(self) -> None:
-        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
-        data = to_embed_data(state)
-        assert data.color == COLOR_TOOL_RUNNING
-        assert data.color == 0x3498DB
+    def test_thinking_and_working_share_one_blue_color(self) -> None:
+        for phase in (TurnPhase.THINKING, TurnPhase.TOOL_RUNNING):
+            data = to_embed_data(_make_state(phase=phase))
+            assert data.color == COLOR_IN_PROGRESS == 0x3498DB, (
+                f"{phase} is in progress; the headline word, not the bar, tells the two apart"
+            )
 
     def test_done_phase_green_color(self) -> None:
         state = _make_state(phase=TurnPhase.DONE)
@@ -161,19 +116,18 @@ class TestToEmbedData:
         assert data.color == COLOR_RED
         assert data.color == 0xED4245
 
-    def test_description_joins_trail_entries(self) -> None:
-        trail = (
-            TrailEntry(emoji="\U0001f9e0", text="thinking"),
-            TrailEntry(emoji="⚙️", text="Bash"),
-            TrailEntry(emoji="✅", text="complete"),
+    def test_in_progress_is_one_description_with_headline_tools_and_draft(self) -> None:
+        state = dataclasses.replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=100.0),
+            tool_lines=("✔️ Ran a command", "🔍 Reading a file"),
+            text_preview="Checking *the* logs",
         )
-        state = _make_state(trail=trail)
-        data = to_embed_data(state)
-        lines = data.description.split("\n")
-        assert len(lines) == 3
-        assert lines[0] == "\U0001f9e0 thinking"
-        assert lines[1] == "⚙️ Bash"
-        assert lines[2] == "✅ complete"
+        data = to_embed_data(state, now=165.0)
+        assert data.title == "", "the headline lives in the description, not a title"
+        assert data.description == (
+            "**Working** · 1m 5s\n```\n✔️ Ran a command\n🔍 Reading a file\n```\n"
+            "> Checking \\*the\\* logs"
+        ), "headline, code-fenced tool lines, then the escaped draft as a quote"
 
     def test_footer_none_on_non_terminal(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
@@ -251,14 +205,13 @@ class TestToEmbedData:
     def test_error_footer_renders_reason_and_summary(self) -> None:
         state = _make_state(
             phase=TurnPhase.ERROR,
-            trail=(TrailEntry(emoji="❌", text="rate limited"),),
             agent_name="Atlas",
             started_at=0.0,
             usage_in=100,
             usage_out=50,
             cost_str=None,
         )
-        data = to_embed_data(state, now=3.0)
+        data = to_embed_data(dataclasses.replace(state, error_reason="rate limited"), now=3.0)
         assert data.footer == "❌ rate limited · Atlas · 3s · 100 in / 50 out", (
             "error footer carries the failure reason then the data-bearing summary"
         )
@@ -272,16 +225,7 @@ class TestToEmbedData:
         assert next_state.usage_out == 320, "update carries usage_out forward"
         assert next_state.cost_str == "$0.04", "update carries cost_str forward"
 
-    def test_title_contains_emoji_and_state_label(self) -> None:
-        thinking = to_embed_data(_make_state(phase=TurnPhase.THINKING))
-        assert "\U0001f9e0" in thinking.title
-        assert "thinking" in thinking.title
-
-        tool_running = to_embed_data(_make_state(phase=TurnPhase.TOOL_RUNNING))
-        assert "⚙️" in tool_running.title
-        assert "tool" in tool_running.title
-
-        # Terminal phases collapse — no title (the summary moves to the footer).
+    def test_terminal_phases_have_no_title(self) -> None:
         done = to_embed_data(_make_state(phase=TurnPhase.DONE))
         assert done.title == "", "done collapses to footer-only — no title"
 
@@ -289,62 +233,18 @@ class TestToEmbedData:
         assert error.title == "", "error collapses to footer-only — no title"
 
 
-class TestElapsedLine:
-    def test_in_progress_with_now_shows_elapsed_first_line(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING, started_at=100.0)
-        data = to_embed_data(state, now=142.0)
-        assert data.description.splitlines()[0] == "⏱️ 42s", (
-            "elapsed line should lead the activity embed"
+class TestHeadline:
+    def test_in_progress_with_now_leads_with_state_and_elapsed(self) -> None:
+        data = to_embed_data(_make_state(started_at=100.0), now=142.0)
+        assert data.description.splitlines()[0] == "**Thinking** · 42s", (
+            "the headline leads the card"
         )
 
-    def test_elapsed_formats_minutes_and_seconds(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING, started_at=0.0)
-        state = EmbedState(phase=TurnPhase.THINKING, started_at=1.0)
-        data = to_embed_data(state, now=124.0)
-        assert data.description.splitlines()[0] == "⏱️ 2m 3s"
+    def test_headline_runs_to_hours(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
+        data = to_embed_data(state, now=1.0 + 2 * 3600 + 3 * 60)
+        assert data.description.splitlines()[0] == "**Working** · 2h 3m", "long turns show hours"
 
-    def test_in_progress_without_now_has_no_elapsed_line(self) -> None:
-        state = _make_state(
-            phase=TurnPhase.TOOL_RUNNING,
-            trail=(TrailEntry(emoji="⚙️", text="Bash"),),
-            started_at=100.0,
-        )
-        data = to_embed_data(state)
-        assert data.description == "⚙️ Bash", "no now → trail only, no elapsed line"
-
-
-class TestPreviewEmbed:
-    def test_no_preview_returns_none(self) -> None:
-        state = _make_state()
-        assert to_preview_embed_data(state) is None, "no message text yet → no preview embed"
-
-    def test_preview_renders_message_text_with_speech_emoji(self) -> None:
-        state = update(_make_state(), EmbedEvent(kind="message", label="Let me check the data"))
-        data = to_preview_embed_data(state)
-        assert data is not None
-        assert data.description == "💬 Let me check the data"
-        assert data.footer is None
-
-    def test_preview_escapes_markdown(self) -> None:
-        state = update(_make_state(), EmbedEvent(kind="message", label="use `code` and *stars*"))
-        data = to_preview_embed_data(state)
-        assert data is not None
-        assert "\\`code\\`" in data.description, (
-            "backticks escaped so truncation can't break markup"
-        )
-        assert "\\*stars\\*" in data.description
-
-    def test_preview_color_matches_phase(self) -> None:
-        state = update(_make_state(), EmbedEvent(kind="message", label="reasoning"))
-        state = update(state, EmbedEvent(kind="tool_use", label="Bash"))
-        data = to_preview_embed_data(state)
-        assert data is not None
-        assert data.color == COLOR_TOOL_RUNNING, "preview bar color follows the activity phase"
-
-    def test_preview_survives_tool_and_thinking_events(self) -> None:
-        state = update(_make_state(), EmbedEvent(kind="message", label="the reasoning so far"))
-        state = update(state, EmbedEvent(kind="tool_use", label="Bash"))
-        state = update(state, EmbedEvent(kind="thinking", label=""))
-        assert state.text_preview == "the reasoning so far", (
-            "preview persists until the next message replaces it"
-        )
+    def test_in_progress_without_now_has_no_elapsed(self) -> None:
+        data = to_embed_data(_make_state(started_at=100.0))
+        assert data.description == "**Thinking**", "no now → the headline word alone"

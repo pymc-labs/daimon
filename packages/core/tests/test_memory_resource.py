@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import pytest
 from daimon.core.memory_resource import (
     MEMORY_INSTRUCTIONS,
+    READ_ONLY_MEMORY_INSTRUCTIONS,
     archive_memory_store_for_agent,
     ensure_memory_store_and_mount,
 )
@@ -24,11 +25,10 @@ from daimon.testing.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
 
-
+@pytest.mark.parametrize("read_only", [False, True])
 async def test_cold_path_creates_store_and_binding(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    read_only: bool, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()  # visible to the factory's separate sessions
@@ -42,11 +42,14 @@ async def test_cold_path_creates_store_and_binding(
         tenant_id=tenant.id,
         agent_id=agent_id,
         agent_name="daimon",
+        read_only=read_only,
     )
 
     assert mount["type"] == "memory_store"
-    assert mount["access"] == "read_write"
-    assert mount["instructions"] == MEMORY_INSTRUCTIONS
+    assert mount["access"] == ("read_only" if read_only else "read_write")
+    assert mount["instructions"] == (
+        READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS
+    )
     assert mount["memory_store_id"] in state.stores
     created = state.stores[mount["memory_store_id"]]
     assert created["metadata"]["daimon_tenant"] == str(tenant.id)

@@ -37,8 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SENTINEL_TOKEN = "phase19-sentinel-pat-DO-NOT-LOG-2026"
 
-pytestmark = pytest.mark.asyncio
-
 
 async def _fixture_is_admin_resolver_false(_ctx: object) -> str | None:
     return None

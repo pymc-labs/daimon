@@ -23,9 +23,12 @@ import time
 from typing import Any
 
 import aiohttp
+import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
@@ -33,11 +36,13 @@ from daimon.adapters.slack.privacy_panel.views import (
     build_export_result_view,
     build_loading_view,
     build_privacy_main_container,
-    summary_line,
 )
-from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
+from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.observability import capture_exception_with_scope
+from daimon.core.privacy import summary_line
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_user_tokens import delete_slack_user_token, get_slack_user_token
 from slack_sdk.errors import SlackApiError
@@ -46,20 +51,21 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
-# No-data-on-file view shown when the invoker has no account.
-_NO_DATA_BLOCKS: list[dict[str, Any]] = [
-    {
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": (
-                "*🔒 Privacy*\n"
-                "You have no data on file with daimon.\n"
-                "Run any other slash command to start fresh."
-            ),
-        },
-    },
-]
+
+def _no_data_blocks(display_name: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*🔒 Privacy*\n"
+                    f"You have no data on file with {escape_mrkdwn(display_name)}.\n"
+                    "Run any other slash command to start fresh."
+                ),
+            },
+        }
+    ]
 
 
 def _mint_connect_url(runtime: SlackRuntime, *, team_id: str, slack_user_id: str) -> str | None:
@@ -95,8 +101,11 @@ async def handle_privacy_command(
     """
     team_id: str = str(payload.get("team_id") or "")
     user_id: str = str(payload.get("user_id") or "")
+    channel_id: str = str(payload.get("channel_id") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
 
+    web_client: AsyncWebClient | None = None
+    view_id: str = ""
     try:
         web_client = await resolve_web_client(runtime, team_id=team_id)
         if web_client is None:
@@ -109,7 +118,7 @@ async def handle_privacy_command(
             view=build_loading_view(),
         )
         opened_view: dict[str, Any] = resp.get("view") or {}  # pyright: ignore[reportUnknownMemberType]  # slack_sdk SlackResponse.data is a union type
-        view_id: str = str(opened_view.get("id") or "")
+        view_id = str(opened_view.get("id") or "")
 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
@@ -124,7 +133,7 @@ async def handle_privacy_command(
                 view={
                     "type": "modal",
                     "title": {"type": "plain_text", "text": "Privacy"},
-                    "blocks": _NO_DATA_BLOCKS,
+                    "blocks": _no_data_blocks(resolve_bot_display_name(runtime.settings)),
                 },
             )
             return
@@ -145,10 +154,24 @@ async def handle_privacy_command(
                 is_slack_connected=is_slack_connected,
                 slack_connect_url=connect_url,
                 policy_url=str(runtime.settings.privacy_policy_url),
+                display_name=resolve_bot_display_name(runtime.settings),
             ),
         )
-    except (SlackApiError, SQLAlchemyError) as exc:
-        log.error("privacy.command.failed", team_id=team_id, exc_info=exc)
+    except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+        request_id = generate_request_id()
+        log.error("privacy.command.failed", team_id=team_id, request_id=request_id, exc_info=exc)
+        capture_exception_with_scope(exc)
+        # A token-resolve failure leaves no client to notify with.
+        if web_client is not None:
+            await surface_command_error(
+                web_client,
+                exc,
+                request_id=request_id,
+                title="Privacy",
+                view_id=view_id,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
 
 
 async def handle_privacy_block_action(
@@ -216,13 +239,18 @@ async def handle_privacy_block_action(
             if account_id is None:
                 await web_client.views_push(  # pyright: ignore[reportUnknownMemberType]
                     trigger_id=trigger_id,
-                    view=build_export_result_view(summary=None),
+                    view=build_export_result_view(
+                        summary=None, display_name=resolve_bot_display_name(runtime.settings)
+                    ),
                 )
                 return
             preview = await load_purge_preview(sm=runtime.sessionmaker, account_id=account_id)
             await web_client.views_push(  # pyright: ignore[reportUnknownMemberType]
                 trigger_id=trigger_id,
-                view=build_export_result_view(summary=summary_line(preview)),
+                view=build_export_result_view(
+                    summary=summary_line(preview),
+                    display_name=resolve_bot_display_name(runtime.settings),
+                ),
             )
         elif action_id == "privacy_slack_disconnect":
             async with runtime.sessionmaker() as s:
@@ -252,6 +280,7 @@ async def handle_privacy_block_action(
                 view_id=current_view_id,
                 view=build_disconnect_result_view(
                     was_connected=token_row is not None,
+                    display_name=resolve_bot_display_name(runtime.settings),
                     reconnect_url=_mint_connect_url(
                         runtime, team_id=team_id, slack_user_id=user_id
                     ),

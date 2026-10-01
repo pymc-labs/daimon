@@ -1,19 +1,23 @@
-"""EnvCredentialModal / McpCredentialModal / RepoBindModal — the three
-credential-button modals.
+"""The private forms a posted control's button opens.
 
-Three separate modals, not one type-dispatching modal: an env secret, an MCP
-auth token, and a repo binding are different resources with different write
-paths (`put_agent_file` vs `add_external_mcp_credential` vs
-`agent_repo_binding.set_binding`), mirroring the modals that already exist
+Five separate forms, not one type-dispatching form: an env secret, a whole
+`.env` file, an MCP auth token, a skill repo and a repo binding are different
+resources with different write paths (`put_agent_file_if_unchanged` vs
+`add_external_mcp_credential` vs `set_skill_repo_credential` vs
+`agent_repo_binding.set_binding`), mirroring the forms that already exist
 for the same writes on the setup panel (`agent_setup/credentials.py`'s
 `PasteSecretModal`, `agent_setup/modals_mcp.py`'s `AddMcpModal`,
-`agent_setup/modals.py`'s `RepoAuthModal`). `EnvCredentialModal` and
-`McpCredentialModal` each collect exactly ONE field — the secret value
-itself — because every routing field (agent, key/server name) is already
-fixed by the consumed `credential_requests` row; the user never retypes it.
-`RepoBindModal` collects two fields (branch, optional token) because a repo
-binding has two writable parts and only one of them is a secret; the repo
-itself is likewise fixed by the row, never retyped.
+`agent_setup/modals.py`'s `RepoAuthModal`).
+
+Every one of them asks for exactly ONE thing, above a `TextDisplay` line that
+restates the facts the card already showed. Nothing else is asked, because
+every routing field — the agent, the key name, the server name, the repo and
+its branch — is already fixed by the consumed `credential_requests` row and
+must never be retyped: what the person holds and the card does not is the
+value alone. The one input is wrapped in a `discord.ui.Label`, which is where
+its visible text and helper line live (`TextInput.label` is deprecated in
+discord.py 2.6+), and the title is built by `_title` so it fits Discord's
+45-character cap whatever the key name or repo is called.
 
 Secret hygiene, matching the structural guarantees `PasteSecretModal` already
 documents:
@@ -21,10 +25,12 @@ documents:
   repo log a masked tail only),
 - the value never reaches a `custom_id` (the button's custom_id carries only
   the opaque request token, minted before any modal exists),
-- the value never reaches a container/embed (a Modal TextInput has no
-  render surface other than the ephemeral confirmation, which never echoes
-  the value back),
-- there is no URL-fetch path and no attachment path.
+- the value never reaches a container/embed (a form input has no render
+  surface other than the ephemeral confirmation, which never echoes the
+  value back),
+- there is no URL-fetch path, and the one upload path (`EnvFileModal`)
+  keeps no copy of the file and never puts a parsed value in a message, a
+  log record or a rejection — `EnvProblem` has no field for one.
 
 The atomic single-use consume runs BEFORE every write, so a request can
 only ever produce one write no matter how many times its modal is
@@ -33,12 +39,38 @@ and writes nothing.
 
 Every `on_submit` acks with a bare `defer()`, never `thinking=True`. On a
 modal opened from a component click that is a `deferred_message_update`,
-whose `@original` is the message the button lives on — which is what lets
-`_mark_button_consumed` disable the button in place once the row is spent.
-`thinking=True` would point `@original` at a fresh ephemeral instead and the
-edit would land there, the defect `agent_setup/credentials.py` already fixed
-on the setup panel. Ephemeral followups still work after this ack, so every
-validation, error and success toast below is unchanged.
+whose `@original` is the message the button lives on. `thinking=True` would
+point `@original` at a fresh ephemeral instead, the defect
+`agent_setup/credentials.py` already fixed on the setup panel. Ephemeral
+followups still work after this ack, so every validation and error toast
+below is unchanged. There is no success toast: the posted card IS the
+receipt, and a second copy of it in the thread says the same thing twice.
+
+That card is re-rendered by message id
+(`posted_controls.edit_posted_card`), not through `@original`. It moves to
+its `received` state the moment the consume commits — before the
+vault/credential/import below is known to have worked — and then to the
+state that actually happened: `applied`, `partial` when the value was
+stored but the work it enables did not finish, `refused` when the
+submit-time gate turned the write away, or `superseded` when the value the
+card promised to replace had already changed underneath it. No card ever
+claims more than the write it is reporting.
+
+Whatever the outcome, the spent request records it
+(`set_credential_request_outcome`), and every write that actually landed
+also queues the one turn it owes (`record_input_continuation`) in the same
+transaction as that record — so a value can never land without its
+follow-up, nor a follow-up without its value.
+The follow-up turn is never awaited here: `_dispatch_origin_thread` spawns
+it on the bot, because a billed turn must not sit inside a Discord
+interaction.
+
+`EnvFileModal` is the one form that takes a file rather than typed text. It
+caps on `Attachment.size` BEFORE downloading, parses the whole file or
+rejects the whole file (`daimon.core.env_file`), and only then consumes the
+request: a typo in an uploaded file must not burn the one click the person
+gets. Its write is all-or-nothing inside a savepoint, and it sends no success
+ephemeral — the card it edits into `applied` is the receipt.
 
 `RepoBindModal`'s write is additionally admin-gated on a shared agent: token
 consumption alone is sufficient authorization for an env secret or an MCP
@@ -55,114 +87,460 @@ opened.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
+from typing import Final, cast
 
 import anthropic
 import httpx
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
-from daimon.adapters.discord.agent_setup.credentials import (
-    _MAX_SECRET_VALUE_BYTES,  # pyright: ignore[reportPrivateUsage]  # reusing PasteSecretModal's byte cap rather than inventing a second number
+from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.credential_origin import (
+    is_credential_interaction_valid,
+    refuse_if_credential_target_unavailable,
 )
-from daimon.adapters.discord.agent_setup.write import mask_tail
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
+    resolve_ma_agent_for_uuid,
     resolve_repo_binding_credential,
 )
+from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
-from daimon.core.credential_requests import split_skill_repo_target
+from daimon.core.constants import MAX_SECRET_VALUE_BYTES
+from daimon.core.continuity.continuation import record_input_continuation
+from daimon.core.continuity.messages import (
+    ConfigurationChange,
+    render_env_import_rejected,
+)
+from daimon.core.credential_requests import (
+    CredentialRequestOutcome,
+    availability_for_request,
+    split_skill_repo_target,
+)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
+from daimon.core.env_file import (
+    MAX_ENV_FILE_BYTES,
+    MEMBER_SECRET_SUFFIX_HINT,
+    EnvEntry,
+    EnvFileRejected,
+    decode_env_bytes,
+    env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
+    env_name_problem,
+    env_related_held,
+    parse_env_file,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.mcp_attach import attach_mcp_server_to_agent
-from daimon.core.mcp_vault import add_external_mcp_credential
+from daimon.core.mcp_attach import (
+    McpConnectDecision,
+    McpServerReplaceRefusedError,
+    decide_mcp_connect,
+)
+from daimon.core.mcp_token_check import is_token_rejected, rejected_token_message
+from daimon.core.mcp_token_connect import (
+    McpAgentGoneError,
+    McpAttachFailedError,
+    McpTokenWriteFailedError,
+    connect_mcp_server_with_token,
+)
+from daimon.core.operation_policy import (
+    PolicyOutcome,
+    TargetFacts,
+    decide_operation,
+    needs_reachability_read,
+)
+from daimon.core.posted_controls import (
+    NO_LONGER_VALID_MESSAGE,
+    CardState,
+    RefusalReason,
+    build_posted_card,
+    card_text,
+)
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores import credential_requests
-from daimon.core.stores.agent_files import put_agent_file
+from daimon.core.stores.agent_files import (
+    AgentEnvEncryptionRequiredError,
+    list_agent_files,
+    lock_agent_keys,
+    put_agent_file_if_unchanged,
+)
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
+from daimon.core.turn_keys import list_turn_key_names
 
 import discord
 
 _log = structlog.get_logger()
 
-_NO_LONGER_VALID = "This request is no longer valid — ask again."
+_NO_LONGER_VALID = NO_LONGER_VALID_MESSAGE
 
-_CONSUMED_BUTTON_LABEL = "✓ Received"
-"""Replaces the request's own label once the row is consumed. Deliberately
-kind-agnostic and about the SUBMISSION rather than the write: this runs the
-moment the consume commits, before the vault/binding/import below it is known
-to have worked, and one of those failing still leaves the button dead."""
+#: Discord rejects a form whose title is longer than this.
+_MAX_TITLE_CHARS: Final[int] = 45
+
+#: A row minted before its agent was resolved names no target, and one
+#: minted outside a turn names no responder — same fallbacks the card's own
+#: renderer (`posted_controls.edit`) uses, because both read the same row.
+_UNNAMED_AGENT: Final[str] = "the agent"
+_UNNAMED_RESPONDER: Final[str] = "Daimon"
+
+#: How many colliding keys the refusal names before it summarises the rest,
+#: matching what `render_env_import_rejected` shows for a rejected file.
+_COLLISIONS_SHOWN: Final[int] = 3
 
 
-async def _mark_button_consumed(interaction: discord.Interaction, *, kind: str) -> None:
-    """Swap the request's button for a disabled confirmation, in place.
+def _title(target: str, agent: str, fallback: str) -> str:
+    """Name the form after what it is for, inside Discord's 45-character cap.
 
-    The bare `defer()` every `on_submit` opens with makes this interaction's
-    `@original` the message the button lives on (`deferred_message_update`),
-    so this edit lands on the button itself rather than on a fresh ephemeral —
-    the same ack shape `agent_setup/credentials.py` uses to land its paste
-    re-render on the panel.
-
-    Called once the row is durably consumed. From that point the button can
-    only ever be refused by `interaction_check`, so leaving it looking live
-    invites a click that cannot succeed, and leaves a thread with no durable
-    record that the credential was ever supplied — the ephemeral reply is
-    gone on refresh and was never visible to anyone else.
+    The pair reads best ("TOGGL_TOKEN for research-bot"), so it is tried
+    first; a long agent name costs the agent, and a target too long to show
+    at all falls back to the generic name for that kind of form.
     """
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button[discord.ui.View](label=_CONSUMED_BUTTON_LABEL, disabled=True))
-    try:
-        await interaction.edit_original_response(view=view)
-    except discord.HTTPException as err:
-        # The consume already committed. A confirmation edit that fails
-        # (message deleted, thread archived, permissions lost) must not read
-        # as a failed submission — the ephemeral reply still carries the
-        # outcome, so this is a downgrade in feedback, not in correctness.
-        _log.warning(
-            "credential_modal.consumed_edit_failed", kind=kind, err_type=type(err).__name__
+    paired = f"{target} for {agent}"
+    if len(paired) <= _MAX_TITLE_CHARS:
+        return paired
+    if len(target) <= _MAX_TITLE_CHARS:
+        return target
+    return fallback
+
+
+def _agent_name(row: CredentialRequestRow) -> str:
+    """The agent this request names, as the person sees it on the card."""
+    return row.target_name or _UNNAMED_AGENT
+
+
+def _text_input_of[ModalT: discord.ui.Modal](
+    label: discord.ui.Label[ModalT],
+) -> discord.ui.TextInput[ModalT]:
+    """Return the `TextInput` a form just wrapped in `label`.
+
+    `Label.component` is typed `Item` because a label may wrap any input;
+    every call below builds its own `TextInput` inline (which is also what
+    lets `scripts/lint_discord_modals.py` see the two as one component), so
+    the narrowing is of a fact the caller established one line earlier.
+    """
+    return cast(discord.ui.TextInput[ModalT], label.component)
+
+
+def _env_card_text(
+    row: CredentialRequestRow,
+    *,
+    state: CardState,
+    refusal: RefusalReason | None = None,
+    replaces: str | None = None,
+) -> str:
+    """The words the env card itself now carries, for the ephemeral to repeat.
+
+    A refusal and a superseded replacement are the two outcomes the
+    submitter needs in their own reply as well as on the card; writing them
+    twice is how the two drift, so both come from the one card builder.
+    """
+    return card_text(
+        build_posted_card(
+            kind="env",
+            state=state,
+            agent_name=_agent_name(row),
+            responder_name=row.responder_name or _UNNAMED_RESPONDER,
+            target=row.target,
+            requester_platform_user_id=row.requester_platform_user_id,
+            expires_at=row.expires_at,
+            token=row.token,
+            refusal=refusal,
+            replaces=replaces,
+        )
+    )
+
+
+async def _settle_spent_request(
+    runtime: DiscordRuntime,
+    *,
+    row: CredentialRequestRow,
+    outcome: CredentialRequestOutcome,
+    carries_work: bool,
+) -> bool:
+    """Record how a spent request ended and queue its continuation, together.
+
+    For the three forms whose value lands outside our database (a vault
+    credential, an MA attach, a skill import) this is the one transaction
+    that can hold both facts. The two env forms write theirs inside the
+    transaction that already carries their value write.
+    """
+    async with runtime.sessionmaker.begin() as session:
+        await credential_requests.set_credential_request_outcome(
+            session, token=row.token, outcome=outcome
+        )
+        return await record_input_continuation(
+            session, row, platform="discord", carries_work=carries_work
         )
 
 
-class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
-    """Add secrets modal: one value, atomic consume, existing agent_files write."""
+async def _record_refused_outcome(runtime: DiscordRuntime, row: CredentialRequestRow) -> None:
+    """Record a refusal that consumed nothing.
+
+    Deliberately queues no continuation: the request is still unspent, and a
+    continuation row would claim its `idempotency_key`, so a later
+    submission of the same still-live token could not queue its own.
+    """
+    async with runtime.sessionmaker.begin() as session:
+        await credential_requests.set_credential_request_outcome(
+            session, token=row.token, outcome="write_failed"
+        )
+
+
+async def _refuse_for_unavailable_target(
+    runtime: DiscordRuntime, interaction: discord.Interaction, row: CredentialRequestRow
+) -> None:
+    """Close a SPENT request whose target turned out to be unusable.
+
+    Unlike `_record_refused_outcome`, whose request is still live, the consume
+    has already happened here — so leaving the card on `received` would have it
+    say "Saving…" about a save that stopped. Nothing is known to have reached a
+    store on this path, so the terminal state is `refused` rather than
+    `partial`, and no continuation is queued: work waiting on this value must
+    not resume on a value that never landed.
+    """
+    async with runtime.sessionmaker.begin() as session:
+        await credential_requests.set_credential_request_outcome(
+            session, token=row.token, outcome="write_failed"
+        )
+    await edit_posted_card(
+        interaction.client, row=row, state="refused", refusal="target_unavailable"
+    )
+
+
+async def _refuse_for_rejected_token(
+    runtime: DiscordRuntime, interaction: discord.Interaction, row: CredentialRequestRow
+) -> None:
+    """Close a SPENT request whose token the server refused before any write."""
+    async with runtime.sessionmaker.begin() as session:
+        await credential_requests.set_credential_request_outcome(
+            session, token=row.token, outcome="token_rejected"
+        )
+    await edit_posted_card(interaction.client, row=row, state="refused", refusal="token_rejected")
+
+
+async def _dispatch_origin_thread(
+    interaction: discord.Interaction, row: CredentialRequestRow
+) -> None:
+    """Kick the origin thread's queued continuations without blocking this form.
+
+    The follow-up is a billed turn posted into a thread people are reading,
+    so it is spawned rather than awaited: an interaction that waited for it
+    would be long dead before the turn finished. A failure inside the
+    spawned task is logged by the bot's own task callback and costs nothing
+    — the row stays pending, and the next completed turn in that thread
+    picks it up.
+    """
+    if row.origin_thread_id is None or interaction.guild_id is None:
+        return
+    bot = cast(DaimonBot, interaction.client)
+    try:
+        thread = bot.get_channel(int(row.origin_thread_id)) or await bot.fetch_channel(
+            int(row.origin_thread_id)
+        )
+    except discord.HTTPException:
+        _log.warning("credential_modal.origin_thread_unreachable", thread_id=row.origin_thread_id)
+        return
+    if not isinstance(thread, discord.Thread):
+        return
+    bot._spawn(  # pyright: ignore[reportPrivateUsage]  # DaimonBot's tracked fire-and-forget helper; the billed follow-up must never block this interaction
+        bot.dispatch_continuations_in_thread(
+            tenant_id=row.tenant_id, thread=thread, guild_id=str(interaction.guild_id)
+        )
+    )
+
+
+def _env_name_refusal(name: str, problem: str) -> str:
+    """One-line refusal for a key name the submitter may not store."""
+    if problem == "bad_name":
+        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
+    if problem == "reserved_name":
+        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
+    return (
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
+    )
+
+
+async def _decide_key_replacement(
+    interaction: discord.Interaction, *, runtime: DiscordRuntime, row: CredentialRequestRow
+) -> PolicyOutcome:
+    """Re-decide a key REPLACEMENT's authorization, at submit time.
+
+    Adding a key needs no gate at all (`decide_operation` always allows
+    `key_add`: a new value overwrites nothing). Replacing one overwrites a
+    value the whole install may be running on, so it is the attachment
+    family's decision instead — and it is taken again here, because the
+    person who was an admin, or whose target was private, when the card was
+    posted may be neither by the time they submit.
+
+    Same facts in the same order as
+    `credential_repo_bind.refuse_if_shared_and_not_admin_for_request`: live
+    guild admin first (no I/O), then the resolved agent's defaults-managed
+    flag, then a fresh reachability read — and every one of them read before
+    the consume's transaction opens, so no row lock is ever held across an
+    MA listing.
+    """
+    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        return "allow"
+    agent = await resolve_ma_agent_for_uuid(
+        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+    )
+    if agent is None:
+        # Fail closed: the target this replacement was authorized against is
+        # gone, so nothing can establish that it is not shared.
+        return "needs_admin"
+    is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    reachable = False
+    if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=is_daimon_managed):
+        async with runtime.sessionmaker() as session:
+            reachable = await is_agent_shared_for_key_changes(
+                session,
+                tenant_id=row.tenant_id,
+                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(agent.id),
+                default=runtime.deployment_default,
+                caller_account_id=row.account_id,
+                caller_platform_user_id=row.requester_platform_user_id,
+            )
+    return decide_operation(
+        "key_replace",
+        is_admin=False,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+
+
+async def _decide_mcp_connect_at_submit(
+    interaction: discord.Interaction, *, runtime: DiscordRuntime, row: CredentialRequestRow
+) -> McpConnectDecision:
+    """Re-decide an MCP token submission against the person submitting it.
+
+    Repointing a server the agent already has, or overwriting the agent-wide
+    token for its URL, is an `mcp_replace` attachment write: on a shared agent
+    it needs a live guild admin. Read before the consume, like a key
+    replacement, so no row lock is held across the MA listing. A target that
+    cannot be resolved is left to the unavailable-target path after the
+    consume, and nothing may be replaced for it.
+    """
+    agent = await find_agent_by_derived_uuid(
+        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+    )
+    if agent is None or row.mcp_server_url is None:
+        return McpConnectDecision(replaces=False, replace_allowed=False)
+    return await decide_mcp_connect(
+        runtime.sessionmaker,
+        tenant_id=row.tenant_id,
+        agent=agent,
+        agent_id=row.agent_id,
+        server_name=row.target,
+        url=row.mcp_server_url,
+        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        default=runtime.deployment_default,
+        shares_token=True,
+    )
+
+
+class EnvCredentialModal(discord.ui.Modal):
+    """Add one key: one value, atomic consume, existing agent_files write."""
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
-        super().__init__()
+        agent = _agent_name(request_row)
+        super().__init__(title=_title(request_row.target, agent, "Add a key"))
         self._runtime = runtime
         self._row = request_row
-        self.value_input: discord.ui.TextInput[EnvCredentialModal] = discord.ui.TextInput(
-            label="Secret value",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=4000,
-            placeholder="usable by everyone who talks to this agent",
+        self.add_item(
+            discord.ui.TextDisplay(
+                f"-# Anyone who talks to {agent} can use it. The value is not shown in chat."
+            )
         )
-        self.add_item(self.value_input)
+        value_label: discord.ui.Label[EnvCredentialModal] = discord.ui.Label(
+            text="Value",
+            component=discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                required=True,
+                max_length=4000,
+                placeholder="paste the value",
+            ),
+        )
+        self.value_input = _text_input_of(value_label)
+        self.add_item(value_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
         raw_value = str(self.value_input.value or "")
 
         if not raw_value.strip():
             await interaction.followup.send(
-                "Secret value cannot be empty — try again.", ephemeral=True
+                "Key value cannot be empty — try again.", ephemeral=True
             )
             return
-        if len(raw_value.encode()) > _MAX_SECRET_VALUE_BYTES:
+        if len(raw_value.encode()) > MAX_SECRET_VALUE_BYTES:
             await interaction.followup.send(
-                f"Secret value is too large. Max {_MAX_SECRET_VALUE_BYTES} bytes.",
+                f"Key value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.",
                 ephemeral=True,
             )
             return
 
+        if await refuse_if_credential_target_unavailable(
+            interaction, runtime=self._runtime, row=self._row
+        ):
+            return
+        # The name a member may store is re-checked against the submitter's
+        # live role: a key minted while they were an admin must not land as a
+        # member. `key_add` itself needs no gate, but the NAME does.
+        is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        name_problem = env_name_problem(self._row.target, is_admin=is_admin)
+        if name_problem is not None:
+            await interaction.followup.send(
+                _env_name_refusal(self._row.target, name_problem), ephemeral=True
+            )
+            return
+        # A replacement's gate is decided BEFORE the transaction opens: the
+        # decision costs an MA listing and a config read, and neither may be
+        # paid for while holding the request row's lock.
+        # A new name that a tool reads as a key already held (GH_TOKEN beside
+        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
+        # gate, decided for this submitter.
+        #
+        # Snapshot the related credentials (aliases and family members) before the
+        # transaction, for every submit. Under the lock the write proceeds only if
+        # that set is unchanged: a related key added or removed after the gate was
+        # decided was never put to it. An unchanged set — rotating
+        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+        async with self._runtime.sessionmaker() as session:
+            held_names = await list_turn_key_names(
+                session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
+            )
+        related_before = env_related_held(self._row.target, held_names)
+        shadowed = (
+            env_alias_shadowed(self._row.target, held_names)
+            if self._row.replaces_updated_at is None
+            else None
+        )
+        replacement = (
+            await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
+            if self._row.replaces_updated_at is not None or shadowed is not None
+            else "allow"
+        )
+
         now = datetime.now(UTC)
+        state: CardState = "applied"
+        is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
                 consumed_row = await credential_requests.consume_credential_request(
@@ -171,13 +549,62 @@ class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
-                await put_agent_file(
-                    session,
-                    tenant_id=consumed_row.tenant_id,
-                    agent_id=consumed_row.agent_id,
-                    key=consumed_row.target,
-                    content=raw_value,
+                outcome: CredentialRequestOutcome = "applied"
+                # Re-read under the write, holding the agent's key-set lock: an
+                # alias that appeared after the gate above was decided was
+                # never put to it, and one a concurrent writer is adding waits.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
                 )
+                appeared = (
+                    env_related_held(
+                        consumed_row.target,
+                        await list_turn_key_names(
+                            session,
+                            tenant_id=consumed_row.tenant_id,
+                            agent_id=consumed_row.agent_id,
+                        ),
+                    )
+                    != related_before
+                )
+                if replacement != "allow":
+                    # The card promised a replacement this person may no
+                    # longer make. Spend the request, write nothing.
+                    state = "refused"
+                    outcome = "write_failed"
+                elif appeared:
+                    state = "superseded"
+                    outcome = "stale_replacement"
+                else:
+                    # The precondition IS the card's promise: `None` for a
+                    # key the card said was unset, the exact `updated_at` for
+                    # one it offered to replace. A value that moved since
+                    # fails it, and this write must not quietly win a race
+                    # the person was never shown.
+                    written = await put_agent_file_if_unchanged(
+                        session,
+                        tenant_id=consumed_row.tenant_id,
+                        agent_id=consumed_row.agent_id,
+                        key=consumed_row.target,
+                        content=raw_value,
+                        set_by_account_id=consumed_row.account_id,
+                        expected_updated_at=consumed_row.replaces_updated_at,
+                    )
+                    if written is None:
+                        state = "superseded"
+                        outcome = "stale_replacement"
+                    else:
+                        is_continuation_queued = await record_input_continuation(
+                            session, consumed_row, platform="discord"
+                        )
+                await credential_requests.set_credential_request_outcome(
+                    session, token=consumed_row.token, outcome=outcome
+                )
+        except AgentEnvEncryptionRequiredError as err:
+            # Rolled back with the consume: nothing stored, the request stays live.
+            _log.error("credential_modal.env_write_refused_no_crypto_keys")
+            await interaction.followup.send(str(err), ephemeral=True)
+            return
         except Exception:
             _log.exception("credential_modal.env_write_failed", key=self._row.target)
             await interaction.followup.send(
@@ -186,40 +613,327 @@ class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
             return
 
         # Log the key NAME only — never the value.
-        _log.info("credential_modal.env.submit", key=consumed_row.target)
-        # After the transaction, not inside it: the consume and the file write
-        # commit together here, so this is the first point the row is durably
-        # spent, and it keeps a Discord round trip out of an open transaction.
-        await _mark_button_consumed(interaction, kind="env")
-        await interaction.followup.send(
-            f"Added `{consumed_row.target}`. Takes effect on the next session — "
-            "anyone who talks to this agent can use it.",
-            ephemeral=True,
+        _log.info("credential_modal.env.submit", key=consumed_row.target, outcome=outcome)
+        # After the transaction, not inside it: the consume, the file write and
+        # the continuation commit together here, so this is the first point the
+        # row is durably spent, and it keeps a Discord round trip out of an open
+        # transaction. The `received` edit still runs first: the terminal edit
+        # below can fail, and a card left saying "Saving…" is a better last
+        # state than one still offering a button that can only be refused.
+        await edit_posted_card(interaction.client, row=consumed_row, state="received")
+        if state == "refused":
+            await edit_posted_card(
+                interaction.client,
+                row=consumed_row,
+                state="refused",
+                refusal="replacement_admin_required",
+                replaces=shadowed,
+            )
+            await interaction.followup.send(
+                _env_card_text(
+                    consumed_row,
+                    state="refused",
+                    refusal="replacement_admin_required",
+                    replaces=shadowed,
+                ),
+                ephemeral=True,
+            )
+            return
+        if state == "superseded":
+            await edit_posted_card(interaction.client, row=consumed_row, state="superseded")
+            await interaction.followup.send(
+                _env_card_text(consumed_row, state="superseded"), ephemeral=True
+            )
+            return
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed_row),
+                kind="key",
+                availability=availability_for_request(consumed_row),
+                detail=consumed_row.target,
+            ),
         )
+        if is_continuation_queued:
+            await _dispatch_origin_thread(interaction, consumed_row)
 
 
-class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
-    """Add MCP credential modal: one token, atomic consume, existing vault write."""
+class _KeyAlreadySet(Exception):
+    """A key the pre-read did not see appeared between that read and its write.
+
+    Raised inside the savepoint so the whole batch rolls back; it never
+    escapes `EnvFileModal.on_submit`, and it carries the entry only to name
+    it in the refusal — `EnvEntry.value` is never read from it.
+    """
+
+    def __init__(self, entry: EnvEntry) -> None:
+        super().__init__(entry.name)
+        self.entry = entry
+
+
+def _collision_lines(collisions: Sequence[EnvEntry], held: Collection[str]) -> tuple[str, ...]:
+    """Name the keys the file would have overwritten, by name and line only.
+
+    A value never reaches this copy: the card these lines land on is public
+    to the channel, so the only facts it may carry are the ones already on
+    the uploader's screen.
+    """
+    lines = [env_collision_line(entry, held) for entry in collisions]
+    shown = lines[:_COLLISIONS_SHOWN]
+    remaining = len(lines) - _COLLISIONS_SHOWN
+    if remaining > 0:
+        shown.append(f"…and {remaining} more.")
+    shown.append("Nothing was changed. Take them out of the file, or ask to replace them by name.")
+    return tuple(shown)
+
+
+class EnvFileModal(discord.ui.Modal):
+    """Add every key in an uploaded `.env` file, or none of them.
+
+    The whole file is parsed before the request is consumed, so a syntax
+    error or a duplicate name costs nothing but a re-upload. Once the
+    request is spent the keys land together inside one savepoint: a key that
+    already exists — including one that appears between the read and the
+    write — refuses the whole file rather than merging half of it, because a
+    silently half-applied secrets file is the failure nobody notices.
+    """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
-        super().__init__()
+        agent = _agent_name(request_row)
+        super().__init__(title=_title(request_row.target, agent, "Keys from a file"))
         self._runtime = runtime
         self._row = request_row
-        self.token_input: discord.ui.TextInput[McpCredentialModal] = discord.ui.TextInput(
-            label="Auth token",
-            required=True,
-            max_length=255,
-            placeholder="usable by everyone who talks to this agent",
+        self.add_item(
+            discord.ui.TextDisplay(
+                "-# One KEY=VALUE per line. Daimon stores the keys, not a retained copy of "
+                "your uploaded file."
+            )
         )
-        self.add_item(self.token_input)
+        upload_label: discord.ui.Label[EnvFileModal] = discord.ui.Label(
+            text=".env file",
+            component=discord.ui.FileUpload(required=True, min_values=1, max_values=1),
+        )
+        # `Label.component` is typed `Item`; this one was built as the
+        # FileUpload on the line above (see `_text_input_of`).
+        self.file_input = cast("discord.ui.FileUpload[EnvFileModal]", upload_label.component)
+        self.add_item(upload_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+        agent_name = _agent_name(self._row)
+
+        uploads = self.file_input.values
+        if not uploads:
+            await interaction.followup.send(
+                f"No file arrived. Upload a .env file to add keys to {agent_name}.",
+                ephemeral=True,
+            )
+            return
+        upload = uploads[0]
+        # Cap on the announced size BEFORE downloading: `decode_env_bytes`
+        # enforces the same bound, but only once the bytes are already here.
+        if upload.size > MAX_ENV_FILE_BYTES:
+            await interaction.followup.send(
+                render_env_import_rejected("file_too_large", (), target_name=agent_name),
+                ephemeral=True,
+            )
+            return
+        try:
+            raw = await upload.read()
+        except discord.HTTPException:
+            _log.warning("credential_modal.env_file_download_failed", size=upload.size)
+            await interaction.followup.send(
+                "I could not read that file. Upload it again.", ephemeral=True
+            )
+            return
+        try:
+            entries = parse_env_file(
+                decode_env_bytes(raw),
+                member_writable_only=not is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+            )
+        except EnvFileRejected as rejected:
+            # The request is deliberately NOT consumed: a typo in the file
+            # must not cost the one click this card is good for.
+            await interaction.followup.send(
+                render_env_import_rejected(
+                    rejected.rejection, rejected.problems, target_name=agent_name
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if await refuse_if_credential_target_unavailable(
+            interaction, runtime=self._runtime, row=self._row
+        ):
+            return
+
+        now = datetime.now(UTC)
+        collisions: tuple[EnvEntry, ...] = ()
+        held: set[str] = set()
+        is_continuation_queued = False
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await credential_requests.consume_credential_request(
+                    session, token=self._row.token, now=now
+                )
+                if consumed_row is None:
+                    await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+                    return
+                # Held across the read below and the writes after it, so a
+                # concurrent writer of another alias name cannot interleave.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
+                )
+                held = {
+                    row.key
+                    for row in await list_agent_files(
+                        session,
+                        tenant_id=consumed_row.tenant_id,
+                        agent_id=consumed_row.agent_id,
+                    )
+                }
+                collisions = env_import_collisions(entries, held)
+                if not collisions:
+                    try:
+                        # A savepoint, not the outer transaction: a key that
+                        # appeared since the read must undo this file's other
+                        # writes while leaving the request spent.
+                        async with session.begin_nested():
+                            for entry in entries:
+                                written = await put_agent_file_if_unchanged(
+                                    session,
+                                    tenant_id=consumed_row.tenant_id,
+                                    agent_id=consumed_row.agent_id,
+                                    key=entry.name,
+                                    content=entry.value,
+                                    set_by_account_id=consumed_row.account_id,
+                                    expected_updated_at=None,
+                                )
+                                if written is None:
+                                    raise _KeyAlreadySet(entry)
+                    except _KeyAlreadySet as appeared:
+                        collisions = (appeared.entry,)
+                        held.add(appeared.entry.name)
+                if not collisions:
+                    is_continuation_queued = await record_input_continuation(
+                        session, consumed_row, platform="discord"
+                    )
+                await credential_requests.set_credential_request_outcome(
+                    session,
+                    token=consumed_row.token,
+                    outcome="stale_replacement" if collisions else "applied",
+                )
+        except AgentEnvEncryptionRequiredError as err:
+            # Rolled back with the consume: nothing stored, the request stays live.
+            _log.error("credential_modal.env_write_refused_no_crypto_keys")
+            await interaction.followup.send(str(err), ephemeral=True)
+            return
+        except Exception:
+            # Named boundary: discord.py swallows whatever escapes on_submit.
+            _log.exception("credential_modal.env_file_write_failed", key_count=len(entries))
+            await interaction.followup.send(
+                "Something went wrong — please try again.", ephemeral=True
+            )
+            return
+
+        # Key NAMES and counts only — never a value.
+        _log.info(
+            "credential_modal.env_file.submit",
+            key_count=len(entries),
+            collision_count=len(collisions),
+        )
+        if collisions:
+            refusal_lines = _collision_lines(collisions, held)
+            await edit_posted_card(
+                interaction.client,
+                row=self._row,
+                state="refused",
+                refusal="env_file_invalid",
+                refusal_lines=refusal_lines,
+            )
+            await interaction.followup.send(
+                "\n".join((f"No keys were saved for {agent_name}.", *refusal_lines)),
+                ephemeral=True,
+            )
+            return
+
+        # No success ephemeral: the card below is the receipt, and a second
+        # copy of it in the thread says the same thing twice.
+        await edit_posted_card(
+            interaction.client,
+            row=self._row,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=agent_name,
+                kind="keys_bulk",
+                availability=availability_for_request(consumed_row),
+                count=len(entries),
+            ),
+        )
+        if is_continuation_queued:
+            await _dispatch_origin_thread(interaction, consumed_row)
+
+
+class McpCredentialModal(discord.ui.Modal):
+    """Connect a server: one token, atomic consume, existing vault write."""
+
+    def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
+        agent = _agent_name(request_row)
+        super().__init__(
+            title=_title(
+                request_row.target, agent, f"{request_row.target} token"[:_MAX_TITLE_CHARS]
+            )
+        )
+        self._runtime = runtime
+        self._row = request_row
+        self.add_item(
+            discord.ui.TextDisplay(
+                f"-# For {request_row.mcp_server_url}. "
+                f"Anyone who talks to {agent} can use this connection."
+            )
+        )
+        token_label: discord.ui.Label[McpCredentialModal] = discord.ui.Label(
+            text="Token",
+            component=discord.ui.TextInput(required=True, max_length=4000),
+        )
+        self.token_input = _text_input_of(token_label)
+        self.add_item(token_label)
+
+    async def _refuse_replacement(
+        self, interaction: discord.Interaction, consumed_row: CredentialRequestRow
+    ) -> None:
+        """Spend the request and write nothing: no vault token, no attach."""
+        await _settle_spent_request(
+            self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+        )
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="refused",
+            refusal="replacement_admin_required",
+        )
+        await interaction.followup.send(
+            f"{_agent_name(consumed_row)} already has `{consumed_row.target}` (or a token "
+            "for that URL) and is shared here, so replacing it needs a server admin. "
+            "Nothing was saved.",
+            ephemeral=True,
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
         token_value = str(self.token_input.value or "")
 
         if not token_value.strip():
             await interaction.followup.send(
-                "Auth token cannot be empty — try again.", ephemeral=True
+                "MCP token cannot be empty — try again.", ephemeral=True
             )
             return
 
@@ -227,12 +941,19 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
         jwt_secret_setting = self._runtime.settings.mcp.jwt_secret
         if public_url_setting is None or jwt_secret_setting is None:
             await interaction.followup.send(
-                "daimon-mcp is not configured (public_url / jwt_secret missing) — "
-                "credential not written.",
+                "This deployment is not finished being set up. Ask the operator to finish setup, "
+                "then try again. Nothing was saved.",
                 ephemeral=True,
             )
             return
 
+        if await refuse_if_credential_target_unavailable(
+            interaction, runtime=self._runtime, row=self._row
+        ):
+            return
+        connect = await _decide_mcp_connect_at_submit(
+            interaction, runtime=self._runtime, row=self._row
+        )
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker() as session, session.begin():
             consumed_row = await credential_requests.consume_credential_request(
@@ -242,11 +963,17 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await _mark_button_consumed(interaction, kind="mcp")
+        await edit_posted_card(interaction.client, row=consumed_row, state="received")
+        if connect.refused:
+            await self._refuse_replacement(interaction, consumed_row)
+            return
 
         mcp_server_url = consumed_row.mcp_server_url
         if mcp_server_url is None:
-            _log.error("credential_modal.mcp_missing_server_url", token_tail=self._row.token[-4:])
+            _log.error(
+                "credential_modal.mcp_missing_server_url", agent_id=str(consumed_row.agent_id)
+            )
+            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
             await interaction.followup.send(
                 "This request is missing its server URL — please ask again.", ephemeral=True
             )
@@ -255,160 +982,163 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
         _log.info(
             "credential_modal.mcp.submit",
             mcp_server_url=mcp_server_url,
-            token_masked=mask_tail(token_value),
+            token_present=bool(token_value),
         )
+        # Ask the server first. A token it rejects would otherwise be stored,
+        # mirrored into every caller's vault and attached, and every turn from
+        # then on would carry a failed MCP init (#79). A server that cannot be
+        # reached is not a verdict: the save proceeds and MA reports later.
+        if await is_token_rejected(
+            self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value
+        ):
+            await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
+            await interaction.followup.send(rejected_token_message(mcp_server_url), ephemeral=True)
+            return
+        # Attach first, publish the agent-wide token only after that authorized
+        # attach, then the submitter's own vault copy: no other session may
+        # ever mirror a token this submission is refused for.
         try:
-            # Agent-scoped copy first: the server is attached to the AGENT, so
-            # every caller's session needs this credential mirrored in at
-            # create time. Without this row the server works only for whoever
-            # filled in this modal.
-            if self._runtime.turn_deps.fernet is not None:
-                await save_agent_mcp_credential(
-                    sessionmaker=self._runtime.sessionmaker,
-                    fernet=self._runtime.turn_deps.fernet,
-                    tenant_id=consumed_row.tenant_id,
-                    agent_id=consumed_row.agent_id,
-                    mcp_server_url=mcp_server_url,
-                    plaintext_token=token_value,
-                )
-            else:
-                _log.warning(
-                    "credential_modal.no_fernet_for_agent_scope",
-                    mcp_server_url=mcp_server_url,
-                )
-            await add_external_mcp_credential(
+            await connect_mcp_server_with_token(
                 self._runtime.anthropic,
-                account_id=consumed_row.account_id,
+                sessionmaker=self._runtime.sessionmaker,
+                fernet=self._runtime.turn_deps.fernet,
+                tenant_id=consumed_row.tenant_id,
                 agent_id=consumed_row.agent_id,
-                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
-                public_url=str(public_url_setting),
+                account_id=consumed_row.account_id,
+                server_name=consumed_row.target,
                 mcp_server_url=mcp_server_url,
                 token=token_value,
+                replace_allowed=connect.replace_allowed,
+                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
+                public_url=str(public_url_setting),
                 now=now,
-                session_factory=self._runtime.sessionmaker,
             )
-        except Exception as err:
-            _log.exception(
-                "credential_modal.mcp_write_failed",
-                mcp_server_url=mcp_server_url,
-                err_type=type(err).__name__,
-            )
-            # Surface only the exception class name — never the stringified
-            # exception, which for SDK/network errors can carry the request
-            # envelope (a token-leak surface). Full traceback goes to structlog.
-            await interaction.followup.send(
-                "Credential request consumed, but storing the auth token failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry.",
-                ephemeral=True,
-            )
+        except McpServerReplaceRefusedError:
+            # A server or token for this URL appeared after the pre-consume check.
+            await self._refuse_replacement(interaction, consumed_row)
             return
-
-        # The vault credential alone is inert: MA rejects an agent whose
-        # mcp_servers are not each referenced by an mcp_toolset, so a token
-        # stored against a server the agent never declares is unreachable.
-        # This tool is documented as the replacement for attach_mcp_server on
-        # auth-required servers, so it owes the attach too (#49) — the vault
-        # write happens first, because a declared server with no credential
-        # advertises calls that fail.
-        agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic,
-            tenant_id=consumed_row.tenant_id,
-            agent_id=consumed_row.agent_id,
-        )
-        if agent is None:
-            _log.error(
-                "credential_modal.mcp_agent_not_found",
-                agent_id=str(consumed_row.agent_id),
-            )
-            await interaction.followup.send(
-                "Auth token stored, but the agent could not be found to attach "
-                f"`{mcp_server_url}` to it. The server is not connected yet.",
-                ephemeral=True,
-            )
-            return
-        try:
-            await attach_mcp_server_to_agent(
-                self._runtime.anthropic,
-                agent.id,
-                server_name=consumed_row.target,
-                url=mcp_server_url,
-            )
-        except Exception as err:
-            # Partial state is real and must not be reported as success: the
-            # token is stored, the server is not attached. Exception class name
-            # only, for the same token-leak reason as the vault-write branch.
-            _log.exception(
+        except (McpAgentGoneError, McpAttachFailedError) as err:
+            # Exception class name only; SDK failures can include the request
+            # envelope. Nothing was stored.
+            _log.warning(
                 "credential_modal.mcp_attach_failed",
                 mcp_server_url=mcp_server_url,
-                err_type=type(err).__name__,
+                err_type=type(err.__cause__ or err).__name__,
             )
+            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
             await interaction.followup.send(
-                f"Auth token stored, but attaching `{mcp_server_url}` to the agent "
-                f"failed (`{type(err).__name__}`). The server is not connected yet — "
-                "ask the agent to attach it, or request a new credential to retry.",
+                f"This request was used, but `{mcp_server_url}` could not be attached to the "
+                "agent. Nothing was saved. Ask for a new request to retry.",
                 ephemeral=True,
             )
             return
+        except McpTokenWriteFailedError as err:
+            _log.warning(
+                "credential_modal.mcp_write_failed",
+                mcp_server_url=mcp_server_url,
+                err_type=type(err.__cause__ or err).__name__,
+            )
+            is_queued = await _settle_spent_request(
+                self._runtime,
+                row=consumed_row,
+                outcome="write_failed",
+                carries_work=False,
+            )
+            await edit_posted_card(
+                interaction.client,
+                row=consumed_row,
+                state="partial",
+                outcome=ConfigurationChange(
+                    target_name=_agent_name(consumed_row),
+                    kind="mcp",
+                    availability="preparation_failed",
+                    detail=consumed_row.target,
+                ),
+            )
+            await interaction.followup.send(
+                f"`{mcp_server_url}` is attached, but saving its token did not finish. "
+                "Ask for a new request to retry.",
+                ephemeral=True,
+            )
+            if is_queued:
+                await _dispatch_origin_thread(interaction, consumed_row)
+            return
 
-        await interaction.followup.send(
-            f"MCP credential added for `{mcp_server_url}` and attached as "
-            f"`{consumed_row.target}`. Anyone who talks to this agent can use it.",
-            ephemeral=True,
+        is_continuation_queued = await _settle_spent_request(
+            self._runtime, row=consumed_row, outcome="applied", carries_work=True
         )
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed_row),
+                kind="mcp",
+                availability="next_message",
+                detail=consumed_row.target,
+            ),
+        )
+        if is_continuation_queued:
+            await _dispatch_origin_thread(interaction, consumed_row)
 
 
-class SkillRepoModal(discord.ui.Modal, title="Import skills"):
-    """Collect a GitHub token for a PRIVATE skill repo, then run the import.
+class SkillRepoModal(discord.ui.Modal):
+    """Collect a GitHub token, import skills, and attach them to the requested agent.
 
-    Deliberately NOT a `RepoBindModal` variant, even though both collect a
-    GitHub token into the same per-agent overlay. Two differences are the
-    whole point of the separate class:
-
-    1. No `set_binding`. Importing skills from a repo must not also tell the
-       agent to check that repo out. Sharing the store is intended; sharing
-       the binding write is the bug this exists to avoid.
-    2. The token is verified against the SKILL repo (`target`), not the
-       agent's clone repo — for a skill import those are routinely different
-       repos, and validating the wrong one both refuses good tokens and
-       accepts ones that cannot read what is about to be fetched.
-
-    Because the credential lands in the same overlay `get_pat(agent_id=…)`
-    resolves, a user who already pasted a token that can read this repo is
-    never asked twice — the agent should attempt `sync_skills` first and only
-    reach for this button on an actual no-credential failure.
-
-    No admin gate. This mirrors the env/mcp kinds rather than the repo kind:
-    the repo kind is admin-gated on a shared agent because a binding changes
-    what code the agent runs for every member, and that reasoning does not
-    reach an import into the shared skill library, which `sync_skills` itself
-    already gates with `_require_admin` at request time.
+    This requester-only enrollment verifies the token against the skill repo
+    and stores it as that repo's SKILL credential
+    (`set_skill_repo_credential`), which is the row later skill syncs resolve
+    the token from. It deliberately writes no `agent_repo_binding`: the
+    working repo is what the agent clones and runs, a separate decision with
+    its own admin gate, and a skill import must never move it. It does not
+    inherit the admin gate of direct skill imports either.
     """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
-        super().__init__()
+        agent = _agent_name(request_row)
+        url, branch, _path = split_skill_repo_target(request_row.target)
+        owner_repo = normalize_owner_repo(url)
+        super().__init__(title=_title(owner_repo, agent, "Your GitHub token"))
         self._runtime = runtime
         self._row = request_row
-        url, _branch, _path = split_skill_repo_target(request_row.target)
-        self.pat_in: discord.ui.TextInput[SkillRepoModal] = discord.ui.TextInput(
-            label="GitHub token",
-            required=True,
-            # Discord rejects the whole modal with 50035 above 4000, so this is
-            # a UI character cap and NOT _MAX_SECRET_VALUE_BYTES (4096), which
-            # is a byte cap enforced on submit. EnvCredentialModal keeps the two
-            # separate for the same reason.
-            max_length=4000,
-            placeholder=f"Needs read access to {normalize_owner_repo(url)}",
+        self.add_item(
+            discord.ui.TextDisplay(
+                f"-# For **{owner_repo}**, branch `{branch}`. Skill repo only — the working "
+                f"repo does not change. The token stays yours; {agent} uses it whenever it "
+                "needs GitHub."
+            )
         )
-        self.add_item(self.pat_in)
+        token_label: discord.ui.Label[SkillRepoModal] = discord.ui.Label(
+            text="Token",
+            description="a fine-grained token with read access to the repo",
+            component=discord.ui.TextInput(
+                placeholder="github_pat_…",
+                required=True,
+                # Discord rejects the whole form with 50035 above 4000, so this
+                # is a UI character cap and NOT MAX_SECRET_VALUE_BYTES (4096),
+                # which is a byte cap enforced on submit. EnvCredentialModal
+                # keeps the two separate for the same reason.
+                max_length=4000,
+            ),
+        )
+        self.pat_in = _text_input_of(token_label)
+        self.add_item(token_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
 
         pat = str(self.pat_in.value or "").strip()
         if not pat:
             await interaction.followup.send("Enter a GitHub token.", ephemeral=True)
             return
 
+        if await refuse_if_credential_target_unavailable(
+            interaction, runtime=self._runtime, row=self._row
+        ):
+            return
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker() as session, session.begin():
             consumed_row = await credential_requests.consume_credential_request(
@@ -418,9 +1148,10 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await _mark_button_consumed(interaction, kind="skill_repo")
+        await edit_posted_card(interaction.client, row=consumed_row, state="received")
 
         url, branch, path = split_skill_repo_target(consumed_row.target)
+        owner_repo = normalize_owner_repo(url)
         # The token appears only as a masked tail, never in full, and never
         # the (now-consumed) request token either.
         _log.info(
@@ -428,9 +1159,10 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
             repo_url=url,
             branch=branch,
             path=path,
-            pat_masked=mask_tail(pat),
+            pat_present=bool(pat),
         )
 
+        is_token_saved = False
         try:
             async with httpx.AsyncClient(timeout=30.0) as http_client:
                 # Verify BEFORE storing: a token that cannot read this repo is
@@ -459,20 +1191,20 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                     pasted_pat=pat,
                     now=now,
                 )
-                # Without this row the stored PAT is unreachable: the skill-sync
-                # resolver finds a per-agent token by walking this tenant's
-                # `agent_repo_binding` rows FOR THIS REPO, not by agent alone
-                # (the session JWT carries no agent_id claim). Storing the
-                # credential without binding the repo is what made a pasted
-                # token look ignored — every later sync resolved `token=None`,
-                # got GitHub's 404, and asked for the credential again.
+                is_token_saved = True
+                # The skill repo's own credential row, keyed by (tenant,
+                # agent, repo): a later sync of this repo resolves its token
+                # from here. Without it the stored PAT is unreachable and
+                # every sync falls back to an anonymous 404 that asks for the
+                # credential again.
                 async with self._runtime.sessionmaker.begin() as session:
-                    await set_binding(
+                    await set_skill_repo_credential(
                         session,
                         tenant_id=consumed_row.tenant_id,
                         agent_id=consumed_row.agent_id,
                         repo_url=url,
                         default_branch=branch,
+                        path=path,
                         ma_secret_ref=ma_secret_ref,
                         proof=proof,
                     )
@@ -486,14 +1218,19 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                     token=pat,
                 )
         except DaimonError as err:
-            # Written for the user by the raiser — surface verbatim. The
-            # credential is already stored and still good; only the import
-            # leg failed, so say which half survived.
+            # Validation can fail before storage; preserve only confirmed saves.
+            progress = (
+                "Token saved, but the skill import did not finish."
+                if is_token_saved
+                else "Could not finish saving the token and importing skills. "
+                "Some changes may have been saved."
+            )
             await interaction.followup.send(
-                f"Token stored, but the import failed: {err} The request was used up — "
-                "ask again to retry the import.",
+                f"{progress} {err} This request was used; ask again to retry the import.",
                 ephemeral=True,
             )
+            if is_token_saved:
+                await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
             return
         except Exception as err:
             _log.exception(
@@ -501,26 +1238,82 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                 repo_url=url,
                 err_type=type(err).__name__,
             )
-            # Class name only — a stringified SDK/network error can carry the
-            # request envelope, which is a token-leak surface.
+            progress = (
+                "Token saved, but the skill import did not finish."
+                if is_token_saved
+                else "Could not finish saving the token and importing skills. "
+                "Some changes may have been saved."
+            )
             await interaction.followup.send(
-                f"Token stored, but the import failed (`{type(err).__name__}`). "
-                "Ask again to retry the import.",
+                f"{progress} Ask again to retry the import for `{owner_repo}`.",
                 ephemeral=True,
             )
+            if is_token_saved:
+                await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
             return
 
-        attach_note = await self._attach_to_requested_agent(
+        if not outcomes:
+            # The token is stored and the repo was readable, but it carried
+            # nothing to import — which is the same thing to say as a failed
+            # import, and the opposite of what an `applied` card would claim.
+            await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
+            return
+
+        attach_failure = await self._attach_to_requested_agent(
             tenant_id=consumed_row.tenant_id,
             agent_id=consumed_row.agent_id,
             outcomes=outcomes,
         )
-        await interaction.followup.send(
-            f"Imported {len(outcomes)} skill(s) from `{normalize_owner_repo(url)}`. "
-            f"{attach_note} The token is stored and the repo is bound, so future "
-            "imports from it will not ask again.",
-            ephemeral=True,
+        if attach_failure is not None:
+            # Only the attach half failed: the skills are in the library, so
+            # this is reported to the submitter rather than rewritten onto
+            # the card as an import that did not happen.
+            await interaction.followup.send(attach_failure, ephemeral=True)
+        is_continuation_queued = await _settle_spent_request(
+            self._runtime, row=consumed_row, outcome="applied", carries_work=True
         )
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed_row),
+                kind="skills_bulk",
+                availability="next_message",
+                count=len(outcomes),
+                repo=owner_repo,
+            ),
+        )
+        if is_continuation_queued:
+            await _dispatch_origin_thread(interaction, consumed_row)
+
+    async def _render_import_failed(
+        self, interaction: discord.Interaction, row: CredentialRequestRow, *, repo: str
+    ) -> None:
+        """Card and trail for a stored token whose skills did not import.
+
+        The continuation carries no work: the skills the waiting task needs
+        are not there, so no turn should resume as though they were.
+        """
+        is_queued = await _settle_spent_request(
+            self._runtime, row=row, outcome="write_failed", carries_work=False
+        )
+        await edit_posted_card(
+            interaction.client,
+            row=row,
+            state="partial",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(row),
+                kind="skills_bulk",
+                availability="preparation_failed",
+                # The failed line names no count; `skills_bulk` still
+                # requires one, and nothing was imported to count.
+                count=1,
+                repo=repo,
+            ),
+        )
+        if is_queued:
+            await _dispatch_origin_thread(interaction, row)
 
     async def _attach_to_requested_agent(
         self,
@@ -528,7 +1321,7 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
         tenant_id: uuid.UUID,
         agent_id: uuid.UUID,
         outcomes: list[ResourceOutcome],
-    ) -> str:
+    ) -> str | None:
         """Attach the just-imported skills to the agent this request named.
 
         Importing puts skills in the tenant's shared library; it does not put
@@ -536,9 +1329,10 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
         only the import leaves the user staring at an agent with no skills and
         no way to tell that anything worked.
 
-        Returns prose rather than raising: the import has already succeeded by
-        the time this runs, so a failure here is partial and both halves must
-        be reported truthfully.
+        Returns None when there was nothing to attach or the attach landed,
+        and the person-facing prose for the failure otherwise — raising is
+        not an option, because the import has already succeeded by the time
+        this runs and both halves must be reported truthfully.
         """
         skill_ids = sorted(
             outcome.anthropic_id
@@ -547,7 +1341,7 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
             and outcome.action in (Action.CREATED, Action.UPDATED)
         )
         if not skill_ids:
-            return "Nothing new to attach."
+            return None
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
         )
@@ -576,17 +1370,22 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
             )
-            return f"Imported, but attaching to `{agent.name}` failed ({type(err).__name__})."
-        return f"Attached {len(skill_ids)} to `{agent.name}`."
+            return (
+                f"Skills imported, but attaching them to `{agent.name}` did not finish. "
+                "Ask again to retry."
+            )
+        return None
 
 
-class RepoBindModal(discord.ui.Modal, title="Bind repo"):
-    """Bind repo modal: branch + optional token, gate, atomic consume, then
-    the shared credential resolution and the binding write.
+class RepoBindModal(discord.ui.Modal):
+    """Give an agent access to a repo: one optional token, gate, atomic
+    consume, then the shared credential resolution and the binding write.
 
-    The repo itself is never retyped here — it is fixed by the consumed
-    row's `target`, exactly as the env key and MCP server name are for the
-    two sibling modals. Unlike them, submitting this one is additionally
+    Neither the repo nor the branch is retyped here — both are fixed by the
+    consumed row's `target`, which packs them exactly as the two skill-repo
+    kinds do, the same way the env key and MCP server name are fixed for the
+    sibling forms. The token stays optional because a public repo needs
+    none. Unlike the siblings, submitting this one is additionally
     gated on `credential_repo_bind.refuse_if_shared_and_not_admin_for_request`
     (see the module docstring): a member who was an admin, or whose target
     was private, when the button was clicked may have lost either between
@@ -596,25 +1395,35 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
     """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
-        super().__init__()
+        agent = _agent_name(request_row)
+        url, branch, _path = split_skill_repo_target(request_row.target)
+        owner_repo = normalize_owner_repo(url)
+        super().__init__(title=_title(owner_repo, agent, "Your GitHub token"))
         self._runtime = runtime
         self._row = request_row
-        self.branch_in: discord.ui.TextInput[RepoBindModal] = discord.ui.TextInput(
-            label="Branch",
-            default="main",
-            max_length=255,
+        self.add_item(
+            discord.ui.TextDisplay(
+                f"-# For **{owner_repo}**, branch `{branch}`. The token stays yours; "
+                f"{agent} uses it whenever it needs GitHub."
+            )
         )
-        self.pat_in: discord.ui.TextInput[RepoBindModal] = discord.ui.TextInput(
-            label="GitHub token (optional)",
-            required=False,
-            max_length=255,
-            placeholder="Leave blank for a public repo",
+        token_label: discord.ui.Label[RepoBindModal] = discord.ui.Label(
+            text="Token",
+            description="leave this blank if the repo is public",
+            component=discord.ui.TextInput(
+                placeholder="github_pat_…",
+                required=False,
+                max_length=4000,
+            ),
         )
-        self.add_item(self.branch_in)
-        self.add_item(self.pat_in)
+        self.pat_in = _text_input_of(token_label)
+        self.add_item(token_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
 
         if await refuse_if_shared_and_not_admin_for_request(
             interaction,
@@ -622,11 +1431,26 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
         ):
+            # The gate runs before the consume, so the request is NOT spent —
+            # an admin can still use this same card. The card itself is
+            # terminal all the same: it tells the channel the bind was
+            # refused and who can make it, and it carries no button back to a
+            # form that would refuse again.
+            await _record_refused_outcome(self._runtime, self._row)
+            await edit_posted_card(
+                interaction.client,
+                row=self._row,
+                state="refused",
+                refusal="admin_required",
+            )
             return
 
-        branch = str(self.branch_in.value or "").strip() or "main"
         pat = str(self.pat_in.value or "").strip()
 
+        if await refuse_if_credential_target_unavailable(
+            interaction, runtime=self._runtime, row=self._row
+        ):
+            return
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker() as session, session.begin():
             consumed_row = await credential_requests.consume_credential_request(
@@ -636,16 +1460,21 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await _mark_button_consumed(interaction, kind="repo")
+        await edit_posted_card(interaction.client, row=consumed_row, state="received")
+
+        # The row's target packs the branch the card promised; unpack it here
+        # rather than asking for it again, so the binding cannot disagree with
+        # what the person was shown.
+        repo_url, branch, _path = split_skill_repo_target(consumed_row.target)
 
         # Log the repo and branch, and the token ONLY as a masked tail when
         # present — never the plain value, never the (now-consumed) request
         # token.
         _log.info(
             "credential_modal.repo.submit",
-            repo_url=consumed_row.target,
+            repo_url=repo_url,
             branch=branch,
-            pat_masked=mask_tail(pat) if pat else None,
+            pat_present=bool(pat),
         )
 
         try:
@@ -655,7 +1484,7 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
                     http_client,
                     agent_id=consumed_row.agent_id,
                     account_id=consumed_row.account_id,
-                    repo_url=consumed_row.target,
+                    repo_url=repo_url,
                     pasted_pat=pat or None,
                     now=now,
                 )
@@ -664,7 +1493,7 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
                     session,
                     tenant_id=consumed_row.tenant_id,
                     agent_id=consumed_row.agent_id,
-                    repo_url=consumed_row.target,
+                    repo_url=repo_url,
                     default_branch=branch,
                     ma_secret_ref=ma_secret_ref,
                     proof=proof,
@@ -680,20 +1509,36 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
         except Exception as err:
             _log.exception(
                 "credential_modal.repo_write_failed",
-                repo_url=consumed_row.target,
+                repo_url=repo_url,
                 err_type=type(err).__name__,
             )
-            # Surface only the exception class name — never the stringified
-            # exception, which for SDK/network errors can carry the request
-            # envelope (a token-leak surface). Full traceback goes to structlog.
+            # Keep exception details in the operator log; SDK failures can
+            # include the request envelope.
             await interaction.followup.send(
-                "Credential request consumed, but binding the repo failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry.",
+                "This request was used, but connecting the working repo did not finish. "
+                "Some changes may have been saved. Ask for a new request to retry.",
                 ephemeral=True,
             )
             return
 
-        await interaction.followup.send(
-            f"Bound `{consumed_row.target}` on `{branch}`. Takes effect on the next session.",
-            ephemeral=True,
+        is_continuation_queued = await _settle_spent_request(
+            self._runtime, row=consumed_row, outcome="applied", carries_work=True
         )
+        await edit_posted_card(
+            interaction.client,
+            row=consumed_row,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed_row),
+                kind="repo",
+                availability="next_message",
+                repo=normalize_owner_repo(repo_url),
+                branch=branch,
+                # Never `copy` or `leave`: this form binds a repo to an agent
+                # that had none of this person's uncommitted work to carry, so
+                # a card claiming either would be inventing one.
+                unsaved_work=None,
+            ),
+        )
+        if is_continuation_queued:
+            await _dispatch_origin_thread(interaction, consumed_row)

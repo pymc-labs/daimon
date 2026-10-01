@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "daimon-slack": {
+      "type": "http",
+      "url": "${DAIMON_MCP_URL:-https://daimon.decision.ai}/slack/mcp"
+    },
+    "daimon-discord": {
+      "type": "http",
+      "url": "${DAIMON_MCP_URL:-https://daimon.decision.ai}/discord/mcp"
+    }
+  }
+}

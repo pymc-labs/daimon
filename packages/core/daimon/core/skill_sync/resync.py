@@ -35,18 +35,21 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import anthropic
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
-from cryptography.fernet import MultiFernet  # noqa: I001
+from cryptography.fernet import MultiFernet
 from daimon.core.config import GithubSettings
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_auth import build_app_jwt, mint_installation_token
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import select_clone_auth
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_sync.fetcher import GitHubRateLimitError
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.specs import SkillRepo
 from daimon.core.stores import agent_repo_binding as binding_store
@@ -63,6 +66,37 @@ _log = structlog.get_logger(__name__)
 
 _RESYNC_MAX_ATTEMPTS = 3
 _RESYNC_BACKOFF_BASE = 1.0  # seconds (doubles each retry)
+
+
+@dataclass(frozen=True)
+class ResyncReport:
+    """Binding errors and retryable bindings from one repository pass."""
+
+    failed_bindings: int
+    retryable_bindings: int = 0
+    retry_after: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _BindingOutcome:
+    failed: bool
+    retryable: bool
+    retry_after: datetime | None = None
+
+
+def _is_retryable_error(err: Exception) -> bool:
+    """Classify transient GitHub, MA, and transport failures for queue retry."""
+    if isinstance(
+        err,
+        (GitHubRateLimitError, httpx.TransportError, anthropic.APIConnectionError, TimeoutError),
+    ):
+        return True
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code
+        return status_code == 429 or status_code >= 500
+    if isinstance(err, anthropic.APIStatusError):
+        return err.status_code == 429 or err.status_code >= 500
+    return False
 
 
 def should_resync(ref: str, default_branch: str) -> bool:
@@ -89,8 +123,8 @@ async def _resolve_agent_name_and_principal(
     session: AsyncSession,
     binding: AgentRepoBindingRow,
     anthropic_client: AsyncAnthropic,
-) -> tuple[str, uuid.UUID] | None:
-    """Resolve (agent_name, principal_id) from a binding row.
+) -> tuple[str, uuid.UUID, str] | None:
+    """Resolve (agent_name, principal_id, MA agent ID) from a binding row.
 
     Uses the PROVEN-CORRECT re-derive-and-compare bridge (Plan 56-01 OQ1):
     iterate the tenant's MA agents, re-derive uuid5 for each, match the one
@@ -106,14 +140,17 @@ async def _resolve_agent_name_and_principal(
 
     # Local import breaks the ma.py <-> defaults circular dependency and routes
     # the listing through the tenant-filtered home (T4: no raw agents.list here).
-    from daimon.core.defaults.ma_index import list_agents_by_tenant  # noqa: PLC0415
+    from daimon.core.defaults.ma_index import list_agents_by_tenant
 
+    tenant_agents = await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id)
     resolved_agent_name: str | None = None
-    for ma_agent in await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id):
+    resolved_ma_agent_id: str | None = None
+    for ma_agent in tenant_agents:
         candidate_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
         if candidate_uuid == binding.agent_id:
             daimon_name = (ma_agent.metadata or {}).get("daimon_name")
             resolved_agent_name = daimon_name or ma_agent.name
+            resolved_ma_agent_id = str(ma_agent.id)
             break
 
     if resolved_agent_name is None:
@@ -124,12 +161,25 @@ async def _resolve_agent_name_and_principal(
         )
         return None
 
+    duplicate_ids = [
+        str(agent.id)
+        for agent in tenant_agents
+        if ((agent.metadata or {}).get("daimon_name") or agent.name) == resolved_agent_name
+        and str(agent.id) != resolved_ma_agent_id
+    ]
+    if duplicate_ids:
+        raise DaimonError(
+            f"multiple MA agents share tenant {tenant_id} and name {resolved_agent_name!r}; "
+            "archive duplicates before resyncing this binding"
+        )
+
     principal = await get_or_create_cli_principal(
         session,
         tenant_id=tenant_id,
         os_user="webhook",
     )
-    return resolved_agent_name, principal.account_id
+    assert resolved_ma_agent_id is not None
+    return resolved_agent_name, principal.account_id, resolved_ma_agent_id
 
 
 # ---------------------------------------------------------------------------
@@ -229,10 +279,13 @@ async def _select_credential(
             github_settings.app_id,
             now=int(time.time()),
         )
+        # Narrowed to the pushed repo, read-only: resync only fetches it.
         return await mint_installation_token(
             http_client,
             jwt=jwt,
             installation_id=installation.installation_id,
+            repository=repo_full_name.split("/", 1)[1],
+            permissions={"contents": "read"},
         )
     if mode == "public":
         assert fallback_pat is not None  # narrows: has_fallback_pat implies this is set
@@ -263,7 +316,7 @@ async def resync_bound_repo(
     anthropic_client: AsyncAnthropic,
     http_client: httpx.AsyncClient | None = None,
     github_settings: GithubSettings | None = None,
-) -> None:
+) -> ResyncReport:
     """Resync skills for all bindings of the pushed repo.
 
     For each binding on repo_full_name:
@@ -296,9 +349,14 @@ async def resync_bound_repo(
     async with sessionmaker() as session:
         bindings = await binding_store.get_bindings_for_repo(session, repo_url=repo_full_name)
 
-    async def _resync_all(client: httpx.AsyncClient) -> None:
+    async def _resync_all(
+        client: httpx.AsyncClient,
+    ) -> tuple[int, int, datetime | None]:
         # Shared per-binding loop body (D-01): http_client is the only input
         # that varies between the caller-owned and self-owned client paths.
+        failed_bindings = 0
+        retryable_bindings = 0
+        retry_after: datetime | None = None
         for binding in bindings:
             if not should_resync(ref, binding.default_branch):
                 _log.info(
@@ -310,7 +368,7 @@ async def resync_bound_repo(
                     agent_id=str(binding.agent_id),
                 )
                 continue
-            await _resync_one_binding(
+            outcome = await _resync_one_binding(
                 binding=binding,
                 repo_full_name=repo_full_name,
                 sessionmaker=sessionmaker,
@@ -319,14 +377,31 @@ async def resync_bound_repo(
                 anthropic_client=anthropic_client,
                 github_settings=github_settings,
             )
+            if outcome.failed:
+                failed_bindings += 1
+            if outcome.retryable:
+                retryable_bindings += 1
+            if outcome.retry_after is not None:
+                retry_after = (
+                    max(retry_after, outcome.retry_after) if retry_after else outcome.retry_after
+                )
+                # A rate limit may be shared across credentials. Stop this batch
+                # and let the durable queue retry every remaining binding later.
+                break
+        return failed_bindings, retryable_bindings, retry_after
 
     if http_client is not None:
         # Caller-owned client (e.g. test injection) — use directly, don't close.
-        await _resync_all(http_client)
+        failed_bindings, retryable_bindings, retry_after = await _resync_all(http_client)
     else:
         # Self-owned client — create and close around the full batch.
         async with httpx.AsyncClient(timeout=120.0) as owned_client:
-            await _resync_all(owned_client)
+            failed_bindings, retryable_bindings, retry_after = await _resync_all(owned_client)
+    return ResyncReport(
+        failed_bindings=failed_bindings,
+        retryable_bindings=retryable_bindings,
+        retry_after=retry_after,
+    )
 
 
 async def _resync_one_binding(
@@ -338,10 +413,13 @@ async def _resync_one_binding(
     http_client: httpx.AsyncClient,
     anthropic_client: AsyncAnthropic,
     github_settings: GithubSettings | None,
-) -> None:
+) -> _BindingOutcome:
     """Attempt to resync a single binding. Records last_sync_at + last_sync_error."""
     now = datetime.now(UTC)
     last_sync_error: str | None = None
+    failed = False
+    retryable = False
+    retry_after: datetime | None = None
 
     try:
         async with sessionmaker() as session:
@@ -351,11 +429,8 @@ async def _resync_one_binding(
                 anthropic_client=anthropic_client,
             )
             if resolved is None:
-                last_sync_error = "agent not found in MA (bridge resolution failed)"
-                return
-
-            agent_name, principal_id = resolved
-
+                raise DaimonError("agent not found in MA (bridge resolution failed)")
+            agent_name, principal_id, ma_agent_id = resolved
             credential = await _select_credential(
                 repo_full_name=repo_full_name,
                 binding=binding,
@@ -366,23 +441,20 @@ async def _resync_one_binding(
                 github_settings=github_settings,
             )
 
-        # Bounded retry — only transient failures (httpx.TransportError, 5xx)
+        # Retry transient network/provider errors a few times before the
+        # durable queue applies its longer backoff.
         for attempt in range(1, _RESYNC_MAX_ATTEMPTS + 1):
             try:
-                # WR-01/WR-02: pass the single selected credential as an override so
-                # sync_agent_skills does NOT re-resolve a per-agent PAT (which would
-                # shadow the App installation token). No transport wrapper / extra
-                # client is created — the credential threads cleanly through the param.
-                # Thread github_settings.max_tarball_bytes / max_tarball_decompressed_bytes
-                # so an operator cap override (including 0-disables) reaches the
-                # fetcher and the pre-extraction expansion guard on this edge.
-                # When github_settings is None, omit both kwargs so the safe
-                # sync_agent_skills defaults (50 MiB / 200 MiB) apply.
+                # Pass the single selected credential as an override so
+                # sync_agent_skills does not re-resolve and shadow an App token.
+                # Thread operator tarball caps through this edge; when settings
+                # are absent, the safe defaults remain in force.
                 if github_settings is not None:
                     report = await sync_agent_skills(
                         principal_id=principal_id,
                         tenant_id=binding.tenant_id,
                         agent_name=agent_name,
+                        target_ma_agent_id=ma_agent_id,
                         repos=[SkillRepo(url=repo_full_name, branch=binding.default_branch)],
                         sessionmaker=sessionmaker,
                         fernet=fernet,
@@ -397,6 +469,7 @@ async def _resync_one_binding(
                         principal_id=principal_id,
                         tenant_id=binding.tenant_id,
                         agent_name=agent_name,
+                        target_ma_agent_id=ma_agent_id,
                         repos=[SkillRepo(url=repo_full_name, branch=binding.default_branch)],
                         sessionmaker=sessionmaker,
                         fernet=fernet,
@@ -404,30 +477,40 @@ async def _resync_one_binding(
                         anthropic_client=anthropic_client,
                         credential_override=credential,
                     )
-                # SYNC-05: a partial failure (some skills failed to upload/attach)
-                # must not persist last_sync_error=None as if the sync were clean.
-                if report.failed_uploads:
-                    last_sync_error = "; ".join(
-                        f"{name}: {reason}" for name, reason in report.failed_uploads
+                failures = [
+                    *(f"{repo}: {reason}" for repo, reason in report.skipped_repos),
+                    *(f"{name}: {reason}" for name, reason in report.failed_uploads),
+                    *(
+                        f"{name}: attach failed: {reason}"
+                        for name, reason in report.attach_failures
+                    ),
+                ]
+                if failures:
+                    failed = True
+                    retryable = report.retryable_failure
+                    last_sync_error = "; ".join(failures)
+                    _log.warning(
+                        "github.resync.partial_failure",
+                        repo=repo_full_name,
+                        tenant_id=str(binding.tenant_id),
+                        agent_id=str(binding.agent_id),
+                        agent_name=agent_name,
+                        failure_count=len(failures),
+                        retryable=retryable,
                     )
-                _log.info(
-                    "github.resync.success",
-                    repo=repo_full_name,
-                    tenant_id=str(binding.tenant_id),
-                    agent_id=str(binding.agent_id),
-                    agent_name=agent_name,
-                )
-                return  # success path — finally block persists last_sync_error
-
-            except (httpx.TransportError, httpx.HTTPStatusError) as err:
-                response = getattr(err, "response", None)
-                is_5xx = (
-                    response is not None
-                    and hasattr(response, "status_code")
-                    and response.status_code >= 500
-                )
-                is_transient = isinstance(err, httpx.TransportError) or is_5xx
-                if not is_transient or attempt >= _RESYNC_MAX_ATTEMPTS:
+                else:
+                    _log.info(
+                        "github.resync.success",
+                        repo=repo_full_name,
+                        tenant_id=str(binding.tenant_id),
+                        agent_id=str(binding.agent_id),
+                        agent_name=agent_name,
+                    )
+                break
+            except Exception as err:
+                if isinstance(err, GitHubRateLimitError):
+                    raise
+                if not _is_retryable_error(err) or attempt >= _RESYNC_MAX_ATTEMPTS:
                     raise
                 backoff = _RESYNC_BACKOFF_BASE * (2 ** (attempt - 1))
                 _log.warning(
@@ -439,7 +522,16 @@ async def _resync_one_binding(
                 )
                 await asyncio.sleep(backoff)
 
-    except Exception as err:  # noqa: BLE001 — named boundary; per-binding failures captured
+    except asyncio.CancelledError:
+        # Cancellation bypasses Exception but still runs finally; preserve an
+        # observable failure rather than clearing an earlier error as success.
+        last_sync_error = "resync cancelled"
+        raise
+    except Exception as err:  # named boundary; per-binding failures captured
+        failed = True
+        retryable = _is_retryable_error(err)
+        if isinstance(err, GitHubRateLimitError):
+            retry_after = err.retry_after
         last_sync_error = str(err)
         _log.warning(
             "github.resync.failed",
@@ -460,9 +552,12 @@ async def _resync_one_binding(
                     last_sync_error=last_sync_error,
                 )
         except Exception as persist_err:
+            failed = True
+            retryable = True
             _log.error(
                 "github.resync.persist_failed",
                 repo=repo_full_name,
                 agent_id=str(binding.agent_id),
                 error=str(persist_err),
             )
+    return _BindingOutcome(failed=failed, retryable=retryable, retry_after=retry_after)

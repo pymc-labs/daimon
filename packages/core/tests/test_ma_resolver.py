@@ -18,11 +18,7 @@ import httpx
 import pytest
 from anthropic import APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig,
-)
 from cachetools import TTLCache
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_resolver import (
     MAResolverMissError,
     ResolverCache,
@@ -31,70 +27,15 @@ from daimon.core.ma_resolver import (
     resolve_environment,
 )
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     MARouter,
     build_fake_anthropic,
     list_response,
 )
+from daimon.testing.ma_models import ma_agent, ma_environment
 
 # ---------------------------------------------------------------------------
 # Local helpers (inline construction per guideline:testing)
 # ---------------------------------------------------------------------------
-
-
-def _agent(
-    *,
-    agent_id: str,
-    name: str,
-    tenant_id: uuid.UUID,
-    archived_at: datetime | None = None,
-) -> BetaManagedAgentsAgent:
-    """Build a real BetaManagedAgentsAgent for a transport-level fake."""
-    now = datetime.now(UTC)
-    return BetaManagedAgentsAgent(
-        id=agent_id,
-        type="agent",
-        name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
-        description=None,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: name,
-        },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at=now,
-        updated_at=now,
-        archived_at=archived_at,
-    )
-
-
-def _env(
-    *,
-    env_id: str,
-    name: str,
-    tenant_id: uuid.UUID,
-    archived_at: str | None = None,
-) -> BetaEnvironment:
-    """Build a real BetaEnvironment. archived_at is `str | None` per probe P2."""
-    now_iso = datetime.now(UTC).isoformat()
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=name,
-        description="",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: name,
-        },
-        created_at=now_iso,
-        updated_at=now_iso,
-        archived_at=archived_at,
-    )
 
 
 def _agent_payload(agent: BetaManagedAgentsAgent) -> dict[str, object]:
@@ -135,7 +76,7 @@ async def test_resolve_agent_cached_id_live_returns_cached_id(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    live = _agent(agent_id="ag_live", name="daimon", tenant_id=tenant_id)
+    live = ma_agent(id="ag_live", name="daimon", tenant_id=tenant_id)
     calls: list[str] = []
 
     def retrieve_live(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -167,13 +108,13 @@ async def test_resolve_agent_cached_id_archived_falls_through_to_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    archived = _agent(
-        agent_id="ag_old",
+    archived = ma_agent(
+        id="ag_old",
         name="daimon",
         tenant_id=tenant_id,
         archived_at=datetime.now(UTC),
     )
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -204,8 +145,8 @@ async def test_resolve_agent_cached_id_wrong_tenant_falls_through_to_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    other_tenant = _agent(agent_id="ag_other", name="daimon", tenant_id=uuid.uuid4())
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    other_tenant = ma_agent(id="ag_other", name="daimon", tenant_id=uuid.uuid4())
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -239,7 +180,7 @@ async def test_resolve_agent_cached_id_404_falls_through_to_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -280,7 +221,7 @@ async def test_resolve_agent_cached_id_400_invalid_falls_through_to_tag_lookup(
     (probe archived_retrieve_shape.py §13). A corrupt cached_id like
     "agent_pending" must fall through to tag lookup, not re-raise.
     """
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -320,7 +261,7 @@ async def test_resolve_agent_no_cached_id_uses_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -350,7 +291,7 @@ async def test_resolve_agent_cache_hit_skips_retrieve_and_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
     list_calls = 0
 
     def list_handler(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -387,7 +328,7 @@ async def test_resolve_agent_ttl_expiry_revalidates(tenant_id: uuid.UUID) -> Non
 
     Uses TTLCache timer= injection so the test advances time without sleeping.
     """
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
     list_calls = 0
 
     def list_handler(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -433,13 +374,13 @@ async def test_resolve_agent_invalidates_cache_on_archived_retrieve(
     """If a cached id retrieves as archived, the cache key must be cleared
     before tag lookup; otherwise an immediate same-key call would silently
     return the stale id."""
-    archived = _agent(
-        agent_id="ag_stale",
+    archived = ma_agent(
+        id="ag_stale",
         name="daimon",
         tenant_id=tenant_id,
         archived_at=datetime.now(UTC),
     )
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     # Pre-populate cache with the stale id at the same key (direct assignment).
     cache: ResolverCache = new_resolver_cache()
@@ -515,7 +456,7 @@ async def test_resolve_agent_total_miss_invokes_apply_callable_then_retries(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
     applied = False
 
     # First LIST returns empty; after apply_callable runs we swap the route to
@@ -554,7 +495,7 @@ async def test_resolve_agent_miss_apply_callable_awaited_exactly_once(
     """apply_callable must be awaited exactly once per miss, no more."""
     router = MARouter()
     # Always return the fresh agent so the retry succeeds immediately.
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
 
     apply_calls = 0
     applied = False
@@ -594,7 +535,7 @@ async def test_resolve_agent_closure_targets_resolving_tenant_id(
     assert other_tenant_id != tenant_id
 
     router = MARouter()
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
     applied_for: list[uuid.UUID] = []
     applied = False
 
@@ -681,7 +622,7 @@ async def test_resolve_total_miss_apply_callable_receives_resolving_tenant_id(
     other_tenant_id = uuid.uuid4()
     assert other_tenant_id != tenant_id
 
-    fresh = _agent(agent_id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
     reconciled_tenant_ids: list[uuid.UUID] = []
 
     router = MARouter()
@@ -774,7 +715,7 @@ async def test_resolve_environment_404_falls_through_to_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _env(env_id="env_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_environment(id="env_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -812,7 +753,7 @@ async def test_resolve_environment_400_invalid_falls_through_to_tag_lookup(
     resolver_cache: ResolverCache,
 ) -> None:
     """Parity with the agent 400 path — malformed env ids must fall through too."""
-    fresh = _env(env_id="env_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_environment(id="env_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -849,13 +790,13 @@ async def test_resolve_environment_archived_falls_through_to_tag_lookup(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    archived = _env(
-        env_id="env_old",
+    archived = ma_environment(
+        id="env_old",
         name="daimon",
         tenant_id=tenant_id,
         archived_at=datetime.now(UTC).isoformat(),
     )
-    fresh = _env(env_id="env_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_environment(id="env_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -889,8 +830,8 @@ async def test_resolve_environment_cached_id_wrong_tenant_falls_through_to_tag_l
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    other_tenant = _env(env_id="env_other", name="daimon", tenant_id=uuid.uuid4())
-    fresh = _env(env_id="env_fresh", name="daimon", tenant_id=tenant_id)
+    other_tenant = ma_environment(id="env_other", name="daimon", tenant_id=uuid.uuid4())
+    fresh = ma_environment(id="env_fresh", name="daimon", tenant_id=tenant_id)
 
     router = MARouter()
     router.add(
@@ -924,7 +865,7 @@ async def test_resolve_environment_total_miss_invokes_apply_defaults(
     tenant_id: uuid.UUID,
     resolver_cache: ResolverCache,
 ) -> None:
-    fresh = _env(env_id="env_fresh", name="daimon", tenant_id=tenant_id)
+    fresh = ma_environment(id="env_fresh", name="daimon", tenant_id=tenant_id)
     applied = False
 
     def list_handler(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:

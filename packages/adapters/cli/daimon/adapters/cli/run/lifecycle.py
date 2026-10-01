@@ -56,7 +56,7 @@ class NdjsonLifecycle:
     async def on_terminal_success(self, state: TurnState) -> None:
         self._emit(_terminal_for_success(state, self.session_id, self.turn_id))
 
-    async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:  # noqa: ARG002
+    async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         assert state.error is not None
         self._emit(
             TerminalFailed(

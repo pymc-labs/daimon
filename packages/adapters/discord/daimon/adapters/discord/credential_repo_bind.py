@@ -61,6 +61,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 
@@ -68,15 +69,9 @@ import discord
 
 log = structlog.get_logger()
 
-# Kept character-identical to the panel gate's `_SHARED_AGENT_MESSAGE`
-# (agent_setup's authz module) on purpose — a test asserts the two strings
-# are equal, so a future edit to one without the other goes red rather than
-# drifting silently.
 _SHARED_AGENT_MESSAGE: Final[str] = (
-    "This agent is shared — it either ships with the deployment or is the "
-    "current default for this channel or the server — so changing its repo or "
-    "environment variables needs Manage Server. Fork it to make an editable "
-    "copy; the fork starts with no environment variables of its own."
+    "Changing this shared agent's working repo needs a server admin (Manage Server). "
+    "Ask a server admin to give it access to the repo with Daimon."
 )
 
 
@@ -160,6 +155,9 @@ async def refuse_if_shared_and_not_admin_for_request(
     to a private agent instead.
 
     This function never acks the interaction — see the module docstring.
+    Steps 4-6's decision itself is `daimon.core.operation_policy.decide_operation`'s
+    (`"repo_bind"`); steps 1-3 stay here because they are identity and
+    existence checks, not policy.
     """
     if interaction.guild_id is None or (
         derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id)) != tenant_id
@@ -184,17 +182,22 @@ async def refuse_if_shared_and_not_admin_for_request(
         )
         await _send_ephemeral(interaction, _AGENT_GONE_MESSAGE)
         return True
-    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-        await _send_ephemeral(interaction, _SHARED_AGENT_MESSAGE)
-        return True
-    async with runtime.sessionmaker() as session:
-        reachable = await is_agent_reachable_in_tenant(
-            session,
-            tenant_id=tenant_id,
-            agent_name=agent.name,
-            default=runtime.deployment_default,
-        )
-    if reachable:
+    is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    reachable = False
+    if needs_reachability_read("repo_bind", is_admin=False, is_daimon_managed=is_daimon_managed):
+        async with runtime.sessionmaker() as session:
+            reachable = await is_agent_reachable_in_tenant(
+                session,
+                tenant_id=tenant_id,
+                agent_name=agent.name,
+                default=runtime.deployment_default,
+            )
+    outcome = decide_operation(
+        "repo_bind",
+        is_admin=False,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+    if outcome in ("managed_agent", "needs_admin"):
         await _send_ephemeral(interaction, _SHARED_AGENT_MESSAGE)
         return True
     return False

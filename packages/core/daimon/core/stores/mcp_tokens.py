@@ -96,6 +96,39 @@ async def revoke_mcp_token(
     return McpTokenRow.model_validate(orm)
 
 
+async def list_live_tokens_by_label(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    label: str,
+) -> list[McpTokenRow]:
+    """Return every live (non-revoked) token row matching `label` in `tenant_id`.
+
+    `tenant_id` is a required, undefaulted filter — not an optional narrowing.
+    Two tenants can each publish a report under the same slug on the same
+    deployment, so `label` alone is not unique across tenants; a label-only
+    lookup would let one tenant's `delete_report` revoke another tenant's
+    live token. This is the whole reason the function takes this shape:
+    do not remove the tenant filter to "simplify" a caller.
+
+    Returns an empty list rather than raising when nothing matches — "no
+    live token with that label" is a legitimate state (a report deleted
+    twice, or a report whose token already expired and was cleaned), not
+    an error.
+
+    Returns every live match, not just one: nothing constrains labels to be
+    unique within a tenant, and a caller revoking "the token for this
+    report" should revoke every live one rather than silently picking one.
+    """
+    stmt = select(McpToken).where(
+        McpToken.tenant_id == tenant_id,
+        McpToken.label == label,
+        McpToken.revoked_at.is_(None),
+    )
+    result = await session.execute(stmt)
+    return [McpTokenRow.model_validate(orm) for orm in result.scalars()]
+
+
 async def delete_tokens_for_account(
     session: AsyncSession,
     *,

@@ -51,7 +51,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core.mcp_auth import mint_jwt
-from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, same_server_url
 
 _log = structlog.get_logger(__name__)
 
@@ -155,9 +155,9 @@ async def sweep_stale_admin_credentials(
         async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
             if cred.auth.type != "static_bearer":
                 continue
-            if cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL:
+            if same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
                 continue  # Never touch Copilot credentials.
-            if cred.auth.mcp_server_url == public_url:
+            if same_server_url(cred.auth.mcp_server_url, public_url):
                 target_cred_id = cred.id
                 break  # First match is sufficient; URLs are effectively unique.
 

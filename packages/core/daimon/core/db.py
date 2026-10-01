@@ -7,6 +7,8 @@ threads the `async_sessionmaker` into stores as an explicit parameter.
 
 from __future__ import annotations
 
+import structlog
+from daimon.core.config import load_crypto_settings
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -34,10 +36,36 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     return create_async_engine(url, echo=echo, pool_pre_ping=True, pool_recycle=1800)
 
 
-def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+def build_session_factory(
+    engine: AsyncEngine,
+    *,
+    crypto_keys: tuple[str, ...] | None = None,
+    allow_plaintext: bool | None = None,
+) -> async_sessionmaker[AsyncSession]:
     """Build an `async_sessionmaker` bound to `engine`.
 
     `expire_on_commit=False` so Pydantic mapping in stores can read attributes
-    after commit without a reload.
+    after commit without a reload. Without crypto keys, agent key writes are
+    refused unless `allow_plaintext` (default: the crypto settings) opts in.
     """
-    return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    if crypto_keys is None or allow_plaintext is None:
+        crypto = load_crypto_settings()
+        if crypto_keys is None:
+            crypto_keys = tuple(k.get_secret_value() for k in crypto.keys)
+        if allow_plaintext is None:
+            allow_plaintext = crypto.allow_plaintext
+    if not crypto_keys:
+        log = structlog.get_logger(__name__)
+        if allow_plaintext:
+            log.warning("agent_env.encryption_disabled", allow_plaintext=True)
+        else:
+            log.error(
+                "agent_env.encryption_keys_missing",
+                hint="set DAIMON_CRYPTO__KEYS; agent key writes are refused until then",
+            )
+    return async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+        info={"crypto_keys": crypto_keys, "crypto_allow_plaintext": allow_plaintext},
+    )

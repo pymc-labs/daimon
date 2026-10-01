@@ -82,6 +82,40 @@ def test_parse_scope_channel_bad_discord_format_raises() -> None:
         _parse_scope("channel:discord/1234", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
 
 
+def test_parse_scope_tenant_slack() -> None:
+    tid = uuid.uuid4()
+    ref = _parse_scope("tenant:slack/T0TEST123", tenant_id=tid, account_id=uuid.uuid4())
+    assert isinstance(ref, TenantScopeRef), "tenant:slack/<team_id> must return TenantScopeRef"
+    assert ref.tenant_id == derive_tenant_uuid(platform="slack", workspace_id="T0TEST123"), (
+        "tenant_id must derive from (slack, team_id) — the same anchor the Slack adapter uses"
+    )
+
+
+def test_parse_scope_channel_slack() -> None:
+    tid = uuid.uuid4()
+    ref = _parse_scope("channel:slack/T0TEST123/C0CHAN9", tenant_id=tid, account_id=uuid.uuid4())
+    assert isinstance(ref, ChannelScopeRef), (
+        "channel:slack/<team_id>/<channel_id> must return ChannelScopeRef"
+    )
+    assert ref.channel_id == "C0CHAN9", "channel_id must be the last path segment"
+    assert ref.tenant_id == derive_tenant_uuid(platform="slack", workspace_id="T0TEST123"), (
+        "tenant_id must derive from the slack team, not the local CLI tenant"
+    )
+
+
+def test_parse_scope_unknown_platform_raises() -> None:
+    with pytest.raises(typer.BadParameter):
+        _parse_scope("tenant:matrix/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
+    with pytest.raises(typer.BadParameter):
+        # "cli" is deliberately not scope-addressable — bare `tenant` already is the local tenant
+        _parse_scope("tenant:cli/local", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
+
+
+def test_parse_scope_tenant_missing_workspace_raises() -> None:
+    with pytest.raises(typer.BadParameter):
+        _parse_scope("tenant:slack/", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
+
+
 @pytest.mark.asyncio
 async def test_config_get_effective_shows_provenance(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
@@ -197,9 +231,9 @@ async def test_config_propagate_empty_source(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_set_scope_tenant(db_session: AsyncSession) -> None:
     """config set --scope tenant writes a row to tenant_config (R6)."""
-    from daimon.adapters.cli.commands.config import _config_set_entry  # noqa: PLC0415
-    from daimon.core.scope import TenantScopeRef  # noqa: PLC0415
-    from daimon.core.stores.scoped_config_read import get_scope  # noqa: PLC0415
+    from daimon.adapters.cli.commands.config import _config_set_entry
+    from daimon.core.scope import TenantScopeRef
+    from daimon.core.stores.scoped_config_read import get_scope
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -224,9 +258,9 @@ async def test_set_scope_tenant(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_set_scope_channel_writes_channel_config(db_session: AsyncSession) -> None:
     """config set --scope channel:<channel_id> writes channel_config (R6)."""
-    from daimon.adapters.cli.commands.config import _config_set_entry  # noqa: PLC0415
-    from daimon.core.scope import ChannelScopeRef  # noqa: PLC0415
-    from daimon.core.stores.scoped_config_read import get_scope  # noqa: PLC0415
+    from daimon.adapters.cli.commands.config import _config_set_entry
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_read import get_scope
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -261,8 +295,8 @@ def test_set_scope_deployment_rejects() -> None:
     # For now (RED), we verify _parse_scope raises BadParameter (old behavior)
     # OR that the set entry raises Exit(1) (new behavior).
     # Either satisfies the intent. This test imports the new grammar symbols.
-    import typer  # noqa: PLC0415
-    from daimon.adapters.cli.commands.config import _parse_scope  # noqa: PLC0415
+    import typer
+    from daimon.adapters.cli.commands.config import _parse_scope
 
     with pytest.raises((typer.BadParameter, typer.Exit)):
         _parse_scope("deployment", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -270,8 +304,8 @@ def test_set_scope_deployment_rejects() -> None:
 
 def test_scope_tenant_system_rejected() -> None:
     """_parse_scope('tenant_system', ...) raises BadParameter in the new grammar (R6)."""
-    import typer  # noqa: PLC0415
-    from daimon.adapters.cli.commands.config import _parse_scope  # noqa: PLC0415
+    import typer
+    from daimon.adapters.cli.commands.config import _parse_scope
 
     with pytest.raises(typer.BadParameter):
         _parse_scope("tenant_system", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -279,8 +313,8 @@ def test_scope_tenant_system_rejected() -> None:
 
 def test_scope_workspace_rejected() -> None:
     """_parse_scope('workspace:discord/123', ...) raises BadParameter in the new grammar (R6)."""
-    import typer  # noqa: PLC0415
-    from daimon.adapters.cli.commands.config import _parse_scope  # noqa: PLC0415
+    import typer
+    from daimon.adapters.cli.commands.config import _parse_scope
 
     with pytest.raises(typer.BadParameter):
         _parse_scope("workspace:discord/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -289,10 +323,10 @@ def test_scope_workspace_rejected() -> None:
 @pytest.mark.asyncio
 async def test_get_scope_deployment(db_session: AsyncSession) -> None:
     """config get --scope deployment prints the injected rt.deployment_default values (R6)."""
-    from io import StringIO  # noqa: PLC0415
+    from io import StringIO
 
-    from daimon.adapters.cli.commands.config import _config_get_entry  # noqa: PLC0415
-    from daimon.core.scope import DeploymentDefault  # noqa: PLC0415
+    from daimon.adapters.cli.commands.config import _config_get_entry
+    from daimon.core.scope import DeploymentDefault
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)

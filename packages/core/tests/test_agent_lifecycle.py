@@ -1,499 +1,80 @@
-"""Behavior-preservation baseline for daimon.core.agent_lifecycle.
-
-Ports the 5 fork-copy scenarios and 2 archive scenarios from Discord's
-`_copy_credential_and_repo_binding` / delete_agent inline archival block
-(agent_setup/write.py) that this module extracts from. These tests are the
-regression proof the whole phase's extraction leans on.
-"""
+"""daimon.core.agent_lifecycle: credential-free forks and best-effort delete archival."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 
 import httpx
-import pytest
-from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.core.agent_lifecycle import (
     archive_memory_store_best_effort,
-    copy_credential_and_repo_binding,
+    strip_credentialed_mcp_servers,
 )
-from daimon.core.config import AnthropicSettings, DatabaseSettings, GithubSettings, Settings
-from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores.agent_memory_stores import get_memory_store_id, insert_memory_store
-from daimon.core.stores.agent_repo_binding import get_binding, set_binding
-from daimon.core.stores.domain import RepoAccessProof
-from daimon.core.stores.github_credentials import (
-    delete_credential_for_principal,
-    get_credential_by_principal,
-)
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
-    NotHandled,
     build_fake_anthropic,
     make_fake_memory_store_handler,
 )
-from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
 
-_OAUTH_SCOPES = ("repo", "read:user")
-
-
-def _refusing_anthropic() -> AsyncAnthropic:
-    """copy_credential_and_repo_binding never calls the MA API — any call
-    here is a test failure."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise NotHandled
-
-    return build_fake_anthropic(handler)
-
-
-async def test_copy_rekeys_inline_pat_source_onto_fork(
+async def test_fork_drops_every_server_backed_by_a_stored_token(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Fork copy of an inline-pat source: fork resolves the source's token
-    re-keyed under its OWN principal, surviving deletion of the source
-    credential (no aliasing)."""
+    """A fork must never become a second holder of the source's connector tokens;
+    the servers those tokens unlock are left off rather than mounted broken."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_source_token_xxxx1234"
-    await upsert_credential_encrypted(
+    source = uuid.uuid4()
+    await save_agent_mcp_credential(
         sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=_OAUTH_SCOPES,
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
         tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
+        agent_id=source,
+        mcp_server_url="https://crm.example.com/mcp",
+        plaintext_token="tok_client_a",
     )
+    servers: list[dict[str, object]] = [
+        {"type": "url", "name": "crm", "url": "https://crm.example.com/mcp/"},
+        {"type": "url", "name": "docs", "url": "https://docs.example.com/mcp"},
+    ]
+    tools: list[dict[str, object]] = [
+        {"type": "agent_toolset_20260401"},
+        {"type": "mcp_toolset", "mcp_server_name": "crm"},
+        {"type": "mcp_toolset", "mcp_server_name": "docs"},
+    ]
 
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
+    kept_servers, kept_tools = await strip_credentialed_mcp_servers(
         sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat == plaintext, "fork's credential must resolve the source's token"
-
-    await delete_credential_for_principal(db_session, principal_id=source_agent_uuid)
-    await db_session.commit()
-    fork_pat_after_delete = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat_after_delete == plaintext, (
-        "fork's credential must survive deletion of the source credential (no aliasing)"
-    )
-
-
-async def test_copy_raises_when_source_credential_unresolvable(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """Fails loud when the source's inline-pat binding has no resolvable
-    credential (binding row exists, credential row does not)."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    with pytest.raises(DaimonError, match="github git-proxy"):
-        await copy_credential_and_repo_binding(
-            anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-            sessionmaker=db_session_factory,
-            fernet=fernet,
-            oauth_scopes=_OAUTH_SCOPES,
-            tenant_id=tenant.id,
-            source_agent_uuid=source_agent_uuid,
-            fork_agent_uuid=fork_agent_uuid,
-        )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is None, "no partial write on the fail-loud path"
-
-
-async def test_copy_raises_even_with_operator_fallback_configured(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """Regression guard: copy_credential_and_repo_binding has no wiring to
-    receive an operator fallback PAT at all (no settings/
-    allow_service_default/fallback_pat parameter exists on this function) --
-    an inline-pat source with no resolvable credential must still fail loud
-    and write nothing for the fork, even in an environment where
-    settings.github.fallback_pat IS configured. This proves the fork path
-    cannot silently inherit the shared operator secret, structurally, not
-    just by convention."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    # An ambient operator fallback PAT is configured in this environment --
-    # copy_credential_and_repo_binding takes no settings/fallback_pat
-    # parameter, so it structurally cannot see or use it.
-    fallback_settings = Settings(
-        database=DatabaseSettings(
-            url=PostgresDsn("postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"),
-        ),
-        anthropic=AnthropicSettings(
-            api_key=SecretStr("sk-test"),
-            base_url=HttpUrl("https://api.anthropic.com"),
-        ),
-        github=GithubSettings(fallback_pat=SecretStr("ghp_operator_fallback")),
-    )
-    assert fallback_settings.github.fallback_pat is not None, "sanity: fallback is configured"
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    with pytest.raises(DaimonError, match="github git-proxy"):
-        await copy_credential_and_repo_binding(
-            anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-            sessionmaker=db_session_factory,
-            fernet=fernet,
-            oauth_scopes=_OAUTH_SCOPES,
-            tenant_id=tenant.id,
-            source_agent_uuid=source_agent_uuid,
-            fork_agent_uuid=fork_agent_uuid,
-        )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is None, "no partial binding write on the fail-loud path"
-    fork_credential = await get_credential_by_principal(db_session, principal_id=fork_agent_uuid)
-    assert fork_credential is None, (
-        "no github_credentials row for the fork -- the fallback was never persisted"
-    )
-
-
-async def test_copy_anon_binding_without_error_or_credential_write(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A public/anon: source binding copies with no error and no credential
-    write; the fork's binding carries the same repo verbatim."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/public-repo",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
         tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
+        source_agent_uuid=source,
+        mcp_servers=servers,
+        tools=tools,
     )
 
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, "anon: source binding must still be copied to the fork"
-    assert fork_binding.repo_url == "acme/public-repo"
-    assert fork_binding.ma_secret_ref == "anon:", "anon: ref is copied verbatim, not rewritten"
-
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "no credential write must happen for an anon: source"
+    assert kept_servers == [servers[1]], "the token-backed server must not reach the fork"
+    assert kept_tools == [tools[0], tools[2]], "its toolset goes with it"
 
 
-async def test_copy_rewrites_secret_ref_for_inline_pat(
+async def test_fork_keeps_everything_when_the_source_holds_no_tokens(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Fork's repo binding matches the source's repo_url/default_branch, with
-    ma_secret_ref rewritten to the fork's own inline-pat ref."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
+    servers: list[dict[str, object]] = [{"type": "url", "name": "docs", "url": "https://d/mcp"}]
+    tools: list[dict[str, object]] = [{"type": "mcp_toolset", "mcp_server_name": "docs"}]
 
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_bind_token_xxxx5678"
-    await upsert_credential_encrypted(
+    assert await strip_credentialed_mcp_servers(
         sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=_OAUTH_SCOPES,
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="https://github.com/acme/private-repo",
-            default_branch="develop",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
         tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None
-    assert fork_binding.repo_url == "acme/private-repo"
-    assert fork_binding.default_branch == "develop"
-    assert fork_binding.ma_secret_ref == f"inline-pat:{fork_agent_uuid}", (
-        "ma_secret_ref rewritten to the fork's own inline-pat ref"
-    )
-
-
-async def test_copy_unbound_source_is_a_noop(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A source with no repo binding produces no fork binding and no error."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
-        tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is None
-
-
-async def test_copy_carries_pat_proof_forward_to_rekeyed_inline_pat_fork(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A pat-proven source binding's proof (kind/timestamp/account) carries
-    forward onto the fork verbatim, alongside the fork's own re-keyed
-    inline-pat ma_secret_ref."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_proof_source_token_9999"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=_OAUTH_SCOPES,
-    )
-    proof_at = datetime(2026, 7, 31, 12, 0, 0, tzinfo=UTC)
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/proven-repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=RepoAccessProof(kind="pat", at=proof_at, account_id=account.id),
-        )
-
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
-        tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, "fork binding must exist"
-    assert fork_binding.proof_kind == "pat", "proof kind must carry forward verbatim"
-    assert fork_binding.proof_at == proof_at, "proof timestamp must carry forward verbatim"
-    assert fork_binding.proof_account_id == account.id, (
-        "proof account must carry forward verbatim, not re-attributed to the forking principal"
-    )
-    assert fork_binding.ma_secret_ref == f"inline-pat:{fork_agent_uuid}", (
-        "ma_secret_ref must still be re-keyed to the fork's own inline-pat ref"
-    )
-
-
-async def test_copy_carries_public_proof_forward_verbatim_for_anon_source(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A public-proven anon: source binding copies both its ref and its
-    proof verbatim onto the fork."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    proof_at = datetime(2026, 7, 30, 9, 30, 0, tzinfo=UTC)
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/public-proven-repo",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=RepoAccessProof(kind="public", at=proof_at, account_id=None),
-        )
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
-        tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None
-    assert fork_binding.ma_secret_ref == "anon:", "anon: ref must copy verbatim"
-    assert fork_binding.proof_kind == "public", "public proof kind must copy verbatim"
-    assert fork_binding.proof_at == proof_at, "proof timestamp must copy verbatim"
-    assert fork_binding.proof_account_id is None, (
-        "a system-proven public proof has no account to carry forward"
-    )
-
-
-async def test_copy_leaves_fork_proof_null_when_source_proof_is_null(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A source binding with no recorded proof yields a fork binding with no
-    recorded proof — copy_binding invents nothing."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    source_agent_uuid = uuid.uuid4()
-    fork_agent_uuid = uuid.uuid4()
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant.id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/unproven-repo",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    await copy_credential_and_repo_binding(
-        anthropic=_refusing_anthropic(),  # type: ignore[arg-type]
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        oauth_scopes=_OAUTH_SCOPES,
-        tenant_id=tenant.id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None
-    assert fork_binding.proof_kind is None, "no proof kind must be invented"
-    assert fork_binding.proof_at is None, "no proof timestamp must be invented"
-    assert fork_binding.proof_account_id is None, "no proof account must be invented"
+        source_agent_uuid=uuid.uuid4(),
+        mcp_servers=servers,
+        tools=tools,
+    ) == (servers, tools)
 
 
 async def test_archive_best_effort_happy_path(

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from daimon.adapters.discord.agent_setup.write import delete_agent
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.agent_memory_stores import (
@@ -19,48 +20,17 @@ from daimon.core.stores.agent_memory_stores import (
 )
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
+    make_archive_agent_handler,
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-
-pytestmark = pytest.mark.asyncio
-
-
-def _make_archive_agent_handler() -> Callable[[httpx.Request], httpx.Response]:
-    """`make_fake_ma_handler` doesn't implement POST .../archive — add it here."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
-        if request.method != "POST" or not m:
-            raise NotHandled
-        now = datetime.now(UTC).isoformat()
-        return httpx.Response(
-            200,
-            json={
-                "id": m.group("id"),
-                "type": "agent",
-                "name": "doomed",
-                "version": 2,
-                "model": {"id": "claude-sonnet-4-6", "speed": "standard"},
-                "system": None,
-                "metadata": {},
-                "mcp_servers": [],
-                "tools": [],
-                "skills": [],
-                "created_at": now,
-                "updated_at": now,
-                "archived_at": now,
-                "description": None,
-            },
-        )
-
-    return handler
 
 
 async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:
@@ -68,7 +38,7 @@ async def test_delete_agent_archives_memory_store(db_session, db_session_factory
     mem_state = FakeMemoryStoreState()
     client = build_fake_anthropic(
         combine_handlers(
-            _make_archive_agent_handler(),
+            make_archive_agent_handler(),
             make_fake_memory_store_handler(mem_state),
             make_fake_ma_handler(),
         )
@@ -128,7 +98,7 @@ async def test_delete_agent_succeeds_when_store_archive_fails(
     mem_state = FakeMemoryStoreState()
     client = build_fake_anthropic(
         combine_handlers(
-            _make_archive_agent_handler(),
+            make_archive_agent_handler(),
             _make_failing_store_archive_handler(),
             make_fake_memory_store_handler(mem_state),
             make_fake_ma_handler(),
@@ -176,7 +146,7 @@ async def test_delete_agent_clears_channel_default_naming_the_agent(
 
     client = build_fake_anthropic(
         combine_handlers(
-            _make_archive_agent_handler(),
+            make_archive_agent_handler(),
             make_fake_memory_store_handler(FakeMemoryStoreState()),
             make_fake_ma_handler(),
         )
@@ -213,7 +183,7 @@ async def test_delete_agent_leaves_scope_rows_naming_another_agent_untouched(
 
     client = build_fake_anthropic(
         combine_handlers(
-            _make_archive_agent_handler(),
+            make_archive_agent_handler(),
             make_fake_memory_store_handler(FakeMemoryStoreState()),
             make_fake_ma_handler(),
         )
@@ -239,3 +209,103 @@ async def test_delete_agent_leaves_scope_rows_naming_another_agent_untouched(
         assert survivor.agent_name == "keeper", (
             "a channel row naming a different agent must keep its agent_name"
         )
+
+
+# ---------------------------------------------------------------------------
+# delete_agent — server-side refusal for defaults-managed ("system") agents
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_archive_handler(
+    archived_ids: list[str],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Archive handler that records which agent ids MA was actually asked to archive.
+
+    Lets a test assert the guard fired *before* the archive call, not merely
+    that `delete_agent` raised.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
+        if request.method != "POST" or not m:
+            raise NotHandled
+        archived_ids.append(m.group("id"))
+        now = datetime.now(UTC)
+        return httpx.Response(
+            200,
+            json=ma_agent(
+                id=m.group("id"),
+                name="doomed",
+                version=2,
+                archived_at=now,
+                created_at=now,
+            ).model_dump(mode="json"),
+        )
+
+    return handler
+
+
+async def test_delete_agent_refuses_defaults_managed_agent(db_session, db_session_factory) -> None:
+    """The panel disables Delete for a seeded agent — the server must refuse too.
+
+    A stale or re-fired view interaction reaches `delete_agent` directly, and
+    the archive would take the deployment's built-in agent and its memory store
+    with it.
+    """
+    tenant = await make_tenant(db_session)
+    archived_ids: list[str] = []
+    client = build_fake_anthropic(
+        combine_handlers(
+            _make_recording_archive_handler(archived_ids),
+            make_fake_memory_store_handler(FakeMemoryStoreState()),
+            make_fake_ma_handler(),
+        )
+    )
+    await client.beta.agents.create(
+        name="daimon",
+        model="claude-sonnet-4-6",
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_name": "daimon",
+            "daimon_managed": "true",
+        },
+    )
+
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    with pytest.raises(DaimonError, match="built-in agent"):
+        await delete_agent(runtime, tenant_id=tenant.id, name="daimon")
+
+    assert archived_ids == [], (
+        "delete_agent must refuse a daimon_managed agent before calling agents.archive"
+    )
+
+
+async def test_delete_agent_still_archives_unmanaged_agent(db_session, db_session_factory) -> None:
+    """The managed guard must not over-block: user forks still delete normally."""
+    tenant = await make_tenant(db_session)
+    archived_ids: list[str] = []
+    client = build_fake_anthropic(
+        combine_handlers(
+            _make_recording_archive_handler(archived_ids),
+            make_fake_memory_store_handler(FakeMemoryStoreState()),
+            make_fake_ma_handler(),
+        )
+    )
+    agent = await client.beta.agents.create(
+        name="my-fork",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "my-fork"},
+    )
+
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    await delete_agent(runtime, tenant_id=tenant.id, name="my-fork")
+
+    assert archived_ids == [agent.id], (
+        "an agent without the daimon_managed marker must still be archived"
+    )

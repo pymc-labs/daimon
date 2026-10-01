@@ -1,6 +1,6 @@
 """Pure unit tests for daimon.core.scope merge/_pick_* and ScopeContext validation.
 
-These tests import DeploymentDefault, TenantConfigRow, ChannelConfigRow, _pick_agent,
+These tests import DeploymentDefault, TenantConfigRow, ChannelConfigRow, pick_agent,
 _pick_environment, and merge from daimon.core.scope using the new 3-tier signature
 (channel, tenant, default). They are RED until the scope rewrite lands.
 """
@@ -10,13 +10,15 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.scope import (
+    AnsweringPlace,
     ChannelConfigRow,
     DeploymentDefault,
     ScopeContext,
     TenantConfigRow,
-    _pick_agent,  # pyright: ignore[reportPrivateUsage]  # test seam
+    answering_places,
     is_agent_reachable,
     merge,
+    pick_agent,
 )
 
 # ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ def test_merge_channel_wins_over_tenant_and_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _pick_agent — mode gate
+# pick_agent — mode gate
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +146,7 @@ def test_pick_agent_skips_user_active() -> None:
     tid = uuid.uuid4()
     tenant = TenantConfigRow(tenant_id=tid, agent_name="x", mode="user_active")
     default = DeploymentDefault(agent_name="daimon", environment_name="default")
-    name, tier = _pick_agent(channel=None, tenant=tenant, default=default)
+    name, tier = pick_agent(channel=None, tenant=tenant, default=default)
     assert name == "daimon", (
         "mode='user_active' tenant row must be skipped; default should provide the agent name"
     )
@@ -159,7 +161,7 @@ def test_pick_agent_channel_user_active_skips_to_tenant() -> None:
     channel = ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="ch", mode="user_active")
     tenant = TenantConfigRow(tenant_id=tid, agent_name="tenant-bot", mode="agent")
     default = DeploymentDefault(agent_name="daimon", environment_name="default")
-    name, tier = _pick_agent(channel=channel, tenant=tenant, default=default)
+    name, tier = pick_agent(channel=channel, tenant=tenant, default=default)
     assert name == "tenant-bot", (
         "user_active channel must be skipped; tenant row provides the agent name"
     )
@@ -172,7 +174,7 @@ def test_pick_agent_returns_none_when_all_user_active_and_no_default() -> None:
     channel = ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="ch", mode="user_active")
     tenant = TenantConfigRow(tenant_id=tid, agent_name="t", mode="user_active")
     default = DeploymentDefault()
-    name, tier = _pick_agent(channel=channel, tenant=tenant, default=default)
+    name, tier = pick_agent(channel=channel, tenant=tenant, default=default)
     assert name is None, "no resolvable agent when all rows user_active and no deployment default"
     assert tier is None
 
@@ -336,7 +338,7 @@ def test_is_agent_reachable_true_for_default_when_tenant_agent_name_empty() -> N
     default = DeploymentDefault(agent_name="daimon")
     assert is_agent_reachable("daimon", tenant=tenant, channels=[], default=default), (
         "an empty agent_name on an agent-mode tenant row must not consume the fall-through, "
-        "matching _pick_agent's truthiness test"
+        "matching pick_agent's truthiness test"
     )
 
 
@@ -384,3 +386,101 @@ def test_is_agent_reachable_is_case_sensitive() -> None:
     assert not is_agent_reachable(
         "Alpha", tenant=tenant, channels=[], default=DeploymentDefault()
     ), "matching must be case-sensitive: 'Alpha' must not match a row named 'alpha'"
+
+
+# ---------------------------------------------------------------------------
+# answering_places — the itemised form of is_agent_reachable
+# ---------------------------------------------------------------------------
+
+
+def _row_combinations() -> list[tuple[TenantConfigRow | None, list[ChannelConfigRow]]]:
+    """Every tenant-row shape crossed with every channel-row shape that matters."""
+    tid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    tenants: list[TenantConfigRow | None] = [
+        None,
+        TenantConfigRow(tenant_id=tid, agent_name="alpha", mode="agent"),
+        TenantConfigRow(tenant_id=tid, agent_name="other", mode="agent"),
+        TenantConfigRow(tenant_id=tid, agent_name="alpha", mode="user_active"),
+        TenantConfigRow(tenant_id=tid, agent_name=None, mode="agent"),
+    ]
+    channel_sets: list[list[ChannelConfigRow]] = [
+        [],
+        [ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="alpha", mode="agent")],
+        [ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="other", mode="agent")],
+        [ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="alpha", mode="user_active")],
+        [
+            ChannelConfigRow(tenant_id=tid, channel_id="c2", agent_name="alpha", mode="agent"),
+            ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="alpha", mode="agent"),
+        ],
+    ]
+    return [(tenant, channels) for tenant in tenants for channels in channel_sets]
+
+
+def test_answering_places_truthiness_matches_is_agent_reachable_over_every_row_combination() -> (
+    None
+):
+    """Empty result means unreachable and a non-empty one means reachable, always.
+
+    Two functions answering the same question are free to disagree the moment
+    one of them grows a case the other lacks; this pins them together across
+    the tenant/channel/default shapes that decide the answer.
+    """
+    for default in (DeploymentDefault(), DeploymentDefault(agent_name="alpha")):
+        for tenant, channels in _row_combinations():
+            places = answering_places("alpha", tenant=tenant, channels=channels, default=default)
+            reachable = is_agent_reachable(
+                "alpha", tenant=tenant, channels=channels, default=default
+            )
+            assert bool(places) == reachable, (
+                f"answering_places and is_agent_reachable disagree for tenant={tenant!r}, "
+                f"channels={channels!r}, default={default!r}"
+            )
+
+
+def test_answering_places_orders_channels_then_tenant_then_deployment() -> None:
+    """The result reads in precedence order, with channels sorted by channel_id."""
+    tid = uuid.uuid4()
+    channels = [
+        ChannelConfigRow(tenant_id=tid, channel_id="c2", agent_name="alpha", mode="agent"),
+        ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="alpha", mode="agent"),
+    ]
+    tenant = TenantConfigRow(tenant_id=tid, agent_name="alpha", mode="agent")
+    places = answering_places(
+        "alpha", tenant=tenant, channels=channels, default=DeploymentDefault(agent_name="alpha")
+    )
+    assert places == (
+        AnsweringPlace(tier="channel", channel_id="c1"),
+        AnsweringPlace(tier="channel", channel_id="c2"),
+        AnsweringPlace(tier="tenant", channel_id=None),
+    ), (
+        "channels must come first sorted by channel_id, then the tenant tier; the deployment "
+        "tier must be absent because the tenant row consumes the fall-through"
+    )
+
+
+def test_answering_places_reports_the_deployment_tier_when_nothing_overrides_it() -> None:
+    """A fresh install routes to the deployment default, with no channel attached."""
+    places = answering_places(
+        "daimon", tenant=None, channels=[], default=DeploymentDefault(agent_name="daimon")
+    )
+    assert places == (AnsweringPlace(tier="deployment", channel_id=None),), (
+        "the deployment fall-through must be reported as its own place with no channel_id"
+    )
+
+
+def test_answering_places_omits_user_active_rows() -> None:
+    """A channel handed to a user-active session is not a place the agent answers."""
+    tid = uuid.uuid4()
+    channels = [
+        ChannelConfigRow(tenant_id=tid, channel_id="c1", agent_name="alpha", mode="user_active"),
+        ChannelConfigRow(tenant_id=tid, channel_id="c2", agent_name="alpha", mode="agent"),
+    ]
+    places = answering_places(
+        "alpha",
+        tenant=TenantConfigRow(tenant_id=tid, agent_name="alpha", mode="user_active"),
+        channels=channels,
+        default=DeploymentDefault(),
+    )
+    assert places == (AnsweringPlace(tier="channel", channel_id="c2"),), (
+        "user_active rows must be omitted at both the channel and the tenant tier"
+    )

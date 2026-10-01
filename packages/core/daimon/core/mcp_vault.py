@@ -19,10 +19,16 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
+    BetaManagedAgentsEnvironmentVariableAuthResponse,
+)
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_server_url import same_mcp_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -71,6 +77,55 @@ async def _lock_vault_namespace(
     )
 
 
+@asynccontextmanager
+async def hold_agent_vault_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> AsyncIterator[None]:
+    """Hold this (account_id, agent_id)'s vault lock for the body of the block.
+
+    A vault holds one credential per URL, and each writer below lists the
+    slot and then writes it, so two of them interleaving can leave the loser
+    with a 409 or a 404. Holding one lock makes each read-then-write see the
+    other's finished result. The writers that hold it:
+
+    - ``ensure_agent_mcp_vault`` (the daimon-mcp JWT at ``public_url``) and
+      ``add_external_mcp_credential`` (a person's pasted token) take it
+      themselves;
+    - the OAuth grant (``complete_mcp_oauth_flow`` around
+      ``put_mcp_oauth_credential``), the mirror of the agent's shared tokens
+      (``create_session`` and ``sync_agent_mcp_credentials`` around
+      ``mirror_credentials_into_vault``) and the Copilot PAT
+      (``create_session`` around ``add_github_copilot_credential``) take it
+      through this block.
+
+    Two vault writers do not hold it. Neither can take a URL from a person's
+    grant or the mirror:
+
+    - ``set_repo_binding`` / ``clear_repo_binding`` (MCP self-edit) create
+      a fresh credential at the ``https://github.com`` placeholder and delete
+      only the ids their binding row recorded. They never list and replace
+      a slot, and the placeholder is no MCP server's URL, so neither a grant
+      nor the mirror writes it.
+    - The operator's ``daimon mcp sweep-credentials`` deletes and recreates
+      the JWT at ``public_url``. A turn's ``ensure_agent_mcp_vault`` landing
+      between those two calls recreates the JWT itself (without ``is_admin``,
+      which is what the sweep wants). The sweep's own create is then a 409
+      and it stops, and re-running it is safe. A session that starts inside
+      that gap can also start without the JWT. This is a known gap, accepted
+      because the sweep is a manual, one-off backfill.
+
+    Never call ``ensure_agent_mcp_vault`` or ``add_external_mcp_credential``
+    inside the block: they take this lock on another connection and would
+    wait on it forever.
+    """
+    async with session_factory() as session, session.begin():
+        await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
+        yield
+
+
 async def _ensure_agent_mcp_vault_locked(
     client: AsyncAnthropic,
     *,
@@ -79,6 +134,7 @@ async def _ensure_agent_mcp_vault_locked(
     jwt_secret: bytes,
     public_url: str,
     now: dt.datetime,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Core get-or-create body, assuming the caller already holds the
     per-(account_id, agent_id) advisory lock for this transaction.
@@ -90,31 +146,56 @@ async def _ensure_agent_mcp_vault_locked(
     would deadlock against the outer transaction's own held lock.
     """
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
+    if slack_turn_context_id is not None:
+        display_name += f":slack-turn:{slack_turn_context_id}"
     oldest = await _find_vault_by_name(client, display_name=display_name)
     if oldest is not None:
-        # Inspect existing static_bearer credentials. Only act on URL mismatch:
-        # no credential matches `public_url` — stale URL from an earlier deploy
-        # (e.g. cloudflare-tunnel → fly URL migration), leaves MA unable to find
-        # a credential for the agent's current mcp_server URL.
-        # MA blocks PATCH (405) and POST-duplicate (409), so the only way to
-        # update a credential is delete + recreate (verified against the live MA API).
+        # Only act on URL mismatch: no credential at `public_url` — stale URL
+        # from an earlier deploy (e.g. cloudflare-tunnel → fly URL migration),
+        # leaves MA unable to find a credential for the agent's current
+        # mcp_server URL. Any auth type at that URL counts: a vault holds one
+        # credential per URL, so creating next to an `mcp_oauth` grant would be
+        # a 409 on every session create with nothing to heal it.
         has_matching_url = False
         async for cred in client.beta.vaults.credentials.list(vault_id=oldest.id):
-            if cred.auth.type != "static_bearer":
+            if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
                 continue
-            if cred.auth.mcp_server_url == public_url:
+            if same_server_url(cred.auth.mcp_server_url, public_url):
                 has_matching_url = True
+                # Bearer secrets cannot be read back. Version our own credential
+                # metadata so pre-identity vaults are upgraded once, in place.
+                if cred.auth.type == "static_bearer" and (cred.metadata or {}).get(
+                    "daimon_chat_identity"
+                ) != str(agent_id):
+                    await client.beta.vaults.credentials.update(
+                        cred.id,
+                        vault_id=oldest.id,
+                        auth={
+                            "type": "static_bearer",
+                            "token": mint_jwt(
+                                account_id=account_id,
+                                chat_agent_id=agent_id,
+                                slack_turn_context_id=slack_turn_context_id,
+                                secret=jwt_secret,
+                                now=now,
+                            ),
+                        },
+                        metadata={**(cred.metadata or {}), "daimon_chat_identity": str(agent_id)},
+                    )
                 break
         url_mismatch = not has_matching_url
         if url_mismatch:
             # No credential for the current URL yet — create fresh.
             await client.beta.vaults.credentials.create(
                 vault_id=oldest.id,
+                metadata={"daimon_chat_identity": str(agent_id)},
                 auth={
                     "type": "static_bearer",
                     "mcp_server_url": public_url,
                     "token": mint_jwt(
                         account_id=account_id,
+                        chat_agent_id=agent_id,
+                        slack_turn_context_id=slack_turn_context_id,
                         secret=jwt_secret,
                         now=now,
                     ),
@@ -125,11 +206,14 @@ async def _ensure_agent_mcp_vault_locked(
     vault = await client.beta.vaults.create(display_name=display_name)
     token = mint_jwt(
         account_id=account_id,
+        chat_agent_id=agent_id,
+        slack_turn_context_id=slack_turn_context_id,
         secret=jwt_secret,
         now=now,
     )
     await client.beta.vaults.credentials.create(
         vault_id=vault.id,
+        metadata={"daimon_chat_identity": str(agent_id)},
         auth={
             "type": "static_bearer",
             "mcp_server_url": public_url,
@@ -137,6 +221,16 @@ async def _ensure_agent_mcp_vault_locked(
         },
     )
     return vault.id
+
+
+def same_server_url(left: str, right: str) -> bool:
+    """One vault slot per server: compare in `canonical_mcp_url` form.
+
+    Whether MA itself treats `.../mcp` and `.../mcp/` as one URL is not
+    verified; daimon treats them as one everywhere so its own comparisons
+    agree with each other.
+    """
+    return same_mcp_url(left, right)
 
 
 async def ensure_agent_mcp_vault(
@@ -148,13 +242,18 @@ async def ensure_agent_mcp_vault(
     public_url: str,
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
 
-    Creates the vault + credential on cold path. On warm path, only acts when
-    there is no credential matching the current ``public_url`` (URL-drift case,
-    e.g. cloudflare-tunnel → fly URL migration) — a fresh credential is created
-    at the new URL; the prior credential is left as an inert orphan.
+    A Slack DM execution ID selects a separate vault namespace and signed claim;
+    it never modifies the shared agent vault. Only sessions for that logical turn
+    receive the isolated vault. Completed execution rows revoke DM-read authority.
+
+    Creates the vault + credential on cold path. On warm path, upgrades legacy
+    static-bearer credentials once to carry ``chat_agent_id``. If no credential
+    matches ``public_url`` (URL drift), creates one at the new URL and leaves
+    the prior credential as an inert orphan. OAuth credentials are preserved.
 
     The long-lived credential is always non-admin and never carries the ``internal``
     discriminator claim — admin is resolved live from the DB ``role`` by the verifier
@@ -162,10 +261,12 @@ async def ensure_agent_mcp_vault(
     never elevates a non-admin caller at the MCP gate (#162 escalation closed).
 
     Per-turn delete+recreate (the old re-stamp limb) is intentionally removed (Phase
-    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account, no
-    ``is_admin``, no ``internal``), so nothing per-turn needs to mutate it. Removing
-    the re-stamp limb eliminates the cross-thread race where an in-flight session
-    re-reads the shared per-(account,agent) vault credential mid-turn (A3).
+    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account,
+    ``chat_agent_id`` = agent, no ``is_admin``, no ``internal``), so nothing per-turn
+    needs to mutate it. Removing the re-stamp limb eliminates the cross-thread race
+    where an in-flight session re-reads its shared vault credential mid-turn (A3).
+    The one-time legacy upgrade is an exception: an active session may observe
+    the new chat identity during the upgrade. Subsequent warm calls stay stable.
 
     We do NOT delete credentials on URL drift. The vault is shared with user-added
     external MCP credentials (``add_external_mcp_credential``) whose URLs we cannot
@@ -173,8 +274,8 @@ async def ensure_agent_mcp_vault(
     ``public_url`` would silently nuke user data on the first deploy-URL change.
     Cost: O(deploys-with-URL-change) orphan creds per agent, bounded and harmless.
 
-    The daimon-mcp JWT claims are account-scoped only — no agent claim is added (SC-4).
-    Only the vault's storage location is per-agent.
+    The JWT subject stays account-scoped. Its separate chat_agent_id claim is
+    consumed only by the Google broker; it does not confer agent-chat authority.
 
     The entire list-then-create body runs inside a blocking Postgres
     advisory-transaction lock keyed on ``(account_id, agent_id)`` (SYNC-01):
@@ -191,6 +292,7 @@ async def ensure_agent_mcp_vault(
             jwt_secret=jwt_secret,
             public_url=public_url,
             now=now,
+            slack_turn_context_id=slack_turn_context_id,
         )
 
 
@@ -207,25 +309,28 @@ async def add_github_copilot_credential(
     This is the second credential in the per-agent vault — the first is the
     daimon-mcp JWT placed by `ensure_agent_mcp_vault`.
 
-    The caller (OAuth callback) runs this best-effort.
-    If it raises, the local Fernet blob is already the source of truth;
-    the operator can retry by re-OAuthing.
+    The caller (``create_session``) holds the per-(account, agent) vault
+    lock (``hold_agent_vault_lock``) and runs this best-effort. If it raises,
+    the local Fernet blob is already the source of truth, and the next
+    session create writes it again.
 
-    Idempotent on retry: list existing credentials, delete any pointed at the
-    GitHub Copilot URL, then create the new one.
+    Idempotent on retry: list existing credentials, delete any static one
+    pointed at the GitHub Copilot URL, then create the new one. A person's own
+    `mcp_oauth` grant at that URL is left in place and nothing is created:
+    their sign-in outranks the agent's PAT, and the slot is taken anyway.
     """
+    stale: list[str] = []
     async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
-        # SDK 0.117 widened the auth union with an `environment_variable`
-        # member that has no `mcp_server_url`; narrow to static_bearer first
-        # (these creds are created as static_bearer below), matching the guard
-        # in ensure_agent_mcp_vault.
-        if cred.auth.type != "static_bearer":
+        if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
-        if cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL:
-            await client.beta.vaults.credentials.delete(
-                cred.id,
-                vault_id=vault_id,
-            )
+        if not same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
+            continue
+        if cred.auth.type == "mcp_oauth":
+            return
+        stale.append(cred.id)
+    # Collect first: deleting while the list paginates can skip an entry.
+    for credential_id in stale:
+        await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
 
     await client.beta.vaults.credentials.create(
         vault_id=vault_id,
@@ -256,10 +361,13 @@ async def add_external_mcp_credential(
     Bootstraps the per-agent vault (creates it + mints the daimon-mcp JWT) when
     it does not yet exist — no longer raises on missing vault.
 
-    Idempotent on retry: deletes any existing ``static_bearer`` credential
-    whose ``auth.mcp_server_url`` matches ``mcp_server_url``, then creates the
-    new one. Mirrors ``add_github_copilot_credential`` but accepts the URL as
-    a parameter (per-user MCP servers each have distinct URLs).
+    Idempotent on retry: deletes any existing credential at ``mcp_server_url``,
+    a ``static_bearer`` or this person's own ``mcp_oauth`` grant, then creates
+    the new one. A vault holds one credential per URL, so leaving the grant in
+    place would make the create a 409; the person who pastes a token for a
+    server they had signed in to is choosing the token. Mirrors
+    ``add_github_copilot_credential`` but accepts the URL as a parameter
+    (per-user MCP servers each have distinct URLs).
 
     The entire list-then-create body (including the bootstrap branch) runs
     inside the same blocking Postgres advisory-transaction lock as
@@ -288,11 +396,15 @@ async def add_external_mcp_credential(
                 now=now,
             )
 
-        async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
-            if cred.auth.type != "static_bearer":
-                continue
-            if cred.auth.mcp_server_url == mcp_server_url:
-                await client.beta.vaults.credentials.delete(cred.id, vault_id=vault_id)
+        # Collect first: deleting while the list paginates can skip an entry.
+        stale = [
+            cred.id
+            async for cred in client.beta.vaults.credentials.list(vault_id=vault_id)
+            if not isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
+            and same_server_url(cred.auth.mcp_server_url, mcp_server_url)
+        ]
+        for credential_id in stale:
+            await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
 
         await client.beta.vaults.credentials.create(
             vault_id=vault_id,

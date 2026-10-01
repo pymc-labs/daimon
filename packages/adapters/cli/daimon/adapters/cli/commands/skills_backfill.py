@@ -398,7 +398,7 @@ async def _apply_phase(
                     version=fresh.version,
                     skills=new_skills,  # type: ignore[arg-type]
                 )
-            except Exception as exc:  # noqa: BLE001 — per-agent error; run continues
+            except Exception as exc:  # per-agent error; run continues
                 _log.warning(
                     "skills_backfill.repin_failed",
                     agent_id=agent.id,

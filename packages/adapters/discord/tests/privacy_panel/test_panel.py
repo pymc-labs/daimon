@@ -157,7 +157,7 @@ def test_summary_line_includes_phase_76_categories_when_nonzero() -> None:
     assert "2 synced skill(s)" in header, (
         f"Header summary must include the user_skills count; got {header!r}"
     )
-    assert "1 GitHub credential(s)" in header, (
+    assert "1 GitHub token(s)" in header, (
         f"Header summary must include the github_credentials count; got {header!r}"
     )
     assert "3 OAuth handshake record(s)" in header, (
@@ -174,7 +174,7 @@ def test_summary_line_omits_phase_76_categories_when_zero() -> None:
     preview = _make_preview(linked_principals=PurgePreviewRow(count=1, example="Discord:1"))
     container = build_privacy_main_container(preview, user_name="carlos")
     header = _text_displays(container)[0]
-    for fragment in ("synced skill", "GitHub credential", "OAuth handshake"):
+    for fragment in ("synced skill", "GitHub token", "OAuth handshake"):
         assert fragment not in header, (
             f"Zero-count category {fragment!r} must not appear in the header; got {header!r}"
         )

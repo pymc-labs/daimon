@@ -9,8 +9,17 @@
 #       inline.
 #   T2  model_construct(...) anywhere in the test tree — banned (skips
 #       Pydantic validation; produces silently-invalid objects).
-#   T3  AsyncMock(...) attached to client.beta.* — banned. Always go
-#       transport-level via httpx.MockTransport.
+#   T3  AsyncMock(...) attached to <any-receiver>.beta.* — banned. Always go
+#       transport-level via httpx.MockTransport. Receiver-agnostic: the old
+#       pattern anchored on a receiver literally named `client`, which let
+#       `anthropic_mock.beta.files.list = AsyncMock(...)` sail through.
+#       Residue: exactly two expressions are allowlisted — the
+#       agents.retrieve / environments.retrieve wirings on the bare
+#       AsyncMock() Discord runtime builders in test_bot.py,
+#       test_orchestration.py and test_bot_mention_routing.py. The exemption
+#       ends when those builders move to build_fake_anthropic (see the
+#       in-tree TODO in test_orchestration.py); any OTHER AsyncMock on a
+#       .beta.* attribute in those files still fails.
 #   T4  client.beta.{agents,environments}.list in production source — banned
 #       (cross-tenant leak). Allowlisted: ma_index.py, ma.py (filtered-list homes).
 #   T5  .beta.agents.create( outside the approved creation chokepoints — banned.
@@ -32,8 +41,22 @@
 #       factories / store helpers, never raw ORM rows. Scoped to its OWN
 #       T9_SEARCH_PATHS (not the shared SEARCH_PATHS above) so packages/core/tests
 #       and packages/testing — which legitimately need ORM access — are never
-#       scanned. Allowlisted: conftest.py files that need Base.metadata.create_all
-#       for schema-per-test setup (a distinct concern from row seeding).
+#       scanned. The only sanctioned importer for schema DDL is
+#       daimon.testing.db (outside T9_SEARCH_PATHS); no conftest is allowlisted.
+#   T10 Local re-definitions of the shared daimon.testing builders — banned.
+#       Definitions only (`def _?<name>(`), never calls or inline
+#       `BetaManagedAgents*(...)` constructors, which stay legitimate when the
+#       test is about the shape itself. The banned names are the helpers the
+#       consolidation retired from per-tree copies: make_ma_agent,
+#       make_fake_agent/environment/session, make_ma_environment,
+#       make_agent_env_handler, build_turn_router, build_anthropic,
+#       build_fake_anthropic, build_no_retry_anthropic, make_tarball,
+#       make_fernet, make_archive_agent_handler, lifespan,
+#       parse_jsonrpc(_response), call_tool_via_http, agent_response,
+#       environment_response. Sanctioned homes: packages/testing/daimon/testing/
+#       (the shared package), mcp/tests/hub/test_app.py (a Starlette router
+#       lifespan, not a harness copy) and apps/report-host/tests/conftest.py
+#       (the report host must not import daimon).
 #
 # Each rule emits a list of file:line matches. Exits non-zero with the number
 # of failing rules if any pattern is found outside an allow-list.
@@ -43,13 +66,18 @@
 
 set -euo pipefail
 
-# Scope: test trees only. Adjust as the implementation phase formalizes.
+# Scope: every test tree plus the shared daimon.testing package (T1-T3, T10).
 SEARCH_PATHS=(
   "packages/adapters/discord/tests"
   "packages/adapters/cli/tests"
   "packages/adapters/mcp/tests"
   "packages/adapters/slack/tests"
+  "packages/adapters/scheduler/tests"
   "packages/core/tests"
+  "packages/testing"
+  "tests"
+  "apps/notebook-host/tests"
+  "apps/report-host/tests"
 )
 
 # Scope: T9 only — adapter test trees + top-level integration/parity tests.
@@ -73,6 +101,7 @@ PROD_SEARCH_PATHS=(
   "packages/adapters/discord/daimon"
   "packages/adapters/mcp/daimon"
   "packages/adapters/scheduler/daimon"
+  "packages/adapters/slack/daimon"
 )
 
 # Files where each rule's match is acceptable (e.g. the fixture file itself
@@ -80,8 +109,19 @@ PROD_SEARCH_PATHS=(
 # implementation phase can grow this allow-list with intent.
 ALLOWLIST_T1=()  # MagicMock(id=...) for SDK shapes
 ALLOWLIST_T2=()  # model_construct
-ALLOWLIST_T3=()  # AsyncMock on client.beta.*
-ALLOWLIST_T4=("ma_index.py" "ma.py")  # the legitimate filtered-list homes
+# T3 residue: the Discord runtime builders wire two retrieves onto a bare
+# AsyncMock() client. Converting them to build_fake_anthropic is a real
+# migration of ~4,400 lines of Discord tests (TODO in test_orchestration.py);
+# out of scope for the Slack delivery work. Content-level entries (run_rule
+# filters full path:line:content strings with grep -vF), so ONLY these two
+# exact expressions are exempt — not the files, not the directory.
+ALLOWLIST_T3=(
+  'anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())'
+  'anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())'
+)
+# Recovery export is intentionally workspace-wide, operator CLI only; it never
+# serves a tenant-facing endpoint. All other list homes filter by tenant.
+ALLOWLIST_T4=("ma_index.py" "ma.py" "core/defaults/platform_export.py")
 # Approved agent-creation chokepoints: each guarantees the base agent_toolset
 # via dump_agent_spec or merge_default_agent_toolset.
 ALLOWLIST_T5=(
@@ -89,8 +129,11 @@ ALLOWLIST_T5=(
   "mcp/tools/agents.py"
   "cli/commands/agents.py"
   "discord/agent_setup/write.py"
+  "slack/agent_setup/write.py"
   # preflight probe agents are archived immediately — never host sessions/skills.
   "core/defaults/preflight.py"
+  # reader variant create/update both go through dump_agent_spec(reader_spec).
+  "core/reader_agent.py"
 )
 # get_earliest_tenant is fully retired — the oldest-tenant
 # path no longer exists anywhere. Zero allowlist: any occurrence fails.
@@ -111,15 +154,16 @@ ALLOWLIST_T8=(
   "cli/commands/skills.py"
 )
 # T9: daimon.core._models is banned in adapter/integration/parity test trees
-# (SUITE-02). The only tolerated occurrences are conftest.py files that need
-# Base.metadata.create_all for schema-per-test DDL setup — a distinct concern
-# from seeding rows, which must go through daimon.testing factories/store
-# helpers. Each entry below is exactly such a conftest.
-ALLOWLIST_T9=(
-  "packages/adapters/mcp/tests/conftest.py"
-  "packages/adapters/cli/tests/commands/conftest.py"
-  "packages/adapters/cli/tests/contract_flows/conftest.py"
-  "tests/integration/conftest.py"
+# (SUITE-02). Schema DDL lives in daimon.testing.db (outside T9_SEARCH_PATHS);
+# rows are seeded through daimon.testing factories/store helpers. No conftest
+# needs the ORM any more, so the allow-list is empty.
+ALLOWLIST_T9=()
+# T10: the only places a builder from the banned list may be defined. Path
+# substrings (run_rule filters full path:line:content strings with grep -vF).
+ALLOWLIST_T10=(
+  "packages/testing/daimon/testing/"
+  "packages/adapters/mcp/tests/hub/test_app.py"
+  "apps/report-host/tests/conftest.py"
 )
 
 DIVIDER="------------------------------------------------------------------"
@@ -250,10 +294,10 @@ run_rule "T2" \
   '\.model_construct\(' \
   ALLOWLIST_T2
 
-# T3: AsyncMock on client.beta.* methods.
+# T3: AsyncMock on any receiver's .beta.* methods (receiver-agnostic).
 run_rule "T3" \
-  "Banned: AsyncMock attached to client.beta.* methods" \
-  'client\.beta\.[a-zA-Z_.]+\s*=\s*AsyncMock' \
+  "Banned: AsyncMock attached to <any-receiver>.beta.* methods" \
+  '\.beta\.[a-zA-Z_.]+\s*=\s*AsyncMock' \
   ALLOWLIST_T3
 
 # T4: unfiltered agents/environments .list() in production source (cross-tenant leak).
@@ -297,6 +341,12 @@ run_rule_t9 "T9" \
   "Banned: daimon.core._models import under adapter/integration/parity test trees" \
   '(from daimon\.core(\.| import )_models\b|daimon\.core\._models\b)' \
   ALLOWLIST_T9
+
+# T10: local re-definitions of shared daimon.testing builders (definitions only).
+run_rule "T10" \
+  "Banned: re-defining a shared daimon.testing builder locally (import it from daimon.testing)" \
+  'def _?(make_ma_agent|make_fake_agent|make_fake_environment|make_fake_session|make_ma_environment|make_agent_env_handler|build_turn_router|build_anthropic|build_fake_anthropic|build_no_retry_anthropic|make_tarball|make_fernet|make_archive_agent_handler|lifespan|parse_jsonrpc(_response)?|call_tool_via_http|agent_response|environment_response)\s*\(' \
+  ALLOWLIST_T10
 
 
 echo "$DIVIDER"

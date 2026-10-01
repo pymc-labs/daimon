@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 import pytest
 from daimon.core.errors import StoreError
 from daimon.core.stores import github_app_installations as store
 from daimon.core.stores.domain import GitHubAppInstallationRow
-from sqlalchemy.ext.asyncio import AsyncSession
+from daimon.testing.db import build_test_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 
 @pytest.mark.asyncio
@@ -124,6 +129,82 @@ async def test_remove_repos_drops_specified_repos(db_session: AsyncSession) -> N
     assert "org/a" in row.repo_full_names, "untouched repo org/a should remain"
     assert "org/c" in row.repo_full_names, "untouched repo org/c should remain"
     assert "org/b" not in row.repo_full_names, "removed repo org/b should be gone"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_repo_updates_preserve_each_delta(
+    db_session: AsyncSession,
+    db_schema: str,
+) -> None:
+    """Concurrent add/remove transactions must apply to the current repo array."""
+    await store.upsert(
+        db_session,
+        installation_id=3002,
+        account_login="org",
+        repo_full_names=["org/remove-me", "org/stay"],
+    )
+    await db_session.commit()
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    sessions = async_sessionmaker(bind=engine, expire_on_commit=False)
+    both_read = asyncio.Event()
+    read_count = 0
+
+    async def pause_after_read() -> None:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 3:
+            both_read.set()
+        await both_read.wait()
+
+    class ReadBarrierSession:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+            self._paused = False
+
+        async def execute(self, statement, *args, **kwargs):
+            result = await self._session.execute(statement, *args, **kwargs)
+            if not self._paused and statement.is_select:
+                self._paused = True
+                await pause_after_read()
+            return result
+
+        async def flush(self) -> None:
+            await self._session.flush()
+
+    async def add_repo(repo: str) -> None:
+        async with sessions.begin() as session:
+            await store.add_repos(
+                ReadBarrierSession(session),
+                installation_id=3002,
+                repos=[repo],
+            )
+
+    async def remove_repo(repo: str) -> None:
+        async with sessions.begin() as session:
+            await store.remove_repos(
+                ReadBarrierSession(session),
+                installation_id=3002,
+                repos=[repo],
+            )
+
+    try:
+        await asyncio.gather(
+            add_repo("org/alpha"),
+            add_repo("org/beta"),
+            remove_repo("org/remove-me"),
+        )
+
+        async with sessions() as session:
+            row = await store.get(session, installation_id=3002)
+    finally:
+        await engine.dispose()
+    assert row is not None, "concurrent updates must preserve the installation row"
+    assert set(row.repo_full_names) == {"org/alpha", "org/beta", "org/stay"}, (
+        "concurrent updates must retain both additions and the unaffected repo"
+    )
 
 
 @pytest.mark.asyncio

@@ -9,11 +9,15 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import uuid
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
+from daimon.core.thread_participation import ParticipationMode
+from daimon.core.tool_safety import ToolSafetyPolicy
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +51,15 @@ class AnthropicSettings(BaseModel):
             "a proxy or a non-default API endpoint."
         ),
     )
+    skills_requests_per_minute: int = Field(
+        default=80,
+        ge=1,
+        description=(
+            "Maximum Anthropic Skills API requests per minute in this process. "
+            "Default 80 leaves headroom below the 100 requests/minute organization limit. "
+            "Other deployments in the same organization share that limit."
+        ),
+    )
 
 
 class CLISettings(BaseModel):
@@ -64,6 +77,16 @@ class LogSettings(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         description="Minimum log level emitted by the structured logger.",
+    )
+
+
+class OpsSettings(BaseModel):
+    alert_webhook_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Discord webhook URL for short operator alerts about new installs, Stripe top-ups, "
+            "and Anthropic limits. Unset disables alerts. Keep the URL secret."
+        ),
     )
 
 
@@ -99,6 +122,34 @@ class McpSettings(BaseModel):
             "at startup."
         ),
     )
+    bundle_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        description=(
+            "Per-upload byte cap enforced by the bundle upload route. The "
+            "default keeps headroom under a 32 MiB proxy request limit; raise "
+            "it if the front end in front of the mcp service allows larger "
+            "bodies."
+        ),
+    )
+    bundle_uploads_per_hour: int = Field(
+        default=20,
+        description=(
+            "Per-token cap on bundle upload route calls per rolling hour. "
+            "Prevents a compromised or buggy caller from exhausting the "
+            "Files API upload path. Set to 0 to disable (not recommended in "
+            "production)."
+        ),
+    )
+    bundle_ttl_days: int = Field(
+        default=90,
+        description=(
+            "How long an uploaded bundle object is retained on the Files API "
+            "before deletion. Deletion is performed by the scheduler's "
+            "pending-file sweeper, not by this process directly — a "
+            "deployment running no scheduler will never reclaim these "
+            "objects."
+        ),
+    )
 
     @property
     def app_root_url(self) -> str | None:
@@ -113,6 +164,149 @@ class McpSettings(BaseModel):
         if self.public_url is None:
             return None
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
+
+
+_HUB_SIGNING_KEY_BYTES = 32
+
+
+class HubSettings(BaseModel):
+    """OAuth-login MCP mounts for coding-agent clients.
+
+    A platform's mount appears only when both its client id and secret are
+    set; a deployment that sets neither runs exactly as before. The signing
+    key is shared by both mounts and must be a base64url 32-byte key, the same
+    shape as a Fernet key, so the proxy uses it directly rather than deriving
+    one from the client secret (rotating a client secret would otherwise
+    invalidate every issued login).
+    """
+
+    slack_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Slack OAuth app client ID for the /slack/mcp login mount. Register "
+            "<DAIMON_MCP__PUBLIC_URL origin>/slack/auth/callback as a redirect "
+            "URL on the Slack app."
+        ),
+    )
+    slack_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Slack OAuth app client secret for the /slack/mcp login mount.",
+    )
+    discord_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Discord OAuth app client ID for the /discord/mcp login mount. "
+            "Register <DAIMON_MCP__PUBLIC_URL origin>/discord/auth/callback as a "
+            "redirect URI on the Discord app."
+        ),
+    )
+    discord_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Discord OAuth app client secret for the /discord/mcp login mount.",
+    )
+    allowed_client_redirect_uris: list[str] = Field(
+        default=[
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://claude.ai/*",
+            "https://claude.com/*",
+        ],
+        description=(
+            "Redirect URI patterns an MCP client may register with the hub login "
+            "mounts (wildcards allowed). Defaults cover coding agents on loopback "
+            "and claude.ai; widen only for a client you operate."
+        ),
+    )
+    jwt_signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Base64url 32-byte key that signs hub login tokens. Required when "
+            "any hub mount is configured, and rejected at boot unless it "
+            "decodes to exactly 32 bytes. Generate with Fernet.generate_key()."
+        ),
+    )
+
+    @field_validator("jwt_signing_key")
+    @classmethod
+    def _check_signing_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """Reject anything but a 32-byte base64url key.
+
+        FastMCP derives an HS256 secret and warns about short keys only for a
+        ``str`` secret; the proxy is handed ``bytes``, which it uses raw. A
+        passphrase would therefore be accepted silently as the signing secret.
+        """
+        if value is None:
+            return value
+        try:
+            decoded = base64.urlsafe_b64decode(value.get_secret_value())
+        except (binascii.Error, ValueError):
+            decoded = b""
+        if len(decoded) != _HUB_SIGNING_KEY_BYTES:
+            raise ValueError(
+                "DAIMON_HUB__JWT_SIGNING_KEY must be a base64url-encoded "
+                f"{_HUB_SIGNING_KEY_BYTES}-byte key; generate one with "
+                "python -c 'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
+            )
+        return value
+
+    @property
+    def slack_configured(self) -> bool:
+        return self.slack_client_id is not None and self.slack_client_secret is not None
+
+    @property
+    def discord_configured(self) -> bool:
+        return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
+class ThreadParticipationSettings(BaseModel):
+    """Organic thread participation: replying in a thread unprompted.
+
+    Platform-agnostic settings (the store and tool are keyed by platform);
+    only the Discord adapter reads them today. `mode` is the deployment tier
+    of a cascade (deployment, workspace, channel, thread) that the agent's
+    `set_thread_participation` tool writes the other tiers of. `off` (the
+    default) changes nothing for anyone: no classifier runs and every server
+    behaves as today until someone asks the agent to follow a thread, or an
+    admin turns a channel or the workspace on. `disabled` also refuses those
+    requests. `on` follows every thread unless a lower tier says otherwise.
+    """
+
+    mode: ParticipationMode = Field(
+        default=ParticipationMode.OFF,
+        description=(
+            "Deployment default for replying in threads unprompted. off: mention-only "
+            "until a thread, channel or workspace is turned on. disabled: mention-only "
+            "and cannot be turned on. on: follow every thread unless turned off below."
+        ),
+    )
+    quiet_seconds: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "How long a followed thread must be quiet after an unprompted message before "
+            "the agent decides whether to reply. A burst of messages is judged once, at "
+            "the end."
+        ),
+    )
+    max_per_hour: int = Field(
+        default=20,
+        ge=1,
+        description="Backstop: maximum unprompted replies per thread per rolling hour.",
+    )
+    recent_messages_window: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="How many earlier thread messages the classifier sees before deciding.",
+    )
+    classifier_model: str = Field(
+        default="claude-haiku-4-5",
+        description=(
+            "Model that decides whether a burst of unprompted messages deserves a reply. "
+            "One short call per quiet burst; a small, fast model is the point."
+        ),
+    )
 
 
 class DiscordSettings(BaseModel):
@@ -131,6 +325,15 @@ class DiscordSettings(BaseModel):
             "Maximum number of agent turns a single tenant (Discord guild) may "
             "have in flight at once. Caps one noisy guild from starving others "
             "on the shared Anthropic key."
+        ),
+    )
+    max_concurrent_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum Discord agent turns running across all guilds and DMs in this process. "
+            "Unset leaves deployment-wide admission unlimited. Excess turns are refused "
+            "with a retry notice; continuation wakes keep their existing admission path."
         ),
     )
     health_port: int = Field(
@@ -200,6 +403,15 @@ class SlackSettings(BaseModel):
     ``app_token`` for Socket Mode.
     """
 
+    bot_display_name: str = Field(
+        default="daimon",
+        # Keep surrounding Block Kit copy within Slack's limits and exclude
+        # mention, markdown, and emoji-shortcode metacharacters.
+        min_length=1,
+        max_length=32,
+        pattern=r"^[^\\`@#:]+$",
+        description="The bot's presented name in Slack setup, help, and privacy messages.",
+    )
     signing_secret: SecretStr = Field(
         description=(
             "Slack request-signing secret used to verify inbound HTTP "
@@ -234,19 +446,107 @@ class SlackSettings(BaseModel):
             "scheduler process (8082) — all process groups share one host."
         ),
     )
-    dev_allow_all_admin: bool = Field(
-        default=False,
+
+
+class TeamsSettings(BaseModel):
+    """Microsoft Teams adapter config.
+
+    Optional so non-Teams deployments boot unchanged — the block is ``None``
+    when no ``DAIMON_TEAMS__*`` env vars are present. Mirrors ``SlackSettings``.
+
+    ``client_id`` / ``client_secret`` / ``tenant_id`` are the Entra app
+    registration the Bot Framework posts activities to; ``port`` is the HTTP
+    ingress the SDK's FastAPI adapter binds (``/api/messages`` plus the
+    ``/healthz`` / ``/readyz`` endpoints served by the same listener);
+    ``enabled`` gates ``/api/messages`` without taking the process down.
+    """
+
+    client_id: str = Field(
         description=(
-            "Testing-only flag: when True, treats every Slack user as a "
-            "workspace admin, bypassing the normal admin lookup, so a "
-            "non-admin tester can exercise agent CRUD on a test deployment. "
-            "Must stay unset in production."
+            "Entra (Azure AD) app registration client ID the Teams bot "
+            "authenticates as — also the audience inbound Bot Framework JWTs "
+            "are validated against."
+        ),
+    )
+    client_secret: SecretStr = Field(
+        description=(
+            "Entra app registration client secret, used to mint Bot Framework "
+            "tokens for outbound sends."
+        ),
+    )
+    tenant_id: str = Field(
+        description=(
+            "Entra tenant ID the app registration lives in. A single-tenant "
+            "bot only answers activities whose conversation and channel-data "
+            "tenant both equal this value."
+        ),
+    )
+    max_concurrent_turns_per_tenant: int = Field(
+        default=3,
+        description=(
+            "Maximum number of agent turns a single Teams tenant may have "
+            "in flight at once. Caps one noisy tenant from starving others "
+            "on the shared Anthropic key."
+        ),
+    )
+    port: int = Field(
+        default=3978,
+        description=(
+            "Port for the Teams process's HTTP ingress and health endpoints "
+            "(/api/messages, /healthz, /readyz). The Bot Framework messaging "
+            "endpoint must be configured to reach this listener."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When False, /api/messages answers 503 while the health endpoints "
+            "stay live — the process keeps running so ingress can be "
+            "re-enabled without a redeploy."
+        ),
+    )
+    admin_user_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Entra object IDs of the people who administer this deployment "
+            "from Teams. Teams exposes no admin role to bots, so this list is "
+            "the admin check: admins get the admin role in turns, create "
+            "routines, replace shared keys, top up and see everyone's usage. "
+            "Everyone else is a regular user."
         ),
     )
 
+    @field_validator("admin_user_ids")
+    @classmethod
+    def _canonicalize_admin_user_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Compare against the canonical lowercase form inbound ids arrive in."""
+        try:
+            return tuple(str(UUID(item)) for item in value)
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
+            ) from None
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonicalize_tenant_id(cls, value: str) -> str:
+        """Normalize to the canonical lowercase UUID form and reject non-UUIDs.
+
+        The resolver canonicalizes activity tenant ids and compares them to
+        this value, and ``provision_tenant`` hashes ``workspace_id`` into the
+        deterministic tenant uuid — an uppercase portal paste must not yield
+        a provisioned row the resolver cannot match.
+        """
+        try:
+            return str(UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__TENANT_ID must be the Entra directory tenant's UUID"
+            ) from None
+
 
 class GithubSettings(BaseModel):
-    """GitHub repo-auth config (App-or-PAT; no OAuth flow). All fields are
+    """GitHub repository access config (App-or-PAT; no OAuth flow). All fields are
     optional so deployments without GitHub App or PAT config keep working.
 
     Cloning via the GitHub App requires only app_id + app_private_key.
@@ -378,16 +678,28 @@ class CryptoSettings(BaseModel):
 
     A single deployment ships one key; rotation means prepending a new key.
     Each key must be a Fernet.generate_key()-style base64-urlsafe 32-byte
-    string. Empty default lets deployments without any encrypted credentials
-    boot without crypto config.
+    string. A deployment without keys still boots, but refuses to save agent
+    keys unless `allow_plaintext` opts into plaintext storage for local
+    development.
     """
 
     keys: tuple[SecretStr, ...] = Field(
         default=(),
         description=(
             "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. The first key encrypts new values; older keys "
-            "remain valid for decrypting existing ciphertext during rotation."
+            "credentials. Required to save agent keys: without keys, saving an "
+            "agent environment value is refused unless `allow_plaintext` is set. "
+            "The first key encrypts new values; older keys "
+            "remain valid for decrypting existing ciphertext during rotation. "
+            "Run `daimon crypto verify` to confirm no plaintext rows remain."
+        ),
+    )
+    allow_plaintext: bool = Field(
+        default=False,
+        description=(
+            "Store agent environment values (agent keys) in plaintext when no "
+            "`keys` are configured. For local development only: with this off "
+            "and no keys, every agent key write is refused."
         ),
     )
 
@@ -464,6 +776,38 @@ class NotebookSettings(BaseModel):
             "independently as a second layer of defense."
         ),
     )
+    allow_editable: bool = Field(
+        default=False,
+        description=(
+            "Let `create_notebook_upload_url(editable=True)` publish the marimo "
+            "code editor. Anyone holding an editor link can run arbitrary code "
+            "on the notebook host, and any member or prompt-injected agent can "
+            "ask for one, so this stays off unless every notebook on the host "
+            "belongs to one client. Off: scratch notebooks are always read-only."
+        ),
+    )
+
+
+class ReportHostSettings(BaseModel):
+    """Optional report-host client config.
+
+    Both fields optional so deployments without a report host keep working.
+    The publishing MCP tool raises ToolError when host_url is unset.
+    """
+
+    host_url: HttpUrl | None = Field(
+        default=None,
+        description="Base URL of the report-host service (e.g. http://report-host:8002).",
+    )
+    admin_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Bearer secret used to authenticate admin calls to the report-host "
+            "service. Must be the same value the report host itself is "
+            "configured with (its DAIMON_REPORT__ADMIN_SECRETS) — rotating one "
+            "without the other breaks publishing."
+        ),
+    )
 
 
 class SentrySettings(BaseModel):
@@ -515,28 +859,211 @@ class BillingSettings(BaseModel):
     )
 
 
+class SupportSettings(BaseModel):
+    """Human-support escalation: where requests land, and how many each user gets.
+
+    `credits_per_user` is a COUNT of human interactions, deliberately not the
+    USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
+    let a support request eat the tenant's ability to run turns, and would give
+    a paid-up tenant unlimited support. Different unit, different table.
+
+    An unset `escalation_channel_id` disables the escalate affordance entirely
+    rather than recording requests nobody will ever see. Failing closed is the
+    honest behaviour: an escalate button that reaches no one is worse than no
+    button, because the person believes they have asked for help.
+    """
+
+    escalation_channel_id: str | None = Field(
+        default=None,
+        description=(
+            "Channel id where human-support requests are posted. Unset (the "
+            "default) disables the escalate affordance entirely — a request "
+            "that reaches nobody is worse than no button at all. A channel "
+            "rather than operator DMs: it survives one person's DMs being "
+            "closed, and it leaves a shared record anyone on the rota can pick "
+            "up. The bot must be able to post there."
+        ),
+    )
+    credits_per_user: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "How many human-support requests each user gets within a tenant. "
+            "A COUNT of interactions, NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — "
+            "the two are deliberately separate ledgers. 0 disables escalation."
+        ),
+    )
+
+
+class ThreadNamingSettings(BaseModel):
+    """Automatic Discord thread titles, generated by a metered Haiku call.
+
+    A top-level feature block (``DAIMON_THREAD_NAMING__*``), not a
+    ``DiscordSettings`` field, per the feature-settings rule. Discord-only in
+    effect: Slack threads have no title (``tests/parity/
+    test_thread_naming_discord_only.py``).
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Title bot-created Discord threads from the opening message with a short "
+            "Haiku-generated name, chosen before the thread is created. The call is "
+            "metered to the tenant like any other model call. Set false to keep the "
+            "static 'Chat with <agent>' title."
+        ),
+    )
+    max_input_chars: int = Field(
+        default=2000,
+        gt=0,
+        le=20_000,
+        description=(
+            "Characters of the opening message sent to the naming model; longer "
+            "messages are cut here. Bounds the per-thread naming cost."
+        ),
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        description=(
+            "Seconds to wait for the naming model before the thread opens under the "
+            "static title. The thread is created only after this call, so this is "
+            "the most a mention can wait before anything appears."
+        ),
+    )
+
+
+class ArtifactsSettings(BaseModel):
+    """Optional private object storage for hosted-client artifacts."""
+
+    endpoint_url: HttpUrl = Field(
+        description="S3-compatible bucket endpoint; used for uploads and presigned GET URLs.",
+    )
+    bucket: str = Field(
+        min_length=1,
+        description="Private bucket name. Daimon never applies a public-read ACL.",
+    )
+    access_key_id: SecretStr = Field(description="S3-compatible access key id.")
+    secret_access_key: SecretStr = Field(description="S3-compatible secret access key.")
+    region: str = Field(
+        default="us-east-1",
+        min_length=1,
+        description="S3 signing region supplied by the bucket provider.",
+    )
+    url_ttl_seconds: int = Field(
+        default=600,
+        gt=0,
+        le=86_400,
+        description="Lifetime of each presigned artifact GET URL; defaults to ten minutes.",
+    )
+    embed_images: bool = Field(
+        default=True,
+        description=(
+            "Also return bounded MCP image blocks for model vision. Disable independently "
+            "when a hosted client cannot accept image content."
+        ),
+    )
+
+
+class DirectMessagePolicy(BaseModel):
+    """Tenant recipient restrictions; platform membership is always required."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["members", "allowlist", "disabled"] = "members"
+    recipient_ids: list[str] = Field(default_factory=list[str])
+
+    def allows(self, recipient_id: str) -> bool:
+        return self.mode == "members" or (
+            self.mode == "allowlist" and recipient_id in self.recipient_ids
+        )
+
+
 class Settings(BaseSettings):
+    security_audit_retention_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Security audit retention age in days, default 90. Operators must schedule "
+            "daimon audit prune TENANT_UUID for each tenant (for example daily). "
+            "The command deletes older events. Set 0 to explicitly retain events forever; "
+            "privacy erasure and tenant deletion still apply."
+        ),
+    )
+    completion_pings: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant completion notification policy, keyed by tenant UUID. "
+            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "mentioning only the requester "
+            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
+    direct_message_policies: dict[uuid.UUID, DirectMessagePolicy] = Field(
+        default_factory=dict[uuid.UUID, DirectMessagePolicy],
+        description=(
+            "Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; "
+            "invalid keys rejected). Default is "
+            "members (live membership required). Set mode=disabled to disable DMs, "
+            "or mode=allowlist with recipient_ids to restrict delivery to listed "
+            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+        ),
+    )
+    table_rendering: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant table rendering opt-in, keyed by tenant UUID. True renders "
+            "final Markdown tables as PNG on Discord and native tables on Slack. "
+            "Missing/false preserves plain text. Set DAIMON_TABLE_RENDERING to a JSON object."
+        ),
+    )
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL rendered on the Discord and Slack privacy panels' Policy button. "
+            "URL rendered on the privacy panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
         ),
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
+    thread_participation: ThreadParticipationSettings = Field(
+        default_factory=ThreadParticipationSettings,
+        description="Replying in threads unprompted. See ThreadParticipationSettings.",
+    )
     slack: SlackSettings | None = None
+    teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     notebook: NotebookSettings = Field(default_factory=NotebookSettings)
+    report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    support: SupportSettings = Field(default_factory=SupportSettings)
+    thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
+    tool_safety: ToolSafetyPolicy = Field(
+        default_factory=ToolSafetyPolicy,
+        description=(
+            "Read/write classes and confirmation for attached third-party MCP tools. "
+            "See ToolSafetyPolicy."
+        ),
+    )
+    artifacts: ArtifactsSettings | None = Field(
+        default=None,
+        description=(
+            "Optional private S3-compatible store for presigned chart links. "
+            "Bounded image embeds still run when this is unset."
+        ),
+    )
     defaults_root: Path = Field(
         default_factory=lambda: Path("defaults"),
         description=(
@@ -567,3 +1094,17 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     return Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
+
+
+class _CryptoSettingsSource(BaseSettings):
+    """Crypto-only settings for migrations and standalone store sessions."""
+
+    crypto: CryptoSettings = Field(default_factory=CryptoSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+    )
+
+
+def load_crypto_settings() -> CryptoSettings:
+    """Load keys without requiring unrelated API or database configuration."""
+    return _CryptoSettingsSource().crypto

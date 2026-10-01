@@ -26,9 +26,7 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ADMIN_REQUIRED = "requires a workspace or server admin"
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
@@ -206,7 +204,7 @@ async def test_set_agent_default_raises_for_non_admin_and_performs_no_write(
     with pytest.raises(ToolError) as exc_info:
         await _set_agent_default_impl(_runtime(committing_sessionmaker), auth, "any-agent", None)
 
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin caller must be refused with the expected message"
     )
 
@@ -223,7 +221,7 @@ async def test_clear_agent_default_raises_for_non_admin(
     with pytest.raises(ToolError) as exc_info:
         await _clear_agent_default_impl(_runtime(committing_sessionmaker), auth, None)
 
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin caller must be refused with the expected message for clear as well"
     )
 
@@ -338,4 +336,152 @@ async def test_explain_says_so_when_nothing_resolves(
     assert result.winning_tier is None, "no tier can be credited"
     assert "nothing to answer it" in result.explanation, (
         "the sentence must say a mention there goes unanswered, not stay silent"
+    )
+
+
+async def test_explanation_separates_setup_responder_target_and_parent_defaults(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    await _set_agent_default_impl(
+        runtime, _admin_auth(tenant_id=tenant.id, account_id=account.id), "specialist", "parent"
+    )
+    async with committing_sessionmaker.begin() as session:
+        for index in range(12):
+            await create_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="parent",
+                thread_id=f"thread-{index}",
+                responder_ma_agent_id="agent_daimon",
+                responder_name="Daimon",
+                configuration_target_ma_agent_id="agent_specialist",
+                configuration_target_name="specialist",
+                creator_account_id=account.id,
+            )
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="another-parent",
+            thread_id="unrelated-thread",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="Daimon",
+        )
+    auth = AuthIdentity(
+        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+    )
+    explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "thread-0")
+    assert explained.effective_agent_name == "Daimon", "thread binding determines who answers"
+    assert explained.winning_tier == "thread", "the setup responder outranks parent routing"
+    assert explained.responder_ma_agent_id == "agent_daimon", "report concrete responder identity"
+    assert explained.configuration_target_ma_agent_id == "agent_specialist", (
+        "target remains distinct"
+    )
+    assert explained.configuration_target_name == "specialist", (
+        "target snapshot names configuration"
+    )
+    assert explained.channel_default == "specialist", "parent routing is preserved and explained"
+    assert len(explained.recent_setup_conversations) == 10, "show at most ten recent setup threads"
+    assert all(row.parent_channel_id == "parent" for row in explained.recent_setup_conversations), (
+        "recent setup conversations must be restricted to the requested parent"
+    )
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_explanation_reports_deleted_setup_without_parent_fallback(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    platform: str,
+) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
+
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform=platform)
+        account = await make_account(session, tenant=tenant)
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform=platform,
+            parent_channel_id="parent",
+            thread_id="deleted-thread",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id="agent_specialist",
+            configuration_target_name="specialist",
+            creator_account_id=account.id,
+        )
+        await update_lifecycle(
+            session,
+            tenant_id=tenant.id,
+            platform=platform,
+            parent_channel_id="parent",
+            thread_id="deleted-thread",
+            deleted=True,
+        )
+    runtime = _runtime_with_default(committing_sessionmaker, "parent-responder")
+    auth = AuthIdentity(
+        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform=platform
+    )
+    with pytest.raises(ToolError, match="deleted-thread.*was deleted") as error:
+        await _explain_agent_resolution_impl(runtime, auth, "parent", "deleted-thread")
+    explanation = str(error.value)
+    assert "Daimon (agent_daimon)" in explanation, "retain the recorded responder identity"
+    assert "specialist (agent_specialist)" in explanation, (
+        "retain the configuration target identity"
+    )
+    assert "Open a new setup conversation" in explanation, "provide the supported continuation path"
+    assert "parent-responder" not in explanation, (
+        "a deleted setup cannot silently resume parent routing"
+    )
+
+
+async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """Both kinds outrank channel routing; only one of them is a setup conversation."""
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    await _set_agent_default_impl(
+        runtime, _admin_auth(tenant_id=tenant.id, account_id=account.id), "specialist", "parent"
+    )
+    async with committing_sessionmaker.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="parent",
+            thread_id="handed-over",
+            responder_ma_agent_id="agent_research",
+            responder_name="research-bot",
+            kind="handoff",
+        )
+    auth = AuthIdentity(
+        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+    )
+
+    explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "handed-over")
+
+    assert explained.effective_agent_name == "research-bot", "the agent holding the task answers"
+    assert explained.winning_tier == "thread", "the thread still outranks the channel default"
+    assert "this task was handed to it" in explained.explanation, (
+        "the reason the thread has its own responder must be stated accurately"
+    )
+    assert "setup thread" not in explained.explanation, (
+        "a handed-over thread is not a setup conversation"
+    )
+    assert explained.channel_default == "specialist", "the channel's own routing is unchanged"
+    assert explained.recent_setup_conversations == (), (
+        "a handoff binding is not a setup conversation and must not be listed as one"
     )

@@ -21,6 +21,16 @@ def monkeypatch_admin_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_NOTEBOOK__ADMIN_SECRET", "test-secret")
 
 
+@pytest.fixture(autouse=True)
+def private_shared_temp_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Point remove_uid_files at a per-test dir, never the machine's /tmp or /dev/shm."""
+    from notebook_host import jail
+
+    monkeypatch.setattr(jail, "SHARED_TEMP_DIRS", (tmp_path_factory.mktemp("shared-tmp"),))
+
+
 def set_unjailed_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt a test into the unjailed-spawn break-glass.
 

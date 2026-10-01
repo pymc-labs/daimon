@@ -76,6 +76,30 @@ def test_debug_level_admits_debug_lines(
     assert record["level"] == "debug", "the rendered level should be debug"
 
 
+def test_exception_tracebacks_omit_local_values(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_log_level("INFO")
+    credential = "test-only-private-credential"
+    try:
+        try:
+            raise ValueError("upstream rejected request")
+        except ValueError as err:
+            raise RuntimeError("could not open form") from err
+    except RuntimeError:
+        structlog.get_logger().exception("form.failed")
+
+    captured = capsys.readouterr().out.strip()
+    assert credential not in captured, "exception logs must not serialize local credentials"
+    record = json.loads(captured)
+    exceptions = record["exception"]
+    assert {exception["exc_type"] for exception in exceptions} == {"RuntimeError", "ValueError"}, (
+        "exception types and causes must remain available for diagnosis"
+    )
+    for exception in exceptions:
+        assert exception["frames"], "stack locations must remain available for diagnosis"
+        for frame in exception["frames"]:
+            assert not frame.get("locals"), "no frame may expose its local variables"
+
+
 def test_warning_level_filters_info_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

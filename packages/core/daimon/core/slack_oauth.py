@@ -27,12 +27,15 @@ _TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_BOT_SCOPES: tuple[str, ...] = (
     "app_mentions:read",
     "chat:write",
+    "im:write",  # agent-initiated direct messages to verified workspace members
     "commands",
+    "im:history",  # opt-in private message events
     "users:read",
     "channels:history",
     "groups:history",
     "reactions:write",  # queued-mention reaction parity
     "files:read",  # attachments & vision: read event.files + fetch url_private
+    "files:write",  # post-turn delivery of session output artifacts
     "channels:read",  # channel tools: public channel metadata + membership checks
     "groups:read",  # channel tools: private channel metadata + membership checks
 )

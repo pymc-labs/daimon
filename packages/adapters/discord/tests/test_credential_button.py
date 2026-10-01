@@ -17,13 +17,26 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.credential_button import CredentialRequestButton
 from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
+    EnvFileModal,
     McpCredentialModal,
     RepoBindModal,
 )
 from daimon.adapters.discord.credential_repo_bind import _SHARED_AGENT_MESSAGE
-from daimon.core.credential_requests import build_button_label, build_custom_id, mint_request_token
+from daimon.core.credential_requests import (
+    ENV_FILE_TARGET,
+    build_button_label,
+    build_custom_id,
+    mint_request_token,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.posted_controls import (
+    ALREADY_USED_MESSAGE,
+    EXPIRED_HEADLINE,
+    NO_LONGER_VALID_MESSAGE,
+    WRONG_REQUESTER_MESSAGE,
+    expired_message,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.credential_requests import (
@@ -31,8 +44,10 @@ from daimon.core.stores.credential_requests import (
     peek_credential_request,
 )
 from daimon.core.stores.domain import CredentialRequestRow
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -66,6 +81,7 @@ def _fake_bot(
 def _interaction(*, user_id: str, client: Any) -> MagicMock:
     interaction = MagicMock()
     interaction.user.id = int(user_id)
+    interaction.guild_id = _GUILD_ID
     interaction.client = client
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
@@ -77,7 +93,7 @@ def _repo_admin_interaction(*, client: Any, guild_id: int = _GUILD_ID) -> MagicM
     interaction.client = client
     interaction.guild_id = guild_id
     interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 1
+    interaction.user.id = int(_REQUESTER_ID)
     interaction.user.guild_permissions.administrator = True
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
@@ -93,7 +109,7 @@ def _repo_member_interaction(*, client: Any, guild_id: int = _GUILD_ID) -> Magic
     interaction.client = client
     interaction.guild_id = guild_id
     interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 2
+    interaction.user.id = int(_REQUESTER_ID)
     interaction.user.guild_permissions.administrator = False
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
@@ -102,6 +118,36 @@ def _repo_member_interaction(*, client: Any, guild_id: int = _GUILD_ID) -> Magic
     interaction.response.send_modal = AsyncMock()
     interaction.followup.send = AsyncMock()
     return interaction
+
+
+def _card_click(*, user_id: str) -> MagicMock:
+    """A click on the card of a `with_card=True` row.
+
+    `is_credential_interaction_valid` compares the thread, the parent channel
+    and the card's own message id against the row, so a click that is meant
+    to reach the expiry branch has to agree with all three.
+    """
+    interaction = _interaction(user_id=user_id, client=MagicMock())
+    interaction.channel_id = 333
+    interaction.channel = MagicMock(spec=discord.Thread)
+    interaction.channel.parent_id = 222
+    interaction.message = MagicMock()
+    interaction.message.id = 444
+    _partial_card(interaction).edit = AsyncMock()
+    return interaction
+
+
+def _partial_card(interaction: MagicMock) -> MagicMock:
+    """The partial message `edit_posted_card` re-renders, off the mock chain."""
+    channel = interaction.client.get_partial_messageable.return_value
+    return channel.get_partial_message.return_value  # pyright: ignore[reportAny]
+
+
+def _card_text(view: discord.ui.LayoutView) -> str:
+    """All text the rendered card shows, newline-joined."""
+    return "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
 
 
 def _match(token: str) -> Any:
@@ -114,28 +160,43 @@ def _match(token: str) -> Any:
 def _row(
     *,
     token: str,
-    kind: Literal["env", "mcp", "repo"] = "env",
+    kind: Literal["env", "env_file", "mcp", "repo"] = "env",
     target: str = "OPENAI_API_KEY",
     mcp_server_url: str | None = None,
     requester_platform_user_id: str = _REQUESTER_ID,
+    target_name: str | None = None,
+    responder_name: str | None = None,
     tenant_id: uuid.UUID | None = None,
     agent_id: uuid.UUID | None = None,
     account_id: uuid.UUID | None = None,
     expires_at: datetime | None = None,
     used_at: datetime | None = None,
+    with_card: bool = False,
 ) -> CredentialRequestRow:
-    """Build a CredentialRequestRow in memory -- no DB needed for interaction_check/callback tests."""
+    """Build a CredentialRequestRow in memory -- no DB needed for interaction_check/callback tests.
+
+    `with_card` gives the row the posted card the expiry flip below edits;
+    without those ids there is no message to re-render and the edit is a
+    no-op by design.
+    """
     now = datetime.now(UTC)
     return CredentialRequestRow(
+        idempotency_key=uuid.uuid4(),
         token=token,
         kind=kind,
-        tenant_id=tenant_id or uuid.uuid4(),
+        tenant_id=tenant_id or derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID)),
         agent_id=agent_id or uuid.uuid4(),
         account_id=account_id or uuid.uuid4(),
         target=target,
         mcp_server_url=mcp_server_url,
         requester_platform_user_id=requester_platform_user_id,
-        channel_id="chan-1",
+        channel_id="333" if with_card else "chan-1",
+        platform="discord" if with_card else None,
+        parent_channel_id="222" if with_card else None,
+        origin_thread_id="333" if with_card else None,
+        posted_message_id="444" if with_card else None,
+        target_name=target_name,
+        responder_name=responder_name,
         created_at=now,
         expires_at=expires_at or (now + timedelta(minutes=30)),
         used_at=used_at,
@@ -148,20 +209,10 @@ def _make_agent(
     metadata = {"daimon_tenant": str(tenant_id)}
     if managed:
         metadata[MA_METADATA_KEY_MANAGED] = "true"
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id=ma_agent_id,
-        type="agent",
         name=name,
-        model={"id": "claude-sonnet-4-6"},
         metadata=metadata,
-        description=None,
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     )
 
 
@@ -200,6 +251,10 @@ async def _seed_repo_row(
             requester_platform_user_id=_REQUESTER_ID,
             channel_id="chan-1",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="tester",
+            requested_work=None,
         )
     return row
 
@@ -228,6 +283,10 @@ async def _seed_request(
             requester_platform_user_id=requester_platform_user_id,
             channel_id="chan-1",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="tester",
+            requested_work=None,
         )
     return token
 
@@ -260,7 +319,7 @@ async def test_from_custom_id_unknown_token_returns_item_with_no_row_and_fallbac
     item = await CredentialRequestButton.from_custom_id(interaction, MagicMock(), _match(token))
 
     assert item.request_row is None, "an unknown token must yield no row rather than raising"
-    assert item.item.label == "Add credential", "fallback label is used when no row is found"
+    assert item.item.label == "Enter it privately", "fallback label is used when no row is found"
 
 
 async def test_from_custom_id_db_failure_is_logged_and_interaction_check_rejects_gracefully(
@@ -313,7 +372,9 @@ async def test_interaction_check_unknown_row_sends_ephemeral_and_rejects() -> No
     assert allowed is False, "no row means the click must be rejected"
     interaction.response.send_message.assert_awaited_once()
     message = interaction.response.send_message.call_args.args[0]
-    assert "no longer valid" in message, "unknown-row rejection must tell the user to ask again"
+    assert message == NO_LONGER_VALID_MESSAGE, (
+        "the refusal must be the shared card copy, so Discord and Slack cannot drift"
+    )
 
 
 async def test_interaction_check_wrong_requester_sends_ephemeral_and_rejects() -> None:
@@ -325,13 +386,17 @@ async def test_interaction_check_wrong_requester_sends_ephemeral_and_rejects() -
 
     assert allowed is False, "a non-requester click must be rejected"
     message = interaction.response.send_message.call_args.args[0]
-    assert "someone else" in message, "rejection must indicate the request targeted another user"
+    assert message == WRONG_REQUESTER_MESSAGE, (
+        "the refusal must be the shared card copy, so Discord and Slack cannot drift"
+    )
 
 
 async def test_interaction_check_expired_sends_ephemeral_and_rejects() -> None:
     row = _row(
         token="expiredrow123456789012",
         expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        target_name="research-bot",
+        responder_name="Daimon",
     )
     item = CredentialRequestButton(token=row.token, label="Add credential", request_row=row)
     interaction = _interaction(user_id=_REQUESTER_ID, client=None)
@@ -340,7 +405,13 @@ async def test_interaction_check_expired_sends_ephemeral_and_rejects() -> None:
 
     assert allowed is False, "an expired row must be rejected"
     message = interaction.response.send_message.call_args.args[0]
-    assert "expired" in message, "rejection must say the request expired"
+    assert message == expired_message(
+        kind="env",
+        agent_name="research-bot",
+        responder_name="Daimon",
+        target="OPENAI_API_KEY",
+    ), "a late clicker must be told exactly what the card beside them now says"
+    assert "research-bot" in message, "the way back must name the agent that was being set up"
 
 
 async def test_interaction_check_already_used_sends_ephemeral_and_rejects() -> None:
@@ -352,7 +423,9 @@ async def test_interaction_check_already_used_sends_ephemeral_and_rejects() -> N
 
     assert allowed is False, "an already-used row must be rejected"
     message = interaction.response.send_message.call_args.args[0]
-    assert "already used" in message, "rejection must say the request was already used"
+    assert message == ALREADY_USED_MESSAGE, (
+        "the refusal must be the shared card copy, so Discord and Slack cannot drift"
+    )
 
 
 async def test_interaction_check_allows_requester_with_valid_row_and_sends_nothing() -> None:
@@ -380,6 +453,21 @@ async def test_callback_dispatches_env_modal_for_env_kind() -> None:
     interaction.response.send_modal.assert_awaited_once()
     sent_modal = interaction.response.send_modal.call_args.args[0]
     assert isinstance(sent_modal, EnvCredentialModal), "env-kind rows must open EnvCredentialModal"
+
+
+async def test_callback_dispatches_env_file_modal_for_env_file_kind() -> None:
+    row = _row(token="envfilecallback12345678", kind="env_file", target=ENV_FILE_TARGET)
+    item = CredentialRequestButton(token=row.token, label="Add keys from .env", request_row=row)
+    bot = _fake_bot(MagicMock())
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
+
+    await item.callback(interaction)
+
+    interaction.response.send_modal.assert_awaited_once()
+    sent_modal = interaction.response.send_modal.call_args.args[0]
+    assert isinstance(sent_modal, EnvFileModal), (
+        "env_file-kind rows must open the upload form, not the single-value one"
+    )
 
 
 async def test_callback_dispatches_mcp_modal_for_mcp_kind() -> None:
@@ -521,7 +609,7 @@ async def test_callback_repo_kind_pre_filter_timeout_opens_modal_and_submit_time
     submit_interaction.followup.send = AsyncMock()
     submit_interaction.guild_id = _GUILD_ID
     submit_interaction.user = MagicMock(spec=discord.Member)
-    submit_interaction.user.id = 2
+    submit_interaction.user.id = int(_REQUESTER_ID)
     submit_interaction.user.guild_permissions.administrator = False
     submit_interaction.user.guild_permissions.manage_guild = False
     submit_interaction.guild.owner_id = 999
@@ -547,3 +635,171 @@ def test_custom_id_that_does_not_fullmatch_template_never_dispatches() -> None:
     assert pattern.fullmatch(build_custom_id("a" * 20)) is not None, (
         "a well-formed minted custom_id must match the dispatch template"
     )
+
+
+async def test_expired_click_flips_the_card() -> None:
+    """The one person who could have used this card is the one who can retire it.
+
+    Nothing sweeps expiries, so a card goes stale in the channel with its
+    button still showing. The late click is the event that can still correct
+    it, and the clicker's own refusal must not wait on that edit.
+    """
+    row = _row(
+        token="expiredcard1234567890",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        target_name="research-bot",
+        responder_name="Daimon",
+        with_card=True,
+    )
+    item = CredentialRequestButton(token=row.token, label="Add credential", request_row=row)
+    interaction = _card_click(user_id=_REQUESTER_ID)
+
+    allowed = await item.interaction_check(interaction)
+
+    assert allowed is False, "an expired row must still be rejected"
+    interaction.client.get_partial_messageable.assert_called_once_with(333)
+    interaction.client.get_partial_messageable.return_value.get_partial_message.assert_called_once_with(
+        444
+    )
+    edit = _partial_card(interaction).edit
+    edit.assert_awaited_once()
+    card = _card_text(edit.call_args.kwargs["view"])
+    assert EXPIRED_HEADLINE in card, "the card must now say the form expired"
+    assert "research-bot" in card, "and name the agent, so the way back is on the card too"
+    refusal = interaction.response.send_message.call_args.args[0]
+    assert all(line in card for line in refusal.split("\n")), (
+        "the card and the late clicker's refusal must say the same thing, line for line "
+        f"(refusal={refusal!r}, card={card!r})"
+    )
+
+
+async def test_wrong_requester_click_does_not_edit() -> None:
+    """Anyone in the channel can click; nobody else may retire the card."""
+    row = _row(
+        token="wrongrequestercard1234",
+        requester_platform_user_id=_REQUESTER_ID,
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        with_card=True,
+    )
+    item = CredentialRequestButton(token=row.token, label="Add credential", request_row=row)
+    interaction = _card_click(user_id=_OTHER_USER_ID)
+
+    allowed = await item.interaction_check(interaction)
+
+    assert allowed is False, "a non-requester click must be rejected"
+    interaction.client.get_partial_messageable.assert_not_called()
+    assert interaction.response.send_message.call_args.args[0] == WRONG_REQUESTER_MESSAGE, (
+        "the wrong clicker is told whose request this is, and changes nothing"
+    )
+
+
+# --- callback (mcp_oauth kind): a private sign-in link, no modal ------------------
+
+
+async def test_callback_mcp_oauth_kind_spends_the_request_and_sends_a_private_sign_in_link(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The OAuth card's click opens no modal: the request is spent atomically,
+    a flow row is minted and only the requester gets the start link."""
+    from daimon.core.stores import mcp_oauth_flows as flows_store
+    from daimon.testing.crypto import make_fernet
+
+    token = mint_request_token()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=f"guild-{token[:8]}")
+        row = await create_credential_request(
+            session,
+            token=token,
+            kind="mcp_oauth",
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_test"),
+            account_id=uuid.uuid4(),
+            target="notion",
+            mcp_server_url="https://mcp.notion.com/mcp",
+            requester_platform_user_id=_REQUESTER_ID,
+            channel_id="chan-1",
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="daimon",
+            requested_work=None,
+        )
+    agents = [ma_agent(id="ag_test", name="daimon", tenant_id=tenant.id).model_dump(mode="json")]
+    runtime = SimpleNamespace(
+        anthropic=build_fake_anthropic(lambda _r: list_response(agents)),
+        sessionmaker=db_session_factory,
+        settings=SimpleNamespace(
+            mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
+        ),
+        turn_deps=SimpleNamespace(fernet=make_fernet()),
+    )
+    bot = SimpleNamespace(runtime=runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    item = CredentialRequestButton(token=token, label="Connect", request_row=row)
+
+    await item.callback(interaction)
+
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True, "the link is for the requester alone"
+    view = kwargs["view"]
+    button = next(c for c in view.children if isinstance(c, discord.ui.Button))
+    assert button.url is not None and button.url.startswith(
+        "https://d.example/oauth/mcp/start?state="
+    )
+    state = button.url.rsplit("state=", 1)[1]
+    async with db_session_factory() as session:
+        flow = await flows_store.get_flow(session, state=state)
+        spent = await peek_credential_request(session, token=token)
+    assert flow is not None and flow.request_token == token, "the link points at a minted flow"
+    assert spent is not None and spent.used_at is not None, "the request is spent on the click"
+
+
+async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has_no_crypto_keys(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The sign-in routes only mount with crypto keys; without them the click must
+    not spend the request on a link to nowhere."""
+    token = mint_request_token()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=f"guild-{token[:8]}")
+        row = await create_credential_request(
+            session,
+            token=token,
+            kind="mcp_oauth",
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            target="notion",
+            mcp_server_url="https://mcp.notion.com/mcp",
+            requester_platform_user_id=_REQUESTER_ID,
+            channel_id="chan-1",
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="daimon",
+            requested_work=None,
+        )
+    runtime = SimpleNamespace(
+        sessionmaker=db_session_factory,
+        settings=SimpleNamespace(
+            mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
+        ),
+        turn_deps=SimpleNamespace(fernet=None),
+    )
+    interaction = _interaction(user_id=_REQUESTER_ID, client=SimpleNamespace(runtime=runtime))
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    await CredentialRequestButton(token=token, label="Connect", request_row=row).callback(
+        interaction
+    )
+
+    text = interaction.followup.send.call_args.args[0]
+    assert "cannot sign you in" in text, "the person learns the operator must finish setup"
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=token)
+    assert spent is not None and spent.used_at is None, "the request survives for a later click"

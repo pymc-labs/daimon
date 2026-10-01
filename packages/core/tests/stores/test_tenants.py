@@ -19,8 +19,6 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
 
 async def test_get_tenant_returns_tenant_row_with_all_fields(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, workspace_id="guild-get-fields")
@@ -130,7 +128,7 @@ async def test_set_provision_status_updates_tenant(
     """set_provision_status writes provision_status and archived_at on the tenant row."""
     await make_tenant(db_session, workspace_id="guild-status")
     # Need to get the tenant_id from what we just inserted
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-status")
 
@@ -153,7 +151,7 @@ async def test_set_provision_status_writes_reason_with_failed_status(
 ) -> None:
     """A reason passed alongside a failed status is persisted and readable via get_tenant."""
     await make_tenant(db_session, workspace_id="guild-reason-write")
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-reason-write")
 
@@ -178,7 +176,7 @@ async def test_set_provision_status_clear_reason_sets_it_back_to_none(
 ) -> None:
     """clear_reason=True clears a previously-written reason back to NULL."""
     await make_tenant(db_session, workspace_id="guild-reason-clear")
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-reason-clear")
 
@@ -200,7 +198,7 @@ async def test_set_provision_status_raises_when_reason_and_clear_reason_both_set
 ) -> None:
     """Passing both reason and clear_reason is rejected, mirroring the archive pair."""
     await make_tenant(db_session, workspace_id="guild-reason-conflict")
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-reason-conflict")
 
@@ -220,7 +218,7 @@ async def test_set_provision_status_leaves_existing_reason_untouched_when_neithe
     archive-only) must keep working without accidentally clearing a recorded reason.
     """
     await make_tenant(db_session, workspace_id="guild-reason-untouched")
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-reason-untouched")
 
@@ -242,7 +240,7 @@ async def test_set_provision_status_truncates_reason_longer_than_cap(
 ) -> None:
     """A reason longer than the stated cap is stored truncated with a marker."""
     await make_tenant(db_session, workspace_id="guild-reason-truncate")
-    from daimon.core.ma_identity import derive_tenant_uuid  # noqa: PLC0415
+    from daimon.core.ma_identity import derive_tenant_uuid
 
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-reason-truncate")
     long_reason = "x" * 3000

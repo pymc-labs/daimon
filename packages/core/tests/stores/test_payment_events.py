@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
 from daimon.core.stores import payment_events
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_upsert_for_dedup_inserts_new_row(db_session: AsyncSession) -> None:

@@ -25,7 +25,9 @@ def configure_log_level(level: str) -> None:
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        structlog.processors.dict_tracebacks,
+        structlog.processors.ExceptionRenderer(
+            structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+        ),
         structlog.processors.JSONRenderer(),
     ]
     structlog.configure(

@@ -19,8 +19,7 @@ def mock_interaction() -> MagicMock:
     real admin short-circuit passes without a DB read — these unit tests
     otherwise carry no real Postgres session for it to read from. Tests that
     need a non-admin caller build their own interaction (see
-    ``test_authz.py``, and the reachable/system negative cases in
-    test_modals.py / test_modals_mcp.py / test_edit_view.py).
+    ``test_authz.py``).
     """
     interaction = MagicMock()
     interaction.user = MagicMock(spec=discord.Member)
@@ -43,24 +42,3 @@ def tenant_id() -> uuid.UUID:
 @pytest.fixture
 def account_id() -> uuid.UUID:
     return uuid.UUID("00000000-0000-0000-0000-0000000000aa")
-
-
-@pytest.fixture(autouse=True)
-def _stub_panel_tenant_resolution(monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID) -> None:
-    """Stub per-interaction tenant resolution for panel/modal callback unit tests.
-
-    Panel callbacks resolve the guild's tenant via ``resolve_tenant_for_panel``
-    which hits the tenants table. These unit tests use a stub
-    anthropic + MagicMock interaction with no real DB, so we resolve straight
-    to the in-scope ``tenant_id`` fixture — the value the callbacks thread into
-    the write helpers, which is exactly what the assertions check.
-    """
-    resolver = AsyncMock(return_value=tenant_id)
-    monkeypatch.setattr("daimon.adapters.discord.agent_setup.panel._resolve_tenant", resolver)
-    monkeypatch.setattr("daimon.adapters.discord.agent_setup.edit_view._resolve_tenant", resolver)
-    monkeypatch.setattr(
-        "daimon.adapters.discord.agent_setup.modals.resolve_tenant_for_panel", resolver
-    )
-    monkeypatch.setattr(
-        "daimon.adapters.discord.agent_setup.modals_mcp.resolve_tenant_for_panel", resolver
-    )

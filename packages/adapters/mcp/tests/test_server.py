@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -21,8 +20,6 @@ from daimon.core.config import (
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 
 def _settings() -> Settings:

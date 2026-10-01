@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from daimon.adapters.discord.commands.memory import MemoryCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -17,8 +16,6 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-
-pytestmark = pytest.mark.asyncio
 
 GUILD_ID = 123456789
 

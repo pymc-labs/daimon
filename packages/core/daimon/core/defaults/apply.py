@@ -33,7 +33,7 @@ async def apply_defaults(
 ) -> ApplyReport:
     # 1. Provision cli:local deterministically (idempotent; signup_credit=0 → no ledger row).
     # Inline import breaks the apply ↔ provisioning circular dependency.
-    from daimon.core.defaults.provisioning import provision_tenant  # noqa: PLC0415
+    from daimon.core.defaults.provisioning import provision_tenant
 
     await provision_tenant(
         session_factory, platform="cli", workspace_id="local", signup_credit=Decimal("0")

@@ -1,6 +1,6 @@
 """Syrupy snapshot tests for the Discord embed render layer (SUITE-04, D-09/D-10).
 
-Locks `to_embed_data` and `to_preview_embed_data` output for a curated set of
+Locks `to_embed_data` output for a curated set of
 render-distinct `EmbedState` instances, plus `render_error` for a fixed
 request_id. Determinism comes from the injectable `now` kwarg (no wall-clock
 reads) and a fixed request_id (no ULID nondeterminism).
@@ -12,15 +12,12 @@ then review the diff in `__snapshots__/` before committing.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from daimon.adapters.discord.embed import (
+    EmbedData,
     EmbedState,
-    TrailEntry,
     TurnPhase,
     to_embed_data,
-    to_preview_embed_data,
 )
 from daimon.adapters.discord.errors import render_error
 from daimon.core.errors import SpecError
@@ -30,12 +27,8 @@ _FIXED_NOW = 142.0
 _FIXED_REQUEST_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 
-def _render(state: EmbedState) -> dict[str, Any]:
-    """Combine to_embed_data + to_preview_embed_data output for one snapshot."""
-    return {
-        "embed": to_embed_data(state, now=_FIXED_NOW),
-        "preview": to_preview_embed_data(state),
-    }
+def _render(state: EmbedState) -> EmbedData:
+    return to_embed_data(state, now=_FIXED_NOW)
 
 
 _STATES: dict[str, EmbedState] = {
@@ -51,18 +44,20 @@ _STATES: dict[str, EmbedState] = {
         phase=TurnPhase.TOOL_RUNNING,
         agent_name="Atlas",
         started_at=100.0,
-        trail=(TrailEntry(emoji="⚙️", text="Bash"),),
+        tool_lines=("🖋️ Running a command",),
     ),
     "saturated_trail_with_preview_and_cost": EmbedState(
         phase=TurnPhase.TOOL_RUNNING,
         agent_name="Atlas",
         started_at=100.0,
-        trail=(
-            TrailEntry(emoji="⚙️", text="Read"),
-            TrailEntry(emoji="⚙️", text="Write"),
-            TrailEntry(emoji="⚙️", text="Bash"),
-            TrailEntry(emoji="⚙️", text="Grep"),
-            TrailEntry(emoji="⚙️", text="Glob"),
+        tool_lines=(
+            "+3 earlier",
+            "✔️ Read a file",
+            "🚫 Wrote a file",
+            "✔️ Search issues (tracker)",
+            "✔️ Listed files",
+            "🔍 Searching files",
+            "🖋️ Running a command",
         ),
         text_preview="Preview text describing the ongoing work.",
         usage_in=1500,
@@ -73,7 +68,6 @@ _STATES: dict[str, EmbedState] = {
         phase=TurnPhase.DONE,
         agent_name="Atlas",
         started_at=100.0,
-        trail=(TrailEntry(emoji="✅", text="complete"),),
         usage_in=1500,
         usage_out=320,
     ),
@@ -81,7 +75,6 @@ _STATES: dict[str, EmbedState] = {
         phase=TurnPhase.DONE,
         agent_name="Atlas",
         started_at=100.0,
-        trail=(TrailEntry(emoji="✅", text="complete"),),
         usage_in=1500,
         usage_out=320,
         cost_str="$0.04",
@@ -90,7 +83,7 @@ _STATES: dict[str, EmbedState] = {
         phase=TurnPhase.ERROR,
         agent_name="Atlas",
         started_at=100.0,
-        trail=(TrailEntry(emoji="❌", text="rate limited"),),
+        error_reason="rate limited",
         usage_in=100,
         usage_out=50,
     ),

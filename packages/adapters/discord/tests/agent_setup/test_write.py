@@ -7,7 +7,6 @@ import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
-import discord
 import httpx
 import pytest
 import structlog
@@ -19,22 +18,17 @@ from daimon.adapters.discord.agent_setup.write import (
     call_reconcile_for_panel,
     create_blank_agent,
     load_tenant_roster,
-    mask_tail,
     replace_agent_resources_for_panel,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import get_binding, set_binding
-from daimon.core.stores.github_credentials import delete_credential_for_principal
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing import ma_agent
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,32 +55,11 @@ def _agent_dict(
         metadata["daimon_account"] = str(account_id)
     if managed:
         metadata["daimon_managed"] = "true"
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id=id_,
-        type="agent",
         name=name,
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]  # SDK model uses TypedDict + Pydantic forgives dict
         metadata=metadata,
-        description=None,
-        archived_at=None,
-        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]  # SDK accepts ISO string into datetime
-        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     ).model_dump(mode="json")
-
-
-def test_mask_tail_short_input_returns_stars_only() -> None:
-    assert mask_tail("abc") == "****", "inputs shorter than 4 must not leak any trailing chars"
-    assert mask_tail("") == "****", "empty input must mask to plain stars"
-
-
-def test_mask_tail_long_input_returns_last_four() -> None:
-    assert mask_tail("ghp_1234567890") == "****7890", "last 4 chars are the display mask"
-    assert mask_tail("abcd") == "****abcd", "exactly-4-char input may show all four"
 
 
 @pytest.mark.asyncio
@@ -277,21 +250,10 @@ async def test_load_tenant_roster_explicit_managed_false_stays_editable(
         "daimon_account": str(account_id),
         "daimon_managed": "false",
     }
-    agent_payload = BetaManagedAgentsAgent(
+    agent_payload = ma_agent(
         id="ag_explicit_false",
-        type="agent",
         name="explicit-false",
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
         metadata=metadata,
-        description=None,
-        archived_at=None,
-        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     ).model_dump(mode="json")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -363,56 +325,6 @@ def _runtime_with_settings(
     )
 
 
-async def test_fork_agent_adds_base_toolset_when_source_lacks_it(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """Forking a legacy agent created before the base-toolset guarantee must not
-    propagate the hole — the fork gains the base toolset so skills stay usable."""
-    source_payload = _agent_dict(
-        id_="ag_src", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    created: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return httpx.Response(200, json={"data": [source_payload], "next_page": None})
-        if request.method == "GET" and request.url.path == "/v1/agents/ag_src":
-            return httpx.Response(200, json=source_payload)
-        if request.method == "POST" and request.url.path == "/v1/agents":
-            created.append(json.loads(request.content))
-            return httpx.Response(
-                200,
-                json=_agent_dict(
-                    id_="ag_fork", name="myfork", tenant_id=tenant_id, account_id=account_id
-                ),
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
-
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler),
-        sessionmaker=db_session_factory,
-        fernet_key=Fernet.generate_key().decode(),
-        public_url=None,
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_spec=source_spec,
-        new_name="myfork",
-        account_id=account_id,
-    )
-
-    assert len(created) == 1, "fork must call MA create exactly once"
-    tool_types = [t.get("type") for t in created[0].get("tools", [])]
-    assert "agent_toolset_20260401" in tool_types, (
-        "fork of a toolless source must gain the base toolset; skills require read"
-    )
-
-
 def _runtime_with_db(
     anthropic: Any,
     *,
@@ -462,332 +374,6 @@ def _fork_handler(
         raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
 
     return handler
-
-
-async def test_fork_agent_rekeys_source_credential_onto_fork(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """After fork_agent, get_pat(agent_id=fork) resolves the source's token,
-    re-keyed under the fork's OWN principal."""
-    await make_tenant(
-        db_session, platform="discord", workspace_id="test-guild-fork-cred", id=tenant_id
-    )
-
-    source_payload = _agent_dict(
-        id_="ag_src_cred", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_cred")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_cred")
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_source_token_xxxx1234"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=("repo", "read:user"),
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_cred",
-        fork_name="myfork",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_spec=source_spec,
-        new_name="myfork",
-        account_id=account_id,
-    )
-
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat == plaintext, "fork's credential must resolve the source's token"
-
-    # Deleting the source credential must not break the fork (no aliasing).
-    await delete_credential_for_principal(db_session, principal_id=source_agent_uuid)
-    await db_session.commit()
-    fork_pat_after_delete = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat_after_delete == plaintext, (
-        "fork's credential must survive deletion of the source credential (no aliasing)"
-    )
-
-
-async def test_fork_agent_raises_when_source_credential_unresolvable(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """fork_agent fails loud when the source's inline-pat binding has no
-    resolvable credential (binding row exists, credential row does not)."""
-    await make_tenant(
-        db_session, platform="discord", workspace_id="test-guild-fork-nocred", id=tenant_id
-    )
-
-    source_payload = _agent_dict(
-        id_="ag_src_nocred", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_nocred")
-
-    # Binding exists (inline-pat:) but no github_credentials row backs it —
-    # the undecryptable/missing-credential case.
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_nocred",
-        fork_name="myfork2",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    with pytest.raises(DaimonError, match="github git-proxy"):
-        await write_mod.fork_agent(
-            runtime,
-            tenant_id=tenant_id,
-            source_spec=source_spec,
-            new_name="myfork2",
-            account_id=account_id,
-        )
-
-
-async def test_fork_agent_copies_anon_binding_without_error_or_credential_write(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """A public/anon: source binding forks with no error and no credential write;
-    the fork's binding carries the same repo with ma_secret_ref copied verbatim."""
-    await make_tenant(
-        db_session, platform="discord", workspace_id="test-guild-fork-anon", id=tenant_id
-    )
-
-    source_payload = _agent_dict(
-        id_="ag_src_anon", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_anon")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_anon")
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/public-repo",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_anon",
-        fork_name="myfork3",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_spec=source_spec,
-        new_name="myfork3",
-        account_id=account_id,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant_id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, "anon: source binding must still be copied to the fork"
-    assert fork_binding.repo_url == "acme/public-repo", "fork points at the same repo"
-    assert fork_binding.ma_secret_ref == "anon:", "anon: ref is copied verbatim, not rewritten"
-
-    fernet = build_multifernet((fernet_key,))
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "no credential write must happen for an anon: source"
-
-
-async def test_fork_agent_copies_repo_binding_with_rewritten_secret_ref(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """Fork's repo binding matches the source's repo_url/default_branch,
-    with ma_secret_ref rewritten to the fork's own inline-pat ref."""
-    await make_tenant(
-        db_session, platform="discord", workspace_id="test-guild-fork-binding", id=tenant_id
-    )
-
-    source_payload = _agent_dict(
-        id_="ag_src_bind", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_bind")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_bind")
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_bind_token_xxxx5678"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=("repo", "read:user"),
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="https://github.com/acme/private-repo",
-            default_branch="develop",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_bind",
-        fork_name="myfork4",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_spec=source_spec,
-        new_name="myfork4",
-        account_id=account_id,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant_id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, "fork must have a repo binding"
-    assert fork_binding.repo_url == "acme/private-repo", "fork points at the same repo"
-    assert fork_binding.default_branch == "develop", "default_branch copied from source"
-    assert fork_binding.ma_secret_ref == f"inline-pat:{fork_agent_uuid}", (
-        "ma_secret_ref rewritten to the fork's own inline-pat ref"
-    )
-
-
-async def test_fork_agent_unbound_source_produces_unbound_fork(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """A source with no repo binding forks with no binding and no error."""
-    await make_tenant(
-        db_session, platform="discord", workspace_id="test-guild-fork-unbound", id=tenant_id
-    )
-
-    source_payload = _agent_dict(
-        id_="ag_src_unbound", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_unbound")
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_unbound",
-        fork_name="myfork5",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-    source_spec = AgentSpec(name="source", model="claude-sonnet-4-6")
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_spec=source_spec,
-        new_name="myfork5",
-        account_id=account_id,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant_id, agent_id=fork_agent_uuid)
-    assert fork_binding is None, "unbound source must produce an unbound fork, no error"
 
 
 async def test_call_reconcile_for_panel_propagates_public_url_and_account_id(
@@ -972,7 +558,6 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
     """Plan-01 create-path guard: if an agent with the same name already exists
     under the guild account, create_blank_agent raises DaimonError (SC-2 + collision
     decision option (a))."""
-    from daimon.core.errors import DaimonError
 
     guild_account = uuid.UUID("00000000-0000-0000-0000-000000003333")
 
@@ -982,21 +567,10 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
         "daimon_name": "existing-agent",
         "daimon_account": str(guild_account),
     }
-    existing_agent = BetaManagedAgentsAgent(
+    existing_agent = ma_agent(
         id="ag_existing",
-        type="agent",
         name="existing-agent",
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
         metadata=existing_meta,
-        description=None,
-        archived_at=None,
-        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     )
 
     async def _collision_found(*args: Any, **kwargs: Any) -> list[Any]:
@@ -1030,30 +604,15 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
     Any non-archived same-name agent in the tenant blocks creation regardless of
     who owns it. Zero MA write calls must fire (collision is detected before reconcile).
     """
-    from daimon.core.errors import DaimonError
 
     other_account = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
 
     # Agent stamped with a different account — NOT the caller's account_id.
-    existing_agent = BetaManagedAgentsAgent(
+    existing_agent = ma_agent(
         id="ag_other_owner",
-        type="agent",
         name="taken-name",
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
-        metadata={
-            "daimon_tenant": str(tenant_id),
-            "daimon_name": "taken-name",
-            "daimon_account": str(other_account),  # different owner
-        },
-        description=None,
-        archived_at=None,
-        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
+        tenant_id=tenant_id,
+        metadata={"daimon_account": str(other_account)},  # different owner
     )
 
     async def _collision_found(*args: Any, **kwargs: Any) -> list[Any]:
@@ -1082,82 +641,6 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
 
     assert reconcile_calls == [], (
         "create must raise before reconcile when another owner holds the name"
-    )
-
-
-async def test_fork_agent_rejects_new_name_held_by_other_owner(
-    monkeypatch: pytest.MonkeyPatch,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """fork_agent rejects new_name that exists under a DIFFERENT owner.
-
-    The old docstring promised cross-owner name reuse was allowed; this inverts
-    that: any non-archived same-name agent in the tenant blocks the fork. Zero MA
-    create calls must fire.
-    """
-    from daimon.core.errors import DaimonError
-
-    other_account = uuid.UUID("00000000-0000-0000-0000-0000000000ee")
-
-    existing_agent = BetaManagedAgentsAgent(
-        id="ag_other_fork",
-        type="agent",
-        name="fork-target",
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
-        metadata={
-            "daimon_tenant": str(tenant_id),
-            "daimon_name": "fork-target",
-            "daimon_account": str(other_account),  # different owner
-        },
-        description=None,
-        archived_at=None,
-        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
-    )
-
-    create_calls: list[Any] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/v1/agents":
-            create_calls.append(request)
-        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
-
-    # find_agents_by_daimon_tag is called FIRST (for new_name collision check)
-    # and returns the existing agent; the handler for the actual source lookup
-    # must never be reached.
-    call_count = 0
-
-    async def _collision_for_new_name(*args: Any, **kwargs: Any) -> list[Any]:
-        nonlocal call_count
-        call_count += 1
-        # Only block on the new_name check (first call); source lookup is never reached
-        # because the DaimonError is raised first.
-        return [existing_agent]
-
-    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", _collision_for_new_name)
-
-    runtime = _runtime_with_settings(
-        build_stub_anthropic(handler), tenant_id=tenant_id, public_url=None
-    )
-    source_spec = AgentSpec(name="source-agent", model="claude-sonnet-4-6")
-
-    with pytest.raises(DaimonError, match="fork-target"):
-        await write_mod.fork_agent(
-            runtime,
-            tenant_id=tenant_id,
-            source_spec=source_spec,
-            new_name="fork-target",
-            account_id=account_id,  # caller's own account; other_account owns the collision
-        )
-
-    assert create_calls == [], (
-        "fork must raise before agents.create when another owner holds new_name"
     )
 
 
@@ -1268,100 +751,6 @@ async def test_kick_off_skill_sync_uses_runtime_credentials(
     assert isinstance(captured["fernet"], MultiFernet), (
         "kick_off_skill_sync must build a MultiFernet from settings.crypto.keys"
     )
-
-
-@pytest.mark.asyncio
-async def test_apply_repo_modal_persists_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """LD-04-01: RepoAuthModal must persist via agent_repo_binding.set_binding."""
-    from unittest.mock import AsyncMock
-
-    from daimon.adapters.discord.agent_setup import modals as modals_mod
-    from daimon.adapters.discord.agent_setup.modals import RepoAuthModal
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores import agent_repo_binding as binding_store
-
-    tenant = await make_tenant(db_session, platform="discord", workspace_id="test-guild-write")
-    # The bind writes a proof carrying account_id, whose column is a real FK
-    # to accounts.id — the submitting account must exist.
-    await make_account(db_session, tenant=tenant, id=account_id)
-
-    ma_agent_id = "agent_017abc"  # MA returns prefixed strings, not UUIDs (BUG-25-01)
-    expected_agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
-
-    async def fake_find(*args: Any, **kwargs: Any) -> Any:
-        mock_agent = MagicMock()
-        mock_agent.id = ma_agent_id
-        return mock_agent
-
-    async def fake_reconcile(runtime: Any, state: PanelState, *, tenant_id: uuid.UUID) -> Any:
-        return MagicMock()
-
-    monkeypatch.setattr(modals_mod, "find_agent_by_daimon_tag", fake_find)
-    monkeypatch.setattr(modals_mod, "call_reconcile_for_panel", fake_reconcile)
-    # Resolve the per-interaction tenant to the seeded tenant (overrides the
-    # conftest autouse stub, which returns a different fixture tenant_id).
-    monkeypatch.setattr(modals_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant.id))
-    # The no-PAT path verifies repo visibility before writing an anon: binding;
-    # stub it True so the success path runs without a live api.github.com call.
-    monkeypatch.setattr(modals_mod, "is_public_repo", AsyncMock(return_value=True))
-
-    selected = RosterEntry(
-        name="bot",
-        model="claude-sonnet-4-6",
-        spec=AgentSpec(name="bot", model="claude-sonnet-4-6"),
-    )
-    state = PanelState(roster=[selected], selected=selected, account_id=account_id)
-
-    settings = MagicMock()
-    settings.crypto.keys = ()
-    settings.github.oauth_scopes = ("repo",)
-    # The bind path no longer reads App credentials at all; set to None so a
-    # stray MagicMock read elsewhere doesn't look truthy by accident.
-    settings.github.app_id = None
-    settings.github.app_private_key = None
-    settings.mcp.public_url = None
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=build_stub_anthropic(),
-        sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
-    )
-
-    modal = RepoAuthModal(state, runtime=runtime, allowed_user_id=42)
-    modal.url_in._value = "https://github.com/me/repo"  # pyright: ignore[reportPrivateUsage]
-    modal.branch_in._value = "develop"  # pyright: ignore[reportPrivateUsage]
-    modal.pat_in._value = ""  # pyright: ignore[reportPrivateUsage]  # no inline PAT — OAuth path
-
-    interaction = MagicMock()
-    # A live guild admin, so the bind path's attachment gate short-circuits
-    # without a DB read — this test is about where the binding persists, not
-    # about who may write it.
-    interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 42
-    interaction.user.guild_permissions.administrator = True
-    interaction.response.defer = AsyncMock()
-    interaction.edit_original_response = AsyncMock()
-    interaction.followup.send = AsyncMock()
-
-    await modal.on_submit(interaction)
-
-    row = await binding_store.get_binding(
-        db_session, tenant_id=tenant.id, agent_id=expected_agent_uuid
-    )
-    assert row is not None, "RepoAuthModal must persist a row via agent_repo_binding.set_binding"
-    assert row.repo_url == "me/repo", "set_binding normalizes repo_url to canonical owner/repo"
-    assert row.default_branch == "develop", "binding default_branch must round-trip"
-    assert row.ma_secret_ref, "binding ma_secret_ref must be non-empty (LD-04-01)"
 
 
 async def test_load_tenant_roster_hydrates_mcp_servers_skills_and_tools(
@@ -1937,25 +1326,12 @@ async def test_replace_agent_resources_retries_once_on_version_conflict(
     returns the agent again; second update returns 200.
     Assert: outcome is UPDATED, exactly two update attempts, and a second retrieve fired.
     """
-    ma_agent_json = BetaManagedAgentsAgent(
+    ma_agent_json = ma_agent(
         id="ag_retry",
-        type="agent",
         name="retry-bot",
-        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
-        metadata={
-            "daimon_tenant": str(tenant_id),
-            "daimon_name": "retry-bot",
-            "daimon_account": str(account_id),
-        },
-        description=None,
-        archived_at=None,
-        created_at="2026-06-01T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-06-01T00:00:00Z",  # type: ignore[arg-type]
+        tenant_id=tenant_id,
+        metadata={"daimon_account": str(account_id)},
         version=3,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     ).model_dump(mode="json")
     updated_json = {**ma_agent_json, "version": 4}
 

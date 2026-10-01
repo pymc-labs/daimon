@@ -11,7 +11,7 @@
   date:     [August 2026],
   status:   "Confidential",
   paper:    "a4",
-  cover-background: 4,
+  cover-background: none,
   abstract: [
     Two or three sentences a stakeholder can read on its own: what was asked,
     what was found, what to do about it.

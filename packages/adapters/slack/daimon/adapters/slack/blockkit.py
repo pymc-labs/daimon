@@ -3,21 +3,22 @@
 Ports the Discord ``embed.py`` state machine to Slack Block Kit, dropping the
 color-based signaling.
 
-Converts EmbedEvents into State and Block Kit dicts with zero I/O dependencies.
-Imports only stdlib — no ``slack_sdk``, ``anthropic``, or ``daimon.core`` imports.
-``escape_mrkdwn`` is imported from the sibling ``mrkdwn`` module (same adapter
-package boundary; not a cross-adapter import).
+Converts EmbedEvents and the turn's content into State and Block Kit dicts
+with zero I/O dependencies. No ``slack_sdk`` or ``anthropic`` imports. The
+in-progress card's words come from ``daimon.core.turn.status_lines``, shared
+with Discord; ``escape_mrkdwn`` is imported from the sibling ``mrkdwn`` module
+(same adapter package boundary; not a cross-adapter import).
 
 Phase reference:
-  THINKING    → 🧠 thinking
-  TOOL_RUNNING → ⚙️ running tool
-  DONE        → ✅ complete   (terminal)
-  ERROR       → ❌ error      (terminal)
+  THINKING     → *Thinking* · {elapsed}
+  TOOL_RUNNING → *Working* · {elapsed}  (a tool call is running)
+  DONE         → collapsed summary (terminal)
+  ERROR        → ❌ collapsed summary (terminal)
 
 Status surface shape (non-terminal):
-  section  — *{phase title}*  (bold emoji + label)
-  context  — ⏱️ {elapsed}  ⚙️ {tool} … (elapsed + trail entries)
-  section  — 💬 {escaped preview}  (when text_preview is set; expand=True)
+  section  — *Thinking* · 12s  (headline)
+  section  — ```tool lines```  (when the turn has made tool calls)
+  section  — > {escaped draft}  (when text_preview is set; expand=True)
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
 
 Terminal collapse (DONE/ERROR):
@@ -32,11 +33,23 @@ Cost/usage footer on terminal.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.state import TurnState
+from daimon.core.turn.status_lines import (
+    format_draft,
+    format_headline,
+    format_tool_lines,
+    has_running_tool,
+)
+
+# Slack rejects a section block whose text exceeds 3,000 characters.
+NOTICE_MAX_CHARS = 2900
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -60,32 +73,17 @@ class EmbedEvent:
     """An event fed into the Block Kit state machine.
 
     kind discriminates the event:
-    - "thinking": agent is thinking or generating text
     - "message": agent emitted intermediate text; label is the full text
-      (capped to the preview length in ``update``)
-    - "tool_use": a tool was invoked; label is the tool name (never args)
+      (flattened and clipped to the draft length in ``update``)
     - "done": turn completed successfully
     - "error": turn failed; label is the error description
 
-    Per threat model T-13-01: label carries tool name only for tool_use events,
-    never tool arguments.
+    Tool calls are not events here: ``update_activity`` reads them from the
+    turn state on each render.
     """
 
-    kind: Literal["thinking", "message", "tool_use", "done", "error"]
+    kind: Literal["message", "done", "error"]
     label: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Trail entry
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class TrailEntry:
-    """A single entry in the activity trail."""
-
-    emoji: str
-    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -98,103 +96,65 @@ class State:
     """Accumulated Block Kit state. Immutable — update() returns new instances."""
 
     phase: TurnPhase = TurnPhase.THINKING
-    trail: tuple[TrailEntry, ...] = ()
+    tool_lines: tuple[str, ...] = ()
     agent_name: str = ""
     started_at: float = 0.0
     usage_in: int = 0
     usage_out: int = 0
     cost_str: str | None = None
+    balance_str: str | None = None
     text_preview: str | None = None
+    error_reason: str = ""
+    """Why the turn failed; leads the ERROR summary."""
+    notice: str = ""
+    """Rendered termination notice (mrkdwn); drawn above the ERROR summary."""
 
 
 # ---------------------------------------------------------------------------
-# Emoji constants
+# Constants
 # ---------------------------------------------------------------------------
 
-_EMOJI_BRAIN = "\U0001f9e0"  # 🧠
-_EMOJI_GEAR = "⚙️"  # ⚙️
-_EMOJI_CHECK = "✅"  # ✅
 _EMOJI_CROSS = "❌"  # ❌
 
-_KIND_EMOJI: dict[str, str] = {
-    "thinking": _EMOJI_BRAIN,
-    "message": _EMOJI_BRAIN,
-    "tool_use": _EMOJI_GEAR,
-    "done": _EMOJI_CHECK,
-    "error": _EMOJI_CROSS,
-}
-
-_KIND_PHASE: dict[str, TurnPhase] = {
-    "thinking": TurnPhase.THINKING,
-    "message": TurnPhase.THINKING,
-    "tool_use": TurnPhase.TOOL_RUNNING,
-    "done": TurnPhase.DONE,
-    "error": TurnPhase.ERROR,
-}
-
-_PHASE_TITLE: dict[TurnPhase, str] = {
-    TurnPhase.THINKING: f"{_EMOJI_BRAIN} thinking",
-    TurnPhase.TOOL_RUNNING: f"{_EMOJI_GEAR} running tool",
-    TurnPhase.DONE: f"{_EMOJI_CHECK} complete",
-    TurnPhase.ERROR: f"{_EMOJI_CROSS} error",
-}
-
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
+
+# Copy is byte-identical to the Discord adapter's orphan-retirement embed: the
+# two adapters must say the same thing about the same event.
+INTERRUPTED_NOTICE: str = (
+    f"{_EMOJI_CROSS} This turn was interrupted by a restart and cannot be "
+    "resumed. Nothing was lost on your side — mention me again to retry."
+)
 
 # ---------------------------------------------------------------------------
 # Pure functions
 # ---------------------------------------------------------------------------
 
-_TRAIL_MAX = 5
-
-_TEXT_PREVIEW_MAX_CHARS = 250
-
 
 def update(state: State, event: EmbedEvent) -> State:
     """Return a new State with event applied.
 
-    Trail is capped at _TRAIL_MAX (5) entries — keeps the last 5.
-    Phase transitions to match event kind.
-
-    Messages do not enter the trail: the latest agent message text is held in
-    ``text_preview`` and rendered as its own preview section block,
-    so reasoning is readable instead of truncated to a one-line snippet.
-
-    Thinking events update phase only — MA carries no thinking text to surface.
-    A bare "thinking" trail line would be empty noise next to real tool lines.
+    A message replaces the draft shown under the tool lines; an empty one
+    keeps the last draft. done and error move to the terminal phases.
     """
-    new_phase = _KIND_PHASE[event.kind]
-    if event.kind == "thinking":
-        # agent.thinking is a contentless progress ping — phase only, no trail.
-        return dataclasses.replace(state, phase=new_phase)
-
     if event.kind == "message":
         if not event.label:
-            return dataclasses.replace(state, phase=new_phase)
-        preview = (
-            event.label[:_TEXT_PREVIEW_MAX_CHARS] + "…"
-            if len(event.label) > _TEXT_PREVIEW_MAX_CHARS
-            else event.label
-        )
-        return dataclasses.replace(state, phase=new_phase, text_preview=preview)
+            return state
+        return dataclasses.replace(state, text_preview=format_draft(event.label))
+    if event.kind == "done":
+        return dataclasses.replace(state, phase=TurnPhase.DONE)
+    return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")
 
-    emoji = _KIND_EMOJI[event.kind]
-    text: str
-    if event.kind == "tool_use":
-        text = event.label
-    elif event.kind == "done":
-        text = "complete"
-    else:  # "error"
-        text = event.label if event.label else "error"
 
-    new_entry = TrailEntry(emoji=emoji, text=text)
-    current = state.trail
-    if len(current) >= _TRAIL_MAX:
-        updated_trail: tuple[TrailEntry, ...] = current[-(_TRAIL_MAX - 1) :] + (new_entry,)
-    else:
-        updated_trail = current + (new_entry,)
+def update_activity(state: State, turn: TurnState) -> State:
+    """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
 
-    return dataclasses.replace(state, phase=new_phase, trail=updated_trail)
+    A no-op once the turn is terminal, so a late render cannot reopen the card.
+    """
+    if state.phase in _TERMINAL_PHASES:
+        return state
+    phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
+    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    return dataclasses.replace(state, phase=phase, tool_lines=lines)
 
 
 def _fmt_tokens(n: int) -> str:
@@ -205,36 +165,48 @@ def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
 
 
-def _fmt_elapsed(total_seconds: int) -> str:
-    """Format elapsed seconds as ``42s`` or ``2m 3s``."""
-    total_seconds = max(0, total_seconds)
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes}m {seconds}s"
+def to_fallback_text(state: State, *, now: float | None) -> str:
+    """The running card's headline in plain words, e.g. ``Working · 1m 5s``.
+
+    Slack shows it in notifications and to screen readers instead of the blocks.
+    """
+    return _headline(state, now, bold=lambda word: word)
 
 
-def to_blocks(state: State, *, now: float | None) -> list[dict[str, Any]]:
+def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) -> str:
+    elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
+    return format_headline(
+        is_working=state.phase is TurnPhase.TOOL_RUNNING,
+        elapsed_seconds=elapsed_seconds,
+        bold=bold,
+    )
+
+
+def to_blocks(
+    state: State, *, now: float | None, cancel_key: str | None = None
+) -> list[dict[str, Any]]:
     """Render State into a list of Slack Block Kit block dicts.
 
     Args:
         state: Current turn State.
         now: Current monotonic time from the caller (``time.monotonic()``).
              Pass ``None`` to omit the elapsed line.
+        cancel_key: Optional per-turn routing key for the live Cancel button.
 
     Returns:
         A list of raw block dicts safe to pass directly to Slack's ``blocks=``
         parameter. No ``slack_sdk.models.blocks`` types — pure dicts (Pitfall 5).
 
     Non-terminal (THINKING / TOOL_RUNNING):
-        - section  : ``*{emoji phase title}*``
-        - context  : ⏱️ {elapsed}  ⚙️ {tool} … (when trail or now is set)
-        - section  : 💬 {escaped preview}  (when text_preview is set; expand=True)
+        - section  : ``*Thinking* · {elapsed}`` or ``*Working* · {elapsed}``
+        - section  : the tool lines in a code block  (when there are any)
+        - section  : > {escaped draft}  (when text_preview is set; expand=True)
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
         - context  : {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
-                     ERROR prepends ❌ {reason}
+                     ERROR prepends ❌ {reason}, under a section with the
+                     termination notice when one was rendered
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
@@ -244,65 +216,85 @@ def to_blocks(state: State, *, now: float | None) -> list[dict[str, Any]]:
         parts: list[str] = [state.agent_name, f"{elapsed}s", tokens]
         if state.cost_str is not None:
             parts.append(state.cost_str)
+        if state.balance_str is not None:
+            parts.append(state.balance_str)
         summary = " · ".join(parts)
         if state.phase is TurnPhase.ERROR:
-            reason = state.trail[-1].text if state.trail else "error"
-            summary_text = f"{_EMOJI_CROSS} {reason} · {summary}"
+            summary_text = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"
         else:
             summary_text = summary
-        return [
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": summary_text}],
-            }
-        ]
+        blocks: list[dict[str, Any]] = []
+        if state.phase is TurnPhase.ERROR and state.notice:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": state.notice}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary_text}]})
+        return blocks
 
-    # Non-terminal: build the status surface blocks.
-    title = _PHASE_TITLE[state.phase]
+    # Non-terminal: the headline, the tool lines, then the latest draft.
+    headline = _headline(state, now, bold=lambda word: f"*{word}*")
     blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]
-
-    # Context block: elapsed marker + trail entries (omitted when both are absent).
-    context_lines: list[str] = []
-    if now is not None and state.started_at:
-        context_lines.append(f"⏱️ {_fmt_elapsed(int(now - state.started_at))}")
-    context_lines += [f"{e.emoji} {e.text}" for e in state.trail]
-    if context_lines:
+    if state.tool_lines:
+        tool_lines = escape_mrkdwn("\n".join(state.tool_lines))
         blocks.append(
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "\n".join(context_lines)}],
-            }
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"```\n{tool_lines}\n```"}}
         )
-
-    # Preview section: latest agent message text, entity-escaped, expand=True.
+    # expand=True keeps Slack from folding the draft behind "see more".
     if state.text_preview:
         blocks.append(
             {
                 "type": "section",
                 "expand": True,
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"💬 {escape_mrkdwn(state.text_preview)}",
-                },
+                "text": {"type": "mrkdwn", "text": f"> {escape_mrkdwn(state.text_preview)}"},
             }
         )
 
     # Cancel button — present only while the turn is running (non-terminal).
-    # action_id="cancel_turn"; no `value` field.
+    # A per-turn value lets the listener route clicks before Slack returns the
+    # message ts from chat.postMessage.
+    cancel_button: dict[str, Any] = {
+        "type": "button",
+        "action_id": "cancel_turn",
+        "text": {"type": "plain_text", "text": "Cancel"},
+        "style": "danger",
+    }
+    if cancel_key is not None:
+        cancel_button["value"] = cancel_key
     blocks.append(
         {
             "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "cancel_turn",
-                    "text": {"type": "plain_text", "text": "Cancel"},
-                    "style": "danger",
-                }
-            ],
+            "elements": [cancel_button],
         }
     )
 
     return blocks
+
+
+def to_interrupted_blocks() -> list[dict[str, Any]]:
+    """Render the frozen status card a boot sweep leaves behind.
+
+    Deliberately NOT ``to_blocks(State(phase=TurnPhase.ERROR, ...))``: a fresh
+    boot process has the DB row and nothing else -- no agent name, no usage,
+    no monotonic start -- so the terminal collapse would render an empty
+    agent field and a misleading "0s · 0 in / 0 out" for a turn that may have
+    run 40 minutes.
+
+    Takes no arguments and emits no ``actions`` block, so the Cancel button is
+    gone by construction -- there is no live turn left to cancel.
+    """
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": INTERRUPTED_NOTICE}}]
+
+
+def format_termination_notice(notice: TerminationNotice) -> str:
+    """Draw the core notice as mrkdwn for the ERROR card.
+
+    The headline is not repeated here: it is already the summary's reason.
+    """
+    lines = [escape_mrkdwn(notice.cause)]
+    work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
+    if work is not None:
+        lines.append(work)
+    lines.append(notice.survived)
+    lines.append(f"*Next:* {notice.next_step}")
+    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    return fit_notice(lines, tail=tail, limit=NOTICE_MAX_CHARS)

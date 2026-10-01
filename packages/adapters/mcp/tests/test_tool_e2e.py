@@ -11,7 +11,6 @@ import json
 import uuid
 
 import httpx
-import pytest
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.middleware.mcp_identity import ClaimResolver
 from daimon.adapters.mcp.server import create_mcp_app
@@ -21,6 +20,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp import Client
@@ -29,9 +29,7 @@ from fastmcp.server.middleware import MiddlewareContext
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .factories import make_ma_agent, seed_tenant_and_account
-
-pytestmark = pytest.mark.asyncio
+from .harness import seed_tenant_and_account
 
 
 def _fixed_resolvers(
@@ -74,7 +72,7 @@ async def test_list_agents_end_to_end(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="demo",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
                 ).model_dump(mode="json")
@@ -112,7 +110,7 @@ async def test_create_agent_end_to_end_validates_ma_response(
     tenant_id, account_id = await seed_tenant_and_account(db_session)
     await db_session.commit()
 
-    ma_response = make_ma_agent(id="ag_new", name="newagent")
+    ma_response = ma_agent(id="ag_new", name="newagent")
 
     def handler(request: httpx.Request) -> httpx.Response:
         # reconcile calls GET /agents (list for collision + dedup), POST /agents (create),
@@ -160,12 +158,12 @@ async def test_list_agents_isolates_tenants_end_to_end(
 
     # Both apps share a transport that returns all agents; each app filters to its tenant
     all_agents = [
-        make_ma_agent(
+        ma_agent(
             id="ag_a",
             name="a-agent",
             metadata={"daimon_tenant": str(tenant_a_id), "daimon_name": "a-agent"},
         ).model_dump(mode="json"),
-        make_ma_agent(
+        ma_agent(
             id="ag_b",
             name="b-agent",
             metadata={"daimon_tenant": str(tenant_b_id), "daimon_name": "b-agent"},
@@ -265,7 +263,7 @@ async def test_list_skills_end_to_end(
     mcp = app.state.mcp  # type: ignore[attr-defined]
 
     async with Client(mcp) as client:
-        result = await client.call_tool("skills_list", {})
+        result = await client.call_tool("list_skills", {})
         skills = json.loads(result.content[0].text)  # type: ignore[union-attr]
         assert [s["name"] for s in skills] == ["e2e-skill"], (
             "should list the e2e skill with bare name"

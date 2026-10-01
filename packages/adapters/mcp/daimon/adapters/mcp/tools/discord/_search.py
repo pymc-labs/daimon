@@ -14,6 +14,7 @@ import discord
 import discord.http
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -53,6 +54,12 @@ class _SearchAttachment(BaseModel):
     size: int
 
 
+class _SearchReference(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    channel_id: str | None = None
+
+
 class _SearchHit(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -63,6 +70,24 @@ class _SearchHit(BaseModel):
     timestamp: str = ""
     attachments: list[_SearchAttachment] = []
     hit: bool = False
+    # Kept so a THREAD_CREATED notice (type 18, content = the thread's name) can
+    # be withheld when the thread it references is sealed.
+    type: int = 0
+    message_reference: _SearchReference | None = None
+
+
+_THREAD_CREATED = 18
+
+
+def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) -> bool:
+    """Same rule as channel history: a thread-created notice naming a sealed
+    thread is withheld; one naming no thread is withheld whenever anything is sealed."""
+    if hit.type != _THREAD_CREATED:
+        return False
+    thread_id = hit.message_reference.channel_id if hit.message_reference else None
+    if thread_id is None:
+        return bool(read_policy.policy.sealed_channel_ids)
+    return not read_policy.allows(thread_id, hit.channel_id)
 
 
 class _SearchThread(BaseModel):
@@ -105,6 +130,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
     | None = None,
     limit: int = 25,
     offset: int = 0,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SearchResult:
     # 1. Auth gates
     user_id = _require_discord_identity(auth)
@@ -141,8 +167,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
+                    read_policy.require(ch_id, str(guild_ch.parent_id))
                 else:
                     _check_view_permission(guild_ch, member)
+                    read_policy.require(ch_id)
 
         # 5. Build per-channel visibility data from fetch_channels.
         #    Absence does NOT mean invisible — it means "resolve it".
@@ -200,11 +228,19 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # 9. Visibility filter per hit (cache decisions per channel_id)
         visible_hits: list[_SearchHit] = []
         view_cache: dict[str, bool] = {}
+        # Thread -> parent, for the sealed-channel rule below.
+        parent_by_channel_id: dict[str, str] = {
+            t_id: t.parent_id for t_id, t in thread_by_id.items() if t.parent_id
+        }
 
         for group in parsed.messages:
             # Hit selection: pick hit=true, fallback to group[0]
             hit = next((m for m in group if m.hit), group[0] if group else None)
             if hit is None:
+                continue
+            # Before the per-channel cache: this is a per-message rule, and the
+            # notice sits in an open parent whose other hits stay visible.
+            if _names_a_withheld_thread(hit, read_policy):
                 continue
 
             ch_id = hit.channel_id
@@ -261,6 +297,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 try:
                     raw_ch = await _resolve_channel(c, ch_id)
                     if isinstance(raw_ch, discord.Thread):
+                        parent_by_channel_id[ch_id] = str(raw_ch.parent_id)
                         try:
                             await _check_thread_view(c, raw_ch, member, user_id)
                             can_view = True
@@ -274,6 +311,8 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 except ToolError:
                     can_view = False
 
+            # A sealed channel's hits are withheld outside it, like an invisible one's.
+            can_view = can_view and read_policy.allows(ch_id, parent_by_channel_id.get(ch_id))
             view_cache[ch_id] = can_view
             if can_view:
                 visible_hits.append(hit)
@@ -308,10 +347,22 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # When channel_ids is not provided, total_results is the guild-wide
         # count from the bot's perspective — suppress it to avoid leaking the
         # existence/volume of messages in channels the caller cannot view.
-        effective_total = parsed.total_results if channel_ids else showing
+        # Once anything is sealed, a scoped count could include hits in a sealed
+        # thread under a scoped parent, so it reports only what is shown too.
+        exact_count = bool(channel_ids) and not read_policy.policy.sealed_channel_ids
+        effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
-        if clamped_offset + consumed < parsed.total_results:
-            if channel_ids:
+        if read_policy.policy.sealed_channel_ids:
+            # With anything sealed, the raw total (and a page's raw size) could
+            # count withheld hits, so the hint rests on what is shown: a full
+            # page of visible rows may have more behind it.
+            if showing == clamped_limit:
+                hint = (
+                    f"More results may be available. "
+                    f"Use offset={clamped_offset + consumed} to continue."
+                )
+        elif clamped_offset + consumed < parsed.total_results:
+            if exact_count:
                 hint = (
                     f"More results available. Use offset={clamped_offset + consumed} to continue."
                 )

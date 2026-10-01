@@ -25,6 +25,7 @@ from daimon.core._models import (
     CliPrincipal,
     PlatformPrincipal,
     PrincipalLink,
+    SecurityAuditEvent,
     Tenant,
     TenantLedger,
     UsageEvent,
@@ -67,6 +68,7 @@ from daimon.core.stores.domain import (
     UsageEventRow,
     WizardSessionRow,
 )
+from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import new_short_id
@@ -79,7 +81,7 @@ async def make_tenant(
     *,
     platform: Platform = "discord",
     workspace_id: str | None = None,
-    id: uuid.UUID | None = None,  # noqa: A002 - mirrors the Tenant.id column name
+    id: uuid.UUID | None = None,  # mirrors the Tenant.id column name
 ) -> TenantRow:
     """Create a Tenant row and flush it into the session.
 
@@ -106,7 +108,7 @@ async def make_account(
     session: AsyncSession,
     *,
     tenant: TenantRow | None = None,
-    id: uuid.UUID | None = None,  # noqa: A002 - mirrors the Account.id column name
+    id: uuid.UUID | None = None,  # mirrors the Account.id column name
 ) -> AccountRow:
     tenant = tenant or await make_tenant(session)
     orm = Account(id=id, tenant_id=tenant.id) if id is not None else Account(tenant_id=tenant.id)
@@ -429,6 +431,7 @@ async def make_thread_session(
     platform: str = "discord",
     thread_id: str | None = None,
     ma_session_id: str | None = None,
+    ma_agent_id: str | None = None,
     watermark_message_id: str | None = None,
     created_at: datetime | None = None,
 ) -> ThreadSessionRow:
@@ -444,6 +447,7 @@ async def make_thread_session(
         thread_id=thread_id,
         account_id=account.id,
         ma_session_id=ma_session_id,
+        ma_agent_id=ma_agent_id,
         watermark_message_id=watermark_message_id,
         created_at=created_at,
     )
@@ -534,3 +538,26 @@ async def make_wizard_session(
         expires_at=expires_at,
         now=now,
     )
+
+
+async def make_security_audit_event(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    occurred_at: datetime | None = None,
+) -> SecurityAuditRow:
+    """Seed metadata at a chosen time for audit retention and privacy tests."""
+    event = SecurityAuditEvent(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform="slack",
+        platform_user_id="U123",
+        tool_name="read",
+        outcome="allowed",
+        reason="completed",
+        occurred_at=occurred_at or datetime.now(UTC),
+    )
+    session.add(event)
+    await session.flush()
+    return SecurityAuditRow.model_validate(event)

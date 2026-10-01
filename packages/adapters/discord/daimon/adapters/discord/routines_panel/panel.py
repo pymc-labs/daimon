@@ -107,7 +107,7 @@ class _RoutinePicker(discord.ui.Select["RoutinesPanelView"]):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
-        except Exception as exc:  # noqa: BLE001 — routines-panel button-callback boundary
+        except Exception as exc:  # routines-panel button-callback boundary
             await _send_callback_error(interaction, exc)
 
 
@@ -177,7 +177,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
             await _rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
-        except Exception as exc:  # noqa: BLE001 — routines-panel button-callback boundary
+        except Exception as exc:  # routines-panel button-callback boundary
             await _send_callback_error(interaction, exc)
 
 
@@ -195,7 +195,7 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
             return
         try:
             from daimon.adapters.discord.routines_panel.subviews import (
-                ViewLastOutputSubView,  # noqa: PLC0415
+                ViewLastOutputSubView,
             )
 
             row = self.view.state.selected.routine
@@ -206,7 +206,7 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
-        except Exception as exc:  # noqa: BLE001 — routines-panel button-callback boundary
+        except Exception as exc:  # routines-panel button-callback boundary
             await _send_callback_error(interaction, exc)
 
 
@@ -224,7 +224,7 @@ class _RefreshButton(discord.ui.Button["RoutinesPanelView"]):
             await _rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
-        except Exception as exc:  # noqa: BLE001 — routines-panel button-callback boundary
+        except Exception as exc:  # routines-panel button-callback boundary
             await _send_callback_error(interaction, exc)
 
 
@@ -246,7 +246,7 @@ class _DoneButton(discord.ui.Button["RoutinesPanelView"]):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
-        except Exception as exc:  # noqa: BLE001 — routines-panel button-callback boundary
+        except Exception as exc:  # routines-panel button-callback boundary
             await _send_callback_error(interaction, exc)
 
 

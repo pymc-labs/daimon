@@ -10,18 +10,18 @@ Patterns:
 
 from __future__ import annotations
 
-import io
+import asyncio
+import json
 import re
-import tarfile
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
 import httpx
 import pytest
-from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_sync import resync as resync_module
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.skill_sync.resync import resync_bound_repo, should_resync
 from daimon.core.specs import SkillRepo
@@ -30,36 +30,24 @@ from daimon.core.stores import agent_repo_binding as binding_store
 from daimon.core.stores import github_app_installations as install_store
 from daimon.core.stores import github_credentials as cred_store
 from daimon.core.stores.domain import RepoAccessProof, RepoProofKind
+from daimon.testing.archives import make_tarball
+from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_cli_principal, make_tenant
 from daimon.testing.ma import (
+    FakeMAState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
 )
+from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 _TEST_APP_ID = "123456"
-
-
-def _make_fernet() -> MultiFernet:
-    return MultiFernet([Fernet(Fernet.generate_key())])
-
-
-def _make_tarball(files: dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for path, content in files.items():
-            info = tarfile.TarInfo(name=path)
-            info.size = len(content)
-            tf.addfile(info, io.BytesIO(content))
-    return buf.getvalue()
 
 
 def _make_tarball_handler(tarball: bytes) -> tuple[list[httpx.Request], httpx.MockTransport]:
@@ -164,12 +152,12 @@ async def test_resync_persists_last_sync_on_success(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """resync_bound_repo calls update_last_sync with last_sync_at set + last_sync_error=None on success."""
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-success")
     tenant_id = cli.tenant_id
     repo_url = "owner/persist-test-repo"
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     _, tarball_transport = _make_tarball_handler(tarball)
     http_client = httpx.AsyncClient(transport=tarball_transport)
 
@@ -194,8 +182,17 @@ async def test_resync_persists_last_sync_on_success(
     )
     await db_session.commit()
 
+    async with db_session_factory.begin() as session:
+        await binding_store.update_last_sync(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            last_sync_at=datetime.now(UTC),
+            last_sync_error="earlier sync failed",
+        )
+
     before = datetime.now(UTC)
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -211,6 +208,8 @@ async def test_resync_persists_last_sync_on_success(
     assert row.last_sync_at is not None, "last_sync_at must be set after successful resync"
     assert row.last_sync_at >= before, "last_sync_at must be after resync started"
     assert row.last_sync_error is None, "last_sync_error must be None on success"
+    assert report.failed_bindings == 0, "a later successful run must clear the failed status"
+    assert report.retryable_bindings == 0, "a clean run must not remain retryable"
 
 
 async def test_resync_records_error_on_failure(
@@ -223,7 +222,7 @@ async def test_resync_records_error_on_failure(
     which propagates out of _resolve_agent_name_and_principal and gets caught at the
     _resync_one_binding named boundary, recording last_sync_error.
     """
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-fail")
     tenant_id = cli.tenant_id
     repo_url = "owner/error-test-repo"
@@ -244,7 +243,7 @@ async def test_resync_records_error_on_failure(
     )
 
     # Should NOT raise — resync catches and persists error
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -259,6 +258,62 @@ async def test_resync_records_error_on_failure(
     assert row.last_sync_error is not None, (
         "last_sync_error must be set when the resync fails at the named boundary"
     )
+    assert report.failed_bindings == 1, "the Managed Agents outage must remain a binding failure"
+    assert report.retryable_bindings == 1, "a connection outage must be retried after backoff"
+
+
+async def test_resync_cancellation_does_not_clear_existing_error(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-cancel")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/cancel-test-repo"
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_cancel_probe")
+    await _setup_binding(db_session, tenant_id=tenant_id, agent_id=agent_id, repo_url=repo_url)
+    await db_session.commit()
+
+    async with db_session_factory.begin() as session:
+        await binding_store.update_last_sync(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            last_sync_at=datetime.now(UTC),
+            last_sync_error="earlier sync failed",
+        )
+
+    async def cancel_during_bridge_resolution(
+        *,
+        session: AsyncSession,
+        binding: object,
+        anthropic_client: object,
+    ) -> tuple[str, uuid.UUID] | None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        resync_module, "_resolve_agent_name_and_principal", cancel_during_bridge_resolution
+    )
+    anthropic_client = build_fake_anthropic(lambda request: NotHandled)
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b""))
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await resync_bound_repo(
+            repo_full_name=repo_url,
+            ref="refs/heads/main",
+            sessionmaker=db_session_factory,
+            fernet=make_fernet(),
+            http_client=http_client,
+            anthropic_client=anthropic_client,
+        )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert row is not None, "the binding should remain available after cancellation"
+    assert row.last_sync_error == "resync cancelled", (
+        "cancellation must remain visible instead of clearing the earlier sync error"
+    )
 
 
 async def test_resync_skips_push_to_non_default_branch(
@@ -266,7 +321,7 @@ async def test_resync_skips_push_to_non_default_branch(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A push to a non-default branch must not trigger a resync (no last_sync_at update)."""
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-branch")
     tenant_id = cli.tenant_id
     repo_url = "owner/branch-filter-repo"
@@ -326,7 +381,7 @@ async def test_resync_prefers_installation_token(
     from cryptography.hazmat.primitives.asymmetric import rsa
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-apptoken")
     tenant_id = cli.tenant_id
     repo_url = "owner/app-token-repo"
@@ -353,7 +408,7 @@ async def test_resync_prefers_installation_token(
     )
     await db_session.commit()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
 
     token_exchange_calls: list[httpx.Request] = []
     tarball_calls: list[httpx.Request] = []
@@ -402,6 +457,10 @@ async def test_resync_prefers_installation_token(
     assert len(token_exchange_calls) == 1, (
         "installation token exchange endpoint must be called when an App installation exists"
     )
+    assert json.loads(token_exchange_calls[0].content or b"{}") == {
+        "repositories": ["app-token-repo"],
+        "permissions": {"contents": "read"},
+    }, "the resync token must be narrowed to the pushed repo and read-only"
     assert len(tarball_calls) >= 1, "tarball fetch must happen after token exchange"
     auth_header = tarball_calls[0].headers.get("authorization", "")
     assert "ghs_app_installation_token_xyz" in auth_header, (
@@ -429,7 +488,7 @@ async def test_resync_prefers_per_agent_pat_over_installation_token(
     from cryptography.hazmat.primitives.asymmetric import rsa
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-pat-wins")
     tenant_id = cli.tenant_id
     repo_url = "owner/pat-beats-app-repo"
@@ -468,7 +527,7 @@ async def test_resync_prefers_per_agent_pat_over_installation_token(
     )
     await db_session.commit()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     token_exchange_calls: list[httpx.Request] = []
     tarball_calls: list[httpx.Request] = []
 
@@ -537,7 +596,7 @@ async def test_resync_refuses_binding_with_no_recorded_proof_and_records_last_sy
     from cryptography.hazmat.primitives.asymmetric import rsa
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-no-proof")
     tenant_id = cli.tenant_id
     repo_url = "owner/no-proof-repo"
@@ -592,7 +651,7 @@ async def test_resync_refuses_binding_with_no_recorded_proof_and_records_last_sy
         fallback_pat="ghp_operator_fallback_should_not_be_used",  # type: ignore[arg-type]
     )
 
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -616,6 +675,10 @@ async def test_resync_refuses_binding_with_no_recorded_proof_and_records_last_sy
     assert "proof" in row.last_sync_error.lower(), (
         f"last_sync_error must name the missing proof as the reason; got {row.last_sync_error!r}"
     )
+    assert report.failed_bindings == 1, "the authorization refusal must remain a binding failure"
+    assert report.retryable_bindings == 0, (
+        "credential proof needs correction before another attempt"
+    )
 
 
 async def test_resync_continues_batch_after_refusing_one_unproven_binding(
@@ -625,7 +688,7 @@ async def test_resync_continues_batch_after_refusing_one_unproven_binding(
     """One binding with no recorded proof must not abort the resync batch --
     a second, proof-bearing binding on the same pushed repo still syncs.
     """
-    fernet = _make_fernet()
+    fernet = make_fernet()
     tenant = await make_tenant(db_session)
     tenant_id = tenant.id
     repo_url = "owner/batch-continues-repo"
@@ -664,7 +727,7 @@ async def test_resync_continues_batch_after_refusing_one_unproven_binding(
 
     # No SKILL.md -- avoids needing a skills-upload fake; only presence of a
     # successful fetch and last_sync_error=None is asserted for this binding.
-    tarball = _make_tarball({"r-main/README.md": b"no skills here"})
+    tarball = make_tarball({"r-main/README.md": b"no skills here"})
     tarball_calls: list[httpx.Request] = []
 
     def tarball_handler(request: httpx.Request) -> httpx.Response:
@@ -710,7 +773,7 @@ async def test_resync_uses_fallback_pat_for_verified_public_binding(
     """
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-fallback-public")
     tenant_id = cli.tenant_id
     repo_url = "owner/fallback-public-repo"
@@ -730,7 +793,7 @@ async def test_resync_uses_fallback_pat_for_verified_public_binding(
     )
     await db_session.commit()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     tarball_calls: list[httpx.Request] = []
 
     def tarball_handler(request: httpx.Request) -> httpx.Response:
@@ -769,7 +832,7 @@ async def test_resync_fetches_anonymously_for_verified_public_binding_without_fa
     is the legitimate anonymous case: refusing it would break public skill
     sync on any deployment that never configured an operator fallback token.
     """
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-anon-public")
     tenant_id = cli.tenant_id
     repo_url = "owner/anon-public-repo"
@@ -791,7 +854,7 @@ async def test_resync_fetches_anonymously_for_verified_public_binding_without_fa
 
     # No SKILL.md -- avoids needing a skills-upload fake; this test asserts
     # only on the fetch's auth header and the absence of a recorded error.
-    tarball = _make_tarball({"r-main/README.md": b"no skills here"})
+    tarball = make_tarball({"r-main/README.md": b"no skills here"})
     tarball_calls: list[httpx.Request] = []
 
     def tarball_handler(request: httpx.Request) -> httpx.Response:
@@ -837,7 +900,7 @@ async def test_resync_refuses_pat_kind_proof_binding_without_credential_even_wit
     """
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-pat-proof-no-cred")
     tenant_id = cli.tenant_id
     repo_url = "owner/pat-proof-no-credential-repo"
@@ -901,7 +964,7 @@ async def test_resync_pat_tier_is_per_agent(
     Agent B's resync fetches with NO credential (anon/public).
     Neither ever resolves the principal-default credential.
     """
-    fernet = _make_fernet()
+    fernet = make_fernet()
     tenant = await make_tenant(db_session)
     tenant_id = tenant.id
     repo_url = "owner/d25-isolation-repo"
@@ -957,7 +1020,7 @@ async def test_resync_pat_tier_is_per_agent(
     )
     await db_session.commit()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
 
     # --- Run resync for agent A (has per-agent PAT) ---
     auth_headers_a: list[str | None] = []
@@ -1004,6 +1067,363 @@ async def test_resync_pat_tier_is_per_agent(
     auth_b = auth_headers_b[0]
     assert auth_b is None, (
         f"agent B has no per-agent credential — fetch must be unauthenticated (anon); got: {auth_b!r}"
+    )
+
+
+async def test_resync_uses_exact_binding_agent_identity(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A binding for the older same-name MA agent must retain its exact target."""
+    from daimon.core.stores.user_skills import list_user_skills_for_agent
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/bound-identity-repo"
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(combine_handlers(_make_skills_handler(), ma_handler))
+
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="bound-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(db_session, tenant_id=tenant.id, agent_id=agent_id_a, repo_url=repo_url)
+    pat_a = "ghp_binding_agent_a"
+    await cred_store.upsert_credential(
+        db_session,
+        principal_id=agent_id_a,
+        github_login="agent-a-login",
+        encrypted_token=encrypt_token(fernet, pat_a),
+        scopes=("repo",),
+    )
+    await ag_binding_store.set_agent_github_binding(
+        db_session, agent_id=agent_id_a, principal_id=agent_id_a
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    auth_headers: list[str | None] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        auth_headers.append(request.headers.get("authorization"))
+        return httpx.Response(200, content=tarball)
+
+    update_targets: list[str] = []
+
+    def record_agent_updates(request: httpx.Request) -> httpx.Response:
+        match = re.fullmatch(r"/v1/agents/([^/]+)", request.url.path)
+        if request.method == "POST" and match:
+            update_targets.append(match.group(1))
+        raise NotHandled
+
+    await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(record_agent_updates, _make_skills_handler(), ma_handler)
+        ),
+    )
+
+    assert auth_headers and pat_a in (auth_headers[0] or ""), (
+        "the binding's GitHub fetch must use agent A's PAT"
+    )
+    assert update_targets == [ma_id_a], (
+        f"the binding's skill attach must target its exact MA agent, got {update_targets}"
+    )
+    async with db_session_factory() as session:
+        rows_a = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="bound-agent"
+        )
+    assert [row.name for row in rows_a] == ["r"], (
+        "the binding's user_skills ledger must be keyed by its MA identity"
+    )
+
+
+async def test_resync_refuses_duplicate_name_before_github_or_ma_writes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.user_skills import list_user_skills_for_agent
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/duplicate-bound-name"
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="duplicate-agent",
+    )
+    ma_id_b = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="duplicate-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    agent_id_b = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_b)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    github_requests: list[httpx.Request] = []
+    ma_writes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(
+            200,
+            content=make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"}),
+        )
+
+    def capture_ma_writes(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and (
+            request.url.path == "/v1/skills" or re.fullmatch(r"/v1/agents/[^/]+", request.url.path)
+        ):
+            ma_writes.append(request.url.path)
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(capture_ma_writes, _make_skills_handler(), ma_handler)
+        ),
+    )
+
+    assert report.failed_bindings == 1, "ambiguity refusal must count as a failed binding"
+    assert report.retryable_bindings == 0, (
+        "ambiguity refusal is permanent until duplicate agents are fixed"
+    )
+    assert github_requests == [], "ambiguous bindings must stop before fetching the repo"
+    assert ma_writes == [], "ambiguous bindings must stop before uploading or attaching skills"
+    async with db_session_factory() as session:
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+        rows_a = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="duplicate-agent"
+        )
+        rows_b = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_b, agent_name="duplicate-agent"
+        )
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the ambiguity refusal must be stored on the binding"
+    )
+    assert "multiple MA agents" in binding.last_sync_error, (
+        f"the refusal should explain the duplicate-name state, got {binding.last_sync_error!r}"
+    )
+    assert rows_a == [], "refusing the binding must not write agent A's user_skills ledger"
+    assert rows_b == [], "refusing the binding must not write agent B's user_skills ledger"
+
+
+async def test_resync_refuses_duplicate_added_after_bridge_resolution(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/late-duplicate-bound-name"
+    ma_state = FakeMAState()
+    ma_handler = make_fake_ma_handler(ma_state)
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="late-duplicate-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    duplicate = ma_agent(
+        id="ag_late_duplicate",
+        name="late-duplicate-agent",
+        tenant_id=tenant.id,
+        created_at=datetime.now(UTC),
+    ).model_dump(mode="json")
+    agent_list_calls: list[None] = []
+
+    def introduce_duplicate(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            visible_agents = list(ma_state.agents.values())
+            agent_list_calls.append(None)
+            if len(agent_list_calls) == 2:
+                ma_state.agents["ag_late_duplicate"] = duplicate
+            return httpx.Response(200, json={"data": visible_agents, "has_more": False})
+        raise NotHandled
+
+    github_requests: list[httpx.Request] = []
+    ma_writes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(
+            200,
+            content=make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"}),
+        )
+
+    def capture_ma_writes(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and (
+            request.url.path == "/v1/skills" or re.fullmatch(r"/v1/agents/[^/]+", request.url.path)
+        ):
+            ma_writes.append(request.url.path)
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(
+                capture_ma_writes, introduce_duplicate, _make_skills_handler(), ma_handler
+            )
+        ),
+    )
+
+    assert report.failed_bindings == 1, "ambiguity refusal must count as a failed binding"
+    assert report.retryable_bindings == 0, (
+        "ambiguity refusal is permanent until duplicate agents are fixed"
+    )
+    assert len(agent_list_calls) == 3, (
+        "the fake must add the duplicate after initial target preflight and expose it before upload"
+    )
+    assert len(github_requests) == 1, "the late duplicate appears after the repo fetch begins"
+    assert ma_writes == [], "the post-fetch guard must stop before skill upload or agent attach"
+    async with db_session_factory() as session:
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the late ambiguity refusal must be stored on the binding"
+    )
+    assert "archive duplicate agents" in binding.last_sync_error, (
+        f"the late refusal should identify the ambiguous target, got {binding.last_sync_error!r}"
+    )
+
+
+async def test_resync_empty_repo_refuses_duplicate_before_orphan_delete(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.user_skills import list_user_skills_for_agent, upsert_user_skill
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/late-duplicate-empty-repo"
+    ma_state = FakeMAState()
+    ma_handler = make_fake_ma_handler(ma_state)
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="empty-repo-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=agent_id_a,
+        agent_name="empty-repo-agent",
+        name="orphan",
+        source_repo_url=repo_url,
+        source_repo_branch="main",
+        source_path="orphan/SKILL.md",
+        content_hash="existing-content",
+        anthropic_id="sk_orphan",
+        anthropic_latest_version="1",
+    )
+    await db_session.commit()
+
+    duplicate = ma_agent(
+        id="ag_late_empty_duplicate",
+        name="empty-repo-agent",
+        tenant_id=tenant.id,
+        created_at=datetime.now(UTC),
+    ).model_dump(mode="json")
+    agent_list_calls: list[None] = []
+
+    def introduce_duplicate(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            visible_agents = list(ma_state.agents.values())
+            agent_list_calls.append(None)
+            if len(agent_list_calls) == 2:
+                ma_state.agents["ag_late_empty_duplicate"] = duplicate
+            return httpx.Response(200, json={"data": visible_agents, "has_more": False})
+        raise NotHandled
+
+    github_requests: list[httpx.Request] = []
+    ma_deletes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(200, content=make_tarball({}))
+
+    def capture_ma_delete(request: httpx.Request) -> httpx.Response:
+        match = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
+        if request.method == "DELETE" and match:
+            ma_deletes.append(match.group(1))
+            return httpx.Response(200, json={"id": match.group(1), "type": "skill_deleted"})
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(capture_ma_delete, introduce_duplicate, ma_handler)
+        ),
+    )
+
+    assert report.failed_bindings == 1 and report.retryable_bindings == 0, (
+        "an empty-repo duplicate refusal must be a permanent binding failure"
+    )
+    assert len(agent_list_calls) == 3, (
+        "the empty fetched repo must perform the post-fetch ambiguity check before orphan cleanup"
+    )
+    assert len(github_requests) == 1, "the late duplicate is introduced after fetch starts"
+    assert ma_deletes == [], "the ambiguity guard must stop before deleting the orphan skill"
+    async with db_session_factory() as session:
+        rows = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="empty-repo-agent"
+        )
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+    assert [row.name for row in rows] == ["orphan"], (
+        "the ambiguity guard must preserve the local orphan row too"
+    )
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the refusal must remain actionable on the binding"
     )
 
 
@@ -1076,7 +1496,7 @@ async def test_panel_and_webhook_share_one_skill_ledger(
     synced=1), then runs the webhook resync (resync_bound_repo). With a shared ledger,
     the second run dedups: synced=0, updated=0, and skills.create fires exactly once.
     """
-    fernet = _make_fernet()
+    fernet = make_fernet()
     tenant = await make_tenant(db_session)
     tenant_id = tenant.id
     # Distinct Discord-user account (panel principal) — NOT the webhook system account.
@@ -1100,7 +1520,7 @@ async def test_panel_and_webhook_share_one_skill_ledger(
     )
     await db_session.commit()
 
-    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
 
     # --- Panel sync: Discord-user account principal ---
     panel_http = httpx.AsyncClient(
@@ -1135,7 +1555,7 @@ async def test_panel_and_webhook_share_one_skill_ledger(
 
     # Inspect the ledger: there must be exactly ONE user_skills row for this agent
     # (under the shared, agent-stable key) — not two disjoint ledgers.
-    from daimon.core.stores.user_skills import list_user_skills_for_agent  # noqa: PLC0415
+    from daimon.core.stores.user_skills import list_user_skills_for_agent
 
     async with db_session_factory() as check:
         rows_under_agent = await list_user_skills_for_agent(
@@ -1169,7 +1589,7 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
     into GitHubTarballFetcher on this path."""
     from daimon.core.config import GithubSettings
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-tarball-cap")
     tenant_id = cli.tenant_id
     repo_url = "owner/tarball-cap-repo"
@@ -1190,7 +1610,7 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
     await db_session.commit()
 
     # Over-cap tarball body — larger than the 64-byte cap configured below.
-    over_cap_tarball = _make_tarball({"r-main/SKILL.md": b"x" * 4096})
+    over_cap_tarball = make_tarball({"r-main/SKILL.md": b"x" * 4096})
 
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, content=over_cap_tarball))
@@ -1198,7 +1618,7 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
 
     github_settings = GithubSettings(max_tarball_bytes=64)
 
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -1211,13 +1631,14 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
     async with db_session_factory() as check_session:
         row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
     assert row is not None, "binding row must still exist after the capped resync"
-    assert row.last_sync_at is not None, (
-        "resync must still complete (last_sync_at set) even though the repo was skipped"
+    assert report.failed_bindings == 1, (
+        "an over-cap tarball must remain visible as a binding failure"
     )
-    assert row.last_sync_error is None, (
-        "sync_agent_skills records an over-cap tarball as a skipped_repos entry, not a "
-        "raised exception — the resync itself succeeds with the repo skipped, proving "
-        "github_settings.max_tarball_bytes reached the fetcher on this edge"
+    assert report.retryable_bindings == 0, "an over-cap tarball is a permanent configuration error"
+    assert row.last_sync_at is not None, "resync attempt time must be persisted after the skip"
+    assert row.last_sync_error is not None, (
+        "sync_agent_skills records an over-cap tarball in skipped_repos; resync must surface "
+        "the actionable error so the operator can correct the configured cap or repository"
     )
 
 
@@ -1233,7 +1654,7 @@ async def test_resync_persists_non_none_last_sync_error_on_partial_failure(
     last_sync_error naming the failed skill, not the initialized None."""
     from daimon.core.stores.user_skills import upsert_user_skill
 
-    fernet = _make_fernet()
+    fernet = make_fernet()
     cli = await make_cli_principal(db_session, os_user="resync-partial-fail")
     tenant_id = cli.tenant_id
     repo_url = "owner/partial-fail-repo"
@@ -1272,7 +1693,7 @@ async def test_resync_persists_non_none_last_sync_error_on_partial_failure(
             anthropic_latest_version="1",
         )
 
-    empty_tarball = _make_tarball({"r-main/README.md": b"no skills here"})
+    empty_tarball = make_tarball({"r-main/README.md": b"no skills here"})
 
     def ma_delete_fails(request: httpx.Request) -> httpx.Response:
         if request.method == "DELETE" and request.url.path == "/v1/skills/sk_doomed_partial":
@@ -1304,4 +1725,188 @@ async def test_resync_persists_non_none_last_sync_error_on_partial_failure(
     )
     assert "doomed_orphan" in row.last_sync_error, (
         f"last_sync_error must name the failed skill; got {row.last_sync_error!r}"
+    )
+
+
+async def test_resync_marks_failed_fetch_for_durable_retry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fetch failure is a binding failure even though the sync report has no failed_uploads."""
+    cli = await make_cli_principal(db_session, os_user="resync-fetch-fail")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/fetch-fail-repo"
+
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-fetch-fail",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    def github_unavailable(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="temporarily unavailable")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(github_unavailable))
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert report.failed_bindings == 1, (
+        "a skipped repository fetch must keep the queue job retryable"
+    )
+    assert report.retryable_bindings == 1, "a GitHub 503 must be retried after queue backoff"
+    assert row is not None, "the binding should remain available after fetch failure"
+    assert row.last_sync_error is not None, "the fetch failure must be persisted on the binding"
+
+
+async def test_resync_keeps_attach_cap_error_visible_without_retrying_forever(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-attach-cap")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/attach-cap-repo"
+    ma_handler = make_fake_ma_handler()
+
+    def ma_attach_cap(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.startswith("/v1/agents/"):
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Agent skills: 21 exceeds maximum of 20 for this organization",
+                    },
+                },
+            )
+        raise NotHandled
+
+    anthropic_client = build_fake_anthropic(
+        combine_handlers(ma_attach_cap, _make_skills_handler(), ma_handler)
+    )
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-attach-cap",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert report.failed_bindings == 1, (
+        "MA attach rejection must remain visible as a binding failure"
+    )
+    assert report.retryable_bindings == 0, (
+        "an MA skill-cap rejection needs operator action, not retries"
+    )
+    assert row is not None and row.last_sync_error is not None, (
+        "the permanent attach failure must remain actionable on the binding"
+    )
+    assert "exceeds maximum" in row.last_sync_error, "the binding error should preserve MA's reason"
+
+
+async def test_resync_keeps_missing_attach_agent_error_visible(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-attach-agent-missing")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/attach-agent-missing-repo"
+    ma_handler = make_fake_ma_handler()
+    agent_list_calls = 0
+
+    def agent_disappears_before_attach(request: httpx.Request) -> httpx.Response:
+        nonlocal agent_list_calls
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            agent_list_calls += 1
+            if agent_list_calls == 3:
+                return httpx.Response(
+                    200,
+                    json={"data": [], "has_more": False, "next_page": None},
+                )
+        raise NotHandled
+
+    anthropic_client = build_fake_anthropic(
+        combine_handlers(agent_disappears_before_attach, _make_skills_handler(), ma_handler)
+    )
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-attach-agent-missing",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert agent_list_calls >= 3, "agent disappearance must occur on the post-upload attach lookup"
+    assert report.failed_bindings == 1, (
+        "uploaded but unattached skills must remain a binding failure"
+    )
+    assert report.retryable_bindings == 0, "a missing MA agent is permanent until operator action"
+    assert row is not None and row.last_sync_error is not None, (
+        "the missing-agent attach failure must remain actionable on the binding"
     )

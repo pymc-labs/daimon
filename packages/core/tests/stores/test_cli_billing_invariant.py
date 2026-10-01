@@ -9,14 +9,11 @@ CLI path.
 
 from __future__ import annotations
 
-import pytest
 from daimon.core._models import TenantLedger
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing.factories import make_tenant
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_cli_local_provisioning_writes_no_tenant_ledger(

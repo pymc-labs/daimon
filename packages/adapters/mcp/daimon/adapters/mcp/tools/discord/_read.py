@@ -4,7 +4,7 @@ Provides: _read_channel_impl, _list_channels_impl, _get_message_impl,
 _parse_link_impl, _read_thread_impl, _list_threads_impl.
 
 Every impl follows the locked sequence:
-  gates -> bound limit -> rest_client -> _resolve_member FIRST ->
+  gates -> bound limit -> parse cursor -> rest_client -> _resolve_member FIRST ->
   _resolve_channel -> _require_guild_channel -> permission check ->
   typed discord.py call -> map rows.
 """
@@ -17,6 +17,7 @@ from typing import Literal
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -30,8 +31,9 @@ from daimon.adapters.mcp.tools.discord._models import (
     ChannelRow,  # pyright: ignore[reportPrivateUsage]
     MessageRow,  # pyright: ignore[reportPrivateUsage]
     ParsedLink,  # pyright: ignore[reportPrivateUsage]
-    ReadThreadResult,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
-    ThreadRow,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
+    ReadChannelResult,  # pyright: ignore[reportPrivateUsage]
+    ReadThreadResult,  # pyright: ignore[reportPrivateUsage]
+    ThreadRow,  # pyright: ignore[reportPrivateUsage]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
@@ -50,6 +52,71 @@ _DISCORD_LINK_PATTERN = re.compile(
 )
 
 
+def _before_object(before: str | None) -> discord.Object | None:
+    """Parse a before cursor; call before any REST round-trip so a bad cursor
+    fails without spending rate-limited member/channel resolves."""
+    if before is None:
+        return None
+    # Stricter than int(): "1_000", " 42 ", "+7" all parse but name a
+    # different message than written, and a negative id reaches Discord as an
+    # unmapped 400.
+    if not (before.isascii() and before.isdecimal()):
+        raise ToolError("before must be a numeric discord message id")
+    value = int(before)
+    # Snowflakes are unsigned 64-bit and never zero: out-of-range values are
+    # Discord's unmapped 400 again, and 0 returns an empty page that reads as
+    # exhausted history.
+    if not 0 < value < 1 << 64:
+        raise ToolError("before must be a numeric discord message id")
+    return discord.Object(id=value)
+
+
+def _sealed_thread_named(
+    message: discord.Message, read_policy: ChannelReadPolicy, *, parent_id: str
+) -> str | None:
+    """The thread a THREAD_CREATED system message names, if the policy withholds
+    it: its content is the thread's name, which is content too. A notice whose
+    thread can't be told is withheld whenever anything is sealed."""
+    if message.type is not discord.MessageType.thread_created:
+        return None
+    reference = message.reference
+    thread_id = reference.channel_id if reference is not None else None
+    if thread_id is None:
+        return "" if read_policy.policy.sealed_channel_ids else None
+    return None if read_policy.allows(str(thread_id), parent_id) else str(thread_id)
+
+
+async def _history_page(
+    channel: discord.abc.Messageable,
+    *,
+    limit: int,
+    before: discord.Object | None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
+    parent_id: str = "",
+) -> tuple[list[MessageRow], str | None, str | None]:
+    """Fetch one history page; return oldest-first rows, cursor, and hint.
+
+    Discord's history API reports no has_more, so a full page is the only
+    signal that older history may exist. A channel holding exactly ``limit``
+    messages therefore still advertises a cursor; the follow-up read comes
+    back empty and ends the sweep. Notices naming a sealed thread are dropped;
+    the cursor still follows the page as Discord returned it.
+    """
+    page = [m async for m in channel.history(limit=limit, before=before)]
+    rows = [
+        _to_message_row(m)
+        for m in reversed(page)
+        if _sealed_thread_named(m, read_policy, parent_id=parent_id) is None
+    ]
+    next_before = str(page[-1].id) if len(page) == limit else None
+    hint = (
+        f"more messages available — pass before={next_before} to read older messages"
+        if next_before is not None
+        else None
+    )
+    return rows, next_before, hint
+
+
 # ---------------------------------------------------------------------------
 # read_channel
 # ---------------------------------------------------------------------------
@@ -61,8 +128,10 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     *,
     channel_id: str,
     limit: int = 50,
-) -> list[MessageRow]:
-    """Read recent messages from a channel, oldest-first.
+    before: str | None = None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
+) -> ReadChannelResult:
+    """Read channel messages, oldest-first, with before-cursor pagination.
 
     If the resolved channel is a thread, raises ToolError directing to
     read_thread (keeps parse_link routing unambiguous).
@@ -71,6 +140,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)
     bounded_limit = max(1, min(limit, _MAX_HISTORY_LIMIT))
+    before_obj = _before_object(before)
 
     async with rest_client(token) as c:
         _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
@@ -81,10 +151,17 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("this is a thread — use read_thread")
 
         _check_view_permission(channel, member)
+        read_policy.require(str(channel.id))
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
-        page = [m async for m in channel.history(limit=bounded_limit)]
-        return [_to_message_row(m) for m in reversed(page)]
+        rows, next_before, hint = await _history_page(
+            channel,
+            limit=bounded_limit,
+            before=before_obj,
+            read_policy=read_policy,
+            parent_id=str(channel.id),
+        )
+        return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +206,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
     *,
     channel_id: str,
     message_id: str,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> MessageRow:
     """Fetch a single message by id.
 
@@ -145,8 +223,10 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
 
         if isinstance(channel, discord.Thread):
             await _check_thread_view(c, channel, member, _require_discord_identity(auth))
+            read_policy.require(str(channel.id), str(channel.parent_id))
         else:
             _check_view_permission(channel, member)
+            read_policy.require(str(channel.id))
 
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
@@ -154,7 +234,12 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             message = await channel.fetch_message(int(message_id))
         except discord.NotFound as e:
             raise ToolError("message not found") from e
-        return _to_message_row(message)
+        sealed_thread = _sealed_thread_named(message, read_policy, parent_id=str(channel.id))
+        if sealed_thread:
+            read_policy.require(sealed_thread, str(channel.id))  # refuses: it's sealed
+        if sealed_thread is not None:
+            raise ToolError("message not found")  # a notice naming no thread: withheld
+        return _to_message_row(message).model_copy(update={"trust": "untrusted"})
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +304,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     thread_id: str,
     limit: int = 50,
     before: str | None = None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> ReadThreadResult:
     """Read messages from a thread, oldest-first, with before-cursor pagination.
 
@@ -229,6 +315,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)
     bounded_limit = max(1, min(limit, _MAX_HISTORY_LIMIT))
+    before_obj = _before_object(before)
 
     async with rest_client(token) as c:
         _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
@@ -239,15 +326,14 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("not a thread — use read_channel for channels")
 
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
+        read_policy.require(str(channel.id), str(channel.parent_id))
 
-        before_obj = discord.Object(id=int(before)) if before is not None else None
-        page = [m async for m in channel.history(limit=bounded_limit, before=before_obj)]
-        rows = [_to_message_row(m) for m in reversed(page)]
-        next_before = str(page[-1].id) if len(page) == bounded_limit else None
-        hint = (
-            f"more messages available — pass before={next_before} to read older messages"
-            if next_before is not None
-            else None
+        rows, next_before, hint = await _history_page(
+            channel,
+            limit=bounded_limit,
+            before=before_obj,
+            read_policy=read_policy,
+            parent_id=str(channel.id),
         )
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 
@@ -262,6 +348,7 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
     auth: AuthIdentity,
     *,
     channel_id: str,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> list[ThreadRow]:
     """List active and archived public threads for a parent channel.
 
@@ -284,6 +371,8 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support threads")
 
         _check_view_permission(parent, member)
+        # Thread names are content too.
+        read_policy.require(str(parent.id))
 
         # Active threads — guild-wide, filter by parent_id
         active_threads = await guild.active_threads()
@@ -297,11 +386,14 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
                     await _check_thread_view(c, t, member, _require_discord_identity(auth))
                 except ToolError:
                     continue  # silently omit (no existence leak)
-            result.append(_to_thread_row(t))
+            # A thread sealed on its own keeps even its name from outside turns.
+            if read_policy.allows(str(t.id), str(parent.id)):
+                result.append(_to_thread_row(t))
 
         # Archived public threads (private=False is default)
         async for t in parent.archived_threads(limit=50):
-            result.append(_to_thread_row(t))
+            if read_policy.allows(str(t.id), str(parent.id)):
+                result.append(_to_thread_row(t))
 
         return result
 

@@ -13,12 +13,28 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+from daimon.core.session_snapshot import SessionSnapshot
 from pydantic import BaseModel, ConfigDict
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
 # ValidationError on read — keep in sync.
-Platform = Literal["discord", "cli", "slack"]
+Platform = Literal["discord", "cli", "slack", "teams"]
+# Platforms whose turns run in a conversation and carry a turn origin.
+ChatPlatform = Literal["discord", "slack", "teams"]
+CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
+
+# Session-continuity vocabularies. Same contract as `Platform` above: the
+# columns are untyped Text, so a value outside the Literal raises on read.
+# `transfer_kind` says how much of a task survived a session replacement;
+# a preparation's `stage` is its resume point.
+TransferKind = Literal["full", "transcript", "history"]
+PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "completed", "failed"]
+# What the caller answered about uncommitted repository changes: carry them
+# into the successor's working files, or leave them in the old checkout.
+UnsavedWorkChoice = Literal["copy", "leave"]
+ContinuationReason = Literal["task_handoff", "private_input_applied", "timer"]
+ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 
 
 class Role(enum.StrEnum):
@@ -83,6 +99,9 @@ class PrincipalLinkRow(BaseModel):
     linked_at: datetime
 
 
+FundingMode = Literal["prepaid", "operator_funded"]
+
+
 class TenantRow(BaseModel):
     """Canonical per-tenant identity + lifecycle row. Returned by stores.tenants.get_tenant.
 
@@ -96,6 +115,8 @@ class TenantRow(BaseModel):
     platform: str  # "discord" | "cli"
     external_id: str  # = folded workspace_id
     provision_status: str  # "ready" | "pending" | "failed"
+    funding_mode: FundingMode = "prepaid"
+    turn_cap: int | None = None
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime
@@ -143,6 +164,13 @@ class TenantDependentCounts:
         )
 
 
+CatchUpPolicy = Literal["skip", "run-once"]
+
+
+RoutineDestinationKind = Literal["channel", "thread"]
+RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -155,10 +183,20 @@ class RoutineRow(BaseModel):
     timezone: str
     trigger_message: str
     enabled: bool
+    catch_up_policy: CatchUpPolicy = "skip"
+    last_skipped_from: datetime | None = None
+    last_skipped_until: datetime | None = None
+    last_skip_reason: Literal["stale", "in_flight"] | None = None
     next_fire_at: datetime | None
     last_fired_at: datetime | None
     last_error: str | None
     last_result_tail: str | None
+    destination_kind: RoutineDestinationKind | None = None
+    destination_id: str | None = None
+    delivery_status: RoutineDeliveryStatus | None = None
+    delivery_note: str | None = None
+    delivery_payload: str | None = None
+    delivered_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -172,12 +210,88 @@ class ThreadSessionRow(BaseModel):
     thread_id: str
     account_id: uuid.UUID | None
     ma_session_id: str
+    ma_agent_id: str | None = None
     watermark_message_id: str | None
     status: str
     created_at: datetime
     updated_at: datetime
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
+    active_turn_channel_id: str | None = None
+    # The configuration the MA session froze at create time. NULL on rows
+    # written before continuity existed — callers read that as "unknown".
+    effective_config: SessionSnapshot | None = None
+    identity_fingerprint: str | None = None
+    mutable_fingerprint: str | None = None
+    predecessor_id: uuid.UUID | None = None
+    replaced_by_id: uuid.UUID | None = None
+    transfer_file_id: str | None = None
+    transfer_kind: TransferKind | None = None
+    fresh_start_requested_at: datetime | None = None
+    # The caller's answer to the uncommitted-work question, waiting for the
+    # replacement it governs. None means unanswered, which reads as the
+    # default: capture the changes.
+    pending_unsaved_work: UnsavedWorkChoice | None = None
+
+
+class TurnCardIntentRow(BaseModel):
+    """Persisted intent for a turn's initial status card."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    turn_token: uuid.UUID
+    channel_id: str | None
+    message_id: str | None
+    status: Literal["prepared", "posted", "retired"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionPreparationRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    mapping_id: uuid.UUID
+    target_fingerprint: str
+    stage: PreparationStage
+    transfer_file_id: str | None
+    transfer_kind: TransferKind | None
+    new_mapping_id: uuid.UUID | None
+    failure_reason: str | None
+    attempts: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskContinuationRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    parent_channel_id: str
+    requester_account_id: uuid.UUID
+    requester_external_user_id: str
+    target_ma_agent_id: str
+    target_name: str
+    requested_work: str | None
+    reason: ContinuationReason
+    status: ContinuationStatus
+    skip_reason: str | None
+    idempotency_key: uuid.UUID
+    created_at: datetime
+    claimed_at: datetime | None
+    delivered_at: datetime | None
+    available_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    started_at: datetime | None = None
+    attempts: int = 0
 
 
 class GitHubOauthStateRow(BaseModel):
@@ -316,6 +430,18 @@ class PaymentEventRow(BaseModel):
     occurred_at: datetime
 
 
+class PendingPaymentClawbackRow(BaseModel):
+    """Verified Stripe clawback waiting for its original payment credit."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    event_id: str
+    payment_intent: str
+    event_type: str
+    target_amount_usd: Decimal | None
+    received_at: datetime
+
+
 class TenantLedgerRow(BaseModel):
     """Append-only ledger row. Balance = SUM(delta_usd). TOPUP-01."""
 
@@ -366,6 +492,8 @@ class AgentFileRow(BaseModel):
     agent_id: uuid.UUID
     key: str
     content: str
+    created_by_account_id: uuid.UUID | None = None
+    last_set_by_account_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -420,6 +548,29 @@ class AgentRepoBindingRow(BaseModel):
     updated_at: datetime
 
 
+class AgentSkillRepoCredentialRow(BaseModel):
+    """Pydantic row for AgentSkillRepoCredential — a per-repo skill-import token.
+
+    Separate from `AgentRepoBindingRow` for the reason its ORM docstring
+    gives: one working repo per agent, any number of skill repos, and
+    enrolling one must never move the other.
+    """
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    repo_url: str
+    default_branch: str
+    path: str
+    ma_secret_ref: str
+    proof_kind: RepoProofKind | None = None
+    proof_at: datetime | None = None
+    proof_account_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AgentMemoryStoreRow(BaseModel):
     """Pydantic row for AgentMemoryStore (agent memory feature)."""
 
@@ -443,6 +594,45 @@ class GitHubAppInstallationRow(BaseModel):
     updated_at: datetime
 
 
+class GitHubInstallationReconciliationRow(BaseModel):
+    """A coalesced, leased refresh of one GitHub installation's repository set."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    installation_id: int
+    generation: int
+    claimed_generation: int | None
+    state: str
+    attempts: int
+    available_at: datetime
+    lease_owner: uuid.UUID | None
+    lease_expires_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GitHubPushResyncRow(BaseModel):
+    """A coalesced, leased repository-ref resync job."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    repo_full_name: str
+    ref: str
+    delivery_id: str
+    generation: int
+    claimed_generation: int | None
+    state: str
+    attempts: int
+    available_at: datetime
+    lease_owner: uuid.UUID | None
+    lease_expires_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CredentialRequestRow(BaseModel):
     """Pydantic row for CredentialRequest — the credential-button handshake."""
 
@@ -457,9 +647,66 @@ class CredentialRequestRow(BaseModel):
     mcp_server_url: str | None
     requester_platform_user_id: str
     channel_id: str
+    platform: str | None = None
+    parent_channel_id: str | None = None
+    origin_thread_id: str | None = None
+    posted_message_id: str | None = None
+    idempotency_key: uuid.UUID
+    requested_work: str | None = None
+    target_ma_agent_id: str | None = None
+    target_name: str | None = None
+    responder_name: str | None = None
+    replaces_updated_at: datetime | None = None
+    outcome: str | None = None
     created_at: datetime
     expires_at: datetime
     used_at: datetime | None
+
+
+class McpOAuthFlowRow(BaseModel):
+    """Pydantic row for McpOAuthFlow — one in-flight MCP OAuth authorization."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    state: str
+    request_token: str
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_id: uuid.UUID
+    server_name: str
+    mcp_server_url: str
+    redirect_uri: str
+    code_verifier: str
+    client_id: str | None
+    client_secret_encrypted: str | None
+    token_endpoint_auth_method: str | None
+    token_endpoint: str | None
+    authorization_endpoint: str | None
+    resource: str | None
+    scope: str | None
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None
+    completed_at: datetime | None
+
+
+class McpOAuthGrantRow(BaseModel):
+    """One person's finished OAuth sign-in to an MCP server URL on one agent.
+
+    The completed-flow projection: a `mcp_oauth_flows` row whose
+    `completed_at` is set is the durable record that this account's grant was
+    stored in its (account, agent) vault — not merely that it opened the
+    link, which `used_at` records for anyone who reached the callback. Keyed
+    by URL, which is what MA authenticates against; the server's name is
+    per agent and not part of it. Erasing the platform user deletes the flow
+    row, and with it the grant this row reports.
+    """
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    agent_id: uuid.UUID
+    account_id: uuid.UUID
+    mcp_server_url: str
 
 
 class MessageFeedbackRow(BaseModel):
@@ -555,3 +802,74 @@ class FileUploadRow(BaseModel):
     content_type: str
     content: bytes | None
     created_at: datetime
+
+
+class SupportEscalationRow(BaseModel):
+    """Pydantic row for SupportEscalation — one human-support request."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    platform: str
+    platform_user_id: str
+    channel_id: str
+    message_id: str
+    ma_session_id: str | None
+    note: str
+    delivered_at: datetime | None
+    created_at: datetime
+
+
+class ThreadAutoResponseRow(BaseModel):
+    """One reply the agent posted in a thread unprompted (the rate-limit ledger)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    message_id: str
+    created_at: datetime
+
+
+class ThreadAgentBindingRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    parent_channel_id: str
+    thread_id: str
+    kind: Literal["setup", "handoff"] = "setup"
+    responder_ma_agent_id: str
+    responder_name: str
+    configuration_target_ma_agent_id: str | None
+    configuration_target_name: str | None
+    creator_account_id: uuid.UUID | None
+    archived: bool
+    locked: bool
+    deleted: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class TurnOriginRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    parent_channel_id: str
+    thread_id: str
+    responder_ma_agent_id: str
+    responder_name: str
+    configuration_target_ma_agent_id: str | None
+    configuration_target_name: str | None
+    is_setup: bool = False
+    role: Role
+    created_at: datetime
+    expires_at: datetime

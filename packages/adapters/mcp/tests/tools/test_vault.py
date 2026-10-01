@@ -17,8 +17,6 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_re
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
 VAULT_ID = "vault_abc"
 ACCOUNT_ID = uuid.uuid4()
 TENANT_ID = uuid.uuid4()

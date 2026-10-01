@@ -5,13 +5,12 @@ import uuid
 from typing import Any
 
 import httpx
-from anthropic.types.beta import BetaEnvironment
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.defaults.reconcile_environments import reconcile_environment
 from daimon.core.defaults.report import Action
 from daimon.core.specs import EnvironmentSpec
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, list_response
+from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from daimon.testing.ma_models import ma_environment
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
@@ -23,19 +22,7 @@ def _env_spec() -> EnvironmentSpec:
 
 
 def _tagged_env(*, id_: str, spec: EnvironmentSpec, tenant_id: uuid.UUID) -> dict[str, Any]:
-    return BetaEnvironment(
-        id=id_,
-        type="environment",
-        name=spec.name,
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: spec.name,
-        },
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    ).model_dump(mode="json")
+    return ma_environment(id=id_, name=spec.name, tenant_id=tenant_id).model_dump(mode="json")
 
 
 def _router_with_envs(envs: list[dict[str, Any]]) -> MARouter:
@@ -47,16 +34,7 @@ def _router_with_envs(envs: list[dict[str, Any]]) -> MARouter:
 def _env_response(*, id_: str) -> httpx.Response:
     return httpx.Response(
         200,
-        json=BetaEnvironment(
-            id=id_,
-            type="environment",
-            name="default",
-            config=EMPTY_CLOUD_CONFIG,
-            metadata={},
-            description="",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-        ).model_dump(mode="json"),
+        json=ma_environment(id=id_, name="default").model_dump(mode="json"),
     )
 
 

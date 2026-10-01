@@ -12,34 +12,17 @@ rather than only at the core unit-test level
 Both platforms: Discord landed with the 06-06 cutover; the Slack scenario
 below was added once Slack's own cutover (06-07) closed its dead-session gap.
 The router fixture is platform-agnostic (it only fakes the `/v1/...` MA
-endpoints), so both scenarios share `_build_dead_session_router`.
+endpoints), so both scenarios share `_build_dead_session_router`. Teams runs
+the Discord half: both address a turn by its thread id alone.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 
-import httpx
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
-    BetaManagedAgentsAgentMessageEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
-    BetaManagedAgentsSessionEndTurn,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import (
-    BetaManagedAgentsSessionStatusIdleEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
-    BetaManagedAgentsSpanModelRequestEndEvent,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
-from anthropic.types.beta.sessions.beta_managed_agents_text_block import BetaManagedAgentsTextBlock
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+import pytest
+from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import (
@@ -48,130 +31,61 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
-    MARouter,
-    list_response,
-    not_found_response,
-    send_events_response,
-    sse_response,
-)
+from daimon.testing.ma import MARouter, not_found_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import AGENT_ID, AGENT_TEXT, ENV_ID, MODEL_ID
+from .conftest import AGENT_ID, build_turn_router
 from .drivers.discord_driver import DiscordDriver
+from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver
 
 # The Discord driver's `create_session` stub always returns this fixed session
-# id for the recreate call (see DiscordDriver._make_fake_session usage in
-# dispatch_turn) -- the recovered-turn's NEW session id in this scenario.
+# id for the recreate call (see the `ma_session(...)` stub in
+# `DiscordDriver.dispatch_turn`) -- the recovered-turn's NEW session id in
+# this scenario.
 _RECOVERED_SESSION_ID = "sess_parity_test"
 _DEAD_SESSION_ID = "sess_dead_before_recovery"
 
 
 def _build_dead_session_router(tenant_id_str: str) -> MARouter:
-    """Agent/environment resolution identical to `build_turn_router`, but with
-    session-id-scoped event routes: the OLD (already-dead) session's SSE
-    stream open 404s (the confirmed dead-session signal -- `run_turn` opens
-    the stream before posting the initial user message, so the 404 surfaces
-    there), the recreated session's stream open + `events.send` succeed.
+    """The shared turn router with its event routes scoped to the recreated
+    session, plus the OLD (already-dead) session: its SSE stream open 404s
+    (the confirmed dead-session signal -- `run_turn` opens the stream before
+    posting the initial user message, so the 404 surfaces there).
     """
-    agent_item = BetaManagedAgentsAgent(
-        id=AGENT_ID,
-        type="agent",
-        name="test-agent",
-        model=BetaManagedAgentsModelConfig(id=MODEL_ID),
-        metadata={
-            MA_METADATA_KEY_TENANT: tenant_id_str,
-            MA_METADATA_KEY_NAME: "test-agent",
-        },
-        description=None,
-        created_at="2026-06-14T00:00:00Z",  # pyright: ignore[reportArgumentType]
-        updated_at="2026-06-14T00:00:00Z",  # pyright: ignore[reportArgumentType]
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
-    ).model_dump(mode="json")
-
-    env_item = BetaEnvironment(
-        id=ENV_ID,
-        type="environment",
-        name="test-env",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: tenant_id_str,
-            MA_METADATA_KEY_NAME: "test-env",
-        },
-        description="",
-        created_at="2026-06-14T00:00:00Z",
-        updated_at="2026-06-14T00:00:00Z",
-    ).model_dump(mode="json")
-
-    now = datetime.now(UTC)
-    agent_message_event = BetaManagedAgentsAgentMessageEvent(
-        id="evt_parity_recover_msg",
-        type="agent.message",
-        processed_at=now,
-        content=[BetaManagedAgentsTextBlock(type="text", text=AGENT_TEXT)],
-    ).model_dump(mode="json")
-    model_request_end_event = BetaManagedAgentsSpanModelRequestEndEvent(
-        id="evt_parity_recover_usage",
-        is_error=False,
-        model_request_start_id="start_parity_recover",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
-        processed_at=now,
-        type="span.model_request_end",
-    ).model_dump(mode="json")
-    idle_event = BetaManagedAgentsSessionStatusIdleEvent(
-        id="evt_parity_recover_idle",
-        type="session.status_idle",
-        processed_at=now,
-        stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
-    ).model_dump(mode="json")
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent_item]))
-    router.add("GET", r"/v1/agents/[^/]+", lambda req, _m: httpx.Response(200, json=agent_item))
-    router.add("GET", r"/v1/environments", lambda req, _m: list_response([env_item]))
-    router.add("GET", r"/v1/environments/[^/]+", lambda req, _m: httpx.Response(200, json=env_item))
-    # OLD session: opening the SSE stream 404s -- the dead-session signal
-    # (`run_turn` opens the stream before `send_initial`, so this is the
-    # first request the driver makes against a gone session).
+    router = build_turn_router(
+        tenant_id_str,
+        session_id=_RECOVERED_SESSION_ID,
+        usage_event_id="evt_parity_recover_usage",
+    )
     router.add(
         "GET",
         rf"/v1/sessions/{_DEAD_SESSION_ID}/events/stream",
         lambda req, _m: not_found_response("session gone"),
     )
-    # Recreated session: events.send + SSE stream succeed.
-    router.add(
-        "POST",
-        rf"/v1/sessions/{_RECOVERED_SESSION_ID}/events",
-        lambda req, _m: send_events_response(),
-    )
+    # ... and retrieving it 404s too: the pre-continuity row carries no record
+    # of what its session was running, so the bind tries to read it. A gone
+    # session leaves that to the recovery cycle below rather than failing.
     router.add(
         "GET",
-        rf"/v1/sessions/{_RECOVERED_SESSION_ID}/events/stream",
-        lambda req, _m: sse_response([agent_message_event, model_request_end_event, idle_event]),
+        rf"/v1/sessions/{_DEAD_SESSION_ID}",
+        lambda req, _m: not_found_response("session gone"),
     )
     return router
 
 
+@pytest.mark.parametrize("platform", ["discord", "teams"])
 async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
+    platform: Literal["discord", "teams"],
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id = "900002001"
-    user_id = "555000222"
-    thread_id = "200000"
+    workspace_id, user_id, _parent, thread_id = thread_ids(
+        platform, workspace=900002001, user=555000222, thread=200000
+    )
 
-    tenant = await make_tenant(db_session, platform="discord", workspace_id=workspace_id)
+    tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     await tenant_ledger.insert_entry(
         db_session,
         tenant_id=tenant.id,
@@ -182,21 +96,22 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     # Identity resolution inside admit() is idempotent get-or-create -- pre-creating
     # here just lets the test learn the account_id up front to seed the live row.
     principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="discord", external_id=user_id
+        db_session, tenant_id=tenant.id, platform=platform, external_id=user_id
     )
     old_row = await create_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=principal.account_id,
         ma_session_id=_DEAD_SESSION_ID,
+        ma_agent_id=AGENT_ID,
         watermark_message_id="100",
     )
     await db_session.commit()
 
     router = _build_dead_session_router(str(tenant.id))
-    driver = DiscordDriver()
+    driver = DiscordDriver() if platform == "discord" else TeamsDriver()
     posted = await driver.dispatch_turn(
         sessionmaker=db_session_factory,
         router=router,
@@ -208,6 +123,25 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     )
     assert posted, f"expected the recovered turn's reply to be posted, got: {posted}"
 
+    # A dead-session recovery must tell the person their workspace was lost,
+    # exactly once, and ABOVE the answer it explains -- the answer is an
+    # in-place edit of the embed posted at mention time, so a notice sent as
+    # its own message would always sort below it. This scenario's dead-session
+    # signal is a 404 (deleted session), never the archived-400 signature the
+    # transcript rescue targets, so the history variant is the one that
+    # must appear.
+    expected_notice = render_unexpected_loss("history")
+    carrying = [text for text in posted if expected_notice in text]
+    assert len(carrying) == 1, (
+        f"expected exactly one unexpected-loss notice (history variant), got: {posted}"
+    )
+    assert carrying[0].startswith(expected_notice + "\n\n"), (
+        f"the loss notice must be the first paragraph of the answer, got: {carrying[0]!r}"
+    )
+    assert carrying[0] != expected_notice, (
+        "the notice must ride the answer, not stand alone as a trailing message"
+    )
+
     # The stale mapping is marked dead.
     dead_row = await get_thread_session_by_id(db_session, id=old_row.id)
     assert dead_row is not None, "the pre-existing mapping row must still exist"
@@ -217,7 +151,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     live_row = await get_live_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=principal.account_id,
     )
@@ -284,6 +218,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session_s
         thread_id=thread_id,
         account_id=principal.account_id,
         ma_session_id=_DEAD_SESSION_ID,
+        ma_agent_id=AGENT_ID,
         watermark_message_id="9000005000.000000",
     )
     await db_session.commit()
@@ -301,6 +236,20 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session_s
         thread_ts=thread_id,
     )
     assert posted, f"expected the recovered turn's reply to be posted, got: {posted}"
+
+    # A dead-session recovery must tell the person their workspace was lost,
+    # exactly once and above the answer it explains, matching Discord.
+    expected_notice = render_unexpected_loss("history")
+    carrying = [text for text in posted if expected_notice in text]
+    assert len(carrying) == 1, (
+        f"expected exactly one unexpected-loss notice (history variant), got: {posted}"
+    )
+    assert carrying[0].startswith(expected_notice + "\n\n"), (
+        f"the loss notice must be the first paragraph of the answer, got: {carrying[0]!r}"
+    )
+    assert carrying[0] != expected_notice, (
+        "the notice must ride the answer, not stand alone as a trailing message"
+    )
 
     # The stale mapping is marked dead.
     dead_row = await get_thread_session_by_id(db_session, id=old_row.id)

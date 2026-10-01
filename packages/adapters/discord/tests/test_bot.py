@@ -8,87 +8,24 @@ Plan 88-04: per-(thread,account) session keying (flag-gated) + unconditional rol
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from contextlib import suppress
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
-from daimon.core.config import McpSettings
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from daimon.core.stores.tenants import set_turn_cap
+from daimon.core.turn.deps import build_turn_deps
+from daimon.testing import ma_agent, ma_environment, ma_session
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-
-def _make_fake_session(session_id: str = "sess_test") -> BetaManagedAgentsSession:
-    return BetaManagedAgentsSession(
-        id=session_id,
-        agent=BetaManagedAgentsSessionAgent(
-            id="agent_test",
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-5"),
-            name="test-agent",
-            skills=[],
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        created_at="2026-04-28T00:00:00Z",
-        environment_id="env_test",
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at="2026-04-28T00:00:00Z",
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
-        outcome_evaluations=[],
-    )
-
-
-def _make_fake_agent(name: str = "test-agent") -> BetaManagedAgentsAgent:
-    """A live (non-archived) agent -- the realistic default for `agents.retrieve`.
-
-    `archived_at` defaults to `None` on the SDK model; every test in this file
-    that needs an archived agent constructs its own with `archived_at` set.
-    """
-    return BetaManagedAgentsAgent(
-        id="ag_test",
-        version=1,
-        name=name,
-        type="agent",
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-5"),
-        created_at=datetime(2026, 4, 28, tzinfo=UTC),
-        updated_at=datetime(2026, 4, 28, tzinfo=UTC),
-        mcp_servers=[],
-        metadata={},
-        skills=[],
-        tools=[],
-    )
-
-
-def _make_fake_environment(name: str = "test-env") -> BetaEnvironment:
-    return BetaEnvironment(
-        id="env_test",
-        name=name,
-        type="environment",
-        config=EMPTY_CLOUD_CONFIG,
-        created_at="2026-04-28T00:00:00Z",
-        updated_at="2026-04-28T00:00:00Z",
-        description="",
-        metadata={},
-    )
+from .harness import make_bot
 
 
 def _make_runtime(
@@ -104,12 +41,20 @@ def _make_runtime(
     discord_settings.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
     discord_settings.per_caller_thread_sessions = per_caller_thread_sessions
     settings.discord = discord_settings
+    settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
+    # Dead-session recovery's transcript rescue (`_replay_previous_session`)
+    # walks this as an async iterator, not an awaitable -- an unconfigured
+    # AsyncMock attribute returns a coroutine instead and blows up with
+    # "'async for' requires an object with __aiter__ method". Empty history
+    # degrades it to the history-only rung, same as before that rescue path
+    # existed.
+    anthropic.beta.sessions.events.list = MagicMock(return_value=_AsyncIter([]))
     # A live agent/environment by default -- admit() now reads archived_at off
     # the retrieved agent, so an unconfigured AsyncMock (whose attributes are
     # themselves truthy mocks) would wrongly look archived on every turn.
-    anthropic.beta.agents.retrieve = AsyncMock(return_value=_make_fake_agent())
-    anthropic.beta.environments.retrieve = AsyncMock(return_value=_make_fake_environment())
+    anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
+    anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
     return DiscordRuntime(
@@ -129,16 +74,6 @@ def _make_runtime(
             billing_config=None,
         ),
     )
-
-
-def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = DaimonBot(runtime=runtime, intents=intents)
-    bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
-    return bot
 
 
 def _make_channel_message(
@@ -172,6 +107,30 @@ def _make_channel_message(
 
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
+
+    async def test_tenant_override_admits_above_deployment_default(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+
+        guild_id = "801000099"
+        result = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("5.00"),
+        )
+        async with db_session_factory() as session, session.begin():
+            await set_turn_cap(session, tenant_id=result.tenant_id, cap=30)
+        bot = make_bot(_make_runtime(db_session_factory, max_concurrent_turns_per_tenant=3))
+        bot._inflight[result.tenant_id] = 3  # pyright: ignore[reportPrivateUsage]
+        bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportMethodAssign]
+
+        message = _make_channel_message(guild_id=int(guild_id))
+        await bot.on_message(message)
+
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert bot._inflight[result.tenant_id] == 3  # pyright: ignore[reportPrivateUsage]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -207,7 +166,7 @@ class TestInflightCapRejection:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Saturate the tenant's in-flight slot.
         bot._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
@@ -267,12 +226,12 @@ class TestInflightDecrement:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-dec")
+        mock_create_session.return_value = ma_session(id="sess-dec")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message(guild_id=int(guild_id))
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 8001
@@ -322,13 +281,13 @@ class TestInflightDecrement:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-dec-err")
+        mock_create_session.return_value = ma_session(id="sess-dec-err")
         mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message(guild_id=int(guild_id))
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 8002
@@ -388,12 +347,12 @@ class TestInflightIsolation:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-isolation")
+        mock_create_session.return_value = ma_session(id="sess-isolation")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Saturate only guild A.
         bot._inflight[tenant_a] = cap  # pyright: ignore[reportPrivateUsage]
@@ -474,12 +433,12 @@ class TestIsAdminDerivation:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-admin-true")
+        mock_create_session.return_value = ma_session(id="sess-admin-true")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Member with manage_guild=True.
         admin_member = MagicMock(spec=discord.Member)
@@ -551,12 +510,12 @@ class TestIsAdminDerivation:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-admin-false")
+        mock_create_session.return_value = ma_session(id="sess-admin-false")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Regular member without manage_guild.
         regular_member = MagicMock(spec=discord.Member)
@@ -626,12 +585,12 @@ class TestIsAdminDerivation:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-user-admin")
+        mock_create_session.return_value = ma_session(id="sess-user-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Plain User (not a Member — no guild_permissions attribute).
         plain_user = MagicMock(spec=discord.User)
@@ -718,7 +677,7 @@ class TestOnReadySweepProvisioning:
         mock_reconcile.return_value = ApplyReport()
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Register one guild that is not in known_guild_ids.
         mock_guild = MagicMock(spec=discord.Guild)
@@ -784,7 +743,7 @@ class TestOnReadySweepProvisioning:
         mock_reconcile.return_value = ApplyReport()
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         mock_guild = _make_sweep_guild(guild_id)
         bot._connection._guilds = {guild_id: mock_guild}  # pyright: ignore[reportPrivateUsage]
@@ -825,6 +784,7 @@ class TestOnReadySweepWidenedReconcile:
         mock_reconcile: AsyncMock,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
     ) -> None:
         """A tenant already in status='ready' still gets `_seed_tenant_defaults`
         invoked on boot -- the whole point of widening the sweep."""
@@ -843,8 +803,11 @@ class TestOnReadySweepWidenedReconcile:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
         mock_reconcile.return_value = ApplyReport()
 
-        runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        # The sweep spawns one background task per guild, and each opens its own
+        # session: give them a sessionmaker on the engine, not `db_session_factory`
+        # (bound to one connection), so the concurrent tasks don't share a transaction.
+        runtime = _make_runtime(async_sessionmaker(bind=db_engine, expire_on_commit=False))
+        bot = make_bot(runtime)
         bot._connection._guilds = {guild_id: _make_sweep_guild(guild_id)}  # pyright: ignore[reportPrivateUsage]
         bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
         bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
@@ -868,6 +831,7 @@ class TestOnReadySweepWidenedReconcile:
         mock_reconcile: AsyncMock,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
     ) -> None:
         """Pre-existing behavior is not lost: tenants stuck in pending or failed
         are still reconciled on boot."""
@@ -896,8 +860,11 @@ class TestOnReadySweepWidenedReconcile:
         await set_provision_status(db_session_factory, tenant_id=tenant_failed, status="failed")
         mock_reconcile.return_value = ApplyReport()
 
-        runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        # The sweep spawns one background task per guild, and each opens its own
+        # session: give them a sessionmaker on the engine, not `db_session_factory`
+        # (bound to one connection), so the concurrent tasks don't share a transaction.
+        runtime = _make_runtime(async_sessionmaker(bind=db_engine, expire_on_commit=False))
+        bot = make_bot(runtime)
         bot._connection._guilds = {  # pyright: ignore[reportPrivateUsage]
             guild_pending: _make_sweep_guild(guild_pending),
             guild_failed: _make_sweep_guild(guild_failed),
@@ -937,7 +904,7 @@ class TestOnReadySweepWidenedReconcile:
         )
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         # No guild registered in bot._connection._guilds -- the bot has not joined it.
         bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
         bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
@@ -970,7 +937,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.return_value = ApplyReport()
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000020)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -999,7 +966,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.return_value = report
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000021)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1027,7 +994,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.return_value = ApplyReport()
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000022)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1061,7 +1028,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.return_value = report
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000023)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1084,7 +1051,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.side_effect = DaimonError("provider blew up")
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000025)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1106,7 +1073,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.side_effect = DaimonError("provider blew up")
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000026)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1134,7 +1101,7 @@ class TestReadyEmbedSuppression:
         mock_reconcile.return_value = report
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(900000024)
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1182,7 +1149,7 @@ class TestReconcileFailureReasonPersistence:
         mock_reconcile.return_value = report
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(int(guild_id))
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1222,7 +1189,7 @@ class TestReconcileFailureReasonPersistence:
         mock_reconcile.return_value = ApplyReport()
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(int(guild_id))
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1258,7 +1225,7 @@ class TestReconcileFailureReasonPersistence:
         mock_reconcile.side_effect = ValueError(secret_message)
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         guild = _make_sweep_guild(int(guild_id))
 
         await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
@@ -1383,9 +1350,9 @@ class TestPerCallerSessionKeying:
         mock_build_context_xml.return_value = ("<context></context>", [])
 
         # Admin caller (external_id=111) starts the thread: create_session fires, row inserted.
-        mock_create_session.return_value = _make_fake_session("sess-admin-starter")
+        mock_create_session.return_value = ma_session(id="sess-admin-starter")
         runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=True)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         admin_member = MagicMock(spec=discord.Member)
         admin_member.bot = False
@@ -1423,7 +1390,7 @@ class TestPerCallerSessionKeying:
         )
 
         # Now a DISTINCT low-priv caller (external_id=222) mentions in the same thread.
-        mock_create_session.return_value = _make_fake_session("sess-lowpriv-caller")
+        mock_create_session.return_value = ma_session(id="sess-lowpriv-caller")
         mock_create_session.reset_mock()
 
         low_priv = MagicMock(spec=discord.Member)
@@ -1523,8 +1490,8 @@ class TestPerCallerSessionKeying:
         mock_build_context_xml.return_value = ("<context></context>", [])
 
         # First call to run_turn returns a dead-session state; second call succeeds.
-        import anthropic as _anthropic  # noqa: PLC0415
-        from daimon.core.errors import TurnError  # noqa: PLC0415
+        import anthropic as _anthropic
+        from daimon.core.errors import TurnError
 
         fake_response = MagicMock()
         fake_response.status_code = 404
@@ -1542,12 +1509,12 @@ class TestPerCallerSessionKeying:
 
         mock_run_turn.side_effect = [dead_state, alive_state]
         mock_create_session.side_effect = [
-            _make_fake_session("sess-dead-original"),
-            _make_fake_session("sess-recreated"),
+            ma_session(id="sess-dead-original"),
+            ma_session(id="sess-recreated"),
         ]
 
         runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=True)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         caller = MagicMock(spec=discord.Member)
         caller.bot = False
@@ -1633,11 +1600,11 @@ class TestPerCallerSessionKeying:
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_context_xml.return_value = ("<context></context>", [])
-        mock_create_session.return_value = _make_fake_session("sess-legacy-shared")
+        mock_create_session.return_value = ma_session(id="sess-legacy-shared")
 
         # Flag OFF → legacy single-session-per-thread.
         runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=False)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # First caller (external_id=444) starts the thread.
         caller_a = MagicMock(spec=discord.Member)
@@ -1693,7 +1660,7 @@ class TestPerCallerSessionKeying:
 
         # Insert a couple of real accounts and confirm the sentinel is not among them.
         async with db_session_factory() as s:
-            from daimon.testing.factories import make_account, make_tenant  # noqa: PLC0415
+            from daimon.testing.factories import make_account, make_tenant
 
             tenant = await make_tenant(s)
             acct1 = await make_account(s, tenant=tenant)
@@ -1759,12 +1726,12 @@ class TestPerTurnRoleUpsert:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-role-admin")
+        mock_create_session.return_value = ma_session(id="sess-role-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         admin_member = MagicMock(spec=discord.Member)
         admin_member.bot = False
@@ -1834,12 +1801,12 @@ class TestPerTurnRoleUpsert:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-role-user")
+        mock_create_session.return_value = ma_session(id="sess-role-user")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         regular_member = MagicMock(spec=discord.Member)
         regular_member.bot = False
@@ -1922,12 +1889,12 @@ class TestPerTurnRoleUpsert:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-no-downgrade")
+        mock_create_session.return_value = ma_session(id="sess-no-downgrade")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # A non-admin Discord turn for a DISTINCT platform account.
         non_admin = MagicMock(spec=discord.Member)
@@ -1995,13 +1962,13 @@ class TestPerTurnRoleUpsert:
             environment_name="test-env",
             environment_name_tier="tenant",
         )
-        mock_create_session.return_value = _make_fake_session("sess-role-flag-off")
+        mock_create_session.return_value = ma_session(id="sess-role-flag-off")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         # Flag OFF — session keying falls back to legacy, but role write must still fire.
         runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=False)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         admin_member = MagicMock(spec=discord.Member)
         admin_member.bot = False
@@ -2060,9 +2027,9 @@ class TestDrainLoopDeCoalescing:
 
         G1 closes the confused-deputy hole on the drain hot path.
         """
-        from unittest.mock import patch as _patch  # noqa: PLC0415
+        from unittest.mock import patch as _patch
 
-        from daimon.core.defaults.provisioning import provision_tenant  # noqa: PLC0415
+        from daimon.core.defaults.provisioning import provision_tenant
 
         guild_id = "804000001"
         thread_id = 8040001
@@ -2074,7 +2041,7 @@ class TestDrainLoopDeCoalescing:
         )
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Build two distinct authors with distinct author.id values.
         author_a = MagicMock()
@@ -2171,7 +2138,8 @@ class TestCredentialButtonRegistration:
         from daimon.adapters.discord.credential_button import CredentialRequestButton
 
         runtime = _make_runtime(db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
 
         await bot.setup_hook()
 
@@ -2185,3 +2153,166 @@ class TestCredentialButtonRegistration:
             "CredentialRequestButton's compiled template must be registered as a "
             "dynamic item after setup_hook runs"
         )
+
+
+class TestGuildInstallLifecycle:
+    async def test_delayed_remove_cannot_archive_after_rejoin(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A remove DB write delayed across a join must not leave the tenant archived."""
+        import asyncio
+
+        from daimon.adapters.discord import bot as bot_module
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.stores.tenants import get_tenant, set_provision_status
+
+        guild_id = 900000111
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = guild_id
+        guild.name = "Rejoined Guild"
+        runtime = _make_runtime(db_session_factory)
+        runtime.settings.billing = BillingSettings(signup_credit=Decimal("0"))
+        bot = make_bot(runtime)
+        await provision_tenant(db_session_factory, platform="discord", workspace_id=str(guild_id))
+
+        remove_entered = asyncio.Event()
+        release_remove = asyncio.Event()
+        join_unarchived = asyncio.Event()
+
+        async def delayed_status(
+            session_factory: async_sessionmaker[AsyncSession],
+            *,
+            tenant_id: uuid.UUID,
+            status: str | None = None,
+            archive: bool = False,
+            clear_archive: bool = False,
+            reason: str | None = None,
+            clear_reason: bool = False,
+        ) -> None:
+            if archive:
+                remove_entered.set()
+                await release_remove.wait()
+            await set_provision_status(
+                session_factory,
+                tenant_id=tenant_id,
+                status=status,
+                archive=archive,
+                clear_archive=clear_archive,
+                reason=reason,
+                clear_reason=clear_reason,
+            )
+            if clear_archive:
+                join_unarchived.set()
+
+        with (
+            patch.object(bot_module, "set_provision_status", delayed_status),
+            patch.object(bot, "_post_to_guild", new_callable=AsyncMock),
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock),
+        ):
+            # discord.py removes the old guild from its cache before dispatching
+            # guild_remove, so the old callback enters its archive write now.
+            remove_task = asyncio.create_task(bot.on_guild_remove(guild))
+            await remove_entered.wait()
+
+            # parse_guild_create adds the rejoined guild before dispatching join.
+            bot._connection._guilds[guild_id] = guild  # pyright: ignore[reportPrivateUsage]
+            join_task = asyncio.create_task(bot.on_guild_join(guild))
+            # Let an unguarded join finish its unarchive write while the older
+            # remove write is still paused. With the lifecycle lock, join waits
+            # until remove is released, so the bounded wait expires instead.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(join_unarchived.wait(), timeout=2.0)
+            release_remove.set()
+            await asyncio.gather(remove_task, join_task)
+            for task in tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+        async with db_session_factory() as session:
+            tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None and tenant.archived_at is None, (
+            "a completed rejoin must remain live after an earlier remove callback"
+        )
+
+    async def test_on_ready_revives_archived_known_guild_without_welcome_or_credit(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.stores.tenant_ledger import list_for_tenant
+        from daimon.core.stores.tenants import get_tenant, set_provision_status
+
+        guild_id = "900000112"
+        provisioned = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("1.00"),
+        )
+        await set_provision_status(
+            db_session_factory, tenant_id=provisioned.tenant_id, archive=True
+        )
+
+        runtime = _make_runtime(db_session_factory)
+        runtime.settings.billing = BillingSettings(signup_credit=Decimal("1.00"))
+        bot = make_bot(runtime)
+        guild = _make_sweep_guild(int(guild_id))
+        bot._connection._guilds[int(guild_id)] = guild  # pyright: ignore[reportPrivateUsage]
+
+        with (
+            patch.object(bot, "_post_to_guild", new_callable=AsyncMock) as post,
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock) as clear_commands,
+        ):
+            await bot.on_ready()
+            for task in tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        async with db_session_factory() as session:
+            tenant = await get_tenant(session, tenant_id)
+            ledger = await list_for_tenant(session, tenant_id=tenant_id)
+        assert tenant is not None and tenant.archived_at is None, (
+            "on_ready must revive a known tenant when its guild is in the cache"
+        )
+        assert tenant.provision_status == "pending", "the recovered tenant must be reseeded"
+        assert len(ledger) == 1, "rejoin must not issue a second signup credit"
+        post.assert_not_awaited()
+        assert sync.await_count == 2, "recovery must preserve guild and global command sync"
+        clear_commands.assert_called_once(), "recovery must still clear guild-scoped commands"
+
+
+async def test_orchestrate_boundary_persists_one_terminal_outcome(
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
+) -> None:
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    bot = make_bot(_make_runtime(sm))
+
+    async def pipeline(*args, **kwargs):
+        observation = current_outcome.get()
+        assert observation is not None
+        observation.finish(reason=TerminationReason.COMPLETED)
+
+    message = MagicMock(spec=discord.Message)
+    message.channel.id = 123
+    with patch.object(bot, "_orchestrate_observed", side_effect=pipeline):
+        await bot._orchestrate(message, "guild", tenant.id)
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.COMPLETED
+    assert rows[0].platform == "discord" and rows[0].channel_id == "123"

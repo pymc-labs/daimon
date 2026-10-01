@@ -13,18 +13,8 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsAgent,
-    BetaManagedAgentsDeltaEvent,
-    BetaManagedAgentsModelConfig,
     BetaManagedAgentsSession,
-    BetaManagedAgentsStartEvent,
 )
-from anthropic.types.beta.beta_managed_agents_agent_message_preview import (
-    BetaManagedAgentsAgentMessagePreview,
-)
-from anthropic.types.beta.beta_managed_agents_delta_content import BetaManagedAgentsDeltaContent
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsSessionEndTurn,
@@ -35,18 +25,32 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
-from daimon.core.errors import TurnError
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_WORKSPACE,
+    MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
+)
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import (
     _INTERRUPT_TERMINAL,
     _TERMINAL_STOP_REASONS,
+    WORKSPACE_SENTINEL_AGENT_NAME,
+    delete_entire_workspace_for_testing,
     delete_sessions_for_account,
+    find_workspace_disposable_sentinel,
+    interrupt_orphaned_session,
     replay_events,
     send_interrupt_and_wait,
-    stream_events_with_dedup,
     terminal_stop_reason,
     update_agent_with_version_retry,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    build_no_retry_anthropic,
+    list_response,
+    sse_response,
+)
+from daimon.testing.ma_models import ma_agent, ma_session
 
 
 def _user_message(event_id: str, text: str) -> BetaManagedAgentsUserMessageEvent:
@@ -101,18 +105,6 @@ def _make_list_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
     return build_fake_anthropic(router.dispatch)
 
 
-def _make_stream_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
-    """Build a transport-level client for stream tests."""
-    router = MARouter()
-    event_dicts = [e.model_dump(mode="json") for e in events]
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        return sse_response(event_dicts)
-
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    return build_fake_anthropic(router.dispatch)
-
-
 async def test_replay_events_returns_all_events_in_order_when_paginator_yields_multiple() -> None:
     events = [
         _user_message("sevt_1", "hi"),
@@ -155,111 +147,6 @@ async def test_replay_events_raises_turn_error_when_paginator_stalls_past_timeou
     assert isinstance(exc_info.value.__cause__, TimeoutError), (
         "the original asyncio TimeoutError must be preserved as __cause__"
     )
-
-
-async def test_stream_events_with_dedup_skips_ids_already_in_seen_when_iterated() -> None:
-    events = [
-        _user_message("sevt_1", "a"),
-        _agent_message("sevt_2", "b"),
-        _idle("sevt_3"),
-    ]
-    client = _make_stream_client(events)
-    seen: set[str] = {"sevt_2"}
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert [e.id for e in yielded] == ["sevt_1", "sevt_3"], (
-        "dedup must drop events whose id was pre-populated in seen"
-    )
-
-
-async def test_stream_events_with_dedup_adds_ids_to_seen_when_yielded() -> None:
-    events = [_user_message("sevt_1", "a"), _agent_message("sevt_2", "b")]
-    client = _make_stream_client(events)
-    seen: set[str] = set()
-
-    async for _ in stream_events_with_dedup(client, session_id="sesn_test", seen=seen):
-        pass
-
-    assert seen == {"sevt_1", "sevt_2"}, (
-        "seen set is the caller's running ledger; helper must mutate it"
-    )
-
-
-async def test_stream_events_with_dedup_returns_empty_when_all_events_already_seen() -> None:
-    events = [_user_message("sevt_1", "a"), _agent_message("sevt_2", "b")]
-    client = _make_stream_client(events)
-    seen: set[str] = {"sevt_1", "sevt_2"}
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert yielded == [], "fully-deduped stream should yield nothing"
-
-
-def _stream_client_yielding(events: Sequence[Any]) -> Any:
-    """Fake client whose events.stream yields the given objects verbatim.
-
-    Bypasses the SSE parser so id-less framing events (event_start /
-    event_delta) can be exercised directly — building valid nested SSE
-    payloads for them would couple the test to SDK internals.
-    """
-    client = build_fake_anthropic(MARouter().dispatch)
-
-    async def _aiter() -> Any:
-        for event in events:
-            yield event
-
-    async def _stream(*, session_id: str) -> Any:
-        return _aiter()
-
-    client.beta.sessions.events.stream = _stream  # type: ignore[assignment]
-    return client
-
-
-def _start_event(event_id: str) -> BetaManagedAgentsStartEvent:
-    return BetaManagedAgentsStartEvent(
-        type="event_start",
-        event=BetaManagedAgentsAgentMessagePreview(type="agent.message", id=event_id),
-    )
-
-
-def _delta_event(event_id: str, text: str) -> BetaManagedAgentsDeltaEvent:
-    return BetaManagedAgentsDeltaEvent(
-        type="event_delta",
-        event_id=event_id,
-        delta=BetaManagedAgentsDeltaContent(
-            type="content_delta",
-            content=BetaManagedAgentsTextBlock(type="text", text=text),
-        ),
-    )
-
-
-async def test_stream_events_with_dedup_skips_id_less_framing_events_from_0117_stream() -> None:
-    """SDK 0.117 widened the stream union with event_start / event_delta framing
-    events that carry no `id`. The helper must skip them — reaching `event.id`
-    on one would raise — and yield only foldable session events."""
-    client = _stream_client_yielding(
-        [
-            _start_event("sevt_1"),
-            _agent_message("sevt_1", "hi"),
-            _delta_event("sevt_1", "h"),
-            _idle("sevt_2"),
-        ]
-    )
-    seen: set[str] = set()
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert [e.id for e in yielded] == ["sevt_1", "sevt_2"], (
-        "framing events must be dropped; only session events with ids flow through"
-    )
-    assert seen == {"sevt_1", "sevt_2"}, "framing events must not enter the dedup ledger"
 
 
 async def test_send_interrupt_and_wait_sends_user_interrupt_when_invoked() -> None:
@@ -414,61 +301,23 @@ def _make_session(
     extra_meta: dict[str, str] | None = None,
 ) -> BetaManagedAgentsSession:
     """Build a minimal BetaManagedAgentsSession for transport-level fakes."""
-    now = datetime.now(UTC).isoformat()
     meta: dict[str, str] = {}
     if account_id is not None:
         meta["daimon_account"] = str(account_id)
     if extra_meta:
         meta.update(extra_meta)
-    return BetaManagedAgentsSession(
-        outcome_evaluations=[],
+    return ma_session(
         id=session_id,
-        agent=BetaManagedAgentsSessionAgent(
-            id=agent_id,
-            description=None,
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-            name="test-agent",
-            skills=[],
-            system=None,
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        archived_at=None,
-        created_at=now,
+        agent_id=agent_id,
         environment_id="env_test123",
         metadata=meta,
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        title=None,
-        type="session",
-        updated_at=now,
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
+        created_at=datetime.now(UTC),
     )
 
 
 def _make_agent(agent_id: str, tenant_id: uuid.UUID) -> BetaManagedAgentsAgent:
     """Build a minimal BetaManagedAgentsAgent for transport-level fakes."""
-    now = datetime.now(UTC).isoformat()
-    return BetaManagedAgentsAgent(
-        id=agent_id,
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={"daimon_tenant": str(tenant_id)},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        name="test-agent",
-        skills=[],
-        system=None,
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
-    )
+    return ma_agent(id=agent_id, name="test-agent", metadata={"daimon_tenant": str(tenant_id)})
 
 
 def _build_delete_sessions_client(
@@ -650,24 +499,6 @@ def _conflict_response() -> httpx.Response:
     )
 
 
-def _build_no_retry_anthropic(router: MARouter) -> AsyncAnthropic:
-    """Build an AsyncAnthropic with max_retries=0 backed by the given MARouter.
-
-    The SDK auto-retries 409 by default (max_retries=2). Tests for
-    update_agent_with_version_retry must disable SDK retries so the helper's
-    own retry logic is exercised in isolation — otherwise the SDK consumes
-    the first conflict internally before our code can inspect it.
-    """
-    return AsyncAnthropic(
-        api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(router.dispatch),
-            base_url="https://api.anthropic.com",
-        ),
-        max_retries=0,
-    )
-
-
 async def test_update_agent_with_version_retry_refetches_once_when_first_update_conflicts() -> None:
     """On first update returning 409, helper retrieves fresh agent and retries exactly once.
 
@@ -677,21 +508,8 @@ async def test_update_agent_with_version_retry_refetches_once_when_first_update_
     """
     now = datetime.now(UTC)
     agent_id = "agent_test123"
-    agent_payload = BetaManagedAgentsAgent(
-        id=agent_id,
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        name="test-agent",
-        skills=[],
-        system="original",
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+    agent_payload = ma_agent(
+        id=agent_id, name="test-agent", system="original", created_at=now
     ).model_dump(mode="json")
     updated_payload = {**agent_payload, "system": "updated", "version": 2}
 
@@ -713,7 +531,7 @@ async def test_update_agent_with_version_retry_refetches_once_when_first_update_
     router = MARouter()
     router.add("GET", r"/v1/agents/[^/]+", handle_retrieve)
     router.add("POST", r"/v1/agents/[^/]+", handle_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     async def apply_update(agent: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         return await client.beta.agents.update(agent.id, version=agent.version, system="updated")
@@ -732,21 +550,8 @@ async def test_update_agent_with_version_retry_reraises_when_error_is_not_confli
     """
     now = datetime.now(UTC)
     agent_id = "agent_test456"
-    agent_payload = BetaManagedAgentsAgent(
-        id=agent_id,
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        name="test-agent",
-        skills=[],
-        system="original",
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+    agent_payload = ma_agent(
+        id=agent_id, name="test-agent", system="original", created_at=now
     ).model_dump(mode="json")
 
     update_count = 0
@@ -768,7 +573,7 @@ async def test_update_agent_with_version_retry_reraises_when_error_is_not_confli
     router = MARouter()
     router.add("GET", r"/v1/agents/[^/]+", handle_retrieve)
     router.add("POST", r"/v1/agents/[^/]+", handle_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     async def apply_update(agent: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         return await client.beta.agents.update(agent.id, version=agent.version, system="bad")
@@ -790,21 +595,8 @@ async def test_update_agent_with_version_retry_propagates_second_conflict() -> N
     """
     now = datetime.now(UTC)
     agent_id = "agent_test789"
-    agent_payload = BetaManagedAgentsAgent(
-        id=agent_id,
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        name="test-agent",
-        skills=[],
-        system="original",
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+    agent_payload = ma_agent(
+        id=agent_id, name="test-agent", system="original", created_at=now
     ).model_dump(mode="json")
 
     update_count = 0
@@ -820,7 +612,7 @@ async def test_update_agent_with_version_retry_propagates_second_conflict() -> N
     router = MARouter()
     router.add("GET", r"/v1/agents/[^/]+", handle_retrieve)
     router.add("POST", r"/v1/agents/[^/]+", handle_update)
-    client = _build_no_retry_anthropic(router)
+    client = build_no_retry_anthropic(router)
 
     async def apply_update(agent: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         return await client.beta.agents.update(agent.id, version=agent.version, system="retry")
@@ -830,3 +622,126 @@ async def test_update_agent_with_version_retry_propagates_second_conflict() -> N
 
     assert exc_info.value.status_code == 409, "second conflict must propagate as 409"
     assert update_count == 2, "must attempt exactly two updates before propagating"
+
+
+# ---------------------------------------------------------------------------
+# delete_entire_workspace_for_testing sentinel guard tests
+# ---------------------------------------------------------------------------
+
+
+def _build_workspace_nuke_client(
+    agents: list[BetaManagedAgentsAgent],
+    seen: list[tuple[str, str]],
+) -> AsyncAnthropic:
+    """Transport-level client covering every endpoint the nuke can touch.
+
+    Appends `(method, path)` to `seen` for every request so a test can assert
+    that NOTHING mutating was issued. Every mutating route is registered so an
+    unwanted call shows up in `seen` rather than as an unrouted-request error.
+    """
+    router = MARouter()
+
+    def handle_agents_list(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([a.model_dump(mode="json") for a in agents])
+
+    def handle_empty_list(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([])
+
+    def handle_agent_archive(request: httpx.Request, match: Any) -> httpx.Response:
+        archived = next(a for a in agents if a.id == match.group(1))
+        return httpx.Response(200, json=archived.model_dump(mode="json"))
+
+    def handle_environment_delete(request: httpx.Request, match: Any) -> httpx.Response:
+        return httpx.Response(200, json={"id": match.group(1), "type": "environment_deleted"})
+
+    router.add("GET", r"/v1/agents", handle_agents_list)
+    router.add("GET", r"/v1/skills", handle_empty_list)
+    router.add("GET", r"/v1/environments", handle_empty_list)
+    router.add("POST", r"/v1/agents/([^/]+)/archive", handle_agent_archive)
+    router.add("DELETE", r"/v1/environments/([^/]+)", handle_environment_delete)
+
+    def record_then_dispatch(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return router.dispatch(request)
+
+    return build_fake_anthropic(record_then_dispatch)
+
+
+async def test_delete_entire_workspace_raises_and_touches_nothing_when_sentinel_is_absent() -> None:
+    tenant_agent = ma_agent(
+        id="agent_tenant", name="someone-elses-agent", metadata={"daimon_tenant": str(uuid.uuid4())}
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([tenant_agent], seen)
+
+    with pytest.raises(DaimonError) as exc_info:
+        await delete_entire_workspace_for_testing(
+            client, i_understand_this_destroys_all_tenants=True
+        )
+
+    assert "not marked disposable" in str(exc_info.value), (
+        "the refusal must say why it refused, not just that it failed"
+    )
+    assert "daimon.testing.mark_disposable" in str(exc_info.value), (
+        "the refusal must name the command that marks a workspace disposable"
+    )
+    assert [m for m, _ in seen] == ["GET"], f"an unmarked workspace must see reads only, got {seen}"
+
+
+async def test_delete_entire_workspace_archives_other_agents_but_spares_sentinel() -> None:
+    sentinel = ma_agent(
+        id="agent_sentinel",
+        name=WORKSPACE_SENTINEL_AGENT_NAME,
+        metadata={MA_METADATA_KEY_WORKSPACE: MA_METADATA_VALUE_WORKSPACE_DISPOSABLE},
+    )
+    disposable_agent = ma_agent(
+        id="agent_disposable", name="scratch-agent", metadata={"daimon_tenant": str(uuid.uuid4())}
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([sentinel, disposable_agent], seen)
+
+    await delete_entire_workspace_for_testing(client, i_understand_this_destroys_all_tenants=True)
+
+    archived_paths = [path for method, path in seen if method == "POST"]
+    assert archived_paths == ["/v1/agents/agent_disposable/archive"], (
+        f"only the non-sentinel agent may be archived, got {archived_paths}"
+    )
+
+
+async def test_find_workspace_disposable_sentinel_returns_none_when_no_agent_carries_the_marker() -> (
+    None
+):
+    plain_agent = ma_agent(
+        id="agent_plain", name="plain-agent", metadata={"daimon_tenant": str(uuid.uuid4())}
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([plain_agent], seen)
+
+    assert await find_workspace_disposable_sentinel(client) is None, (
+        "a tenant agent without the workspace marker must not count as a sentinel"
+    )
+
+
+async def test_interrupt_orphaned_session_gives_up_after_its_timeout() -> None:
+    """The boot sweeps hold turn admission while this runs; an MA endpoint
+    that never answers must be cut off by the call's own bound, retries
+    included, and reported as not interrupted rather than raised."""
+
+    async def _never_answers(_request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    anthropic = AsyncAnthropic(
+        api_key="test",
+        max_retries=8,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        ),
+    )
+
+    async with asyncio.timeout(5):
+        interrupted = await interrupt_orphaned_session(
+            anthropic, session_id="sesn_hung", timeout_s=0.05
+        )
+
+    assert interrupted is False

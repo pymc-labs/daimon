@@ -1,16 +1,23 @@
-"""Wave 0 state tests for agent_setup/state.py.
+"""Tests for agent_setup/state.py.
 
-Tests the private_metadata round-trip (L1/L2/L3), the < 3000-char budget,
-and the rename-forbidden reducer shape.
+Both metadata shapes: the flat dict the routines panel still writes, and the
+typed `PanelMetadata` every agent-setup view carries. Round-trips, the
+< 3000-char budget, and the total-function decoders.
 
 No I/O, no DB, no mocks — pure unit assertions.
 """
 
+import json
+
+import pytest
 from daimon.adapters.slack.agent_setup.state import (
-    apply_agent_modal,
+    PanelMetadata,
+    decode_panel_metadata,
     decode_private_metadata,
+    encode_panel_metadata,
     encode_private_metadata,
 )
+from daimon.adapters.slack.modal_limits import MAX_PRIVATE_METADATA_CHARS
 
 # ---------------------------------------------------------------------------
 # encode/decode round-trip — L1
@@ -143,42 +150,142 @@ def test_decode_private_metadata_partial_json_returns_empty_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
-# apply_agent_modal — rename-forbidden shape
+# PanelMetadata — the read-only panel's private_metadata
 # ---------------------------------------------------------------------------
 
 
-def test_apply_agent_modal_returns_model_and_system_fields() -> None:
-    result = apply_agent_modal(
-        model_id="claude-3-5-sonnet-20241022", system_prompt="You are helpful."
+def test_panel_metadata_round_trips_every_field() -> None:
+    meta = PanelMetadata(
+        team_id="T01ABC123",
+        channel_id="C01XYZ456",
+        view="details",
+        page=3,
+        agent_name="research-bot",
+        root_view_id="V0123456789",
+        expanded="connections",
     )
-    assert result.get("model") == "claude-3-5-sonnet-20241022", (
-        "apply_agent_modal should include model in the returned dict"
+    decoded = decode_panel_metadata(encode_panel_metadata(meta))
+    assert decoded == meta, "a fully populated panel metadata must survive the round trip"
+
+
+def test_panel_metadata_omits_defaults_from_the_encoded_payload() -> None:
+    meta = PanelMetadata(team_id="T01ABC123", channel_id="C01XYZ456", view="agents")
+    encoded = encode_panel_metadata(meta)
+    assert json.loads(encoded) == {"t": "T01ABC123", "c": "C01XYZ456", "v": "agents"}, (
+        "a field still at its default costs no characters of the 3,000-character budget"
     )
-    assert result.get("system") == "You are helpful.", (
-        "apply_agent_modal should include system in the returned dict"
+    assert decode_panel_metadata(encoded) == meta, "the omitted fields come back as their defaults"
+
+
+def test_panel_metadata_carries_no_tenant_or_agent_id() -> None:
+    encoded = encode_panel_metadata(
+        PanelMetadata(
+            team_id="T01ABC123",
+            channel_id="C01XYZ456",
+            view="details",
+            agent_name="research-bot",
+        )
+    )
+    assert "tenant" not in encoded, "the tenant id is always re-derived server-side"
+    assert "ma_agent_id" not in encoded, "an MA id is never taken from a client payload"
+
+
+def test_panel_metadata_stays_well_inside_slacks_metadata_budget() -> None:
+    encoded = encode_panel_metadata(
+        PanelMetadata(
+            team_id="T" * 32,
+            channel_id="C" * 32,
+            view="details",
+            page=99,
+            agent_name="n" * 64,
+            root_view_id="V" * 32,
+            expanded="connections",
+        )
+    )
+    assert len(encoded) < MAX_PRIVATE_METADATA_CHARS, (
+        "a worst-case panel payload must still fit Slack's private_metadata cap"
     )
 
 
-def test_apply_agent_modal_has_no_name_path() -> None:
-    """Rename-forbidden: the function must not accept or expose a name/agent_name field."""
-    import inspect
-
-    sig = inspect.signature(apply_agent_modal)
-    param_names = set(sig.parameters)
-    assert "name" not in param_names, (
-        "apply_agent_modal must not accept a 'name' parameter (rename is forbidden)"
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "not json at all",
+        "[]",
+        '{"c":"C1","v":"agents"}',
+        '{"t":"T1","v":"agents"}',
+        '{"t":"T1","c":"C1"}',
+        '{"t":"T1","c":"C1","v":"nope"}',
+        '{"t":"T1","c":"C1","v":"agents","p":-1}',
+        '{"t":"T1","c":"C1","v":"agents","p":"two"}',
+        '{"t":"T1","c":"C1","v":"agents","a":7}',
+        '{"t":1,"c":"C1","v":"agents"}',
+        '{"t":"T1","c":"C1","v":"agents","x":7}',
+    ],
+)
+def test_decode_panel_metadata_when_malformed_returns_none(raw: str) -> None:
+    assert decode_panel_metadata(raw) is None, (
+        f"a payload the panel cannot trust must decode to None, not a half-read view ({raw!r})"
     )
-    assert "agent_name" not in param_names, (
-        "apply_agent_modal must not accept an 'agent_name' parameter (rename is forbidden)"
+
+
+def test_decode_panel_metadata_drops_unrecognised_expansions() -> None:
+    decoded = decode_panel_metadata('{"t":"T1","c":"C1","v":"details","x":["keys","mystery"]}')
+    assert decoded is not None, "a recognisable payload with one odd expansion still decodes"
+    assert decoded.expanded == "keys", (
+        "an expansion this build does not know about is ignored, not carried through"
     )
 
 
-def test_apply_agent_modal_omits_none_fields() -> None:
-    result = apply_agent_modal(model_id=None, system_prompt=None)
-    assert result == {}, "apply_agent_modal with all-None args should return an empty dict"
+def test_with_page_moves_the_page_and_clamps_below_zero() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", view="agents", page=2)
+    assert meta.with_page(5).page == 5, "with_page moves to the requested page"
+    assert meta.with_page(-3).page == 0, "a page before the first clamps to the first"
+    assert meta.page == 2, "with_page returns a new metadata rather than mutating"
 
 
-def test_apply_agent_modal_returns_only_provided_fields() -> None:
-    result = apply_agent_modal(model_id="claude-3-5-haiku-20241022", system_prompt=None)
-    assert "model" in result, "apply_agent_modal should include model when provided"
-    assert "system" not in result, "apply_agent_modal should omit system when system_prompt is None"
+def test_with_view_keeps_page() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", view="agents", page=4, root_view_id="V1")
+    moved = meta.with_view("new_agent", root_view_id="V1")
+    assert moved.view == "new_agent", "with_view switches screens"
+    assert moved.root_view_id == "V1", "the root view id is carried when the caller passes it"
+    assert moved.page == 4, (
+        "the page travels so the root roster can be refreshed where the reader left it"
+    )
+    assert meta.view == "agents", "with_view returns a new metadata rather than mutating"
+
+
+def test_with_view_when_page_given_starts_the_new_screen_there() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", view="agents", page=4)
+    moved = meta.with_view("details", agent_name="research-bot", page=0)
+    assert moved.agent_name == "research-bot", "the target agent travels with the view"
+    assert moved.page == 0, "a screen that pages over its own list says so explicitly"
+    assert meta.page == 4, "the view the reader came from is untouched, so Back restores it"
+    assert meta.with_view("routing", page=-2).page == 0, "a page before the first clamps"
+
+
+def test_with_view_resets_expansion_when_the_agent_changes() -> None:
+    meta = PanelMetadata(
+        team_id="T1",
+        channel_id="C1",
+        view="details",
+        agent_name="researcher",
+        expanded="keys",
+    )
+    assert meta.with_view("details", agent_name="researcher").expanded == "keys", (
+        "an in-place rerender keeps the selected agent's open list"
+    )
+    assert meta.with_view("details", agent_name="forecaster").expanded is None, (
+        "opening another agent starts with every list collapsed"
+    )
+
+
+def test_toggled_opens_a_collapsed_list_and_closes_an_open_one() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", view="details")
+    opened = meta.toggled("keys")
+    assert opened.expanded == "keys", "toggling a collapsed list opens it"
+    assert opened.toggled("keys").expanded is None, "toggling it again closes it"
+    skills = opened.toggled("skills")
+    assert skills.expanded == "skills", "opening one list closes the previous list"
+    assert meta.expanded is None, "toggled returns a new metadata rather than mutating"

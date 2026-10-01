@@ -8,7 +8,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from daimon.core._models import Tenant
 from daimon.core.defaults.provisioning import (
@@ -148,3 +148,63 @@ async def test_archive_tenant_is_noop_for_unknown_tenant(
     unknown_id = uuid.uuid4()
     # Should complete without raising
     await archive_tenant(db_session_factory, tenant_id=unknown_id, now=_NOW)
+
+
+async def test_teardown_older_than_the_stored_token_leaves_the_reinstall_alone(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A teardown for an uninstall that happened before the current token was
+    stored (a delayed or retried app_uninstalled / tokens_revoked arriving after
+    a reinstall) must not delete the fresh token or re-archive the tenant."""
+    team_id = "T_TEARDOWN_LATE"
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(db_session, team_id=team_id, encrypted_token=b"reinstall-token")
+    await db_session.commit()
+    stored = await get_slack_bot_token(db_session, team_id=team_id)
+    assert stored is not None
+    uninstalled_at = stored.updated_at - timedelta(minutes=2)
+
+    await teardown_slack_install(
+        db_session_factory, team_id=team_id, now=_NOW, event_time=uninstalled_at
+    )
+
+    db_session.expire_all()
+    assert await get_slack_bot_token(db_session, team_id=team_id) is not None, (
+        "a teardown older than the stored token must not delete the reinstall's token"
+    )
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    tenant_row = (
+        await db_session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one()
+    assert tenant_row.archived_at is None, (
+        "a teardown older than the stored token must not re-archive the reinstalled tenant"
+    )
+
+
+async def test_teardown_newer_than_the_stored_token_tears_down(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The ordinary uninstall: the event postdates the token, so teardown runs."""
+    team_id = "T_TEARDOWN_CURRENT"
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(db_session, team_id=team_id, encrypted_token=b"install-token")
+    await db_session.commit()
+    stored = await get_slack_bot_token(db_session, team_id=team_id)
+    assert stored is not None
+
+    await teardown_slack_install(
+        db_session_factory,
+        team_id=team_id,
+        now=_NOW,
+        event_time=stored.updated_at + timedelta(minutes=2),
+    )
+
+    db_session.expire_all()
+    assert await get_slack_bot_token(db_session, team_id=team_id) is None
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    tenant_row = (
+        await db_session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one()
+    assert tenant_row.archived_at is not None

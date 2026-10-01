@@ -11,7 +11,7 @@ needed here — nothing in this module spans a read-then-write.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import WizardSession
@@ -111,7 +111,11 @@ async def update_wizard_state(
             WizardSession.expires_at > now,
             WizardSession.updated_at == expected_updated_at,
         )
-        .values(answers=answers, current_step=current_step, updated_at=now)
+        .values(
+            answers=answers,
+            current_step=current_step,
+            updated_at=func.greatest(now, WizardSession.updated_at + timedelta(microseconds=1)),
+        )
     )
     result = await session.execute(stmt)
     rowcount = cast(CursorResult[Any], result).rowcount
@@ -125,15 +129,17 @@ async def try_claim_submit(
     short_id: str,
     answers: dict[str, list[str]],
     current_step: int,
+    expected_updated_at: datetime,
     now: datetime,
 ) -> WizardSessionRow | None:
-    """Atomically flip `short_id` to submitted, iff it is open and unexpired.
+    """Atomically flip `short_id` to submitted if its observed state is current.
 
     One statement is the authoritative single-use gate: the UPDATE's own row
     lock serializes concurrent Submit taps, so the loser's WHERE clause
-    simply matches zero rows — no advisory lock needed, because nothing here
-    spans a read-then-write. Returns the claimed row, or None when the claim
-    was lost (a second claim winning would mean a second billed turn).
+    simply matches zero rows. `expected_updated_at` also rejects a submit
+    computed from a stale read, so it cannot replace answers from an edit that
+    committed in the meantime. Returns the claimed row, or None when its
+    lifecycle or content changed before the claim.
     """
     stmt = (
         update(WizardSession)
@@ -141,8 +147,14 @@ async def try_claim_submit(
             WizardSession.id == short_id,
             WizardSession.status == "open",
             WizardSession.expires_at > now,
+            WizardSession.updated_at == expected_updated_at,
         )
-        .values(status="submitted", answers=answers, current_step=current_step, updated_at=now)
+        .values(
+            status="submitted",
+            answers=answers,
+            current_step=current_step,
+            updated_at=func.greatest(now, WizardSession.updated_at + timedelta(microseconds=1)),
+        )
         .returning(WizardSession)
     )
     result = await session.execute(stmt)
@@ -175,7 +187,11 @@ async def abandon_expired_wizard_sessions(
         return 0
     stmt = (
         update(WizardSession)
-        .where(WizardSession.id.in_(ids))
+        .where(
+            WizardSession.id.in_(ids),
+            WizardSession.status == "open",
+            WizardSession.expires_at <= now,
+        )
         .values(status="abandoned", updated_at=now)
     )
     result = await session.execute(stmt)

@@ -27,7 +27,7 @@ def _summary_line(preview: PurgePreview) -> str:
     if preview.user_skills.count > 0:
         parts.append(f"{preview.user_skills.count} synced skill(s)")
     if preview.github_credentials.count > 0:
-        parts.append(f"{preview.github_credentials.count} GitHub credential(s)")
+        parts.append(f"{preview.github_credentials.count} GitHub token(s)")
     if preview.github_oauth_states.count > 0:
         parts.append(f"{preview.github_oauth_states.count} OAuth handshake record(s)")
     if preview.mcp_tokens.count > 0:
@@ -38,6 +38,8 @@ def _summary_line(preview: PurgePreview) -> str:
         parts.append(f"{preview.slack_user_tokens.count} Slack user token(s)")
     if preview.slack_turn_contexts.count > 0:
         parts.append(f"{preview.slack_turn_contexts.count} Slack turn context(s)")
+    if preview.direct_message_conversations.count > 0:
+        parts.append(f"{preview.direct_message_conversations.count} private conversation(s)")
     return ", ".join(parts) if parts else "nothing visible to you yet"
 
 
@@ -63,18 +65,18 @@ def build_privacy_main_container(
         "-# Routines you scheduled",
         "-# User config rows",
         "-# Synced skill ledger rows",
-        "-# Encrypted GitHub credentials (token stored encrypted-at-rest in our DB)",
+        "-# Encrypted GitHub tokens (token stored encrypted-at-rest in our DB)",
         "-# GitHub OAuth handshake records",
         "-# The account row itself",
         "",
         "🔐 **What lives in Managed Agents**",
-        "-# Agent definitions, system prompts, MCP credentials",
+        "-# Agent definitions, system prompts, MCP tokens",
         "-# Session transcripts, turn message content",
         "-# Skill repo references (the repos themselves stay on GitHub)",
         "-# Retention is governed by Anthropic's Managed Agents policy.",
         "",
         "🚫 **What we don't hold**",
-        "-# Plaintext credentials (GitHub tokens are encrypted-at-rest in our DB)",
+        "-# Plaintext GitHub tokens (GitHub tokens are encrypted-at-rest in our DB)",
         "-# Message content (we only log structural events)",
     ]
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(

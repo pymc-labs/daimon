@@ -1,8 +1,6 @@
-"""Tests for billing_panel/checkout.py and billing_panel/actions.py (top-up select).
+"""Tests for billing_panel/actions.py (top-up select).
 
-Covers:
-- create_checkout POSTs to /billing/checkout with {"amount": N} body and
-  "Authorization: Bearer <token>" header; returns the URL (transport-level fake).
+Covers (create_checkout itself is covered in core's test_billing_panel.py):
 - handle_topup_select with an admin user + amount=25: asserts checkout POST and
   ephemeral chat.postEphemeral with the mrkdwn <url|...> link.
 - handle_topup_select with a non-admin user: asserts NO checkout POST.
@@ -19,13 +17,12 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
-import pytest
 import pytest_asyncio
+import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
@@ -52,8 +49,6 @@ _CHECKOUT_RESPONSE_URL = "https://checkout.example/abc"
 _TEAM_ID = "T_CHECKOUT_TEST"
 _USER_ID = "U_CHECKOUT_ADMIN"
 _CHANNEL_ID = "C_CHECKOUT_CHAN"
-
-pytestmark = pytest.mark.asyncio
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +96,7 @@ def _build_admin_payload(*, amount: int) -> dict[str, Any]:
         "team": {"id": _TEAM_ID},
         "user": {"id": _USER_ID},
         "container": {"channel_id": _CHANNEL_ID},
+        "view": {"id": "V_BILLING_TEST", "hash": "H_BILLING_TEST"},
         "actions": [
             {
                 "action_id": "billing_topup",
@@ -138,78 +134,6 @@ def _make_checkout_transport(
         return httpx.Response(200, json={"url": _CHECKOUT_RESPONSE_URL})
 
     return httpx.MockTransport(handler)
-
-
-# ---------------------------------------------------------------------------
-# Unit: create_checkout
-# ---------------------------------------------------------------------------
-
-
-async def test_create_checkout_posts_with_amount_and_bearer_token() -> None:
-    """create_checkout POSTs {"amount": N} with Authorization: Bearer header."""
-    from daimon.adapters.slack.billing_panel.checkout import create_checkout
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, json={"url": _CHECKOUT_RESPONSE_URL})
-
-    settings = MagicMock()
-    settings.app_root_url = "https://mcp.example.com"
-    settings.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
-
-    account_id = uuid.uuid4()
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        url = await create_checkout(
-            client,
-            settings=settings,
-            account_id=account_id,
-            amount=25,
-        )
-
-    assert url == _CHECKOUT_RESPONSE_URL, "create_checkout must return the URL from the response"
-    assert len(captured) == 1, "create_checkout must make exactly one POST request"
-
-    req = captured[0]
-    assert req.method == "POST", "create_checkout must use POST"
-    assert "/billing/checkout" in str(req.url), "create_checkout must POST to /billing/checkout"
-
-    # Verify body has amount only (no tenant_id — OQ-1)
-    body = json.loads(req.content)
-    assert body == {"amount": 25}, (
-        "request body must be {'amount': 25} — no tenant_id/guild_id in body (OQ-1)"
-    )
-
-    # Verify Authorization header
-    auth_header = req.headers.get("authorization", "")
-    assert auth_header.startswith("Bearer "), (
-        "request must have Authorization: Bearer <token> header"
-    )
-    token = auth_header[len("Bearer ") :]
-    assert len(token) > 10, "Bearer token must be a non-trivial JWT"
-
-
-async def test_create_checkout_raises_on_non_2xx_response() -> None:
-    """create_checkout raises httpx.HTTPStatusError on non-2xx."""
-    from daimon.adapters.slack.billing_panel.checkout import create_checkout
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"error": "invalid amount"})
-
-    settings = MagicMock()
-    settings.app_root_url = "https://mcp.example.com"
-    settings.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            await create_checkout(
-                client,
-                settings=settings,
-                account_id=uuid.uuid4(),
-                amount=999,
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +321,10 @@ async def test_handle_topup_select_non_admin_issues_no_checkout_post(
         )
 
     assert len(captured_checkout) == 0, "Non-admin must NOT trigger a checkout POST (fail-closed)"
+    views_update_key = ("POST", yarl.URL(_VIEWS_UPDATE_URL))
+    assert views_update_key not in mock.requests, (
+        "Non-admin refusal must stay silent — no views.update either"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -457,4 +385,109 @@ async def test_handle_topup_select_invalid_amount_issues_no_checkout_post(
 
     assert len(captured_checkout) == 0, (
         "Amount 999 (not in preset set) must NOT trigger a checkout POST (T-82-10)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration: handle_topup_select — checkout route missing (no payment provider)
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_topup_select_updates_modal_when_checkout_route_is_missing(
+    runtime: SlackRuntime,
+) -> None:
+    """When /billing/checkout 404s, the open modal is updated with a visible message
+    instead of leaving the top-up select silently dead."""
+    from daimon.adapters.slack.billing_panel.actions import handle_topup_select
+
+    def checkout_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    admin_users_info_payload = {
+        "ok": True,
+        "user": {
+            "id": _USER_ID,
+            "name": "admin_user",
+            "is_admin": True,
+            "is_owner": False,
+            "is_primary_owner": False,
+        },
+    }
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN,
+            payload=admin_users_info_payload,
+            repeat=True,
+        )
+        mock.post(  # pyright: ignore[reportUnknownMemberType]
+            _VIEWS_UPDATE_URL,
+            payload={"ok": True, "view": {"id": "V_BILLING_TEST", "hash": "H_BILLING_TEST"}},
+            repeat=True,
+        )
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(checkout_handler))
+        await handle_topup_select(
+            runtime,
+            _build_admin_payload(amount=25),
+            _http_client=http_client,
+        )
+
+    views_update_key = ("POST", yarl.URL(_VIEWS_UPDATE_URL))
+    update_calls = mock.requests.get(views_update_key)
+    assert update_calls, "handle_topup_select must send a views.update when checkout 404s"
+    assert len(update_calls) == 1, "exactly one views.update must be sent on checkout failure"
+    body: dict[str, Any] = update_calls[0].kwargs["json"]
+    view_text = str(body["view"]["blocks"][0]["text"]["text"])
+    assert "aren't configured" in view_text, (
+        "views.update body must tell the operator payments aren't configured"
+    )
+    assert "manual credit top-up" in view_text, (
+        "views.update body must point the operator at a manual credit top-up"
+    )
+
+
+async def test_handle_topup_select_admin_success_sends_no_views_update(
+    runtime: SlackRuntime,
+) -> None:
+    """A successful checkout must not touch the modal — the ephemeral link is the
+    only response (mirroring it into the modal is out of scope)."""
+    from daimon.adapters.slack.billing_panel.actions import handle_topup_select
+
+    def checkout_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"url": _CHECKOUT_RESPONSE_URL})
+
+    admin_users_info_payload = {
+        "ok": True,
+        "user": {
+            "id": _USER_ID,
+            "name": "admin_user",
+            "is_admin": True,
+            "is_owner": False,
+            "is_primary_owner": False,
+        },
+    }
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN,
+            payload=admin_users_info_payload,
+            repeat=True,
+        )
+        mock.post(  # pyright: ignore[reportUnknownMemberType]
+            _POST_EPHEMERAL_URL,
+            payload={"ok": True, "message_ts": "1234.5678"},
+            repeat=True,
+        )
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(checkout_handler))
+        await handle_topup_select(
+            runtime,
+            _build_admin_payload(amount=25),
+            _http_client=http_client,
+        )
+
+    views_update_key = ("POST", yarl.URL(_VIEWS_UPDATE_URL))
+    assert views_update_key not in mock.requests, (
+        "a successful checkout must not send any views.update"
     )

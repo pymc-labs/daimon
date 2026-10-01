@@ -19,47 +19,32 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
-import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.beta_managed_agents_agent import BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig,
-)
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import claim_due_fireable, create_routine
+from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
 
 def _ma_agent_json(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, object]:
-    agent = BetaManagedAgentsAgent(
+    agent = ma_agent(
         id=agent_id,
-        type="agent",
         name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={
             MA_METADATA_KEY_TENANT: str(tenant_id),
             MA_METADATA_KEY_NAME: name,
         },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at="2026-05-19T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-19T00:00:00Z",  # type: ignore[arg-type]
-        archived_at=None,
-        description=None,
     )
     return agent.model_dump(mode="json")
 
@@ -95,13 +80,16 @@ def _auth_identity(
     external_id: str | None = "g_test",
     tenant_id: uuid.UUID | None = None,
 ) -> AuthIdentity:
+    tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
     return AuthIdentity(
         account_id=uuid.uuid4(),
-        tenant_id=tenant_id if tenant_id is not None else uuid.uuid4(),
+        tenant_id=tenant_id,
         role=Role.USER,
         platform=platform,
         external_id=external_id,
         platform_user_id="u_test",
+        # A member in a chat turn with the agent the routine schedules.
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_a"),
     )
 
 

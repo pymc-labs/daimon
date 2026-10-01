@@ -30,6 +30,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
 from anthropic.types.beta.beta_packages_params import BetaPackagesParams
+from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -82,7 +83,7 @@ class AgentSpec(BaseModel):
     verbatim — any SDK rename or discriminator change is inherited without
     re-declaration.
 
-    Two fields diverge from the SDK:
+    Three fields diverge from the SDK:
 
     - `metadata` is omitted entirely. The upload call synthesizes
       `{daimon_account, daimon_name}` at the SDK boundary; operators cannot
@@ -93,6 +94,17 @@ class AgentSpec(BaseModel):
       IDs don't exist until skills have uploaded. `Field(exclude=True)` keeps
       it out of `model_dump()`; the resolved list is passed as a separate
       kwarg at the call site.
+    - `isolated: bool` is an authoring-side property of how daimon builds and
+      mounts the agent, not a Managed Agents create parameter — it never
+      appears in an `agents.create`/`agents.update` payload. `dump_agent_spec`
+      splats its output straight into the SDK call, so an unexcluded field
+      would be sent upstream as an unknown parameter and rejected.
+      `Field(exclude=True)` keeps it out of `model_dump()`, exactly like
+      `skills` and `skill_repos` above. Because it is excluded, `isolated`
+      does not participate in `compute_spec_fingerprint` (which hashes
+      `dump_agent_spec(spec, mode="json")`) — that is correct rather than a
+      gap, since the flag's only observable effects (no `mcp_servers`, no
+      `mcp_toolset` tool) both participate in the hash directly.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -101,11 +113,15 @@ class AgentSpec(BaseModel):
     model: BetaManagedAgentsModelParam
     description: str | None = None
     system: str | None = None
+    context_fragments: dict[TurnContext, ContextFragment] = Field(
+        default_factory=dict[TurnContext, ContextFragment], exclude=True
+    )
     tools: list[Annotated[Tool, Field(discriminator="type")]] | None = None
     mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None
     multiagent: BetaManagedAgentsMultiagentParams | None = None
     skills: list[SkillRef] = Field(default_factory=list[SkillRef], exclude=True)
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
+    isolated: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")
     def _require_mcp_toolset_when_mcp_servers_set(self) -> AgentSpec:
@@ -295,6 +311,9 @@ def dump_agent_spec(
         )
         dumped = spec.model_dump(mode=mode, exclude_none=exclude_none)
 
+    if spec.context_fragments:
+        dumped["system"] = encode_fragments(spec.system or "", spec.context_fragments)
+
     tools = cast(
         "list[dict[str, Any]]",
         list(merge_default_agent_toolset(cast("list[Tool] | None", dumped.get("tools")))),
@@ -347,3 +366,32 @@ def load_environment_spec(path: Path) -> EnvironmentSpec:
         return EnvironmentSpec.model_validate(data)
     except ValidationError as err:
         raise SpecError(f"environment spec at {path} failed validation: {err}") from err
+
+
+def _prune_sdk_extras(value: object) -> object:
+    """Recursive half of `build_authoring_params`."""
+    if isinstance(value, BaseModel):
+        return build_authoring_params(value)
+    if isinstance(value, list):
+        return [_prune_sdk_extras(item) for item in cast("list[object]", value)]
+    return value
+
+
+def build_authoring_params(model: BaseModel) -> dict[str, object]:
+    """Dump an MA response model into an authoring-params dict, dropping fields
+    this SDK version does not declare.
+
+    MA's API ships response fields ahead of the SDK's generated models. The
+    `anthropic` BaseModel keeps those as pydantic extras and `model_dump()`
+    emits them, so feeding a response straight back into an `extra="forbid"`
+    `*Spec` fails on a field nobody authored — e.g. the `type` MA returns
+    alongside `name` on every agent-toolset tool config, which the SDK's
+    `BetaManagedAgentsAgentToolConfigParams` has no slot for. Only
+    SDK-declared fields survive this walk, at every nesting depth.
+    """
+    known = type(model).model_fields
+    return {
+        key: _prune_sdk_extras(getattr(model, key))
+        for key in model.model_dump(mode="python")
+        if key in known
+    }

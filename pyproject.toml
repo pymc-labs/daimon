@@ -1,6 +1,6 @@
 [project]
 name = "daimon"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hostable agent platform on Anthropic Managed Agents (workspace root)"
 requires-python = ">=3.12"
 license = "MIT"
@@ -12,6 +12,7 @@ dependencies = [
     "daimon-adapter-discord",
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
+    "daimon-adapter-teams",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +24,7 @@ billing = ["daimon-adapter-mcp[billing]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "apps/notebook-host"]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
@@ -32,7 +33,9 @@ daimon-adapter-mcp = { workspace = true }
 daimon-adapter-discord = { workspace = true }
 daimon-adapter-scheduler = { workspace = true }
 daimon-adapter-slack = { workspace = true }
+daimon-adapter-teams = { workspace = true }
 daimon-testing = { workspace = true }
+daimon-mux = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -44,21 +47,28 @@ target-version = "py312"
 extend-exclude = ["defaults/skills/**"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests favour long, descriptive assert messages over a hard column cap.
-"**/tests/**" = ["E501"]
+# Tests favour long, descriptive assert messages over a hard column cap, and
+# fake callables in tests may take `Any` where source may not.
+"**/tests/**" = ["E501", "ANN401"]
 
 [tool.pyright]
-include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "apps/notebook-host/src/notebook_host"]
+include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 
 [tool.importlinter]
-root_packages = ["daimon", "notebook_host"]
+root_packages = ["daimon", "mux", "notebook_host", "report_host"]
+
+[[tool.importlinter.contracts]]
+name = "Mux must not import daimon"
+type = "forbidden"
+source_modules = ["mux"]
+forbidden_modules = ["daimon"]
 
 [[tool.importlinter.contracts]]
 name = "Core must not import adapters"
@@ -69,35 +79,133 @@ forbidden_modules = ["daimon.adapters"]
 [[tool.importlinter.contracts]]
 name = "Adapters must not import each other"
 type = "independence"
-modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack"]
+modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack", "daimon.adapters.teams"]
 
 [[tool.importlinter.contracts]]
 name = "ORM module is private to stores and defaults"
 type = "forbidden"
+# import-linter cannot say "daimon.core.* except _models": a wildcard that matches
+# _models itself makes grimp reject the self-pair. The siblings are enumerated
+# instead; packages/core/tests/test_orm_import_contract.py fails when this list
+# drifts from the directory.
 source_modules = [
     "daimon.adapters",
+    "daimon.core.access_policy",
+    "daimon.core.agent_detail_lists",
+    "daimon.core.agent_details",
+    "daimon.core.agent_env_crypto",
+    "daimon.core.agent_guidance",
+    "daimon.core.agent_lifecycle",
+    "daimon.core.agent_pins",
+    "daimon.core.agent_mcp_credentials",
+    "daimon.core.anthropic_spend",
+    "daimon.core.answering_map",
+    "daimon.core.artifacts",
+    "daimon.core.billing",
+    "daimon.core.billing_panel",
     "daimon.core.broker",
+    "daimon.core.bundle_handle",
+    "daimon.core.checkpoint_prompt",
     "daimon.core.config",
+    "daimon.core.confirmation",
     "daimon.core.constants",
+    "daimon.core.continuity",
+    "daimon.core.context_prompt",
+    "daimon.core.credential_env",
     "daimon.core.credential_requests",
+    "daimon.core.cron",
     "daimon.core.db",
+    "daimon.core.env_file",
+    "daimon.core.direct_messages",
     "daimon.core.errors",
+    "daimon.core.github_app_auth",
+    "daimon.core.github_credentials",
+    "daimon.core.github_installation_reconcile",
+    "daimon.core.github_rate_limit",
+    "daimon.core.github_repo_auth",
+    "daimon.core.github_visibility",
+    "daimon.core.handoff_context",
     "daimon.core.headless_runner",
     "daimon.core.health",
+    "daimon.core.hub_identity",
+    "daimon.core.hub_oauth_kv_sweep",
     "daimon.core.ids",
+    "daimon.core.logging_setup",
     "daimon.core.ma",
+    "daimon.core.ma_identity",
+    "daimon.core.ma_resolver",
+    "daimon.core.mcp_attach",
+    "daimon.core.mcp_auth",
+    "daimon.core.mcp_credential_sweep",
+    "daimon.core.mcp_oauth",
+    "daimon.core.mcp_personal_servers",
+    "daimon.core.mcp_server_url",
+    "daimon.core.mcp_token_check",
+    "daimon.core.mcp_token_connect",
+    "daimon.core.mcp_vault",
+    "daimon.core.mcp_vault_janitor",
+    "daimon.core.media",
+    "daimon.core.memory_resource",
+    "daimon.core.memory_view",
     "daimon.core.message_feedback",
+    "daimon.core.message_split",
+    "daimon.core.models_catalog",
+    "daimon.core.notebooks",
     "daimon.core.observability",
+    "daimon.core.ops_alerts",
+    "daimon.core.operation_policy",
+    "daimon.core.security_audit",
+    "daimon.core.output_delivery",
+    "daimon.core.pending_file_sweeper",
+    "daimon.core.posted_controls",
+    "daimon.core.pricing",
     "daimon.core.privacy",
     "daimon.core.purge",
+    "daimon.core.reader_agent",
+    "daimon.core.repo_resource",
+    "daimon.core.reports",
+    "daimon.core.roster",
+    "daimon.core.routine_delivery",
+    "daimon.core.routines",
+    "daimon.core.routing_facts",
+    "daimon.core.scheduler",
     "daimon.core.scope",
+    "daimon.core.session_compat",
+    "daimon.core.session_preparation",
+    "daimon.core.session_preparation_stages",
+    "daimon.core.session_seal",
+    "daimon.core.session_snapshot",
+    "daimon.core.session_update_ops",
+    "daimon.core.sessions",
+    "daimon.core.setup_conversations",
     "daimon.core.skill_sync",
     "daimon.core.skill_zip",
     "daimon.core.skills",
+    "daimon.core.slack_event_dedup_sweep",
+    "daimon.core.slack_file_token",
+    "daimon.core.slack_files",
+    "daimon.core.slack_oauth",
+    "daimon.core.smoke",
     "daimon.core.specs",
+    "daimon.core.support_escalation",
+    "daimon.core.tables",
+    "daimon.core.teams_bot_framework",
+    "daimon.core.teams_threads",
+    "daimon.core.tenant_balance",
+    "daimon.core.thread_classifier",
+    "daimon.core.thread_naming",
+    "daimon.core.thread_participation",
+    "daimon.core.tool_safety",
     "daimon.core.turn",
+    "daimon.core.turn_card_intent_sweep",
+    "daimon.core.turn_keys",
+    "daimon.core.turn_origin",
+    "daimon.core.untrusted",
+    "daimon.core.usage_recording",
+    "daimon.core.usage_sweep",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",
+    "daimon.core.workspace_transfer",
 ]
 forbidden_modules = ["daimon.core._models"]
 # Stores are the sanctioned abstraction layer between adapters and the ORM.
@@ -128,16 +236,23 @@ type = "forbidden"
 source_modules = ["notebook_host"]
 forbidden_modules = ["daimon"]
 
+[[tool.importlinter.contracts]]
+name = "report-host must not import daimon"
+type = "forbidden"
+source_modules = ["report_host"]
+forbidden_modules = ["daimon"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests"]
+testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow'"
 markers = [
     "contract: live MA API tests -- opt-in only, never gate CI",
     "slow: spawns real marimo subprocesses (port 8100-8199) — opt-in",
     "no_cli_local_seed: CLI test manages its own tenant lifecycle -- skip the autouse cli:local seed",
+    "fresh_schema: DB test runs DDL -- give it a private throwaway schema instead of the wiped per-worker one",
 ]
 
 [dependency-groups]
@@ -154,4 +269,5 @@ dev = [
     "daimon-testing",
     "aioresponses>=0.7.9",
     "syrupy>=5.5.3",
+    "jsonschema>=4.23",
 ]

@@ -8,12 +8,23 @@ from collections.abc import Iterator
 
 import pytest
 from aioresponses import aioresponses as AioResponsesMock
-from daimon.testing.db import db_engine as db_engine  # noqa: F401
-from daimon.testing.db import db_session as db_session  # noqa: F401
-from daimon.testing.db import db_session_factory as db_session_factory  # noqa: F401
+from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_engine as db_engine
+from daimon.testing.db import db_schema as db_schema
+from daimon.testing.db import db_session as db_session
+from daimon.testing.db import db_session_factory as db_session_factory
 from slack_sdk.web.async_client import AsyncWebClient
 
 _SLACK_API_BASE = "https://slack.com/api"
+
+# Default ok payload for the POST-JSON chat methods. Exported so tests that
+# clear the defaults to stage failures can re-register the identical shape —
+# the ts value is load-bearing (tests assert on it as status_ts).
+CHAT_OK_PAYLOAD: dict[str, object] = {
+    "ok": True,
+    "ts": "1000000000.000001",
+    "channel": "C_TEST",
+}
 
 # Slack API methods that use POST with JSON body (params in body, not query string).
 # Exact URL match works for these since params are not in the URL.
@@ -83,7 +94,7 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
     for method in _SLACK_POST_JSON_METHODS:
         mock.post(  # pyright: ignore[reportUnknownMemberType]  # aioresponses url param is Pattern[Unknown]
             f"{_SLACK_API_BASE}/{method}",
-            payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
+            payload=CHAT_OK_PAYLOAD,
             repeat=True,
         )
     # auth.test carries the bot's own user id, mirroring the real API — the

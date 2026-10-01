@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import pytest_asyncio
 from anthropic import AsyncAnthropic
-from daimon.testing.ma import _require_api_key
+from daimon.testing.ma import require_api_key
 
 
 @pytest_asyncio.fixture(scope="module")
 async def anthropic_client() -> AsyncAnthropic:
     """Real AsyncAnthropic client from env var. Skips if key is missing."""
-    key = _require_api_key()
+    key = require_api_key()
     return AsyncAnthropic(api_key=key)

@@ -17,9 +17,12 @@ Pattern sequence for billing_topup block_action:
   4. get_or_create_platform_principal → account_id
   5. create_checkout(http_client, …) → url
   6. chat_postEphemeral with "<url|Complete payment>" link
+  7. On failure, views.update the open modal with a static "not configured" message
+     instead of leaving the dropdown silently dead
 
 Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | SlackApiError
-at the handler level; logs + captures to Sentry. Never stripe.
+at the handler level; logs + captures to Sentry, then answers the open modal
+via views.update. Never stripe.
 """
 
 from __future__ import annotations
@@ -29,22 +32,26 @@ from typing import Any
 
 import httpx
 import structlog
+from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.billing_panel.checkout import create_checkout
-from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
 from daimon.adapters.slack.billing_panel.views import build_billing_container, build_loading_view
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.billing_panel import (
+    TOPUP_AMOUNTS,
+    create_checkout,
+    load_billing_snapshot,
+    month_start,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
-
-# Preset top-up amounts; any amount not in this set is rejected (T-82-10)
-_PRESET_AMOUNTS: frozenset[int] = frozenset({10, 25, 50, 100})
 
 
 async def handle_billing_command(
@@ -63,12 +70,14 @@ async def handle_billing_command(
     team_id: str = payload.get("team_id") or payload.get("team", {}).get("id") or ""
     user_id: str = payload.get("user_id") or payload.get("user", {}).get("id") or ""
     trigger_id: str = payload.get("trigger_id") or ""
+    channel_id: str = payload.get("channel_id") or ""
 
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         log.warning("slack.billing_command.no_token", team_id=team_id)
         return
 
+    view_id: str = ""
     try:
         # Open loading modal immediately
         open_resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs
@@ -77,18 +86,18 @@ async def handle_billing_command(
         )
         # SlackResponse subscript is untyped — extract the view dict explicitly
         open_view: dict[str, str] = open_resp["view"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType, reportUnknownMemberType]  # SlackResponse untyped
-        view_id: str = open_view.get("id") or ""
+        view_id = open_view.get("id") or ""
 
         # Resolve admin status (fail-closed)
         is_admin = await resolve_is_admin(client, user_id=user_id)
 
         # Load billing snapshot from DB
         now = datetime.now(UTC)
-        since = datetime(now.year, now.month, 1, tzinfo=UTC)
+        since = month_start(now)
         async with runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
-                team_id=team_id,
+                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
@@ -106,14 +115,25 @@ async def handle_billing_command(
             view=billing_view,
         )
 
-    except (DaimonError, SlackApiError) as exc:
+    except (DaimonError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+        request_id = generate_request_id()
         log.error(
             "slack.billing_command_failed",
             team_id=team_id,
             user_id=user_id,
+            request_id=request_id,
             exc_info=exc,
         )
         capture_exception_with_scope(exc)
+        await surface_command_error(
+            client,
+            exc,
+            request_id=request_id,
+            title="Billing",
+            view_id=view_id,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
 
 
 async def handle_topup_select(
@@ -140,6 +160,8 @@ async def handle_topup_select(
     # channel comes from block_actions container (may be absent for modal actions)
     container: dict[str, Any] = payload.get("container") or {}
     channel: str = container.get("channel_id") or ""
+    view_info: dict[str, Any] = payload.get("view") or {}
+    view_id: str = str(view_info.get("id") or "")
 
     # Extract selected amount from the first action's selected_option value
     actions: list[dict[str, Any]] = payload.get("actions") or []
@@ -172,7 +194,7 @@ async def handle_topup_select(
                 raw_value=raw_value,
             )
             return
-        if amount not in _PRESET_AMOUNTS:
+        if amount not in TOPUP_AMOUNTS:
             log.warning(
                 "slack.billing_topup.amount_not_in_preset",
                 team_id=team_id,
@@ -214,3 +236,23 @@ async def handle_topup_select(
             exc_info=exc,
         )
         capture_exception_with_scope(exc)
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            view={
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "Billing"},
+                "close": {"type": "plain_text", "text": "Close"},
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "Payments aren't configured for this workspace. "
+                                "Ask an operator about a manual credit top-up."
+                            ),
+                        },
+                    }
+                ],
+            },
+        )

@@ -1,0 +1,84 @@
+name: Publish image
+
+# Publishes the runtime image to the GitHub Container Registry so self-hosters
+# can pull a release instead of building it. Releases get images, not every
+# commit: main's images are built by deploy.yml into the operator's own
+# registry, and an unversioned "latest built from main" would be the one thing
+# a self-hoster could not pin.
+#
+# A fork that pushes a v* tag publishes to its own namespace with its own
+# GITHUB_TOKEN; nothing here is specific to this repository.
+on:
+  push:
+    tags: ["v*"]
+  # The arm64 half is built nowhere else: ci.yml's docker-build job is amd64
+  # only, so a change to the image would first fail at release time.
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker/**"
+      - ".github/workflows/publish-image.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build every platform but publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    # The arm64 half of the build runs under QEMU emulation, which is several
+    # times slower than the native amd64 half.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 so the image runs on Apple Silicon and Graviton hosts without a
+      # local build; amd64 is native to the runner.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request' && inputs.dry_run != true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives the tag list from the git tag: v0.2.0 publishes 0.2.0 and 0.2,
+      # and moves latest. A prerelease tag (v0.3.0-rc.1) publishes its exact
+      # version only — latest must keep pointing at the newest stable release.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.description=The open source data science agent for Discord and Slack
+            org.opencontainers.image.licenses=MIT
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && inputs.dry_run != true }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

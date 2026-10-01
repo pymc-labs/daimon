@@ -14,9 +14,6 @@ def _err(status: int, type_: str, message: str) -> httpx.Response:
     )
 
 
-pytestmark = pytest.mark.asyncio
-
-
 _AGENT_RESPONSE = {
     "id": "agent_probe",
     "type": "agent",

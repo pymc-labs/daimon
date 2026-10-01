@@ -10,7 +10,6 @@ from typing import Any
 from urllib.parse import parse_qsl
 
 import httpx
-import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
 from daimon.core.config import (
@@ -24,8 +23,6 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from stripe._http_client import HTTPClient as StripeHTTPClient
-
-pytestmark = pytest.mark.asyncio
 
 _VALID_TOKEN = "bearer-test-token"
 _TENANT_ID: uuid.UUID = uuid.uuid4()

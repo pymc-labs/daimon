@@ -1,0 +1,327 @@
+"""The effective configuration a live MA session is actually running.
+
+An MA session freezes its agent at creation time: model, system prompt, skills,
+agent version, environment, repo checkout, memory store and vault are a
+snapshot, and later `agents.update` calls never reach a session that already
+exists. Only `agent.tools`, `agent.mcp_servers` and file resources can change in
+place. `SessionSnapshot` records that frozen configuration so a later turn can
+compare what the session runs against what the caller's configuration now
+wants, without re-reading the session from MA.
+
+Two axes, because they have different consequences:
+
+- **identity** — changing any of it requires a *replacement* session.
+- **mutable** — changing any of it can be applied to the live session.
+
+`fingerprint_identity` / `fingerprint_mutable` reduce each axis to one hex
+string. The handle fields (resource/file ids) and the diagnostics
+(`agent_version`, `agent_name`) are deliberately excluded from both: they
+identify or describe, they are not configuration, and a rotated handle must not
+read as a configuration change.
+
+Pure module — no I/O, no clock. Hashes are sha256 over canonical JSON, and
+every list is sorted by its own canonical JSON before hashing so that a
+reordered `tools` array is not a change.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Sequence
+from typing import Literal
+
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
+    BetaManagedAgentsAgentToolset20260401,
+)
+from anthropic.types.beta.beta_managed_agents_anthropic_skill import BetaManagedAgentsAnthropicSkill
+from anthropic.types.beta.beta_managed_agents_branch_checkout import (
+    BetaManagedAgentsBranchCheckout,
+)
+from anthropic.types.beta.beta_managed_agents_custom_skill import BetaManagedAgentsCustomSkill
+from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
+from anthropic.types.beta.beta_managed_agents_mcp_server_url_definition import (
+    BetaManagedAgentsMCPServerURLDefinition,
+)
+from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
+from anthropic.types.beta.sessions.beta_managed_agents_file_resource import (
+    BetaManagedAgentsFileResource,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
+    BetaManagedAgentsGitHubRepositoryResource,
+)
+from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from pydantic import BaseModel, ConfigDict
+
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
+type MaTool = (
+    BetaManagedAgentsAgentToolset20260401
+    | BetaManagedAgentsMCPToolset
+    | BetaManagedAgentsCustomTool
+)
+
+_ENV_MOUNT_SUFFIX = ".env"
+
+_IDENTITY_FIELDS = (
+    "schema_version",
+    "ma_agent_id",
+    "model_id",
+    "system_sha256",
+    "skills_sha256",
+    "environment_id",
+    "repo_url",
+    "repo_branch",
+    "memory_store_id",
+    "memory_read_only",
+    "vault_id",
+)
+_MUTABLE_FIELDS = ("schema_version", "tools_sha256", "mcp_servers_sha256", "env_sha256")
+
+
+class SessionSnapshot(BaseModel):
+    """What one MA session is running. Persisted as JSONB on `thread_sessions`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: Literal[1] = 1
+
+    # Identity axis — a difference here can only be applied by replacing the session.
+    ma_agent_id: str
+    model_id: str
+    system_sha256: str | None
+    skills_sha256: str
+    environment_id: str
+    repo_url: str | None
+    repo_branch: str | None
+    memory_store_id: str | None
+    memory_read_only: bool = False
+    vault_id: str | None
+
+    # Mutable axis — a difference here can be applied to the live session.
+    tools_sha256: str
+    mcp_servers_sha256: str
+    env_sha256: str | None
+
+    # Handles: what to call to apply a mutable change. Never fingerprinted.
+    env_file_id: str | None = None
+    env_resource_id: str | None = None
+    repo_resource_id: str | None = None
+    repo_mount_path: str | None = None
+    repo_token_issued_at: int | None = None
+
+    # Diagnostics only. Never fingerprinted — an agent version bump on its own
+    # is not a configuration change to the session that already froze it.
+    agent_version: int
+    agent_name: str
+
+
+def canonical_json(obj: JsonValue) -> str:
+    """One byte-stable JSON encoding: sorted keys, no insignificant whitespace."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_of(payload: str) -> str:
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _hash_model_list(items: Sequence[BaseModel]) -> str:
+    """sha256 over the canonical JSON of the items, sorted by their own encoding.
+
+    Sorting by encoding rather than by a per-type key means a list whose members
+    were merely reordered hashes the same, without this module having to know
+    which field identifies each union member.
+    """
+    dumped: list[JsonValue] = [item.model_dump(mode="json") for item in items]
+    return _sha256_of(canonical_json(sorted(dumped, key=canonical_json)))
+
+
+def hash_system(system: str | None) -> str | None:
+    """None for no system prompt — distinct from the hash of an empty prompt."""
+    return None if system is None else _sha256_of(system)
+
+
+def hash_skills(skills: Sequence[MaSkill]) -> str:
+    return _hash_model_list(skills)
+
+
+def hash_tools(tools: Sequence[MaTool]) -> str:
+    return _hash_model_list(tools)
+
+
+def hash_mcp_servers(mcp_servers: Sequence[BetaManagedAgentsMCPServerURLDefinition]) -> str:
+    return _hash_model_list(mcp_servers)
+
+
+def hash_env_bytes(content: bytes) -> str:
+    """Hash the exact bytes `credential_env.assemble_env_bytes` produces."""
+    return hashlib.sha256(content).hexdigest()
+
+
+def fingerprint_identity(snapshot: SessionSnapshot) -> str:
+    return _fingerprint(snapshot, _IDENTITY_FIELDS)
+
+
+def fingerprint_mutable(snapshot: SessionSnapshot) -> str:
+    return _fingerprint(snapshot, _MUTABLE_FIELDS)
+
+
+def _fingerprint(snapshot: SessionSnapshot, fields: Sequence[str]) -> str:
+    dumped: dict[str, JsonValue] = snapshot.model_dump(mode="json")
+    return _sha256_of(canonical_json({name: dumped[name] for name in fields}))
+
+
+def snapshot_from_created_session(
+    session: BetaManagedAgentsSession,
+    *,
+    env_sha256: str | None,
+    env_file_id: str | None,
+    repo_token_issued_at: int | None,
+    vault_id: str | None,
+) -> SessionSnapshot:
+    """Snapshot a session we just created, from the response plus what we sent.
+
+    `env_sha256` and `repo_token_issued_at` are not readable back off the
+    session — only the creator knows the bytes it uploaded and when it minted
+    the clone token — so the caller supplies them.
+    """
+    return _snapshot_from_session(
+        session,
+        env_sha256=env_sha256,
+        env_file_id=env_file_id,
+        repo_token_issued_at=repo_token_issued_at,
+        vault_id=vault_id,
+    )
+
+
+def snapshot_from_retrieved_session(
+    session: BetaManagedAgentsSession,
+    *,
+    env_sha256: str | None = None,
+    repo_token_issued_at: int | None = None,
+    vault_id: str | None = None,
+) -> SessionSnapshot:
+    """Snapshot a session created before snapshots were persisted (backfill).
+
+    Everything the session itself reports is authoritative; `env_sha256` and
+    `repo_token_issued_at` default to None because a row written before this
+    existed has no record of them, which reads downstream as "unknown, refresh".
+    """
+    return _snapshot_from_session(
+        session,
+        env_sha256=env_sha256,
+        env_file_id=None,
+        repo_token_issued_at=repo_token_issued_at,
+        vault_id=vault_id,
+    )
+
+
+def _snapshot_from_session(
+    session: BetaManagedAgentsSession,
+    *,
+    env_sha256: str | None,
+    env_file_id: str | None,
+    repo_token_issued_at: int | None,
+    vault_id: str | None,
+) -> SessionSnapshot:
+    env_resource_id: str | None = None
+    resolved_env_file_id = env_file_id
+    repo_resource_id: str | None = None
+    repo_url: str | None = None
+    repo_branch: str | None = None
+    repo_mount_path: str | None = None
+    memory_store_id: str | None = None
+    memory_read_only = False
+
+    for resource in session.resources:
+        if isinstance(resource, BetaManagedAgentsFileResource):
+            if resource.mount_path.endswith(_ENV_MOUNT_SUFFIX):
+                env_resource_id = resource.id
+                resolved_env_file_id = resolved_env_file_id or resource.file_id
+        elif isinstance(resource, BetaManagedAgentsGitHubRepositoryResource):
+            repo_resource_id = resource.id
+            repo_url = resource.url
+            repo_mount_path = resource.mount_path
+            if isinstance(resource.checkout, BetaManagedAgentsBranchCheckout):
+                repo_branch = resource.checkout.name
+        else:
+            memory_store_id = resource.memory_store_id
+            memory_read_only = resource.access == "read_only"
+
+    agent = session.agent
+    return SessionSnapshot(
+        ma_agent_id=agent.id,
+        model_id=agent.model.id,
+        system_sha256=hash_system(agent.system),
+        skills_sha256=hash_skills(agent.skills),
+        environment_id=session.environment_id,
+        repo_url=repo_url,
+        repo_branch=repo_branch,
+        memory_store_id=memory_store_id,
+        memory_read_only=memory_read_only,
+        vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
+        tools_sha256=hash_tools(agent.tools),
+        mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
+        env_sha256=env_sha256,
+        env_file_id=resolved_env_file_id,
+        env_resource_id=env_resource_id,
+        repo_resource_id=repo_resource_id,
+        repo_mount_path=repo_mount_path,
+        repo_token_issued_at=repo_token_issued_at,
+        agent_version=agent.version,
+        agent_name=agent.name,
+    )
+
+
+def desired_snapshot(
+    agent: BetaManagedAgentsAgent,
+    *,
+    hidden_mcp_server_names: frozenset[str],
+    environment_id: str,
+    env_sha256: str | None,
+    repo_url: str | None,
+    repo_branch: str | None,
+    memory_store_id: str | None,
+    vault_id: str | None,
+    env_file_id: str | None = None,
+    memory_read_only: bool = False,
+    repo_mount_path: str | None = None,
+    repo_token_issued_at: int | None = None,
+) -> SessionSnapshot:
+    """What a session created right now, for this caller, would be running.
+
+    Resource-id handles are None: a desired configuration has no resources yet.
+    Compare this against a recorded snapshot's fingerprints, never field by
+    field against its handles.
+
+    `hidden_mcp_server_names` is what `create_session` would leave out of this
+    caller's session — the servers only somebody else's OAuth grant can
+    authenticate. Both arrays are hashed after that cut, or a session created
+    with those overrides reads as drifted on every turn and has the hidden
+    servers pushed straight back onto it.
+    """
+    return SessionSnapshot(
+        ma_agent_id=agent.id,
+        model_id=agent.model.id,
+        system_sha256=hash_system(agent.system),
+        skills_sha256=hash_skills(agent.skills),
+        environment_id=environment_id,
+        repo_url=repo_url,
+        repo_branch=repo_branch,
+        memory_store_id=memory_store_id,
+        # No mount has no writable memory. Match the observed snapshot so a
+        # provisioning outage does not cause a replacement on every turn.
+        memory_read_only=memory_read_only and memory_store_id is not None,
+        vault_id=vault_id,
+        tools_sha256=hash_tools(visible_tools(agent, hidden_mcp_server_names)),
+        mcp_servers_sha256=hash_mcp_servers(visible_mcp_servers(agent, hidden_mcp_server_names)),
+        env_sha256=env_sha256,
+        env_file_id=env_file_id,
+        env_resource_id=None,
+        repo_resource_id=None,
+        repo_mount_path=repo_mount_path,
+        repo_token_issued_at=repo_token_issued_at,
+        agent_version=agent.version,
+        agent_name=agent.name,
+    )

@@ -18,6 +18,7 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core import agent_lifecycle
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
@@ -38,6 +39,8 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -161,6 +164,87 @@ async def agents_get(
         console,
         [agent],
         columns=("name", "id", "description", "created_at"),
+        as_json=as_json,
+    )
+
+
+class _GoogleBindingRow(BaseModel):
+    """Report row for bind-google output."""
+
+    agent_name: str
+    email: str
+    scopes: tuple[str, ...]
+
+
+@agents_app.command("bind-google")
+def agents_bind_google_command(
+    ctx: typer.Context,
+    name: str,
+    email: str,
+    scopes: Annotated[
+        list[str],
+        typer.Option("--scopes", help="Google OAuth scope. Repeat for multiple scopes."),
+    ],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = ctx.obj
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_bind_google(
+                rt=rt,
+                console=console,
+                name=name,
+                email=email,
+                scopes=scopes,
+                as_json=as_json,
+                selector=selector,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+async def agents_bind_google(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    email: str,
+    scopes: list[str],
+    as_json: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    if len(scopes) == 0:
+        raise StoreError("one or more --scopes is required to bind a Google identity.")
+
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    # Session closed. MA calls below.
+    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    if agent is None:
+        raise StoreError(f"no agent named {name!r} in your account or system defaults.")
+
+    # The agent_google_binding primary key is agent_id alone (no tenant_id
+    # column), so the uuid must be derived tenant-scoped rather than taken
+    # from the MA id directly — otherwise one tenant could bind a uuid that
+    # belongs to another tenant's agent.
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
+
+    async with rt.sessionmaker() as session, session.begin():
+        binding = await upsert_agent_google_binding(
+            session, agent_id=agent_id, email=email, scopes=scopes
+        )
+
+    emit_rows(
+        console,
+        [_GoogleBindingRow(agent_name=name, email=binding.email, scopes=binding.scopes)],
+        columns=("agent_name", "email", "scopes"),
         as_json=as_json,
     )
 
@@ -394,6 +478,18 @@ async def agents_fork(
     source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
+    # Same rules as the chat fork_agent tool: a pinned agent can't be copied
+    # (the copy would carry no pin), and a copy starts credential-less.
+    async with rt.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    if any(
+        name in policy.agent_channel_pins
+        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
+        if name is not None
+    ):
+        raise StoreError(
+            f"agent {src!r} is pinned to channels in the access policy, so it can't be copied."
+        )
     source_ma = await rt.anthropic.beta.agents.retrieve(source.id)
     params = source_ma.model_dump(mode="json")
     fork_params = {k: params[k] for k in _CREATE_FIELDS if k in params}
@@ -420,6 +516,15 @@ async def agents_fork(
     fork_params["tools"] = merge_default_agent_toolset(
         fork_params.get("tools"),  # type: ignore[arg-type]
     )
+    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
+        sessionmaker=rt.sessionmaker,
+        tenant_id=tenant_id,
+        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
+        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
+        tools=fork_params.get("tools"),  # type: ignore[arg-type]
+    )
+    fork_params["mcp_servers"] = servers
+    fork_params["tools"] = tools
     await rt.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
 
@@ -443,7 +548,7 @@ def agents_backfill_toolset_command(
 ) -> None:
     """Patch every tenant-tagged agent missing the base agent_toolset_20260401.
 
-    Enumerates every registered discord workspace, lists non-archived agents
+    Enumerates every registered Discord and Slack workspace, lists non-archived agents
     per tenant, and adds the base agent toolset to any agent that lacks it.
     Agents that already carry the toolset are skipped. Re-running selects zero
     agents (idempotent by construction).
@@ -466,7 +571,10 @@ async def agents_backfill_toolset(
     dry_run: bool,
 ) -> None:
     """Async implementation of backfill-toolset."""
+    # Chat platforms only: a Slack tenant's agents need the base toolset just as
+    # much as a Discord tenant's. The operator's own `cli` tenant is left alone.
     tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
+    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
 
     report_rows: list[_BackfillRow] = []
     for tenant_row in tenant_rows:
@@ -549,11 +657,13 @@ def agents_rekey_command(
 ) -> None:
     """Re-key existing guild-tenant agents' daimon_account to the derived guild account.
 
-    Enumerates every registered discord workspace, compares each agent's current
-    daimon_account against the deterministically-derived guild account for that
-    tenant, and updates any agent still pointing at a per-user account.
+    Enumerates every registered Discord and Slack workspace, compares each
+    agent's current daimon_account against the deterministically-derived guild
+    account for that tenant, and updates any agent still pointing at a per-user
+    account. Slack stamps the same derived account on create/fork/edit
+    (slack/agent_setup/submit.py), so its agents belong in this sweep.
 
-    Pre-48 operator-tenant agents (no discord workspace) are never enumerated.
+    Operator-tenant agents (no chat workspace) are never enumerated.
     Already-guild-owned and system agents (no daimon_account) are skipped.
     """
     settings = load_settings()
@@ -574,8 +684,11 @@ async def agents_rekey(
     dry_run: bool,
 ) -> None:
     """Async implementation of rekey-guild-ownership."""
-    # Enumerate all registered discord tenants (no raw .list() — ISO-01).
+    # Enumerate registered chat tenants (no raw .list() — ISO-01). Filtering to
+    # discord silently left every Slack tenant's agents un-rekeyed; the operator's
+    # own `cli` tenant stays excluded, as the docstring promises.
     tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
+    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
 
     # Collect items that need re-keying — (tenant_id, guild_account, agent_id,
     # name, current_acct) — plus the names already claimed by guild-owned agents

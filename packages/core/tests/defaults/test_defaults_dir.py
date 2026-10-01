@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from daimon.core.constants import DEFAULT_AGENT_MODEL
@@ -72,14 +73,7 @@ def test_defaults_skills_parse() -> None:
 
 
 def test_defaults_daimon_agent_guidance_routes_credentials_to_request_tools() -> None:
-    """The daimon agent's guidance — its system prompt plus its referenced
-    skills — must name both credential-request tools and no line anywhere in
-    that combined guidance may route credential *entry* to the /agent-setup
-    panel — replacing the setup-panel redirect was the whole point of the
-    request_env_credential / request_mcp_credential tools. The mechanism now
-    lives in the workspace-setup skill rather than the system prompt itself
-    (the prompt keeps only the no-plaintext rule), so this checks the union
-    of both, not the system prompt alone."""
+    """Seeded guidance names callable setup tools and avoids obsolete panel paths."""
     specs = load_agent_specs(DEFAULTS / "agents")
     daimon = next(s for s in specs if s.name == "daimon")
     skill_names = {ref.skill_id for ref in daimon.skills if ref.type == "custom"}
@@ -89,19 +83,34 @@ def test_defaults_daimon_agent_guidance_routes_credentials_to_request_tools() ->
         if load_skill_spec(d)[0].name in skill_names
     ]
     combined = "\n".join([daimon.system or "", *skill_bodies])
-    assert "request_env_credential" in combined, (
-        "guidance must name request_env_credential for ad hoc env secrets"
+    assert "request_agent_key" in combined, (
+        "guidance must name request_agent_key for ad hoc env secrets"
     )
-    assert "request_mcp_credential" in combined, (
-        "guidance must name request_mcp_credential for auth-required MCP servers"
+    assert "request_mcp_token" in combined, (
+        "guidance must name request_mcp_token for auth-required MCP servers"
     )
+    retired_tools = (
+        "request_env_credential",
+        "request_mcp_credential",
+        "request_skill_repo_credential",
+        "list_env_credential_keys",
+        "remove_env_credential",
+        "skills_sync",
+        "skills_list",
+        "skills_get",
+        "skills_delete",
+    )
+    for name in retired_tools:
+        assert name not in combined, f"seeded guidance names a retired tool: {name}"
     for line in combined.splitlines():
-        if "/agent-setup" not in line:
-            continue
         lowered = line.lower()
-        assert not any(
-            word in lowered for word in ("token", "secret", "credential", "mcps modal")
-        ), f"a line mentioning /agent-setup must not also route credential entry there: {line!r}"
+        assert not re.search(r"\bdoor\b|repo\+auth|repo-auth|mcps modal|\benv vars?\b", lowered), (
+            f"seeded guidance contains an obsolete setup label: {line!r}"
+        )
+        if "/agent-setup" in lowered:
+            assert not any(
+                word in lowered for word in ("token", "secret", "credential", "modal", "→", "->")
+            ), f"setup entry must not invent a nested path or route private input: {line!r}"
 
 
 def test_defaults_agent_skill_references_resolve() -> None:

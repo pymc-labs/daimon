@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-import pytest
 from daimon.adapters.discord.agent_setup.authz import (
     refuse_if_reachable_and_not_admin,
     refuse_if_shared_and_not_admin,
@@ -18,8 +17,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 
 def _entry(name: str = "bot", *, is_system: bool = False) -> RosterEntry:

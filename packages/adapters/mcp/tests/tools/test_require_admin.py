@@ -30,13 +30,14 @@ from daimon.adapters.mcp.tools.skills import _list_impl, _sync_impl
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.core.stores.domain import Role
+from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from factories import make_ma_agent
 from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
+from ..harness import seed_tenant
 
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ADMIN_REQUIRED = "requires a workspace or server admin"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ def test_require_admin_raises_tool_error_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         _require_admin(auth)
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin chat caller must be refused with the admin-required message"
     )
 
@@ -74,16 +75,22 @@ def test_require_admin_passes_when_admin() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _agents_runtime(client: AsyncAnthropic) -> McpRuntime:
+def _agents_runtime(
+    client: AsyncAnthropic,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | MagicMock | None = None,
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 
 
-async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin() -> None:
+async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """create_agent is no longer admin-gated — a non-admin caller can create their
     own agent, since a brand-new agent is never reachable (nothing to protect)."""
     tenant_id = uuid.uuid4()
@@ -94,16 +101,12 @@ async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin() -> No
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=make_ma_agent(name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
     )
     client = build_fake_anthropic(router.dispatch)
 
@@ -114,7 +117,9 @@ async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin() -> No
         is_admin=False,
     )
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    result = await _create_agent_impl(_agents_runtime(client), auth, spec)
+    result = await _create_agent_impl(
+        _agents_runtime(client, session_factory=db_session_factory), auth, spec
+    )
     assert isinstance(result, AgentInfo), "non-admin create must succeed and return AgentInfo"
 
 
@@ -129,7 +134,7 @@ async def test_list_agents_impl_does_not_raise_for_non_admin() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                make_ma_agent(
+                ma_agent(
                     name="demo",
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
                 ).model_dump(mode="json")
@@ -158,7 +163,6 @@ async def test_self_write_file_impl_does_not_raise_admin_gate_for_non_admin(
 ) -> None:
     """self_write_file is no longer admin-gated — a non-admin agent session can
     write its own per-agent file (a per-agent attachment, not a spec field)."""
-    from factories import seed_tenant  # type: ignore[import-untyped]
 
     async with committing_sessionmaker.begin() as session:
         tenant_id = await seed_tenant(session)
@@ -176,7 +180,7 @@ async def test_self_write_file_impl_does_not_raise_admin_gate_for_non_admin(
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
-    row = await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello")
+    row = await _self_write_file_impl(runtime, auth, key="CONFIG_TOKEN", content="hello")
     assert row.content == "hello", "non-admin write must succeed and persist content"
 
 
@@ -184,7 +188,6 @@ async def test_self_read_file_impl_does_not_raise_admin_gate_for_non_admin(
     committing_sessionmaker: Any,
 ) -> None:
     """Read tool is ungated — non-admin agent can read its own files."""
-    from factories import seed_tenant  # type: ignore[import-untyped]
 
     async with committing_sessionmaker.begin() as session:
         tenant_id = await seed_tenant(session)
@@ -228,7 +231,7 @@ async def test_sync_impl_raises_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         await _sync_impl(runtime, auth, "https://github.com/x/y", "main", "")
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_sync_impl must refuse non-admin with admin-required message"
     )
 
@@ -301,9 +304,9 @@ async def test_create_environment_impl_does_not_refuse_non_admin() -> None:
         is_admin=False,
     )
     spec = EnvironmentSpec(name="e")
-    with pytest.raises(Exception) as exc_info:  # noqa: B017, PT011
+    with pytest.raises(Exception) as exc_info:
         await _create_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, spec)
-    assert str(exc_info.value) != _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED not in str(exc_info.value), (
         "create_environment must not refuse a non-admin -- gating it blocks the "
         "ordinary onboarding ask while buying no isolation"
     )
@@ -328,7 +331,7 @@ async def test_update_environment_impl_raises_when_not_admin() -> None:
             config=None,
             description="x",
         )
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_update_environment_impl must refuse non-admin with admin-required message"
     )
 
@@ -343,7 +346,7 @@ async def test_archive_environment_impl_raises_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         await _archive_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, "e")
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_archive_environment_impl must refuse non-admin with admin-required message"
     )
 

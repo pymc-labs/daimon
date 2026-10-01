@@ -11,13 +11,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def test_db_session_isolates_tests_when_schema_is_per_test(
+async def test_db_session_search_path_points_at_the_worker_schema(
     db_session: AsyncSession,
 ) -> None:
     result = await db_session.execute(text("SHOW search_path"))
     path = result.scalar_one()
     assert path.startswith("test_") or "test_" in path, (
-        f"search_path should target a fresh test_<uuid> schema, got {path!r}"
+        f"search_path should target this worker's test_w<pid>_<hex> schema, got {path!r}"
     )
 
 
@@ -28,7 +28,7 @@ async def test_make_account_inserts_and_assigns_uuid_when_called(
     assert account.id is not None, "account id must be populated by server default"
 
     rows = (await db_session.execute(select(Account))).scalars().all()
-    assert len(rows) == 1, "schema isolation should start at zero rows per test"
+    assert len(rows) == 1, "the per-test wipe should leave zero rows before this test inserts"
 
 
 async def test_principal_factories_roundtrip_when_linked(
@@ -52,9 +52,9 @@ async def test_principal_factories_roundtrip_when_linked(
     assert len(link_rows) == 1
 
 
-async def test_each_test_schema_starts_empty_regardless_of_prior_test_state(
+async def test_worker_schema_is_wiped_before_each_test_regardless_of_prior_test_state(
     db_session: AsyncSession,
 ) -> None:
-    """Proves the CREATE SCHEMA / DROP SCHEMA isolation — no data bleeds across tests."""
+    """Proves the per-test wipe of the shared worker schema — no rows bleed across tests."""
     rows = (await db_session.execute(select(Account))).scalars().all()
-    assert rows == [], "per-test schema should start empty, prior test leaked"
+    assert rows == [], "worker schema should be wiped before each test, prior test leaked"

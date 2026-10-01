@@ -1,33 +1,31 @@
 """Thin helpers over the anthropic SDK's Managed Agents beta.
 
 Per refinements §6, this module holds ONLY operations whose logic extends
-beyond one SDK call: full-history replay (for SSE reconnect rebuilds),
-dedup-filtered live streaming, and interrupt-with-ack-wait. Everything else
-(create/list/retrieve/archive on agents, environments, sessions) stays a
-direct SDK call in its call site; no delegation layer to maintain.
+beyond one SDK call: full-history replay (for SSE reconnect rebuilds) and
+interrupt-with-ack-wait. Everything else (create/list/retrieve/archive on
+agents, environments, sessions) stays a direct SDK call in its call site;
+no delegation layer to maintain.
 
 Design rules:
 - Free async functions; no class (no cross-call state to own).
 - `AsyncAnthropic` is injected by the caller. No module-level client.
 - Errors from the SDK (`anthropic.APIError` and subclasses) propagate
-  unchanged. The one exception: `send_interrupt_and_wait` converts its own
-  timeout — a purely local condition — into `TurnError(kind="interrupt_timeout")`.
+  unchanged. Two exceptions: `send_interrupt_and_wait` converts its own
+  timeout — a purely local condition — into `TurnError(kind="interrupt_timeout")`,
+  and `interrupt_orphaned_session` is best-effort by contract: it logs an
+  SDK error or its own timeout instead of raising.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
-from anthropic import APIStatusError, AsyncAnthropic
-from anthropic.types.beta import (
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsDeltaEvent,
-    BetaManagedAgentsStartEvent,
-)
+from anthropic import APIError, APIStatusError, AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionStatusIdleEvent,
@@ -98,40 +96,6 @@ async def replay_events(
             kind="upstream",
             message=f"MA event replay did not complete within {timeout_s}s",
         ) from err
-
-
-async def stream_events_with_dedup(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    seen: set[str],
-) -> AsyncGenerator[SessionEvent, None]:
-    """Yield live session events whose id is not in `seen`.
-
-    The caller owns `seen` as a running ledger of event ids already folded into
-    `TurnState.seen_event_ids`. This helper mutates `seen` in place by adding
-    each newly-yielded event id.
-
-    Per `docs/references/sse-streaming.md`:
-    - The stream does NOT close on `session.status_idle`. Callers must break
-      out of their `async for` on a terminal condition; the helper will loop
-      indefinitely otherwise.
-    - On reconnect, MA re-delivers events we've already folded. Dedup by id is
-      the only correctness mechanism — reducers stay pure and are not consulted
-      for "have we seen this before."
-    """
-    stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
-    async for event in stream:
-        # SDK 0.117 widened the stream union with token-level framing events
-        # (event_start / event_delta) that carry no id and are not foldable
-        # session events. Daimon folds complete events only, so skip them —
-        # this also narrows `event` to BetaManagedAgentsSessionEvent.
-        if isinstance(event, BetaManagedAgentsStartEvent | BetaManagedAgentsDeltaEvent):
-            continue
-        if event.id in seen:
-            continue
-        seen.add(event.id)
-        yield event
 
 
 # `session.status_idle` stop_reason variants that represent a real terminal
@@ -222,6 +186,67 @@ async def send_interrupt_and_wait(
 _VERSION_CONFLICT_STATUSES: frozenset[int] = frozenset({409})
 
 
+# The boot orphan sweeps await each interrupt while turn admission waits on
+# them, so the call is bounded here rather than by the client's own timeout
+# (the adapters' clients retry MA_MAX_RETRIES times, 600 s per attempt).
+ORPHAN_INTERRUPT_TIMEOUT_S: float = 10.0
+
+
+async def interrupt_orphaned_session(
+    anthropic: AsyncAnthropic,
+    *,
+    session_id: str,
+    timeout_s: float | None = None,
+) -> bool:
+    """Stop the MA turn a dead adapter process left running. Best-effort.
+
+    A turn's render loop dies with the process that started it, but MA keeps
+    running the turn: it goes on billing, and the next mention in the thread
+    reuses the session and sends its `user.message` into a session that is
+    still running -- MA answers that with 200 and ignores it (see the driver's
+    tool-confirmation send), so the new turn would render the dead turn's
+    answer. The boot orphan sweeps call this for every row whose marker they
+    actually cleared.
+
+    Sends `user.interrupt` without waiting for the session to go idle, and
+    gives up after `timeout_s` (default `ORPHAN_INTERRUPT_TIMEOUT_S`, retries
+    included): the sweep holds turn
+    admission while it runs, so an MA brownout must cost each orphan at most
+    `timeout_s`, not the client's retry budget. A session that is already
+    idle, archived or gone answers with an error (or a no-op); either way
+    there is nothing left to stop. An `anthropic.APIError` or the timeout is
+    logged and reported as `False`, never raised.
+
+    ponytail: the sweeps assume one adapter process per platform (see
+    `list_orphaned_turns`). A second, overlapping process would see the first
+    one's live markers as orphans, and this call would then stop those live
+    MA turns, not just relabel their cards.
+    """
+    if timeout_s is None:
+        timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
+    try:
+        await asyncio.wait_for(
+            anthropic.beta.sessions.events.send(
+                session_id,
+                events=[{"type": "user.interrupt"}],
+            ),
+            timeout=timeout_s,
+        )
+    except TimeoutError:
+        log.warning("turn.orphan_interrupt_timeout", session_id=session_id, timeout_s=timeout_s)
+        return False
+    except APIError as err:
+        log.info(
+            "turn.orphan_interrupt_failed",
+            session_id=session_id,
+            err_type=type(err).__name__,
+            error=str(err)[:200],
+        )
+        return False
+    log.info("turn.orphan_interrupted", session_id=session_id)
+    return True
+
+
 async def update_agent_with_version_retry(
     anthropic: AsyncAnthropic,
     agent_id: str,
@@ -279,14 +304,50 @@ async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) ->
     await anthropic.beta.skills.delete(skill_id)
 
 
+# Name of the agent that marks a workspace as disposable. Only the metadata
+# decides — the name is a courtesy to whoever finds the agent in the console.
+WORKSPACE_SENTINEL_AGENT_NAME = "workspace-disposable-sentinel"
+
+WORKSPACE_NOT_DISPOSABLE_MESSAGE = (
+    "Refusing to empty this Managed Agents workspace: it is not marked disposable, "
+    "so the destructive cleanup stopped before deleting anything. The marker exists "
+    "so that a misrouted API key cannot wipe a shared workspace other installs depend "
+    "on. If this workspace really is a throwaway one, mark it with: "
+    "uv run python -m daimon.testing.mark_disposable --yes"
+)
+
+
+async def find_workspace_disposable_sentinel(
+    client: AsyncAnthropic,
+) -> BetaManagedAgentsAgent | None:
+    """Return the agent marking this MA workspace as disposable, else None.
+
+    The sentinel is workspace-wide, not tenant-scoped: it answers "may the test
+    suite destroy everything reachable from this API key?" and nothing else.
+    """
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_WORKSPACE,
+        MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
+    )
+
+    async for agent in client.beta.agents.list(limit=100):
+        if agent.metadata.get(MA_METADATA_KEY_WORKSPACE) == MA_METADATA_VALUE_WORKSPACE_DISPOSABLE:
+            return agent
+    return None
+
+
 async def delete_entire_workspace_for_testing(
     client: AsyncAnthropic, *, i_understand_this_destroys_all_tenants: bool = False
 ) -> None:
     """Delete every skill/environment/agent in the shared MA workspace.
 
     DESTRUCTIVE — the workspace is shared by ALL tenants on the operator's one
-    API key. Test-only: the required flag must be set True by the caller; a
-    production path that forgets it raises RuntimeError before any MA call.
+    API key. Test-only, and fail-closed twice over: the caller must set the
+    required flag (a production path that forgets it raises RuntimeError before
+    any MA call), AND the workspace itself must carry a disposable sentinel
+    agent (see `find_workspace_disposable_sentinel`). The flag alone is worth
+    little — the caller that passes it is the same caller that would be pointed
+    at the wrong workspace. The sentinel travels with the workspace instead.
 
     Deletion order is dependency-safe: skills (versions first via
     delete_skill_and_versions) → environments (delete, 409 fallback to archive)
@@ -302,12 +363,15 @@ async def delete_entire_workspace_for_testing(
             "for ALL tenants; pass i_understand_this_destroys_all_tenants=True "
             "from a test."
         )
+    sentinel = await find_workspace_disposable_sentinel(client)
+    if sentinel is None:
+        raise DaimonError(WORKSPACE_NOT_DISPOSABLE_MESSAGE)
     errors: list[Exception] = []
 
     # Skills: versions first (MA requires this), then skill.
     # 400 = built-in workspace skill with non-UUID id (xlsx, pdf, etc.) — skip.
     # list_skills_lenient: test-only best-effort cleanup; degrade mode is safe here.
-    from daimon.core.defaults.ma_index import list_skills_lenient  # noqa: PLC0415
+    from daimon.core.defaults.ma_index import list_skills_lenient
 
     skills, _truncated = await list_skills_lenient(client)
     for skill in skills:
@@ -333,8 +397,12 @@ async def delete_entire_workspace_for_testing(
             elif err.status_code != 404:
                 errors.append(err)
 
-    # Agents: archive only — DELETE /v1/agents/{id} returns 404
+    # Agents: archive only — DELETE /v1/agents/{id} returns 404.
+    # The sentinel is spared: archiving it would un-mark the workspace and make
+    # the next module's pre-clean refuse.
     async for agent in client.beta.agents.list(limit=100):
+        if agent.id == sentinel.id:
+            continue
         try:
             await client.beta.agents.archive(agent.id)
         except APIStatusError as err:
@@ -364,8 +432,8 @@ async def delete_sessions_for_account(
     """
     # Local imports break the circular dependency:
     # ma.py <-> defaults/__init__ -> apply -> reconcile_skills -> ma.py
-    from daimon.core.defaults.ma_index import list_agents_by_tenant  # noqa: PLC0415
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT  # noqa: PLC0415
+    from daimon.core.defaults.ma_index import list_agents_by_tenant
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 
     agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
 

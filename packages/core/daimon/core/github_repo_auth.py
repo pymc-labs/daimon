@@ -1,7 +1,7 @@
 """Clone-credential resolution for App-or-PAT repo auth.
 
 Owns the mode decisions (pure) and the token-resolution orchestrations
-(shell, injected httpx) for BOTH of daimon's independent GitHub-repo-auth
+(shell, injected httpx) for BOTH of daimon's independent GitHub-clone-auth
 callers: the per-agent clone path (`agent_repo_binding`, a bound repo with a
 recorded proof of access) and the skill-sync path (a bare repo URL that may
 have no binding row at all). No DB access, no module-level singletons —
@@ -33,7 +33,9 @@ Shell functions (injected httpx):
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Literal
 
 import httpx
@@ -44,17 +46,57 @@ from daimon.core.github_app_auth import (
     get_installation_id_for_repo,
     mint_installation_token,
 )
+from daimon.core.github_rate_limit import GitHubRateLimitError
 from daimon.core.stores.domain import AgentRepoBindingRow, RepoProofKind
-from pydantic import SecretStr
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 log = structlog.get_logger()
 
+_READ_ONLY: dict[str, str] = {"contents": "read"}
+"""Installation-token permission subset for callers that only read a repo."""
+
 __all__ = [
+    "RepoAccess",
+    "RepoAccessKind",
+    "RepoCredential",
+    "derive_repo_access",
+    "render_clone_refusal",
     "select_clone_auth",
     "resolve_clone_token",
     "select_skill_sync_auth",
     "resolve_skill_sync_token",
 ]
+
+RepoAccessKind = Literal["connected", "checked", "needs_attention", "not_checked"]
+"""How much of the repo's access story is settled.
+
+`connected` — a credential that works is in hand. `checked` — someone
+demonstrated access at bind time and the clone will go through the App if it
+covers the repo, which is only decided at clone time. `not_checked` — a
+credential is attached but no access check was ever recorded. `needs_attention`
+— nothing would authorize a clone right now.
+"""
+
+RepoCredential = Literal["per_agent_token", "deployment_public", "github_app", "none"]
+"""Which credential the clone would use, in `select_clone_auth`'s own terms."""
+
+
+class RepoAccess(BaseModel):
+    """The repo-access state of one binding, as a reader should see it.
+
+    Derived from what the binding recorded plus what the deployment has
+    configured — never from a live probe, and never from the skill-resync
+    fields, which describe a different job.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: RepoAccessKind
+    credential: RepoCredential
+    checked_at: datetime | None = None
+    checked_by_account_id: uuid.UUID | None = None
+    corrective: str | None = None
+
 
 type InstallationLookup = Callable[[str, str], Awaitable[int | None]]
 """Injected `(owner, repo) -> installation_id | None` lookup.
@@ -208,6 +250,108 @@ def select_skill_sync_auth(
     return "none"
 
 
+def render_clone_refusal(
+    *,
+    repo_url: str,
+    proof_kind: RepoProofKind | None,
+    has_fallback_pat: bool,
+) -> str:
+    """The sentence a reader gets when nothing would authorize a clone.
+
+    Two cases, deliberately worded apart. A correctly-bound public repo on a
+    deployment with no public-clone credential is the operator's gap, and the
+    user cannot fix it by re-binding — telling them to would misdiagnose it.
+    Everything else is fixed by re-binding with a token that can read the repo.
+
+    The same sentence has to reach the user whether they hit it by running a
+    clone or by reading the repo's state off a panel, so both callers render
+    it here rather than each spelling out its own.
+    """
+    if proof_kind == "public" and not has_fallback_pat:
+        return (
+            f"This deployment has no credential configured for cloning public "
+            f"repositories, so {repo_url} cannot be cloned. The repo binding "
+            "itself is correct — an operator must configure the deployment's GitHub "
+            "credentials."
+        )
+    return (
+        f"No credential is authorized to clone {repo_url}. Re-bind this repo "
+        "with a GitHub token that can read it, using request_repo_binding."
+    )
+
+
+def derive_repo_access(
+    binding: AgentRepoBindingRow,
+    *,
+    has_fallback_pat: bool,
+    app_configured: bool,
+) -> RepoAccess:
+    """Read a binding's access state without touching GitHub.
+
+    Runs `select_clone_auth` twice — once with App coverage denied, once with
+    it allowed — because a deployment that has an App configured still does not
+    know, without a live lookup, whether the App covers this repo. Holding the
+    App at both values separates what is settled from what is only decided at
+    clone time:
+
+    - `pat` either way: the per-agent token is the credential. Without a
+      recorded access check it is `not_checked` — the token is attached, but
+      nobody ever demonstrated it can read this repo.
+    - `public` either way: the repo was verified public and the deployment has
+      the public-read credential, so the clone works.
+    - `none` without the App but `app` with it: a check was recorded and the
+      App is the only remaining candidate, so whether it covers this repo is
+      settled at clone time, not here.
+    - `none` either way: nothing would authorize a clone; `corrective` carries
+      the same sentence a clone attempt would raise.
+
+    Pure — no I/O, no clock. The caller resolves `has_fallback_pat` and
+    `app_configured` from the deployment's settings.
+    """
+    has_per_agent_pat = binding.ma_secret_ref.startswith("inline-pat:")
+    without_app = select_clone_auth(
+        has_per_agent_pat=has_per_agent_pat,
+        app_installed=False,
+        proof_kind=binding.proof_kind,
+        has_fallback_pat=has_fallback_pat,
+    )
+    with_app = select_clone_auth(
+        has_per_agent_pat=has_per_agent_pat,
+        app_installed=app_configured,
+        proof_kind=binding.proof_kind,
+        has_fallback_pat=has_fallback_pat,
+    )
+
+    kind: RepoAccessKind
+    credential: RepoCredential
+    corrective: str | None = None
+    if without_app == "pat":
+        kind = "connected" if binding.proof_at is not None else "not_checked"
+        credential = "per_agent_token"
+    elif without_app == "public":
+        kind = "connected"
+        credential = "deployment_public"
+    elif with_app == "app":
+        kind = "checked"
+        credential = "github_app"
+    else:
+        kind = "needs_attention"
+        credential = "none"
+        corrective = render_clone_refusal(
+            repo_url=binding.repo_url,
+            proof_kind=binding.proof_kind,
+            has_fallback_pat=has_fallback_pat,
+        )
+
+    return RepoAccess(
+        kind=kind,
+        credential=credential,
+        checked_at=binding.proof_at,
+        checked_by_account_id=binding.proof_account_id,
+        corrective=corrective,
+    )
+
+
 async def resolve_clone_token(
     http_client: httpx.AsyncClient,
     *,
@@ -262,8 +406,8 @@ async def resolve_clone_token(
     # Best-effort App path: a transient GitHub failure on the installation
     # lookup / token mint (e.g. a 403 secondary-rate-limit, common once the App
     # has many installs) must not take down a clone that a public+fallback-PAT
-    # binding could still serve. On any HTTP error, degrade to "App unavailable"
-    # and fall through to the fallback/none decision. A malformed App private
+    # binding could still serve. On any HTTP error or rate-limit result, degrade
+    # to "App unavailable" and fall through to the fallback/none decision. A malformed App private
     # key still raises from build_app_jwt (operator misconfig — fail loud so it
     # is fixed, not silently masked). A private binding with no App and no PAT
     # still fails loudly at the raise below.
@@ -275,10 +419,16 @@ async def resolve_clone_token(
                 http_client, jwt=app_jwt, owner=owner, repo=repo
             )
             if installation_id is not None:
+                # Narrow to the bound repo; a verified-public proof shows
+                # read access only, so its token is read-only as well.
                 app_token = await mint_installation_token(
-                    http_client, jwt=app_jwt, installation_id=installation_id
+                    http_client,
+                    jwt=app_jwt,
+                    installation_id=installation_id,
+                    repository=repo,
+                    permissions=_READ_ONLY if binding.proof_kind == "public" else None,
                 )
-        except httpx.HTTPError as err:
+        except (httpx.HTTPError, GitHubRateLimitError) as err:
             log.warning(
                 "github_repo_auth.app_path_failed",
                 repo_url=binding.repo_url,
@@ -311,10 +461,11 @@ async def resolve_clone_token(
             app_configured=app_configured,
         )
         raise DaimonError(
-            f"This deployment has no credential configured for cloning public "
-            f"repositories, so {binding.repo_url} cannot be cloned. The repo binding "
-            "itself is correct — an operator must configure the deployment's GitHub "
-            "credentials."
+            render_clone_refusal(
+                repo_url=binding.repo_url,
+                proof_kind=binding.proof_kind,
+                has_fallback_pat=has_fallback_pat,
+            )
         )
     if binding.proof_kind is not None and not app_configured:
         log.error(
@@ -323,8 +474,11 @@ async def resolve_clone_token(
             proof_kind=binding.proof_kind,
         )
     raise DaimonError(
-        f"No credential is authorized to clone {binding.repo_url}. Re-bind this repo "
-        "with a GitHub token that can read it, from the agent setup panel's GitHub option."
+        render_clone_refusal(
+            repo_url=binding.repo_url,
+            proof_kind=binding.proof_kind,
+            has_fallback_pat=has_fallback_pat,
+        )
     )
 
 
@@ -378,10 +532,11 @@ async def resolve_skill_sync_token(
     before calling.
 
     The App path is best-effort: a lookup-or-mint failure raising
-    ``httpx.HTTPError`` degrades to "App unavailable" (logged, repo + error
-    only — never a token) and falls through to the fallback/anonymous
-    decision, mirroring ``resolve_clone_token``'s degradation so a transient
-    GitHub failure never fails a sync a fallback token could still serve. A
+    ``httpx.HTTPError`` or ``GitHubRateLimitError`` degrades to "App
+    unavailable" (logged, repo + error only — never a token) and falls
+    through to the fallback/anonymous decision, mirroring
+    ``resolve_clone_token``'s degradation so a transient GitHub failure never
+    fails a sync a fallback token could still serve. A
     malformed App private key still raises from ``build_app_jwt`` (operator
     misconfiguration must fail loudly, not be silently masked).
 
@@ -455,10 +610,15 @@ async def resolve_skill_sync_token(
         try:
             installation_id = await installation_lookup(owner, repo)
             if installation_id is not None:
+                # Skill sync only reads this one repo.
                 app_token = await mint_installation_token(
-                    http_client, jwt=app_jwt, installation_id=installation_id
+                    http_client,
+                    jwt=app_jwt,
+                    installation_id=installation_id,
+                    repository=repo,
+                    permissions=_READ_ONLY,
                 )
-        except httpx.HTTPError as err:
+        except (httpx.HTTPError, GitHubRateLimitError) as err:
             log.warning(
                 "github_repo_auth.skill_sync_app_path_failed",
                 repo_url=normalized,

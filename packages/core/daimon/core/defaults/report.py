@@ -63,6 +63,24 @@ class ApplyReport:
         )
 
 
+def compose_failure_reason(report: ApplyReport) -> str | None:
+    """Compose a persisted reason from a report's failed outcomes only, one
+    line per failure naming the resource kind, name, and its recorded error.
+    Pure -- no I/O. Returns None when the report has no failures.
+
+    Composed ONLY from the outcome's own recorded fields -- never a raw
+    exception repr of a credentialed request -- so a provider secret or
+    request body can never land in an operator-visible column."""
+    failures = [
+        o
+        for o in (*report.agents, *report.environments, *report.skills, *report.system_config)
+        if o.action is Action.FAILED
+    ]
+    if not failures:
+        return None
+    return "\n".join(f"{o.kind} {o.name!r}: {o.error}" for o in failures)
+
+
 VerificationStatus = Literal["in_sync", "diverged", "unverifiable"]
 
 

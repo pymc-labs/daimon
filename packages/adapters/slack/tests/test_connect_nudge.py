@@ -9,38 +9,27 @@ posts an ephemeral message.
 
 from __future__ import annotations
 
-import re
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsModelConfig, BetaManagedAgentsSession
-from anthropic.types.beta import BetaManagedAgentsSessionAgent as _SessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.slack_connect_prompts import was_connect_prompted
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
 from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing.ma import (
-    _agent_response as _agent_response,  # pyright: ignore[reportPrivateUsage]  # test-only
-)
-from daimon.testing.ma import (
-    _environment_response as _environment_response,  # pyright: ignore[reportPrivateUsage]  # test-only
-)
-from daimon.testing.ma import build_fake_anthropic
+from daimon.testing import ma_session, ma_session_agent
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import make_orchestrate_app
 
 
 def _make_nudge_app(sessionmaker: async_sessionmaker[AsyncSession]) -> SlackApp:
@@ -191,66 +180,6 @@ async def test_nudge_not_marked_when_post_fails(
         ), "failed post must not consume the once-ever marker"
 
 
-def _make_agent_env_handler() -> Any:
-    """Minimal httpx.MockTransport handler for MA agent/environment retrieves,
-    mirroring ``_make_agent_env_handler`` in ``test_app.py``."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        m = re.match(r"^/v1/agents/(?P<id>[^/]+)$", path)
-        if m and request.method == "GET":
-            return httpx.Response(200, json=_agent_response(agent_id=m.group("id")))
-        m = re.match(r"^/v1/environments/(?P<id>[^/]+)$", path)
-        if m and request.method == "GET":
-            env = _environment_response(environment_id=m.group("id"))
-            return httpx.Response(200, json=env.model_dump(mode="json"))
-        raise AssertionError(f"_make_agent_env_handler: unhandled {request.method} {path}")
-
-    return handler
-
-
-def _make_orchestrate_app_with_nudge_enabled(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> SlackApp:
-    """Build a SlackApp for orchestration with the connect-nudge path live.
-
-    Unlike ``_make_orchestrate_app`` in ``test_app.py`` (which sets
-    ``app_root_url=None`` to short-circuit the nudge), this sets real
-    signing_secret + app_root_url so ``_maybe_post_connect_nudge`` actually
-    runs inside ``_orchestrate``'s ``contextlib.suppress(..., SQLAlchemyError, ...)``.
-    """
-    settings = MagicMock()
-    settings.crypto.keys = ()
-    settings.slack.max_concurrent_turns_per_tenant = 3
-    settings.slack.signing_secret = SecretStr("test-signing-secret")
-    settings.mcp.public_url = None
-    settings.mcp.app_root_url = "https://daimon.example.com"
-    settings.defaults_root = MagicMock()
-
-    anthropic = build_fake_anthropic(_make_agent_env_handler())
-    deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
-    resolver_cache = new_resolver_cache()
-    turn_deps = build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
-    )
-    runtime = SlackRuntime(
-        settings=settings,
-        anthropic=anthropic,
-        sessionmaker=sessionmaker,
-        billing_config=None,
-        http_client=MagicMock(spec=httpx.AsyncClient),
-        resolver_cache=resolver_cache,
-        turn_deps=turn_deps,
-        deployment_default=deployment_default,
-    )
-    return SlackApp(runtime=runtime)
-
-
 async def test_orchestrate_continues_when_nudge_store_call_raises_sqlalchemy_error(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -270,7 +199,9 @@ async def test_orchestrate_continues_when_nudge_store_call_raises_sqlalchemy_err
         db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
     )
 
-    app = _make_orchestrate_app_with_nudge_enabled(db_session_factory)
+    app, _ = make_orchestrate_app(
+        db_session_factory, connect_nudge_url="https://daimon.example.com"
+    )
 
     async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
@@ -286,31 +217,10 @@ async def test_orchestrate_continues_when_nudge_store_call_raises_sqlalchemy_err
         "text": "<@U_BOT> hello",
     }
 
-    _now = datetime.now(UTC)
-    _agent_snapshot = _SessionAgent(
-        id="agent_nudge_fail_id",
-        mcp_servers=[],
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        name="test-agent",
-        skills=[],
-        tools=[],
-        type="agent",
-        version=1,
-    )
-    _fake_session = BetaManagedAgentsSession(
-        outcome_evaluations=[],
+    _fake_session = ma_session(
         id="sess-nudge-fail-001",
-        agent=_agent_snapshot,
-        created_at=_now,
+        agent=ma_session_agent(id="agent_nudge_fail_id"),
         environment_id="env_nudge_fail_id",
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at=_now,
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
     )
 
     with (

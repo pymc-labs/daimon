@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import cast
 
-import pytest
 import structlog.testing
 from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
     BetaManagedAgentsSessionEndTurn,
@@ -33,8 +32,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import usage_events
 from daimon.testing.ma import MARouter, build_fake_anthropic, send_events_response, sse_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_cli_turn_writes_no_usage_events(

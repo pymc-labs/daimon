@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 ConfigField = Literal["agent_name", "environment_name"]
 
-ConfigTier = Literal["channel", "tenant", "deployment"]
+ConfigTier = Literal["thread", "channel", "tenant", "deployment"]
 
 
 class DeploymentDefault(BaseModel):
@@ -63,6 +63,8 @@ class ScopeContext(BaseModel):
     tenant_id: uuid.UUID
     channel_id: str | None = None
     account_id: uuid.UUID | None = None
+    platform: str | None = None
+    thread_id: str | None = None
 
 
 class UserConfigRow(BaseModel):
@@ -102,6 +104,16 @@ class ResolvedConfig(BaseModel):
     agent_name_tier: ConfigTier | None = None
     environment_name: str | None = None
     environment_name_tier: ConfigTier | None = None
+    responder_ma_agent_id: str | None = None
+    configuration_target_ma_agent_id: str | None = None
+    configuration_target_name: str | None = None
+    thread_binding_id: uuid.UUID | None = None
+    # Why this thread has its own responder: a setup conversation, or a task
+    # handed to another agent. None when no binding applies. The two resolve
+    # their responder differently -- a setup thread must answer as the built-in
+    # Daimon, a handoff thread answers as whatever agent received the task --
+    # so the kind has to survive as far as admission.
+    thread_binding_kind: Literal["setup", "handoff"] | None = None
 
 
 class PropagateOutcome(BaseModel):
@@ -117,7 +129,7 @@ class PropagateResult(BaseModel):
     outcomes: list[PropagateOutcome]
 
 
-def _pick_agent(
+def pick_agent(
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     default: DeploymentDefault,
@@ -176,7 +188,7 @@ def is_agent_reachable(
 
     Reachability includes the deployment tier: on a fresh install with no
     config rows at all, the agent named by the deployment default is reachable,
-    because that is what every mention resolves to via `_pick_agent`'s
+    because that is what every mention resolves to via `pick_agent`'s
     fall-through. A tenant row in mode='agent' with a non-empty agent_name
     overrides that fall-through for the whole tenant; a channel row only ever
     overrides for its own channel and never suppresses the deployment tier
@@ -197,13 +209,64 @@ def is_agent_reachable(
     return default.agent_name == agent_name and not tenant_consumes_fallthrough
 
 
+class AnsweringPlace(BaseModel):
+    """One place the cascade currently sends mentions to a given agent.
+
+    `channel_id` is set only on the channel tier; the tenant and deployment
+    tiers describe a fall-through that has no single location.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tier: Literal["channel", "tenant", "deployment"]
+    channel_id: str | None = None
+
+
+def answering_places(
+    agent_name: str,
+    *,
+    tenant: TenantConfigRow | None,
+    channels: Sequence[ChannelConfigRow],
+    default: DeploymentDefault,
+) -> tuple[AnsweringPlace, ...]:
+    """Enumerate every tier that currently routes mentions to `agent_name`.
+
+    The itemised form of `is_agent_reachable`: an empty result means exactly
+    what a False from that predicate means, and a non-empty one means exactly
+    what a True means. Same tier rules — a channel row counts only in
+    mode='agent' with a non-empty agent_name, a tenant row in mode='agent'
+    with a non-empty agent_name consumes the deployment fall-through for the
+    whole tenant, and a channel row never suppresses that fall-through
+    elsewhere.
+
+    Ordered channel → tenant → deployment, channels by channel_id, so a
+    renderer can walk the result without re-sorting.
+    """
+    places = [
+        AnsweringPlace(tier="channel", channel_id=row.channel_id)
+        for row in sorted(channels, key=lambda row: row.channel_id)
+        if row.mode == "agent" and row.agent_name and row.agent_name == agent_name
+    ]
+    tenant_names_target = (
+        tenant is not None and tenant.mode == "agent" and tenant.agent_name == agent_name
+    )
+    tenant_consumes_fallthrough = (
+        tenant is not None and tenant.mode == "agent" and bool(tenant.agent_name)
+    )
+    if tenant_names_target:
+        places.append(AnsweringPlace(tier="tenant"))
+    if default.agent_name == agent_name and not tenant_consumes_fallthrough:
+        places.append(AnsweringPlace(tier="deployment"))
+    return tuple(places)
+
+
 def merge(
     *,
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     default: DeploymentDefault,
 ) -> ResolvedConfig:
-    agent_name, agent_tier = _pick_agent(channel, tenant, default)
+    agent_name, agent_tier = pick_agent(channel, tenant, default)
     env_name, env_tier = _pick_environment(channel, tenant, default)
     return ResolvedConfig(
         agent_name=agent_name,

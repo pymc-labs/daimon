@@ -23,8 +23,6 @@ from daimon.core.specs import EnvironmentSpec
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from fastmcp.exceptions import ToolError
 
-pytestmark = pytest.mark.asyncio
-
 
 def _ma_env(**overrides: object) -> BetaEnvironment:
     base: dict[str, object] = {

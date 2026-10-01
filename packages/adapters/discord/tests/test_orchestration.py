@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import types
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -13,56 +14,48 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
 import discord
+import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
-from anthropic.types.beta.beta_cloud_config import BetaCloudConfig
-from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig as _AgentModelConfig,
-)
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from anthropic.types.beta.beta_packages import BetaPackages
-from anthropic.types.beta.beta_unrestricted_network import BetaUnrestrictedNetwork
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
-from daimon.core.config import McpSettings
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    fingerprint_identity,
+    fingerprint_mutable,
+    snapshot_from_created_session,
+)
 from daimon.core.stores import tenant_ledger
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.tenants import set_provision_status
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.testing import (
+    DEFAULT_MODEL_ID,
+    ma_agent,
+    ma_environment,
+    ma_session,
+)
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
+from .harness import make_bot
 
 
-def _make_fake_session(session_id: str = "sess_test") -> BetaManagedAgentsSession:
-    """Construct a real BetaManagedAgentsSession with validated fields."""
-    return BetaManagedAgentsSession(
-        id=session_id,
-        agent=BetaManagedAgentsSessionAgent(
-            id="agent_test",
-            mcp_servers=[],
-            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-5"),
-            name="test-agent",
-            skills=[],
-            tools=[],
-            type="agent",
-            version=1,
-        ),
-        created_at="2026-04-28T00:00:00Z",
-        environment_id="env_test",
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at="2026-04-28T00:00:00Z",
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
-        outcome_evaluations=[],
+def _snapshot_of(session: BetaManagedAgentsSession) -> SessionSnapshot:
+    """The configuration a mapping row records for the session it maps to.
+
+    A row seeded without one reads as pre-continuity and makes the bind read
+    the session from MA, which these tests' bare `AsyncMock` client cannot
+    answer.
+    """
+    return snapshot_from_created_session(
+        session, env_sha256=None, env_file_id=None, repo_token_issued_at=None, vault_id=None
     )
 
 
@@ -85,10 +78,18 @@ def _make_runtime(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
     settings.discord = discord_settings
+    settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
-    anthropic.beta.agents.retrieve = AsyncMock(return_value=_make_fake_agent())
-    anthropic.beta.environments.retrieve = AsyncMock(return_value=_make_fake_environment())
-    from daimon.core.ma_resolver import new_resolver_cache  # noqa: PLC0415
+    anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
+    anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
+    # Dead-session recovery's transcript rescue (`_replay_previous_session`)
+    # walks this as an async iterator, not an awaitable -- an unconfigured
+    # AsyncMock attribute returns a coroutine instead and blows up with
+    # "'async for' requires an object with __aiter__ method". Empty history
+    # degrades it to the history-only rung, same as before that rescue path
+    # existed.
+    anthropic.beta.sessions.events.list = MagicMock(return_value=_AsyncIter([]))
+    from daimon.core.ma_resolver import new_resolver_cache
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
@@ -131,18 +132,6 @@ def _make_turn_deps(
         resolver_cache=resolver_cache,
         billing_config=None,
     )
-
-
-def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
-    """Build a DaimonBot with minimal intents."""
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = DaimonBot(runtime=runtime, intents=intents)
-    # Set bot user so should_process_message passes
-    bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-    bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
-    return bot
 
 
 class _AsyncIter:
@@ -233,41 +222,6 @@ def _stub_resolved_config(
     )
 
 
-def _make_fake_agent(name: str = "test-agent") -> BetaManagedAgentsAgent:
-    """Build a validated BetaManagedAgentsAgent for MA lookup mocks."""
-    return BetaManagedAgentsAgent(
-        id="ag_test",
-        version=1,
-        name=name,
-        type="agent",
-        model=_AgentModelConfig(id="claude-sonnet-4-5"),
-        created_at=datetime(2026, 4, 28, tzinfo=UTC),
-        updated_at=datetime(2026, 4, 28, tzinfo=UTC),
-        mcp_servers=[],
-        metadata={},
-        skills=[],
-        tools=[],
-    )
-
-
-def _make_fake_environment(name: str = "test-env") -> BetaEnvironment:
-    """Build a validated BetaEnvironment for MA lookup mocks."""
-    return BetaEnvironment(
-        id="env_test",
-        name=name,
-        type="environment",
-        config=BetaCloudConfig(
-            type="cloud",
-            networking=BetaUnrestrictedNetwork(type="unrestricted"),
-            packages=BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
-        ),
-        created_at="2026-04-28T00:00:00Z",
-        updated_at="2026-04-28T00:00:00Z",
-        description="",
-        metadata={},
-    )
-
-
 async def _setup_workspace_and_config(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -294,13 +248,12 @@ async def _setup_workspace_and_config(
 class TestNewThreadCreation:
     """Channel mentions create threads and run turns."""
 
-    # TODO: migrate to MARouter transport-level fake
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_mention_in_channel_creates_thread_and_runs_turn(
+    async def test_tool_turn_starts_output_sweep_in_its_thread(
         self,
         mock_resolve: AsyncMock,
         mock_create_session: AsyncMock,
@@ -312,21 +265,107 @@ class TestNewThreadCreation:
     ) -> None:
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-output")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.send = AsyncMock(return_value=types.SimpleNamespace(id=1000, edit=AsyncMock()))
+        message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(
+                content=[
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id="tu_output",
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                    TextBlock(kind="text", text="Done"),
+                ]
+            )
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        with patch(
+            "daimon.adapters.discord.bot.deliver_session_outputs", new_callable=AsyncMock
+        ) as deliver:
+            await bot.on_message(message)
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+        deliver.assert_awaited_once()
+        assert deliver.await_args.args[1] is thread
+        assert deliver.await_args.kwargs["session_id"] == "sess-output"
+
+    # TODO: migrate to MARouter transport-level fake
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @pytest.mark.parametrize("completion_enabled", [False, True])
+    async def test_mention_in_channel_creates_thread_and_runs_turn(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        completion_enabled: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-abc")
+        mock_create_session.return_value = ma_session(id="sess-abc")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(id=1000, edit=AsyncMock()),
+                types.SimpleNamespace(id=1001, edit=AsyncMock()),
+            ]
+        )
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
+        from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(content=[TextBlock(kind="text", text="Done")])
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
+        assert mock_thread.send.await_count == (2 if completion_enabled else 1)
+        if not completion_enabled:
+            message.add_reaction.assert_not_awaited()
+        async with db_session_factory() as session:
+            assert not await list_recoverable_turn_card_intents(session, platform="discord")
 
         message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
             name="Chat with test-agent",
@@ -343,6 +382,11 @@ class TestNewThreadCreation:
         # Trigger content appears in <user_query>, not the raw message
         assert "<user_query" in user_message, "channel context must include a <user_query> element"
         assert "hello" in user_message, "trigger content must appear somewhere in the user message"
+        assert '"handle": "@' in user_message, (
+            "the turn controls must carry the handle people mention beside the agent name, so a "
+            "renamed bot account is never read as a second agent "
+            "(the exact name comes from settings; see test_branding.TestResponderHandle)"
+        )
         assert call_kwargs["session_id"] == "sess-abc", "should use ma_session.id"
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -370,7 +414,7 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
 
         order: list[str] = []
@@ -397,7 +441,7 @@ class TestNewThreadCreation:
             *args: object, **kwargs: object
         ) -> BetaManagedAgentsSession:
             order.append("session_created")
-            return _make_fake_session("sess-order")
+            return ma_session(id="sess-order")
 
         mock_create_session.side_effect = _record_create_session
 
@@ -408,7 +452,7 @@ class TestNewThreadCreation:
         )
         assert "embeds" in first_send_kwargs, "instant feedback should be an embed, not text"
         embed = cast("list[discord.Embed]", first_send_kwargs["embeds"])[0]
-        assert embed.title is not None and "thinking" in embed.title, (
+        assert (embed.description or "").startswith("**Thinking**"), (
             "initial embed should show the thinking phase"
         )
 
@@ -433,7 +477,7 @@ class TestNewThreadCreation:
         mock_resolve.return_value = _stub_resolved_config(agent_name=None, environment_name=None)
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
 
         await bot.on_message(message)
@@ -474,7 +518,7 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -519,7 +563,7 @@ class TestThreadMention:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-thread")
+        mock_create_session.return_value = ma_session(id="sess-thread")
         mock_build_xml.return_value = (
             "<context><thread_history></thread_history></context>\n\n<user_query>hello</user_query>",
             [],
@@ -528,7 +572,7 @@ class TestThreadMention:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message()
 
         await bot.on_message(message)
@@ -559,7 +603,7 @@ class TestThreadMention:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-xml")
+        mock_create_session.return_value = ma_session(id="sess-xml")
         fake_xml = (
             "<context><thread_history><message>prior</message></thread_history></context>"
             "\n\n<user_query>trigger</user_query>"
@@ -569,14 +613,14 @@ class TestThreadMention:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message()
 
         await bot.on_message(message)
 
         call_kwargs = mock_run_turn.call_args.kwargs
-        assert call_kwargs["user_message"] == fake_xml, (
-            "XML context should be passed as user_message"
+        assert call_kwargs["user_message"].endswith(fake_xml), (
+            "platform history should supplement the trusted per-turn control context"
         )
         assert call_kwargs["session_id"] == "sess-xml", "should use ma_session.id"
 
@@ -601,13 +645,13 @@ class TestThreadMention:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session()
+        mock_create_session.return_value = ma_session()
         mock_build_xml.return_value = ("<context></context>", [])
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message(parent_id=789)
 
         await bot.on_message(message)
@@ -639,13 +683,13 @@ class TestThreadMention:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session()
+        mock_create_session.return_value = ma_session()
         mock_build_xml.return_value = ("<context></context>", [])
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message()
 
         await bot.on_message(message)
@@ -676,13 +720,13 @@ class TestThreadMention:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session()
+        mock_create_session.return_value = ma_session()
         mock_build_xml.return_value = ("<context></context>", [])
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message()
 
         await bot.on_message(message)
@@ -710,7 +754,7 @@ class TestConcurrentTurnProtection:
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Mark the thread as currently processing a turn (without actually
         # running one). on_message should react ⌛ and append to _pending.
@@ -748,12 +792,12 @@ class TestAutoArchive:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-auto-archive")
+        mock_create_session.return_value = ma_session(id="sess-auto-archive")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -793,13 +837,13 @@ class TestHandleMentionErrorBoundary:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-err")
+        mock_create_session.return_value = ma_session(id="sess-err")
         mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -838,13 +882,13 @@ class TestHandleMentionErrorBoundary:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-err2")
+        mock_create_session.return_value = ma_session(id="sess-err2")
         mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9998
@@ -875,7 +919,7 @@ class TestSetupHook:
     ) -> None:
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
 
         # Stub remaining Cogs via sys.modules to keep the test merge-order-independent.
         mock_help_cog = MagicMock()
@@ -901,12 +945,18 @@ class TestSetupHook:
         feedback_reactions_mod = types.ModuleType("daimon.adapters.discord.feedback_reactions")
         feedback_reactions_mod.FeedbackReactionCog = mock_feedback_reaction_cog  # type: ignore[attr-defined]
 
+        # Imported BEFORE patch.dict: it drops any module first imported inside
+        # the block when it exits, so importing DirectMessageCog afterwards would
+        # load a second copy whose class the bot's instance isn't an instance of.
+        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+
         add_cog_calls: list[object] = []
 
         async def tracking_add_cog(cog: object, **kwargs: object) -> None:
             add_cog_calls.append(cog)
 
         bot.add_cog = tracking_add_cog  # type: ignore[assignment]
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
 
         with patch.dict(
             "sys.modules",
@@ -922,7 +972,8 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 7, "setup_hook should add exactly 7 Cogs"
+        assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
+        assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)
@@ -930,6 +981,498 @@ class TestSetupHook:
         mock_privacy_cog.assert_called_once_with(bot)
         mock_memory_cog.assert_called_once_with(bot)
         mock_feedback_reaction_cog.assert_called_once_with(bot)
+
+
+class TestInvokerAccessPolicy:
+    """SYS-047: the tenant's invoker allowlist refuses at admission with a notice."""
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notice(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(
+            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("999",))
+        )
+        await db_session.commit()
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(author_id=111)
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        mock_find_agent.assert_not_called()
+        mock_create_session.assert_not_called()
+        mock_run_turn.assert_not_called()
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "can start a turn" in sent_text, sent_text
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_from_an_allowlisted_user_passes_the_policy(
+        self,
+        mock_resolve: AsyncMock,
+        mock_is_over_cap: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(
+            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("111",))
+        )
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_is_over_cap.return_value = True
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(author_id=111)
+
+        await bot.on_message(message)
+
+        # Past the policy: the config cascade ran, and the cap gate is what stopped it.
+        mock_resolve.assert_awaited_once()
+        mock_is_over_cap.assert_awaited_once()
+
+
+class TestProtectedChannelAdmission:
+    """SYS-048: a mention in a protected channel gets no thread, no reply, no upload."""
+
+    @pytest.mark.parametrize(
+        ("policy", "in_thread"),
+        [
+            (TenantAccessPolicy(protected_channel_ids=("789",)), False),
+            (TenantAccessPolicy(protected_channel_ids=("789",)), True),
+            (TenantAccessPolicy(protected_category_ids=("4242",)), False),
+        ],
+        ids=["protected-channel", "thread-under-protected", "protected-category"],
+    )
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_in_a_protected_channel_is_dropped_without_posting(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy,
+        in_thread: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        if in_thread:
+            message = _make_thread_message(parent_id=789)
+            message.channel.parent.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            message = _make_channel_message(channel_id=789)
+            message.channel.category_id = 4242  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        mock_find_agent.assert_not_called()
+        mock_create_session.assert_not_called()
+        mock_run_turn.assert_not_called()
+        posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        if not in_thread:
+            message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+
+class TestProtectedChannelSilence:
+    """SYS-048: nothing at all is posted for a turn in a protected channel --
+    not the invoker refusal, not the capacity notice."""
+
+    async def _bot_for(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy,
+    ) -> tuple[DaimonBot, uuid.UUID]:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        return make_bot(_make_runtime(tenant.id, db_session_factory)), tenant.id
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_guest_mention_in_a_protected_channel_gets_no_refusal_notice(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session,
+            db_session_factory,
+            TenantAccessPolicy(invoker_user_ids=("999",), protected_channel_ids=("789",)),
+        )
+        message = _make_channel_message(channel_id=789, author_id=111)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    async def test_the_capacity_notice_is_not_posted_into_a_protected_channel(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, tenant_id = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        bot._inflight[tenant_id] = 10_000  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    async def test_global_capacity_notice_is_not_posted_into_a_protected_channel(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        assert bot.runtime.settings.discord is not None
+        bot.runtime.settings.discord.max_concurrent_turns = 1
+        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+
+    async def test_global_capacity_notice_is_not_posted_into_a_protected_thread(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        assert bot.runtime.settings.discord is not None
+        bot.runtime.settings.discord.max_concurrent_turns = 1
+        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        message = _make_thread_message(parent_id=789)
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetched", "fetch-failed"])
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_an_uncached_thread_parent_is_fetched_before_judging_its_category(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fetch_fails: bool,
+    ) -> None:
+        """The parent's category is what's protected. An uncached parent is
+        fetched; if the fetch fails, a category policy fails closed."""
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_category_ids=("4242",))
+        )
+        message = _make_thread_message(parent_id=789)
+        thread = message.channel
+        thread.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+        parent = MagicMock()
+        parent.category_id = 4242
+        thread.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+        thread.guild.fetch_channel = AsyncMock(  # pyright: ignore[reportAttributeAccessIssue]
+            side_effect=discord.NotFound(MagicMock(status=404), "gone") if fetch_fails else None,
+            return_value=parent,
+        )
+
+        await bot.on_message(message)
+
+        thread.guild.fetch_channel.assert_awaited_once_with(789)  # pyright: ignore[reportAttributeAccessIssue]
+        mock_resolve.assert_not_called()
+        thread.send.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
+
+
+class TestProtectedChannelBeforeAnyNotice:
+    """SYS-048 round 4: silence holds before readiness notices and when the
+    policy can't be read; the category fetch happens only when needed."""
+
+    @pytest.mark.parametrize(
+        ("status", "archive"),
+        [("pending", False), ("failed", False), ("ready", True)],
+        ids=["pending", "failed", "archived"],
+    )
+    async def test_no_setup_notice_in_a_protected_channel_of_an_unready_tenant(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        status: str,
+        archive: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(protected_channel_ids=("789",)),
+        )
+        await db_session.commit()
+        await set_provision_status(
+            db_session_factory, tenant_id=tenant.id, status=status, archive=archive
+        )
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+
+        with patch.object(bot, "_ensure_provisioning", new=AsyncMock()) as ensure:
+            await bot.on_message(message)
+
+        ensure.assert_not_awaited()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_failed_policy_read_stays_silent(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A DB or pool failure while reading protection posts nothing -- not
+        even an error -- into a channel whose safety is unknown."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+
+        with patch(
+            "daimon.core.turn.protection.load_access_policy",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ):
+            await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @pytest.mark.parametrize(
+        ("policy", "fetches"),
+        [
+            (None, 0),
+            (TenantAccessPolicy(protected_channel_ids=("elsewhere",)), 0),
+            (TenantAccessPolicy(protected_category_ids=("other-cat",)), 1),
+        ],
+        ids=["no-policy", "no-category-policy", "category-policy-fetches-once"],
+    )
+    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_an_uncached_parent_is_fetched_only_for_a_category_policy_and_once(
+        self,
+        mock_resolve: AsyncMock,
+        mock_is_over_cap: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy | None,
+        fetches: int,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        if policy is not None:
+            await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_is_over_cap.return_value = True  # stop right after admission's gates
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(parent_id=789)
+        thread = message.channel
+        parent = MagicMock(spec=discord.TextChannel)
+        parent.category_id = 4242
+        cached: dict[str, object] = {}
+        thread.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+        thread.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+        thread.guild.fetch_channel = AsyncMock(return_value=parent)  # pyright: ignore[reportAttributeAccessIssue]
+
+        def _cache(channel: object) -> None:
+            cached["parent"] = channel
+            thread.parent = channel  # pyright: ignore[reportAttributeAccessIssue]  # what guild._add_channel makes visible
+
+        thread.guild._add_channel = MagicMock(side_effect=_cache)  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        assert thread.guild.fetch_channel.await_count == fetches, (  # pyright: ignore[reportAttributeAccessIssue]
+            "fetch only when a category is protected, and never twice for one turn"
+        )
+        mock_resolve.assert_awaited_once()  # admitted past the protection gate
+
+
+class TestProtectedChannelWhateverFails:
+    """SYS-048 round 5: the may-post state is decided before anything else in
+    on_message; whatever fails afterwards -- or while deciding it -- nothing
+    is posted into a protected channel. A control proves the same failure
+    still reaches an unprotected channel."""
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "liveness_read",
+            "policy_read",
+            "category_fetch_parent_protected",
+            "category_fetch_category_policy",
+            "provisioning",
+        ],
+    )
+    async def test_nothing_is_posted_into_a_protected_target(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        failure: str,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        policy = (
+            TenantAccessPolicy(protected_category_ids=("4242",))
+            if failure == "category_fetch_category_policy"
+            else TenantAccessPolicy(
+                protected_channel_ids=("789",), protected_category_ids=("4242",)
+            )
+        )
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        if failure == "provisioning":
+            await set_provision_status(db_session_factory, tenant_id=tenant.id, status="pending")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        db_error = OperationalError("SELECT", {}, Exception("pool gone"))
+
+        if failure.startswith("category_fetch"):
+            message = _make_thread_message(parent_id=789)
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.guild.fetch_channel = AsyncMock(side_effect=OSError("reset"))  # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            message = _make_channel_message(channel_id=789)
+            message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+
+        breakage = {
+            "liveness_read": patch(
+                "daimon.adapters.discord.bot.get_tenant_liveness",
+                new=AsyncMock(side_effect=db_error),
+            ),
+            "policy_read": patch(
+                "daimon.core.turn.protection.load_access_policy",
+                new=AsyncMock(side_effect=db_error),
+            ),
+            "provisioning": patch.object(
+                bot, "_ensure_provisioning", new=AsyncMock(side_effect=db_error)
+            ),
+        }.get(failure, contextlib.nullcontext())
+        with breakage:
+            await bot.on_message(message)
+
+        posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        if not failure.startswith("category_fetch"):
+            message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        if failure == "category_fetch_parent_protected":
+            message.channel.guild.fetch_channel.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def test_an_unprotected_channel_still_gets_the_prologue_error(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        with patch(
+            "daimon.adapters.discord.bot.get_tenant_liveness",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ):
+            await bot.on_message(message)
+
+        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+
+class TestContinuationMayPost:
+    """The bot hands its continuation dispatcher the access policy's may-post decision."""
+
+    @pytest.mark.parametrize(
+        ("policy", "fail_read", "expected"),
+        [
+            (None, False, True),
+            (TenantAccessPolicy(protected_channel_ids=("789",)), False, False),
+            (None, True, False),
+        ],
+        ids=["open", "protected-parent", "unknown"],
+    )
+    async def test_may_post_in_follows_the_policy(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy | None,
+        fail_read: bool,
+        expected: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        if policy is not None:
+            await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        thread = _make_thread_message(parent_id=789).channel
+
+        breakage = (
+            patch(
+                "daimon.core.turn.protection.load_access_policy",
+                new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("gone"))),
+            )
+            if fail_read
+            else contextlib.nullcontext()
+        )
+        with breakage:
+            allowed = await bot._may_post_in(tenant_id=tenant.id, channel=thread)  # pyright: ignore[reportPrivateUsage]
+
+        assert allowed is expected
 
 
 class TestBillingAdmissionGate:
@@ -962,7 +1505,7 @@ class TestBillingAdmissionGate:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
 
         await bot.on_message(message)
@@ -1003,12 +1546,12 @@ class TestBillingAdmissionGate:
 
         mock_resolve.return_value = _stub_resolved_config()
         mock_is_over_cap.return_value = False
-        mock_create_session.return_value = _make_fake_session("sess-undercap")
+        mock_create_session.return_value = ma_session(id="sess-undercap")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -1033,7 +1576,7 @@ class TestBillingAdmissionGate:
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         message.guild = None  # DM
 
@@ -1069,12 +1612,12 @@ class TestBillingAdmissionGate:
 
         mock_resolve.return_value = _stub_resolved_config()
         mock_is_over_cap.return_value = False
-        mock_create_session.return_value = _make_fake_session("sess-usage")
+        mock_create_session.return_value = ma_session(id="sess-usage")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -1097,9 +1640,7 @@ class TestBillingAdmissionGate:
         assert bound["managed_session_id"] == "sess-usage", (
             "managed_session_id should be ma_session.id"
         )
-        assert bound["model_id"] == "claude-sonnet-4-5", (
-            "model_id should be ma_session.agent.model.id"
-        )
+        assert bound["model_id"] == DEFAULT_MODEL_ID, "model_id should be ma_session.agent.model.id"
 
 
 class TestResolverSelfHeal:
@@ -1121,10 +1662,8 @@ class TestResolverSelfHeal:
         resolve_agent / resolve_environment fall through to tag lookup and
         return the live id. Discord replies (no 'no longer exists' error)."""
         import httpx
-        from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
         from daimon.core.ma_resolver import new_resolver_cache
         from daimon.testing.ma import (
-            EMPTY_CLOUD_CONFIG,
             MARouter,
             build_fake_anthropic,
             list_response,
@@ -1135,37 +1674,10 @@ class TestResolverSelfHeal:
         await db_session.commit()
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-heal")
+        mock_create_session.return_value = ma_session(id="sess-heal")
 
-        live_agent = BetaManagedAgentsAgent(
-            id="ag_live",
-            version=1,
-            name="test-agent",
-            type="agent",
-            model=_AgentModelConfig(id="claude-sonnet-4-5"),
-            created_at=datetime(2026, 5, 19, tzinfo=UTC),
-            updated_at=datetime(2026, 5, 19, tzinfo=UTC),
-            mcp_servers=[],
-            metadata={
-                MA_METADATA_KEY_TENANT: str(tenant.id),
-                MA_METADATA_KEY_NAME: "test-agent",
-            },
-            skills=[],
-            tools=[],
-        ).model_dump(mode="json")
-        live_env = BetaEnvironment(
-            id="env_live",
-            name="test-env",
-            type="environment",
-            config=EMPTY_CLOUD_CONFIG,
-            created_at="2026-05-19T00:00:00Z",
-            updated_at="2026-05-19T00:00:00Z",
-            description="",
-            metadata={
-                MA_METADATA_KEY_TENANT: str(tenant.id),
-                MA_METADATA_KEY_NAME: "test-env",
-            },
-        ).model_dump(mode="json")
+        live_agent = ma_agent(id="ag_live", tenant_id=tenant.id).model_dump(mode="json")
+        live_env = ma_environment(id="env_live", tenant_id=tenant.id).model_dump(mode="json")
 
         router = MARouter()
         router.add(
@@ -1189,6 +1701,7 @@ class TestResolverSelfHeal:
         discord_settings = MagicMock()
         discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
         settings.discord = discord_settings
+        settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
         runtime = DiscordRuntime(
@@ -1208,7 +1721,7 @@ class TestResolverSelfHeal:
             ),
         )
 
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 7777
@@ -1253,11 +1766,9 @@ class TestResolverSelfHeal:
         import re
 
         import httpx
-        from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.ma_resolver import new_resolver_cache
         from daimon.testing.ma import (
-            EMPTY_CLOUD_CONFIG,
             MARouter,
             build_fake_anthropic,
             list_response,
@@ -1271,37 +1782,10 @@ class TestResolverSelfHeal:
         expected_tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace_id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-miss-heal")
+        mock_create_session.return_value = ma_session(id="sess-miss-heal")
 
-        live_agent = BetaManagedAgentsAgent(
-            id="ag_miss_live",
-            version=1,
-            name="test-agent",
-            type="agent",
-            model=_AgentModelConfig(id="claude-sonnet-4-5"),
-            created_at=datetime(2026, 5, 19, tzinfo=UTC),
-            updated_at=datetime(2026, 5, 19, tzinfo=UTC),
-            mcp_servers=[],
-            metadata={
-                MA_METADATA_KEY_TENANT: str(tenant.id),
-                MA_METADATA_KEY_NAME: "test-agent",
-            },
-            skills=[],
-            tools=[],
-        ).model_dump(mode="json")
-        live_env = BetaEnvironment(
-            id="env_miss_live",
-            name="test-env",
-            type="environment",
-            config=EMPTY_CLOUD_CONFIG,
-            created_at="2026-05-19T00:00:00Z",
-            updated_at="2026-05-19T00:00:00Z",
-            description="",
-            metadata={
-                MA_METADATA_KEY_TENANT: str(tenant.id),
-                MA_METADATA_KEY_NAME: "test-env",
-            },
-        ).model_dump(mode="json")
+        live_agent = ma_agent(id="ag_miss_live", tenant_id=tenant.id).model_dump(mode="json")
+        live_env = ma_environment(id="env_miss_live", tenant_id=tenant.id).model_dump(mode="json")
 
         # Stateful list handlers: return empty (tag miss) until reconcile fires, then live.
         agent_applied: list[bool] = [False]
@@ -1349,6 +1833,7 @@ class TestResolverSelfHeal:
         discord_settings = MagicMock()
         discord_settings.max_concurrent_turns_per_tenant = 100
         settings.discord = discord_settings
+        settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
         runtime = DiscordRuntime(
@@ -1368,7 +1853,7 @@ class TestResolverSelfHeal:
             ),
         )
 
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 8888
@@ -1410,12 +1895,12 @@ class TestAttachmentOrchestration:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-attach")
+        mock_create_session.return_value = ma_session(id="sess-attach")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         # A non-image attachment routes to the data path → signed CDN URL prefix.
         fake_attachment = MagicMock(spec=discord.Attachment)
@@ -1435,7 +1920,7 @@ class TestAttachmentOrchestration:
 
         mock_run_turn.assert_called_once()
         user_msg: str = mock_run_turn.call_args.kwargs["user_message"]
-        assert user_msg.startswith("[attachment] `x.csv`"), (
+        assert "[attachment] `x.csv`" in user_msg, (
             "data attachment CDN-URL prefix must be prepended to the user message"
         )
         assert "https://cdn.discord/x.csv" in user_msg, "the signed CDN URL must be surfaced"
@@ -1468,7 +1953,7 @@ class TestAttachmentOrchestration:
         await _setup_workspace_and_config(db_session, tenant.id)
 
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session("sess-image-url")
+        mock_create_session.return_value = ma_session(id="sess-image-url")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
 
@@ -1491,7 +1976,7 @@ class TestAttachmentOrchestration:
         )
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_channel_message()
         message.attachments = [cast(discord.Attachment, attachment)]
         mock_thread = MagicMock(spec=discord.Thread)
@@ -1503,7 +1988,7 @@ class TestAttachmentOrchestration:
 
         mock_run_turn.assert_called_once()
         user_msg: str = mock_run_turn.call_args.kwargs["user_message"]
-        assert user_msg.startswith("[attachment] image `chart.png`"), (
+        assert "[attachment] image `chart.png`" in user_msg, (
             "image URL prefix must be prepended to user message"
         )
         assert signed_url in user_msg, "full signed CDN URL must reach the agent"
@@ -1559,14 +2044,19 @@ class TestSessionReuse:
         existing_session_id = "sesn_existing_001"
         watermark_msg_id = "111222333"
         async with db_session_factory() as seed_session:
+            snapshot = _snapshot_of(ma_session(id=existing_session_id))
             await create_thread_session(
                 seed_session,
+                ma_agent_id="ag_test",
                 tenant_id=tenant.id,
                 platform="discord",
                 thread_id="5555",  # matches _make_thread_message default thread_id
                 account_id=principal.account_id,
                 ma_session_id=existing_session_id,
                 watermark_message_id=watermark_msg_id,
+                effective_config=snapshot,
+                identity_fingerprint=fingerprint_identity(snapshot),
+                mutable_fingerprint=fingerprint_mutable(snapshot),
             )
             await seed_session.commit()
 
@@ -1579,7 +2069,7 @@ class TestSessionReuse:
         )
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message(thread_id=5555)
 
         await bot.on_message(message)
@@ -1629,7 +2119,7 @@ class TestSessionReuse:
 
         new_session_id = "sesn_new_first_001"
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session(new_session_id)
+        mock_create_session.return_value = ma_session(id=new_session_id)
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_xml.return_value = (
@@ -1642,7 +2132,7 @@ class TestSessionReuse:
         bot_reply_msg.id = 777888999
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message(thread_id=5556)
 
         # Inject the fake reply message so lifecycle.final_message_id is not None.
@@ -1716,20 +2206,25 @@ class TestSessionReuse:
         # Seed a live row for the thread.
         old_session_id = "sesn_old_dead_001"
         async with db_session_factory() as seed_session:
+            snapshot = _snapshot_of(ma_session(id=old_session_id))
             await create_thread_session(
                 seed_session,
+                ma_agent_id="ag_test",
                 tenant_id=tenant.id,
                 platform="discord",
                 thread_id="5557",
                 account_id=principal.account_id,
                 ma_session_id=old_session_id,
                 watermark_message_id="100",
+                effective_config=snapshot,
+                identity_fingerprint=fingerprint_identity(snapshot),
+                mutable_fingerprint=fingerprint_mutable(snapshot),
             )
             await seed_session.commit()
 
         new_session_id = "sesn_new_recreated_001"
         mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = _make_fake_session(new_session_id)
+        mock_create_session.return_value = ma_session(id=new_session_id)
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_xml.return_value = (
@@ -1753,7 +2248,7 @@ class TestSessionReuse:
         mock_run_turn.side_effect = [dead_state, success_state]
 
         runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = _make_bot(runtime)
+        bot = make_bot(runtime)
         message = _make_thread_message(thread_id=5557)
 
         await bot.on_message(message)
@@ -1786,3 +2281,54 @@ class TestSessionReuse:
         assert live_row.ma_session_id == new_session_id, (
             "new live row must store the recreated session id"
         )
+
+
+class TestUnpromptedAdmission:
+    """An unprompted (organic thread participation) turn that fails admission
+    posts nothing: the notice a mention earns would otherwise be reposted on
+    every quiet burst in the thread."""
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_missing_config_is_silent_when_unprompted(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config(agent_name=None, environment_name=None)
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="what about the residuals?")
+
+        await bot._orchestrate(message, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_depleted_balance_is_silent_when_unprompted_but_not_for_a_mention(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # No ledger entry: the balance gate denies.
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+
+        unprompted = _make_thread_message(content="and the priors?")
+        await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+        unprompted.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+        mention = _make_thread_message()
+        await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"

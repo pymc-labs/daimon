@@ -22,18 +22,15 @@ import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.core import usage_recording
 from daimon.core._models import UsageEvent
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_model_usage
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 async def test_record_turn_usage_writes_row_from_real_sdk_event(
@@ -45,12 +42,7 @@ async def test_record_turn_usage_writes_row_from_real_sdk_event(
         id="evt_1",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=100, output_tokens=50),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -81,12 +73,7 @@ async def test_record_turn_usage_idempotent_under_replay(
         id="evt_replay",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=100, output_tokens=50),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -130,12 +117,7 @@ async def test_record_turn_usage_propagates_db_errors_no_swallow(
         id="evt_boom",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=1,
-            output_tokens=1,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=1, output_tokens=1),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -175,12 +157,7 @@ async def test_record_turn_usage_debit_writes_ledger_row_for_guild_turn(
         id="evt_debit_1",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=1_000_000,
-            output_tokens=0,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -194,7 +171,7 @@ async def test_record_turn_usage_debit_writes_ledger_row_for_guild_turn(
         markup=Decimal("1.0"),
         pricing=MODEL_PRICING.get("claude-opus-4-7"),
     )
-    # Balance should have decreased (input_tokens=1M at $15/M = $15.00 debit)
+    # Balance should have decreased (input_tokens=3M at $5/M = $15.00 debit)
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance < Decimal("10.00"), "balance must decrease after a guild turn debit"
     # $15.00 debit from $10.00 trial credit = -$5.00
@@ -212,12 +189,7 @@ async def test_record_turn_usage_debit_dm_exemption_no_ledger_row(
         id="evt_dm_1",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=100, output_tokens=50),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -259,12 +231,7 @@ async def test_record_turn_usage_debit_idempotent_replay_no_double_debit(
         id="evt_idem",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=1_000,
-            output_tokens=500,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=1_000, output_tokens=500),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -285,6 +252,92 @@ async def test_record_turn_usage_debit_idempotent_replay_no_double_debit(
     # If double-debited, balance would be < 49.98; single debit leaves it very close to 50.00
     assert balance_after > Decimal("49.90"), (
         "only one debit must occur even when the same event is replayed"
+    )
+
+
+async def test_record_turn_usage_ledger_failure_rolls_back_pair_and_allows_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_nullpool_engine: AsyncEngine,
+) -> None:
+    """A ledger constraint failure must roll back the preceding usage insert."""
+    independent_sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with independent_sessions() as session:
+        tenant = await make_tenant(session)
+        await session.commit()
+
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_rollback_pair",
+        is_error=False,
+        model_request_start_id="start_rollback_pair",
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    recorder_args = {
+        "sessionmaker": db_session_factory,
+        "tenant_id": tenant.id,
+        "platform_user_id": "u_rollback_pair",
+        "managed_session_id": "s_rollback_pair",
+        "model_id": "claude-opus-4-7",
+        "event": event,
+        "pricing": MODEL_PRICING.get("claude-opus-4-7"),
+    }
+
+    # The usage_events insert and flush happen first. This markup makes the
+    # resulting ledger delta exceed Numeric(12, 6), so PostgreSQL rejects the
+    # second write inside the real recorder transaction.
+    with pytest.raises(DBAPIError, match="numeric field overflow"):
+        await usage_recording.record_turn_usage(
+            **recorder_args,
+            markup=Decimal("100000"),
+        )
+
+    async with independent_sessions() as session:
+        usage_rows = (
+            (
+                await session.execute(
+                    select(UsageEvent).where(
+                        UsageEvent.managed_session_id == "s_rollback_pair",
+                        UsageEvent.event_id == "evt_rollback_pair",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ledger_rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    assert usage_rows == [], "failed ledger insert must roll back its preceding usage row"
+    assert not any(
+        row.idempotency_key == "turn:s_rollback_pair:evt_rollback_pair" for row in ledger_rows
+    ), "failed ledger insert must leave no debit row"
+
+    await usage_recording.record_turn_usage(**recorder_args, markup=Decimal("1.0"))
+
+    async with independent_sessions() as session:
+        usage_rows = (
+            (
+                await session.execute(
+                    select(UsageEvent).where(
+                        UsageEvent.managed_session_id == "s_rollback_pair",
+                        UsageEvent.event_id == "evt_rollback_pair",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ledger_rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    matching_debits = [
+        row
+        for row in ledger_rows
+        if row.idempotency_key == "turn:s_rollback_pair:evt_rollback_pair"
+    ]
+    assert len(usage_rows) == 1, "retry must persist exactly one usage row"
+    assert len(matching_debits) == 1, "retry must persist exactly one matching debit"
+    assert usage_rows[0].tenant_id == tenant.id, "usage row must retain the retried tenant"
+    assert matching_debits[0].tenant_id == tenant.id, "debit must retain the retried tenant"
+    assert matching_debits[0].delta_usd == Decimal("-15.000000"), (
+        "retry debit must match the event's priced usage"
     )
 
 
@@ -406,6 +459,14 @@ async def test_record_media_usage_idempotent_under_replay(
     assert balance_after > Decimal("49.90"), (
         "only one media debit must occur even when the same call is replayed"
     )
+    debits = [
+        entry
+        for entry in await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
+        if entry.reason == "media_debit"
+    ]
+    assert [entry.idempotency_key for entry in debits] == [
+        "media:gemini:fixed-session-3:evt_media_idem"
+    ], "the media debit key is stored history: its prefix must stay `media:`"
 
 
 async def test_record_media_usage_propagates_db_errors_no_swallow(
@@ -431,3 +492,76 @@ async def test_record_media_usage_propagates_db_errors_no_swallow(
             output_tokens=1,
             cache_read_input_tokens=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# record_thread_naming_usage — Haiku thread-title spend
+# ---------------------------------------------------------------------------
+
+
+async def test_record_thread_naming_usage_writes_row_and_debits_ledger(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.flush()
+
+    rates = MODEL_PRICING["claude-haiku-4-5"]
+    await usage_recording.record_thread_naming_usage(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        model_id="claude-haiku-4-5",
+        input_tokens=120,
+        output_tokens=9,
+        cache_read_input_tokens=0,
+        managed_session_id="thread-naming:fixed",
+        event_id="evt_name_1",
+        pricing=rates,
+    )
+
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [
+        ("claude-haiku-4-5", 120, 9)
+    ], "exactly one Haiku usage row must be written with the reported tokens"
+    expected_cost = (120 * rates.input + 9 * rates.output) / 1_000_000
+    balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
+    assert abs(balance - (Decimal("10.00") - Decimal(str(expected_cost)))) < Decimal("0.000001"), (
+        "the tenant must be debited cost_of(usage, pricing) for the naming call"
+    )
+
+
+async def test_record_thread_naming_usage_idempotent_under_replay(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    for _ in range(2):
+        await usage_recording.record_thread_naming_usage(
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            platform_user_id="u1",
+            model_id="claude-haiku-4-5",
+            input_tokens=50,
+            output_tokens=5,
+            cache_read_input_tokens=0,
+            managed_session_id="thread-naming:replay",
+            event_id="evt_name_replay",
+            pricing=MODEL_PRICING["claude-haiku-4-5"],
+        )
+
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert len(rows) == 1, "replaying the same (session, event) must not add a second row"
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(UsageEvent).where(UsageEvent.tenant_id == tenant.id)
+        )
+    ).scalar_one()
+    assert count == 1, "raw row count must agree with the store read"

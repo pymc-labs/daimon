@@ -1,7 +1,7 @@
-"""Behavioral tests for the Connect via MCP button flow.
+"""Behavioral tests for the Use from your coding tools button flow.
 
 Assertions:
-  (1) send_connect_via_mcp writes an mcp_tokens row and replies ephemerally
+  (1) send_coding_tools_access writes an mcp_tokens row and replies ephemerally
       with the /mcp URL + Bearer token in copyable plain message content.
   (2) The reply is ephemeral (send_message called with ephemeral=True).
   (3) The Revoke callback flips revoked_at to non-null.
@@ -15,28 +15,35 @@ an SDK model is expected.
 
 from __future__ import annotations
 
-import datetime as dt
 import uuid
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import jwt as pyjwt
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
-from daimon.adapters.discord.agent_setup.mcp_access import send_connect_via_mcp
+from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.state import PanelState, RosterEntry
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores.domain import AccountRow, TenantRow
-from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
+from daimon.testing import FIXED_TS, ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    build_stub_anthropic,
+    not_found_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -85,28 +92,6 @@ def _make_interaction(*, user_id: int = 42) -> MagicMock:
     return interaction
 
 
-def _make_ma_agent(ma_agent_id: str, name: str, tenant_id: uuid.UUID) -> BetaManagedAgentsAgent:
-    now = dt.datetime.now(dt.UTC)
-    return BetaManagedAgentsAgent(
-        id=ma_agent_id,
-        type="agent",
-        name=name,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-        metadata={
-            "daimon_tenant": str(tenant_id),
-            "daimon_name": name,
-        },
-        description=None,
-        created_at=now,
-        updated_at=now,
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
-    )
-
-
 async def _setup_tenant_and_account(
     db_session: AsyncSession,
     *,
@@ -128,19 +113,19 @@ async def _setup_tenant_and_account(
 
 
 # ---------------------------------------------------------------------------
-# Test 1: _on_talk_via_mcp writes an mcp_tokens row and replies with config
+# Test 1: _on_coding_tools writes an mcp_tokens row and replies with config
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_on_talk_via_mcp_writes_row_and_replies_with_config_block(
+async def test_on_coding_tools_writes_row_and_replies_with_config_block(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     account_id: uuid.UUID,
     tenant_id: uuid.UUID,
 ) -> None:
-    """Driving send_connect_via_mcp writes an mcp_tokens row attributed to the personal
+    """Driving send_coding_tools_access writes an mcp_tokens row attributed to the personal
     account; the reply's plain content contains the /mcp URL and a Bearer token."""
     await _setup_tenant_and_account(
         db_session,
@@ -151,7 +136,7 @@ async def test_on_talk_via_mcp_writes_row_and_replies_with_config_block(
 
     ma_agent_id = "agent_017abc_77_panel01"
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -178,7 +163,7 @@ async def test_on_talk_via_mcp_writes_row_and_replies_with_config_block(
     interaction = _make_interaction()
 
     # Act
-    await send_connect_via_mcp(interaction, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(interaction, runtime=runtime, state=state, allowed_user_id=42)
 
     # Assert — config is in plain message content (copyable), not a LayoutView
     interaction.response.send_message.assert_called_once()
@@ -217,20 +202,172 @@ async def test_on_talk_via_mcp_writes_row_and_replies_with_config_block(
     assert row.tenant_id == tenant_id, "token row tenant_id must be the guild's tenant"
 
 
-# ---------------------------------------------------------------------------
-# Test 2: reply is ephemeral
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_on_talk_via_mcp_reply_is_ephemeral(
+async def test_on_coding_tools_mints_for_card_agent_when_newer_same_name_exists(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     account_id: uuid.UUID,
     tenant_id: uuid.UUID,
 ) -> None:
-    """The send_message call for the Talk via MCP reply must use ephemeral=True."""
+    """A newer duplicate must not replace the exact agent represented by the card."""
+    await _setup_tenant_and_account(
+        db_session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        external_id="test-guild-coding-tools-identity",
+    )
+
+    card_agent = ma_agent(
+        id="agent_card_snapshot",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS,
+    )
+    newer_same_name = ma_agent(
+        id="agent_newer_duplicate",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS + timedelta(seconds=1),
+    )
+    router = MARouter()
+    router.add_agent_list(card_agent, newer_same_name)
+    router.add_agent(card_agent)
+    runtime = DiscordRuntime(
+        settings=_make_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+    )
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    selected = RosterAgent(
+        name="expert-bot",
+        ma_agent_id=card_agent.id,
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
+    )
+    state = PanelState(roster=[], selected=None, account_id=account_id)
+    interaction = _make_interaction()
+
+    await send_coding_tools_access(
+        interaction,
+        runtime=runtime,
+        state=state,
+        allowed_user_id=42,
+        agent=selected,
+    )
+
+    content: str = interaction.response.send_message.call_args.kwargs["content"]
+    bearer_idx = content.index("Bearer ") + len("Bearer ")
+    jwt_token = content[bearer_idx:].split()[0].strip("`\"'")
+    claims = pyjwt.decode(jwt_token, _JWT_SECRET_BYTES, algorithms=["HS256"])
+    expected_agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=card_agent.id)
+    assert claims["agent_id"] == str(expected_agent_id), (
+        "coding-tools token must use the exact MA identity stored on the Details card"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable_kind", ["archived", "foreign", "missing"])
+async def test_on_coding_tools_refuses_unavailable_card_agent_without_minting(
+    unavailable_kind: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Never substitute a current same-name agent for an unavailable card identity."""
+    await _setup_tenant_and_account(
+        db_session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        external_id=f"test-guild-coding-tools-{unavailable_kind}",
+    )
+    card_tenant_id = uuid.uuid4() if unavailable_kind == "foreign" else tenant_id
+    card_agent = ma_agent(
+        id="agent_card_snapshot",
+        name="expert-bot",
+        tenant_id=card_tenant_id,
+        archived_at=FIXED_TS if unavailable_kind == "archived" else None,
+    )
+    newer_same_name = ma_agent(
+        id="agent_newer_duplicate",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS + timedelta(seconds=1),
+    )
+    router = MARouter()
+    router.add_agent_list(card_agent, newer_same_name)
+    if unavailable_kind == "missing":
+        router.add(
+            "GET",
+            r"/v1/agents/agent_card_snapshot",
+            lambda _request, _match: not_found_response("missing agent"),
+        )
+    else:
+        router.add_agent(card_agent)
+    runtime = DiscordRuntime(
+        settings=_make_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+    )
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    selected = RosterAgent(
+        name="expert-bot",
+        ma_agent_id=card_agent.id,
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
+    )
+    interaction = _make_interaction()
+
+    await send_coding_tools_access(
+        interaction,
+        runtime=runtime,
+        state=PanelState(roster=[], selected=None, account_id=account_id),
+        allowed_user_id=42,
+        agent=selected,
+    )
+
+    kwargs = interaction.response.send_message.call_args.kwargs
+    refusal = interaction.response.send_message.call_args.args[0]
+    assert kwargs["ephemeral"] is True, "unavailable card target errors must remain private"
+    assert "no longer available" in refusal, (
+        "unavailable exact identity should explain that Details must be reopened"
+    )
+    assert "Bearer " not in refusal, "refused card identity must expose no token"
+    assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
+        "refused card identity must create no token registry row"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: reply is ephemeral
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_coding_tools_reply_is_ephemeral(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """The send_message call for the coding-tools access reply must use ephemeral=True."""
     await _setup_tenant_and_account(
         db_session,
         tenant_id=tenant_id,
@@ -239,7 +376,7 @@ async def test_on_talk_via_mcp_reply_is_ephemeral(
     )
 
     ma_agent_id = "agent_017abc_77_ephemeral"
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot-2", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot-2", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -264,12 +401,12 @@ async def test_on_talk_via_mcp_reply_is_ephemeral(
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
 
     interaction = _make_interaction()
-    await send_connect_via_mcp(interaction, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(interaction, runtime=runtime, state=state, allowed_user_id=42)
 
     interaction.response.send_message.assert_called_once()
     kwargs = interaction.response.send_message.call_args.kwargs
     assert kwargs.get("ephemeral") is True, (
-        "Talk via MCP reply must be ephemeral=True to prevent token leaks"
+        "coding-tools access reply must be ephemeral=True to prevent token leaks"
     )
 
 
@@ -295,7 +432,7 @@ async def test_revoke_callback_flips_revoked_at(
     )
 
     ma_agent_id = "agent_017abc_77_revoke"
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot-3", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot-3", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -321,7 +458,9 @@ async def test_revoke_callback_flips_revoked_at(
 
     # First: mint a token via the handler
     interaction_mint = _make_interaction()
-    await send_connect_via_mcp(interaction_mint, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(
+        interaction_mint, runtime=runtime, state=state, allowed_user_id=42
+    )
 
     # Extract the jti from the minted token (inside the view's text)
     mint_kwargs = interaction_mint.response.send_message.call_args.kwargs
@@ -382,7 +521,7 @@ async def test_revoke_confirmation_edits_message_content_and_clears_view(
     )
 
     ma_agent_id = "agent_017abc_77_wr01"
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot-wr01", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot-wr01", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -408,7 +547,9 @@ async def test_revoke_confirmation_edits_message_content_and_clears_view(
 
     # Mint the token first
     interaction_mint = _make_interaction()
-    await send_connect_via_mcp(interaction_mint, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(
+        interaction_mint, runtime=runtime, state=state, allowed_user_id=42
+    )
 
     # Get the Revoke button from the minted classic view
     mint_kwargs = interaction_mint.response.send_message.call_args.kwargs
@@ -454,7 +595,7 @@ async def test_mcp_access_timeout_disables_revoke_and_keeps_the_config_block(
     )
 
     ma_agent_id = "agent_017abc_77_timeout"
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot-timeout", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot-timeout", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -479,7 +620,9 @@ async def test_mcp_access_timeout_disables_revoke_and_keeps_the_config_block(
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
 
     interaction_mint = _make_interaction()
-    await send_connect_via_mcp(interaction_mint, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(
+        interaction_mint, runtime=runtime, state=state, allowed_user_id=42
+    )
 
     mint_kwargs = interaction_mint.response.send_message.call_args.kwargs
     sent_view = mint_kwargs["view"]
@@ -514,7 +657,7 @@ async def test_revoke_stops_the_view_so_the_timer_cannot_fire(
     )
 
     ma_agent_id = "agent_017abc_77_stop"
-    real_agent = _make_ma_agent(ma_agent_id, "expert-bot-stop", tenant_id)
+    real_agent = ma_agent(id=ma_agent_id, name="expert-bot-stop", tenant_id=tenant_id)
 
     async def fake_find(*_a: Any, **_k: Any) -> BetaManagedAgentsAgent:
         return real_agent
@@ -539,7 +682,9 @@ async def test_revoke_stops_the_view_so_the_timer_cannot_fire(
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
 
     interaction_mint = _make_interaction()
-    await send_connect_via_mcp(interaction_mint, runtime=runtime, state=state, allowed_user_id=42)
+    await send_coding_tools_access(
+        interaction_mint, runtime=runtime, state=state, allowed_user_id=42
+    )
 
     mint_kwargs = interaction_mint.response.send_message.call_args.kwargs
     sent_view = mint_kwargs["view"]

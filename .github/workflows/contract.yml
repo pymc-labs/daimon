@@ -7,8 +7,10 @@ name: Contract
 # each module (delete_entire_workspace_for_testing) — that must never fire
 # from an automatic trigger.
 #
-# The dedicated contract service account + its single-secret IAM grant are
-# defined in the companion infra repo (staging environment's cicd module).
+# The dedicated contract service account and its single-secret IAM grant are
+# defined in the operator's own cloud configuration, outside this repository:
+# a fork that wants contract runs needs its own staging workspace, its own
+# key and its own grant.
 on:
   workflow_dispatch:
 
@@ -85,10 +87,10 @@ jobs:
 
       # Best-effort immediate re-seed of the just-wiped staging Anthropic
       # workspace so it isn't left empty between this run and the mandatory
-      # manual heal step (see the companion infra repo's contract job
-      # runbook — this step alone does NOT update the real staging
-      # deployment's database, only this job's own throwaway Postgres, so it
-      # cannot fix the running deployment's now-stale agent references).
+      # manual heal: this step alone does NOT update the real staging
+      # deployment's database, only this job's own throwaway Postgres, so an
+      # operator still has to repair the running deployment's now-stale agent
+      # references by hand.
       - name: Best-effort workspace re-seed (deployment scope)
         if: always()
         env:

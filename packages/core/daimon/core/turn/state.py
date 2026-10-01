@@ -23,6 +23,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
     StopReason,
 )
 from daimon.core.errors import TurnError
+from daimon.core.turn.termination import TerminationReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +78,23 @@ class UsageTotals:
 
 
 @dataclass(frozen=True, slots=True)
+class McpServerFailure:
+    """One MCP server MA could not use this turn, folded from `session.error`.
+
+    Kept apart from `TurnState.error` on purpose: MA keeps the session running
+    without the server (the connection is retried on the next turn), so a
+    failure here degrades the turn instead of ending it. `retry_status` is the
+    SDK discriminator verbatim; `terminal` never lands here because the
+    reducer routes that one to `error`.
+    """
+
+    server_name: str
+    error_type: Literal["mcp_connection_failed_error", "mcp_authentication_failed_error"]
+    message: str
+    retry_status: Literal["retrying", "exhausted"]
+
+
+@dataclass(frozen=True, slots=True)
 class Task:
     """Placeholder for subagent-task tracking. Managed Agents emits no
     `agent.task_*` events currently; this type exists so `TurnState.tasks`
@@ -95,6 +113,15 @@ class TurnState:
     error: TurnError | None = None
     seen_event_ids: frozenset[str] = field(default_factory=frozenset[str])
     usage_totals: UsageTotals = field(default_factory=UsageTotals)
+    mcp_failures: tuple[McpServerFailure, ...] = ()
+    """Servers that failed this turn, newest status per server name."""
+    retrying_error: TurnError | None = None
+    """The last `retrying` error MA reported; only surfaces if nothing follows."""
+    termination: TerminationReason | None = None
+    """How the turn ended. Every driver exit sets it; `None` means still running
+    (the reducer sets it early only when MA terminates the session)."""
+    finished_tool_ids: tuple[str, ...] = ()
+    """Ids of the tool calls that got a result, in the order the results came."""
 
 
 def extract_final_response(content: list[ContentBlock]) -> str:

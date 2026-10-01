@@ -28,6 +28,7 @@ import uuid
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -36,6 +37,7 @@ from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -77,9 +79,30 @@ class PurgePreview(BaseModel):
     agent_github_binding: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
+    direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
+    support_escalations: PurgePreviewRow
+
+
+def summary_line(preview: PurgePreview) -> str:
+    """The non-zero held-data categories, comma-joined, for the privacy panels."""
+    categories = (
+        (preview.linked_principals, "linked principal(s)"),
+        (preview.routines, "routine(s)"),
+        (preview.user_configs, "user config row(s)"),
+        (preview.user_skills, "synced skill(s)"),
+        (preview.github_credentials, "GitHub token(s)"),
+        (preview.github_oauth_states, "OAuth handshake record(s)"),
+        (preview.mcp_tokens, "MCP token(s)"),
+        (preview.agent_github_binding, "per-agent GitHub link(s)"),
+        (preview.slack_user_tokens, "Slack user token(s)"),
+        (preview.slack_turn_contexts, "Slack turn context(s)"),
+        (preview.direct_message_conversations, "private conversation(s)"),
+    )
+    parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
+    return ", ".join(parts) if parts else "nothing visible to you yet"
 
 
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:
@@ -335,6 +358,22 @@ async def collect_purge_preview(
         )
         message_feedback = PurgePreviewRow(count=message_feedback_count, example=None)
 
+        # 15. support_escalations — same account-scoped shape, and the SAME
+        # platform-user keys, as message_feedback above. The argument shapes
+        # here are identical to purge_account's delete by contract; any
+        # divergence makes this preview lie about what erasure will remove.
+        support_escalations_count = (
+            await support_escalation_store.count_support_escalations_for_account(
+                session,
+                account_id=account_id,
+                platform_user_keys=message_feedback_platform_user_keys,
+            )
+        )
+        support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+        direct_message_count = await direct_messages_store.count_conversations_for_account(
+            session, account_id=account_id
+        )
+
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
@@ -351,4 +390,6 @@ async def collect_purge_preview(
         credential_requests=credential_requests,
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
+        support_escalations=support_escalations,
+        direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
     )

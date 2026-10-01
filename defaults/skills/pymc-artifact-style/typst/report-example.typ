@@ -9,7 +9,7 @@
   date: [June 2026],
   status: "Confidential",
   paper: "a4",                 // change to "us-letter" for US sizing
-  cover-background: 4,         // choose 4 or 9 (none for a plain cover, or a path)
+  cover-background: none,         // plain cover; use a path for supplied artwork
   abstract: [
     We estimate price elasticity of demand across ACME's twelve core SKUs
     using a hierarchical Bayesian model. The posterior implies a

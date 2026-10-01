@@ -490,6 +490,10 @@ async def test_collect_purge_preview_credential_requests_matches_purge_account(
         requester_platform_user_id="PV_CRED_TARGET",
         channel_id="C1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_test",
+        target_name="tester",
+        requested_work=None,
     )
     await db_session.commit()
 
@@ -733,9 +737,11 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "agent_github_binding": "agent_github_binding",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
+        "direct_message_conversations": "direct_message_conversations",
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
+        "support_escalations": "support_escalations",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -780,6 +786,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
+        "support_escalations": "account_id FK -> accounts.id",
+        "direct_message_conversations": "account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -791,6 +799,13 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Not an erasure gap.
             "channel_config",
             "tenant_config",
+            # Shared setup binding attribution uses SET NULL on creator erasure;
+            # deleting the conversation would destroy other participants' work.
+            "thread_agent_bindings",
+            # Active-turn authority is ephemeral, carries no conversation content,
+            # and is automatically erased by accounts.id ON DELETE CASCADE.
+            # The store tests verify this; it needs no separately reported category.
+            "turn_origins",
             # Same shape: PK is (tenant_id, agent_id) and the only accounts.id FK is
             # the nullable provenance column proof_account_id with ON DELETE SET NULL.
             # An account purge severs who-proved-it while leaving the binding and its

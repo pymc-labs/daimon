@@ -1,0 +1,27 @@
+{
+  "action": "remove",
+  "channelId": "msteams",
+  "conversation": {
+    "conversationType": "personal",
+    "id": "a:conversation-1",
+    "tenantId": "00000000-0000-0000-0000-000000000001"
+  },
+  "entities": [
+    {
+      "locale": "en-US",
+      "type": "clientInfo"
+    }
+  ],
+  "from": {
+    "aadObjectId": "00000000-0000-0000-0000-000000000002",
+    "id": "29:1synthetic-user-mri"
+  },
+  "id": "f:00000000-0000-4000-8000-000000000011",
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "serviceUrl": "https://smba.trafficmanager.net/emea/00000000-0000-0000-0000-000000000001/",
+  "timestamp": "2026-08-26T13:38:36.356Z",
+  "type": "installationUpdate"
+}

@@ -51,10 +51,12 @@ from anthropic.types.beta import (
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.ma_index import (
+    MA_METADATA_KEY_TENANT,
     find_agent_by_daimon_tag,
     find_attach_mount_collision,
     find_conflicting_skill_mount,
     find_skill_by_display_title,
+    list_agents_by_tenant,
 )
 from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
@@ -73,6 +75,7 @@ from daimon.core.skill_sync.bundler import (
 )
 from daimon.core.skill_sync.fetcher import (
     GitHubAuthError,
+    GitHubRateLimitError,
     GitHubTarballFetcher,
     GitHubUnreachable,
     TarballTooLarge,
@@ -80,6 +83,9 @@ from daimon.core.skill_sync.fetcher import (
 from daimon.core.skill_zip import canonical_zip_bytes
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
+from daimon.core.stores.agent_skill_repo_credentials import (
+    get_tenant_skill_repo_proof_kind,
+)
 from daimon.core.stores.domain import RepoProofKind
 from daimon.core.stores.user_skills import (
     delete_user_skill,
@@ -94,6 +100,42 @@ _log = structlog.get_logger(__name__)
 
 _UPLOAD_CONCURRENCY: int = 6
 _PER_SKILL_TIMEOUT_S: float = 60.0
+
+
+async def _get_sync_target_agent(
+    *,
+    anthropic_client: AsyncAnthropic,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    target_ma_agent_id: str | None,
+) -> BetaManagedAgentsAgent | None:
+    """Resolve the sync target, pinning bound resyncs to their MA identity."""
+    if target_ma_agent_id is None:
+        return await find_agent_by_daimon_tag(
+            anthropic_client, tenant_id=tenant_id, name=agent_name
+        )
+
+    agent = await anthropic_client.beta.agents.retrieve(target_ma_agent_id)
+    if agent.archived_at is not None or (agent.metadata or {}).get(MA_METADATA_KEY_TENANT) != str(
+        tenant_id
+    ):
+        raise DaimonError(
+            f"bound skill sync target {target_ma_agent_id} is archived or outside "
+            f"tenant {tenant_id}"
+        )
+    tenant_agents = await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id)
+    target_is_active = any(str(candidate.id) == target_ma_agent_id for candidate in tenant_agents)
+    same_name_ids = [
+        str(candidate.id)
+        for candidate in tenant_agents
+        if ((candidate.metadata or {}).get("daimon_name") or candidate.name) == agent_name
+    ]
+    if not target_is_active or len(same_name_ids) != 1 or same_name_ids[0] != target_ma_agent_id:
+        raise DaimonError(
+            f"multiple or inactive MA sync targets for tenant {tenant_id} and name "
+            f"{agent_name!r}; archive duplicate agents before resyncing this binding"
+        )
+    return agent
 
 
 def _compute_skills_union_list(
@@ -142,6 +184,21 @@ class SyncReport:
     # (agent_name, reason) — attach step refused by MA (e.g. per-agent skill cap).
     # Uploads succeeded; only the agents.update binding failed.
     attach_failures: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    retryable_failure: bool = False
+
+
+def _is_retryable_error(err: Exception) -> bool:
+    """Return whether a sync error may clear on a later provider attempt."""
+    if isinstance(err, (httpx.TransportError, anthropic.APIConnectionError, TimeoutError)):
+        return True
+    if isinstance(err, GitHubRateLimitError):
+        return True
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code
+        return status_code == 429 or status_code >= 500
+    if isinstance(err, anthropic.APIStatusError):
+        return err.status_code == 429 or err.status_code >= 500
+    return False
 
 
 class SyncRepoFailure(BaseModel):
@@ -397,10 +454,12 @@ async def _upload_all(
                     report.failed_uploads.append(
                         (pending.name, f"timeout after {_PER_SKILL_TIMEOUT_S:.0f}s")
                     )
-            except Exception as err:  # noqa: BLE001 — orchestrator IS the named boundary
+                    report.retryable_failure = True
+            except Exception as err:  # orchestrator IS the named boundary
                 _log.warning("skill_sync.skill_failed", name=pending.name, error=str(err))
                 async with report_lock:
                     report.failed_uploads.append((pending.name, str(err)))
+                    report.retryable_failure |= _is_retryable_error(err)
 
     await asyncio.gather(*(_one(p) for p in pending_skills))
 
@@ -416,6 +475,7 @@ async def sync_agent_skills(
     http_client: httpx.AsyncClient,
     anthropic_client: AsyncAnthropic,
     credential_override: str | None = None,
+    target_ma_agent_id: str | None = None,
     github_fallback_pat: str | None = None,
     app_id: str | None = None,
     app_private_key: SecretStr | None = None,
@@ -425,6 +485,11 @@ async def sync_agent_skills(
     max_tarball_members: int = MAX_TARBALL_MEMBERS,
 ) -> SyncReport:
     """Sync all skill_repos for one agent. Named error boundary.
+
+        ``target_ma_agent_id`` lets a binding-driven resync preserve the MA
+        identity resolved from its binding. That exact resource is retrieved
+        and checked for tenant ownership and non-archived state before use;
+        name-only callers keep the canonical name resolver.
 
         ``credential_override`` lets a caller (the webhook resync) pass a
         pre-selected GitHub credential. Whatever the caller supplies is the
@@ -445,13 +510,18 @@ async def sync_agent_skills(
         fallback, then an unauthenticated fetch. Resolution happens per repo
         (not once for the whole call) because App installation coverage AND
         the tenant's recorded proof are both repo-specific: before each
-        ``resolve_skill_sync_token`` call this function reads
-        ``daimon.core.stores.agent_repo_binding.get_tenant_repo_proof_kind``
-        for ``tenant_id``/``repo.url`` — ANY of this tenant's own bindings
-        recording proof for that exact repo is sufficient; a repo this
-        tenant has never bound (with proof) is never eligible for the App
-        tier, even when the deployment's App happens to cover it because
-        some unrelated tenant installed it for their own use.
+        ``resolve_skill_sync_token`` call this function reads the proof this
+        tenant recorded for ``tenant_id``/``repo.url``, preferring its
+        skill-repo credential
+        (``agent_skill_repo_credentials.get_tenant_skill_repo_proof_kind``)
+        and falling back to the legacy binding
+        (``agent_repo_binding.get_tenant_repo_proof_kind``) so tenants
+        enrolled before the credential table keep their proof. ANY of this
+        tenant's own rows recording proof for that exact repo is
+        sufficient; a repo this tenant has never enrolled or bound (with
+        proof) is never eligible for the App tier, even when the
+        deployment's App happens to cover it because some unrelated tenant
+        installed it for their own use.
 
         ``app_id``, ``app_private_key``, and ``installation_lookup`` feed the
         App tier of that per-repo resolution. ``installation_lookup`` is
@@ -494,8 +564,11 @@ async def sync_agent_skills(
     # last resort, never silently using the principal credential for a resolved agent.
     # PAT-optional: public repos work when get_pat returns None (the fetcher returns
     # 404 for private repos, handled below as `skipped_repos`).
-    ma_agent = await find_agent_by_daimon_tag(
-        anthropic_client, tenant_id=tenant_id, name=agent_name
+    ma_agent = await _get_sync_target_agent(
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        target_ma_agent_id=target_ma_agent_id,
     )
     resolved_agent_id: uuid.UUID | None
     if ma_agent is not None:
@@ -553,8 +626,14 @@ async def sync_agent_skills(
                 # extra-I/O on the resolution path, not just the App tier.
                 proof_kind: RepoProofKind | None = None
                 if per_agent_credential is None:
+                    # The skill-repo credential is where enrolling a skill
+                    # repo records its proof today; the binding is the
+                    # legacy home, still authoritative for tenants that
+                    # enrolled before the credential table existed.
                     async with sessionmaker() as session:
-                        proof_kind = await get_tenant_repo_proof_kind(
+                        proof_kind = await get_tenant_skill_repo_proof_kind(
+                            session, tenant_id=tenant_id, repo_url=repo.url
+                        ) or await get_tenant_repo_proof_kind(
                             session, tenant_id=tenant_id, repo_url=repo.url
                         )
                 try:
@@ -580,9 +659,12 @@ async def sync_agent_skills(
             except (GitHubAuthError, GitHubUnreachable, TarballTooLarge) as err:
                 report.skipped_repos.append((repo.url, type(err).__name__))
                 continue
-            except Exception as err:  # noqa: BLE001 — boundary
+            except GitHubRateLimitError:
+                raise
+            except Exception as err:  # boundary
                 _log.warning("skill_sync.repo_fetch_failed", url=repo.url, error=str(err))
                 report.skipped_repos.append((repo.url, str(err)))
+                report.retryable_failure |= _is_retryable_error(err)
                 continue
 
             extract_root = tmp_root_path / hashlib.sha256(repo.url.encode()).hexdigest()
@@ -607,7 +689,7 @@ async def sync_agent_skills(
                     max_tarball_decompressed_bytes=max_tarball_decompressed_bytes,
                     max_tarball_members=max_tarball_members,
                 )
-            except Exception as err:  # noqa: BLE001 — boundary
+            except Exception as err:  # boundary
                 _log.warning("skill_sync.repo_bundle_failed", url=repo.url, error=str(err))
                 report.skipped_repos.append((repo.url, str(err)))
                 continue
@@ -643,6 +725,20 @@ async def sync_agent_skills(
                     skill_dir=entry.skill_dir,
                     prebuilt_zip=entry.prebuilt_zip,
                 )
+
+        # Recheck a bound target after any successful repo fetch and before
+        # upload or orphan cleanup. Even an empty tarball can trigger orphan
+        # deletion. A same-name replacement discovered here shares the registry
+        # display-title namespace even though attach stays ID-pinned.
+        # A duplicate created after this check can still race the MA title write:
+        # MA offers no atomic title reservation tied to this agent ID.
+        if successfully_fetched and target_ma_agent_id is not None:
+            await _get_sync_target_agent(
+                anthropic_client=anthropic_client,
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                target_ma_agent_id=target_ma_agent_id,
+            )
 
         # 3. Bounded-concurrent upload (in deterministic name order for test stability).
         ordered = [pending[name] for name in sorted(pending.keys())]
@@ -696,6 +792,7 @@ async def sync_agent_skills(
                     )
                     async with report_lock:
                         report.failed_uploads.append((row.name, str(err)))
+                        report.retryable_failure |= _is_retryable_error(err)
                     continue
         async with sessionmaker() as session, session.begin():
             await delete_user_skill(
@@ -725,13 +822,22 @@ async def sync_agent_skills(
     if not any(row.anthropic_id is not None for row in current_rows):
         return report
 
-    agent = await find_agent_by_daimon_tag(anthropic_client, tenant_id=tenant_id, name=agent_name)
+    agent = await _get_sync_target_agent(
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        target_ma_agent_id=target_ma_agent_id,
+    )
     if agent is None:
+        reason = "agent disappeared from Managed Agents before skills could be attached"
         _log.warning(
             "skill_sync.attach_skipped_no_agent",
             agent_name=agent_name,
             tenant_id=str(tenant_id),
+            error=reason,
         )
+        async with report_lock:
+            report.attach_failures.append((agent_name, reason))
         return report
 
     # Pre-check using the initially-fetched agent for a cheap no-op early return.
@@ -750,6 +856,14 @@ async def sync_agent_skills(
     # doesn't cause us to clobber a skill added between our initial read and now
     # (#144-2). `row_ids` (DB state) stays outside the closure — it doesn't change.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+        if target_ma_agent_id is not None and (
+            fresh.archived_at is not None
+            or (fresh.metadata or {}).get(MA_METADATA_KEY_TENANT) != str(tenant_id)
+        ):
+            raise DaimonError(
+                f"bound skill sync target {target_ma_agent_id} is archived or outside "
+                f"tenant {tenant_id}"
+            )
         union_list = _compute_skills_union_list(fresh.skills, row_ids)
         if union_list is None:
             # Race: another writer already attached all skills; return fresh agent

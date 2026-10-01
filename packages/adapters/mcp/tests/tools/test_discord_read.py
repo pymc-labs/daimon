@@ -28,6 +28,7 @@ from daimon.core.config import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
@@ -45,8 +46,6 @@ _get_message_impl = _read_mod._get_message_impl  # pyright: ignore[reportPrivate
 _parse_link_impl = _read_mod._parse_link_impl  # pyright: ignore[reportPrivateUsage]
 _read_thread_impl = _read_mod._read_thread_impl  # pyright: ignore[reportPrivateUsage]
 _list_threads_impl = _read_mod._list_threads_impl  # pyright: ignore[reportPrivateUsage]
-
-pytestmark = pytest.mark.asyncio
 
 
 # ---------------------------------------------------------------------------
@@ -300,14 +299,104 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    rows = await _read_channel_impl(
+    result = await _read_channel_impl(
         _runtime_with_discord_token(), _auth(), channel_id="222", limit=50
     )
+    rows = result.rows
     assert len(rows) == 2, "read_channel should return both seeded messages"
     assert rows[0].id == "1001", "first row must be the older message (oldest-first)"
     assert rows[1].id == "1002", "second row must be the newer message"
     assert rows[0].author_username == "caller", "row must carry author_username"
     assert rows[0].role == "user", "non-bot author must have role 'user'"
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE, (
+        "other people's messages come back marked as untrusted data"
+    )
+
+
+async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """read_channel exposes a cursor instead of silently truncating a full page."""
+    limit = 3
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/messages":
+            return [
+                _message_payload(message_id="1003", channel_id="222"),
+                _message_payload(message_id="1002", channel_id="222"),
+                _message_payload(message_id="1001", channel_id="222"),
+            ]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _read_channel_impl(
+        _runtime_with_discord_token(), _auth(), channel_id="222", limit=limit
+    )
+    assert [row.id for row in result.rows] == ["1001", "1002", "1003"]
+    assert result.next_before == "1001"
+    assert result.hint is not None and "before=1001" in result.hint
+
+
+async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """read_channel forwards a continuation cursor to Discord history."""
+    seen_params: dict[str, Any] = {}
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/messages":
+            seen_params.update(kwargs.get("params", {}))
+            return [_message_payload(message_id="999", channel_id="222")]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _read_channel_impl(
+        _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before="1000"
+    )
+    assert [row.id for row in result.rows] == ["999"]
+    assert str(seen_params.get("before")) == "1000"
+    assert result.next_before is None, "a short page means history is exhausted"
+    assert result.hint is None, "a hint on the last page would send the caller in a loop"
+
+
+@pytest.mark.parametrize(
+    "before",
+    ["not-an-id", "1_000", " 42 ", "+7", "-5", "١٢", "0", "9999999999999999999999999"],
+)
+async def test_read_channel_rejects_non_numeric_before(
+    monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Anything but an in-range decimal snowflake gets a ToolError, before any
+    REST call.
+
+    int() alone accepts "1_000" and " 42 " — which silently page from a
+    different message than written — and "-5", which Discord answers with an
+    unmapped 400. A 25-digit id is that same 400, and "0" returns an empty
+    page that reads as exhausted history.
+    """
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        raise AssertionError(
+            f"a bad cursor must fail before any REST call; got {route.method} {route.path}"
+        )
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="before must be a numeric discord message id"):
+        await _read_channel_impl(
+            _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before=before
+        )
 
 
 async def test_read_channel_bot_author_has_assistant_role(
@@ -331,12 +420,12 @@ async def test_read_channel_bot_author_has_assistant_role(
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    rows = await _read_channel_impl(
+    result = await _read_channel_impl(
         _runtime_with_discord_token(), _auth(), channel_id="222", limit=50
     )
-    assert len(rows) == 1
-    assert rows[0].role == "assistant", "bot author must have role 'assistant'"
-    assert rows[0].author_username == "caller"
+    assert len(result.rows) == 1
+    assert result.rows[0].role == "assistant", "bot author must have role 'assistant'"
+    assert result.rows[0].author_username == "caller"
 
 
 async def test_read_channel_rejects_thread_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -538,6 +627,7 @@ async def test_get_message_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert row.id == "1001"
     assert row.content == "fetched"
+    assert row.trust == "untrusted", "a single read-back message carries the marker"
 
 
 async def test_get_message_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -695,6 +785,7 @@ async def test_read_thread_happy_path_oldest_first(monkeypatch: pytest.MonkeyPat
     assert result.rows[2].id == "1003", "last row must be newest"
     assert result.next_before is None, "no cursor when page < limit"
     assert result.hint is None, "no hint when no more messages"
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 async def test_read_thread_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:

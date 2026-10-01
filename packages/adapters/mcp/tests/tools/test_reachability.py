@@ -17,8 +17,6 @@ from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
-
 
 def _runtime(session_factory: async_sessionmaker[AsyncSession] | MagicMock) -> McpRuntime:
     return McpRuntime(
@@ -59,7 +57,7 @@ async def test_non_admin_reachable_agent_raises(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory), auth, agent_name="daimon"
         )

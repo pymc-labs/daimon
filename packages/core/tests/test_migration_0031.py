@@ -11,8 +11,6 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-pytestmark = pytest.mark.asyncio
-
 
 async def test_migration_0031_tenant_id_not_null(db_engine: AsyncEngine) -> None:
     """github_oauth_states.tenant_id is NOT NULL after migration 0031."""
@@ -30,6 +28,7 @@ async def test_migration_0031_tenant_id_not_null(db_engine: AsyncEngine) -> None
     assert row[0] == "NO", "github_oauth_states.tenant_id must be NOT NULL after migration 0031"
 
 
+@pytest.mark.fresh_schema
 async def test_migration_0031_purges_null_tenant_rows(db_session: AsyncSession) -> None:
     """Migration 0031 DELETEs NULL-tenant rows before flipping the column NOT NULL.
 
@@ -37,9 +36,9 @@ async def test_migration_0031_purges_null_tenant_rows(db_session: AsyncSession) 
     after `alembic upgrade head`. This test proves the purge half: that the
     migration's exact DELETE actually removes legacy NULL-tenant rows.
 
-    Uses the per-test `db_session` fixture (fresh test_<uuid> schema via
-    Base.metadata.create_all). The ORM already has tenant_id NOT NULL, so we
-    DROP and rebuild the table with tenant_id nullable — no FK to tenants(id),
+    Marked `fresh_schema` so the DDL below lands in a private throwaway schema
+    rather than the shared per-worker one. The ORM already has tenant_id NOT
+    NULL, so we DROP and rebuild the table with tenant_id nullable — no FK to tenants(id),
     so a NULL row can be inserted without tenant seeding.
     """
     # Drop the ORM-built (already NOT NULL) table and rebuild it nullable

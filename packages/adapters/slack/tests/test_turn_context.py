@@ -9,128 +9,34 @@ is gone afterward whether the turn succeeds or raises.
 
 from __future__ import annotations
 
-import re
+import json
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsModelConfig, BetaManagedAgentsSession
-from anthropic.types.beta import BetaManagedAgentsSessionAgent as _SessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.slack_turn_contexts import get_slack_turn_channels
+from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing.ma import (
-    _agent_response as _agent_response,  # pyright: ignore[reportPrivateUsage]  # test-only
-)
-from daimon.testing.ma import (
-    _environment_response as _environment_response,  # pyright: ignore[reportPrivateUsage]  # test-only
-)
-from daimon.testing.ma import build_fake_anthropic
+from daimon.testing import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import make_orchestrate_app
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-def _make_agent_env_handler() -> Any:
-    """Minimal httpx.MockTransport handler for MA agent/environment retrieves.
-
-    Mirrors ``_make_agent_env_handler`` in ``test_app.py`` — handles
-    GET /v1/agents/{id} and GET /v1/environments/{id}, the two endpoints
-    ``_run_thread_turn`` calls when creating a new MA session.
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        m = re.match(r"^/v1/agents/(?P<id>[^/]+)$", path)
-        if m and request.method == "GET":
-            return httpx.Response(200, json=_agent_response(agent_id=m.group("id")))
-        m = re.match(r"^/v1/environments/(?P<id>[^/]+)$", path)
-        if m and request.method == "GET":
-            env = _environment_response(environment_id=m.group("id"))
-            return httpx.Response(200, json=env.model_dump(mode="json"))
-        raise AssertionError(f"_make_agent_env_handler: unhandled {request.method} {path}")
-
-    return handler
-
-
-def _make_orchestrate_app(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> SlackApp:
-    """Build a SlackApp with a real sessionmaker and a fake MA transport.
-
-    Mirrors ``_make_orchestrate_app`` in ``test_app.py``.
-    """
-    settings = MagicMock()
-    settings.crypto.keys = ()
-    settings.slack.max_concurrent_turns_per_tenant = 3
-    settings.mcp.public_url = None
-    # app_root_url=None short-circuits _maybe_post_connect_nudge (Task 11) — these
-    # turn-context tests don't exercise the connect-nudge flow.
-    settings.mcp.app_root_url = None
-    settings.defaults_root = MagicMock()
-
-    anthropic = build_fake_anthropic(_make_agent_env_handler())
-    deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
-    resolver_cache = new_resolver_cache()
-    turn_deps = build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
-    )
-    runtime = SlackRuntime(
-        settings=settings,
-        anthropic=anthropic,
-        sessionmaker=sessionmaker,
-        billing_config=None,
-        http_client=MagicMock(spec=httpx.AsyncClient),
-        resolver_cache=resolver_cache,
-        turn_deps=turn_deps,
-        deployment_default=deployment_default,
-    )
-    return SlackApp(runtime=runtime)
-
-
 def _fake_ma_session(*, session_id: str, agent_id: str, environment_id: str) -> Any:
-    now = datetime.now(UTC)
-    agent_snapshot = _SessionAgent(
-        id=agent_id,
-        mcp_servers=[],
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        name="test-agent",
-        skills=[],
-        tools=[],
-        type="agent",
-        version=1,
-    )
-    return BetaManagedAgentsSession(
-        outcome_evaluations=[],
+    return ma_session(
         id=session_id,
-        agent=agent_snapshot,
-        created_at=now,
+        agent=ma_session_agent(id=agent_id),
         environment_id=environment_id,
-        metadata={},
-        resources=[],
-        stats=BetaManagedAgentsSessionStats(),
-        status="idle",
-        type="session",
-        updated_at=now,
-        usage=BetaManagedAgentsSessionUsage(),
-        vault_ids=[],
     )
 
 
@@ -156,12 +62,39 @@ async def test_turn_context_row_lives_exactly_during_run_turn(
         )
         await s.commit()
 
-    app = _make_orchestrate_app(db_session_factory)
+    app, _ = make_orchestrate_app(db_session_factory)
 
     seen: list[frozenset[str]] = []
+    origin_ids: list[uuid.UUID] = []
 
     async def fake_run_turn(**kwargs: object) -> TurnState:
+        message = str(kwargs["user_message"])
+        assert message.startswith("<turn_controls>"), (
+            "trusted controls must supplement platform history"
+        )
+        controls = json.loads(message.splitlines()[1])
+        origin_id = uuid.UUID(controls["origin_context_id"])
+        origin_ids.append(origin_id)
+        assert controls["parent_channel_id"] == channel, "controls carry parent location"
+        assert controls["thread_id"] == thread_ts, "controls carry exact thread"
+        assert controls["current_role"] == "user", "controls carry verified current role"
+        assert controls["responder"]["ma_agent_id"] == "agent_turn_ctx_id", (
+            "controls carry concrete responder"
+        )
+        assert controls["responder"]["handle"] == "@daimon", (
+            "controls carry the handle people mention beside the agent name, so an operator "
+            "renaming the bot account is never read as a second agent"
+        )
         async with db_session_factory() as s:
+            origin = await get_active_origin(
+                s,
+                origin_id=origin_id,
+                tenant_id=tenant_id,
+                account_id=principal.account_id,
+                platform="slack",
+                now=datetime.now(UTC),
+            )
+            assert origin is not None, "origin must be committed while the turn runs"
             seen.append(
                 await get_slack_turn_channels(
                     s, tenant_id=tenant_id, account_id=principal.account_id, cutoff=EPOCH
@@ -219,6 +152,18 @@ async def test_turn_context_row_lives_exactly_during_run_turn(
         )
     assert after == frozenset(), "row must be deleted in finally"
 
+    async with db_session_factory() as session:
+        for origin_id in origin_ids:
+            origin = await get_active_origin(
+                session,
+                origin_id=origin_id,
+                tenant_id=tenant_id,
+                account_id=principal.account_id,
+                platform="slack",
+                now=datetime.now(UTC),
+            )
+            assert origin is None, "turn must delete its trusted origin after execution"
+
 
 async def test_turn_context_row_deleted_when_run_turn_raises(
     db_session: AsyncSession,
@@ -242,7 +187,7 @@ async def test_turn_context_row_deleted_when_run_turn_raises(
         )
         await s.commit()
 
-    app = _make_orchestrate_app(db_session_factory)
+    app, _ = make_orchestrate_app(db_session_factory)
 
     async def fake_run_turn(**kwargs: object) -> TurnState:
         raise TurnError(kind="upstream", message="boom")

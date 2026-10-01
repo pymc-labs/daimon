@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.cli.sessions_bootstrap import (
     SessionBootstrapError,
     check_preconditions,
@@ -15,8 +15,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, build_stub_anthropic, list_response
+from daimon.testing.ma import MARouter, build_stub_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -42,19 +43,7 @@ def _agent_body(agent_id: str, agent_name: str, tenant_id: uuid.UUID) -> dict[st
 
 
 def _env_body(env_id: str, env_name: str, tenant_id: uuid.UUID) -> dict[str, object]:
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=env_name,
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: env_name,
-        },
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    ).model_dump(mode="json")
+    return ma_environment(id=env_id, name=env_name, tenant_id=tenant_id).model_dump(mode="json")
 
 
 def _make_client(
@@ -270,19 +259,7 @@ async def test_resolve_ignores_user_scope_and_falls_to_tenant_system(
 
     def _envs_handler(req: httpx.Request, _m: object) -> httpx.Response:
         envs = [
-            BetaEnvironment(
-                id=eid,
-                type="environment",
-                name=name,
-                config=EMPTY_CLOUD_CONFIG,
-                metadata={
-                    MA_METADATA_KEY_TENANT: str(tenant.id),
-                    MA_METADATA_KEY_NAME: name,
-                },
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-            ).model_dump(mode="json")
+            ma_environment(id=eid, name=name, tenant_id=tenant.id).model_dump(mode="json")
             for name, eid in [("user-env", "env_u"), ("sys-env", "env_s")]
         ]
         return list_response(envs)

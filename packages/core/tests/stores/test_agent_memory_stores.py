@@ -13,10 +13,8 @@ from daimon.core.stores.agent_memory_stores import (
     insert_memory_store,
 )
 from daimon.testing.factories import make_tenant
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_get_returns_none_when_unbound(db_session: AsyncSession) -> None:
@@ -71,11 +69,9 @@ async def test_insert_conflict_across_transactions_returns_first_committed_id(
     memory store) — same-transaction duplicate inserts (see the test above)
     can't prove that on their own.
 
-    `db_session` pins its schema via a `SET search_path` issued on its own
-    connection (daimon.testing.db.db_session); a second connection off the
-    same `db_engine` does not inherit that search_path, so we discover the
-    per-test schema name via `current_schema()` on `db_session` and set it
-    explicitly on the second connection before using it.
+    Every `db_engine` connection is pinned to the worker schema, so the
+    second connection sees the same tables as `db_session` without any
+    `SET search_path`.
     """
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
@@ -87,12 +83,9 @@ async def test_insert_conflict_across_transactions_returns_first_committed_id(
     assert won_a == "memstore_A"
     await db_session.commit()
 
-    schema = (await db_session.execute(text("SELECT current_schema()"))).scalar_one()
-
-    # Transaction B: a fully independent connection/session, pinned to the
-    # same per-test schema, racing to insert memstore_B for the same key.
+    # Transaction B: a fully independent connection/session on the same
+    # worker schema, racing to insert memstore_B for the same key.
     async with db_engine.connect() as other_conn:
-        await other_conn.execute(text(f'SET search_path TO "{schema}", public'))
         other_session_factory = async_sessionmaker(bind=other_conn, expire_on_commit=False)
         async with other_session_factory() as other_session:
             won_b = await insert_memory_store(
@@ -123,7 +116,7 @@ class _ChurnSession:
         self._agent_id = agent_id
         self._churns = churns
 
-    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+    async def execute(self, stmt, *args, **kwargs):
         if getattr(stmt, "is_select", False) and self._churns > 0:
             self._churns -= 1
             await self._real.execute(

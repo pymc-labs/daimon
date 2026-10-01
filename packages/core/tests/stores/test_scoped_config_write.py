@@ -291,7 +291,7 @@ async def test_set_fields_tenant_scope_stamps_audit(
     t = await make_tenant(db_session)
     acct = await make_account(db_session, tenant=t)
     scope = TenantScopeRef(tenant_id=t.id)
-    from daimon.core._models import TenantConfig  # noqa: PLC0415
+    from daimon.core._models import TenantConfig
 
     await set_fields(
         db_session,
@@ -300,7 +300,7 @@ async def test_set_fields_tenant_scope_stamps_audit(
         agent_name="ws-bot",
         actor_account_id=acct.id,
     )
-    from sqlalchemy import select as sa_select  # noqa: PLC0415
+    from sqlalchemy import select as sa_select
 
     stmt = sa_select(TenantConfig).where(TenantConfig.tenant_id == t.id)
     orm = (await db_session.execute(stmt)).scalar_one()

@@ -14,10 +14,11 @@ and nowhere else.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsSkillParams
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from daimon.core.defaults.ma_index import find_skill_by_display_title, list_skills_lenient
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.errors import DefaultsError
@@ -131,3 +132,36 @@ async def resolve_skill_names(
         raise DefaultsError(msg)
 
     return resolved
+
+
+async def resolve_custom_skill_titles(
+    client: AsyncAnthropic,
+    *,
+    agents: Sequence[BetaManagedAgentsAgent],
+    tenant_id: uuid.UUID,
+) -> tuple[dict[str, str], bool]:
+    """Map MA skill id -> bare display name for ``agents``' own-namespace custom skills.
+
+    Agent responses carry opaque custom skill ids (``skill_...``); the
+    human-readable display titles only live on the skills list. One LIST call,
+    skipped entirely -- and the truncation flag reported as False -- when no
+    agent references a custom skill.
+
+    Only skills whose display_title strips to a non-None bare name for
+    ``tenant_id`` are included, so foreign-tenant and legacy titles never reach
+    a rendered name; a caller displaying an id it cannot find falls back to the
+    id itself. The second element is True when the skills listing hit the MA
+    page ceiling, which a caller rendering "these are the skills" must say out
+    loud rather than present a partial list as complete.
+    """
+    if not any(sk.type == "custom" for agent in agents for sk in agent.skills):
+        return {}, False
+    rows, truncated = await list_skills_lenient(client)
+    titles: dict[str, str] = {}
+    for sk in rows:
+        if sk.display_title is None:
+            continue
+        bare = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title)
+        if bare is not None:
+            titles[sk.id] = bare
+    return titles, truncated

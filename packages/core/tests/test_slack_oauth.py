@@ -79,15 +79,15 @@ def test_slack_bot_scopes_constant_contains_required_v3_day1_scopes() -> None:
         "groups:history",
         "reactions:write",  # queued-mention reaction parity
         "files:read",  # attachments & vision: read event.files + fetch url_private
+        "files:write",  # post-turn delivery of session output artifacts
         "channels:read",  # channel tools: public channel metadata + membership checks
         "groups:read",  # channel tools: private channel metadata + membership checks
     }
     assert required <= set(SLACK_BOT_SCOPES), (
         "SLACK_BOT_SCOPES must include all v3.0 day-1 bot scopes"
     )
-    assert len(SLACK_BOT_SCOPES) == 10, (
-        "SLACK_BOT_SCOPES must have exactly 10 scopes after adding channels:read and groups:read"
-    )
+    assert {"im:history", "im:write"} <= set(SLACK_BOT_SCOPES)
+    assert len(SLACK_BOT_SCOPES) == 13
 
 
 def test_slack_user_scopes_include_users_read_for_author_resolution() -> None:

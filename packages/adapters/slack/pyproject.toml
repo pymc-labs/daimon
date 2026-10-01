@@ -1,6 +1,6 @@
 [project]
 name = "daimon-adapter-slack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Daimon Slack adapter"
 requires-python = ">=3.12"
 license = "MIT"
@@ -8,6 +8,7 @@ authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
     "slack-sdk>=3.42,<4",
+    "aiohttp>=3.9",
     "structlog>=24",
     "anthropic>=0.96",
     "sqlalchemy[asyncio]>=2",
@@ -16,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "sentry-sdk>=2.61",
     "httpx>=0.27",
+    "python-ulid>=3,<4",
 ]
 
 [project.urls]

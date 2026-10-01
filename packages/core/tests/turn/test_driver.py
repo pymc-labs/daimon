@@ -10,19 +10,20 @@ from daimon.core.errors import TurnError
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
+from daimon.testing.turn_fakes import (
+    BlockForever,
+    FakeAnthropic,
+    RecordingLifecycle,
+    YieldEvent,
+)
 
 from .conftest import (
     make_agent_message,
     make_end_turn,
     make_requires_action,
+    make_retries_exhausted,
     make_status_idle,
     make_status_terminated,
-)
-from .fakes import (
-    BlockForever,
-    FakeAnthropic,
-    RecordingLifecycle,
-    YieldEvent,
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
@@ -251,7 +252,7 @@ async def test_reconnect_refolds_from_empty_and_continues_the_turn() -> None:
     # First stream yields `pre`, then raises APIConnectionError.
     # replay_events returns [pre, mid] (server has it all).
     # Second stream yields `mid` (redelivered, dedup) and `done`.
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [YieldEvent(pre), RaiseConnection()],
@@ -283,7 +284,7 @@ async def test_reconnect_does_not_re_emit_pre_reconnect_content() -> None:
     pre = make_agent_message(event_id="sevt_1", text="before ")
     mid = make_agent_message(event_id="sevt_2", text="after")
     done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [YieldEvent(pre), RaiseConnection()],
@@ -318,7 +319,7 @@ async def test_double_connection_error_surfaces_connection_lost() -> None:
     """Second APIConnectionError (tenacity retry exhausted) →
     TurnError(kind="connection_lost")."""
     fa = FakeAnthropic()
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [RaiseConnection()],
@@ -348,7 +349,7 @@ async def test_non_retryable_status_error_surfaces_upstream() -> None:
     """APIStatusError (non-429) does not retry; converts to
     TurnError(kind="upstream")."""
     fa = FakeAnthropic()
-    from .fakes import RaiseStatus
+    from daimon.testing.turn_fakes import RaiseStatus
 
     fa.beta.sessions.events.stream_scripts = [[RaiseStatus(status_code=500)]]
     lc = RecordingLifecycle()
@@ -370,7 +371,7 @@ async def test_non_retryable_status_error_surfaces_upstream() -> None:
 
 async def test_upstream_error_clears_stop_reason() -> None:
     """_finalize_upstream must clear stop_reason so callers don't loop on stale state."""
-    from .fakes import RaiseStatus
+    from daimon.testing.turn_fakes import RaiseStatus
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseStatus(status_code=400)]]
@@ -397,7 +398,7 @@ async def test_upstream_error_clears_stop_reason() -> None:
 async def test_rate_limit_error_populates_rate_limit_until_from_retry_after() -> None:
     from datetime import timedelta
 
-    from .fakes import RaiseRateLimit
+    from daimon.testing.turn_fakes import RaiseRateLimit
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
@@ -448,7 +449,7 @@ async def test_inband_rate_limited_session_error_wraps_but_rate_limit_until_stay
 
 
 async def test_interrupt_during_replay_raises_interrupted_without_posting_user_interrupt() -> None:
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     # Stream 1 raises APIConnectionError; tenacity will retry.
@@ -491,16 +492,21 @@ async def test_interrupt_during_replay_raises_interrupted_without_posting_user_i
             assert ev.get("type") != "user.interrupt"
 
 
-async def test_interrupt_during_reattach_raises_interrupted_without_user_interrupt() -> None:
-    """Cancel observed between replay completion and the post-reattach
-    cancel-check raises `_InterruptedDuringRecovery(reattach)` and routes
-    to on_terminal_failure without posting `user.interrupt`."""
-    from .fakes import RaiseConnection
+async def test_interrupt_during_reconnect_stream_open_raises_interrupted_without_user_interrupt() -> (
+    None
+):
+    """Cancel observed exactly as a RECONNECT attempt's stream re-open
+    resolves is now caught by the stream-open race itself (19-05), not the
+    older post-open `reattach` fast-check -- a cancel arriving mid-open on a
+    retry attempt is no longer silently ignored until the open resolves.
+    Routes to on_terminal_failure without posting `user.interrupt`, and the
+    stream that opened anyway on the losing side of the race is closed."""
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     # Attempt 1 raises APIConnectionError to enter retry. Attempt 2 opens a
-    # fresh stream after replay -- intercept that open to set cancel before
-    # the post-reattach cancel-check fires.
+    # fresh stream after replay -- intercept that open to set cancel exactly
+    # as it resolves, racing the driver's own stream-open race.
     fa.beta.sessions.events.stream_scripts = [
         [RaiseConnection()],
         [YieldEvent(make_status_idle(event_id="s", stop_reason=make_end_turn()))],
@@ -508,10 +514,9 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
     cancel = asyncio.Event()
     original_stream = fa.beta.sessions.events.stream
 
-    async def _stream_triggering_cancel(*, session_id: str):
-        result = await original_stream(session_id=session_id)
-        # Post-replay, post-reattach-open. The driver's next cancel-check
-        # should observe this and raise `_InterruptedDuringRecovery(reattach)`.
+    async def _stream_triggering_cancel(*, session_id: str, timeout: object = None):
+        result = await original_stream(session_id=session_id, timeout=timeout)
+        # Second stream call is the reconnect attempt's re-open.
         if fa.beta.sessions.events.stream_calls == 2:
             cancel.set()
         return result
@@ -531,12 +536,15 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
     )
 
     assert final.error is not None
-    assert final.error.kind == "interrupted", "reattach-phase interrupt must surface as interrupted"
-    assert "reattach" in final.error.message, "message should identify reattach phase"
+    assert final.error.kind == "interrupted", "reconnect-open interrupt must surface as interrupted"
+    assert "stream-open" in final.error.message, "message should identify stream-open phase"
+    assert fa.beta.sessions.events.streams[1].closed is True, (
+        "the reconnect stream opened on the losing side of the race must be closed"
+    )
     for _sid, payload in fa.beta.sessions.events.sent_events:
         for ev in payload:
             assert ev.get("type") != "user.interrupt", (
-                "reattach-phase interrupt must not post user.interrupt"
+                "reconnect-open interrupt must not post user.interrupt"
             )
 
 
@@ -566,7 +574,7 @@ async def test_interrupt_before_stream_open_raises_interrupted_with_pre_stream_p
 
 
 async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack() -> None:
-    from .fakes import BlockForever
+    from daimon.testing.turn_fakes import BlockForever
 
     fa = FakeAnthropic()
     pre = make_agent_message(event_id="sevt_1", text="partial")
@@ -606,7 +614,7 @@ async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack(
 
 
 async def test_interrupt_mid_consume_timeout_surfaces_interrupt_timeout() -> None:
-    from .fakes import BlockForever
+    from daimon.testing.turn_fakes import BlockForever
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [
@@ -670,8 +678,7 @@ async def test_structlog_emits_turn_started_completed_on_happy_path() -> None:
 
 async def test_structlog_emits_reconnect_events_on_retry() -> None:
     import structlog.testing
-
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     pre = make_agent_message(event_id="sevt_1", text="a")
@@ -706,8 +713,7 @@ async def test_structlog_turn_rate_limited_carries_retry_after_s_and_until() -> 
     """`turn.rate_limited` kwargs include `session_id`, `retry_after_s`,
     `until`. `retry_after_s` is the raw header value to avoid clock round-trip."""
     import structlog.testing
-
-    from .fakes import RaiseRateLimit
+    from daimon.testing.turn_fakes import RaiseRateLimit
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
@@ -741,7 +747,7 @@ async def test_reconnect_on_reused_session_two_turn_log_renders_only_current_tur
     AFTER the last session.status_idle boundary so the render state only shows
     turn-2 content.
     """
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
 
@@ -799,3 +805,249 @@ def test_driver_source_contains_no_except_cancelled_error() -> None:
     src = path.read_text()
     assert "except asyncio.CancelledError" not in src
     assert "except CancelledError" not in src
+
+
+async def test_run_turn_sends_system_message_after_user_message_when_blocks_given() -> None:
+    """Handoff framing rides a `system.message` on the FIRST send only, and the
+    live API rejects the whole batch unless it is last and directly follows the
+    `user.message` — so order here is a wire contract, not a preference."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
+    ]
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="continue the task",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        system_blocks=({"type": "text", "text": "you inherited a workspace"},),
+    )
+
+    assert len(fa.beta.sessions.events.sent_events) == 1, "one initial batch, not two sends"
+    session_id, sent = fa.beta.sessions.events.sent_events[0]
+    assert session_id == "sess_1"
+    assert [event["type"] for event in sent] == ["user.message", "system.message"], (
+        "system.message must be the final event of the batch"
+    )
+    assert sent[1]["content"] == [{"type": "text", "text": "you inherited a workspace"}]
+
+
+async def test_run_turn_sends_only_the_user_message_when_system_blocks_are_empty() -> None:
+    """The default is byte-identical to the pre-handoff single-event send."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
+    ]
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    _, sent = fa.beta.sessions.events.sent_events[0]
+    assert [event["type"] for event in sent] == ["user.message"], (
+        "no system.message when no blocks were supplied"
+    )
+
+
+# --- #79: an MCP server failing mid-turn degrades the turn, never discards the reply ---
+
+
+def _mcp_failure_event(event_id: str):  # SDK union member, inlined per guideline:testing
+    from anthropic.types.beta.sessions.beta_managed_agents_mcp_authentication_failed_error import (
+        BetaManagedAgentsMCPAuthenticationFailedError,
+    )
+    from anthropic.types.beta.sessions.beta_managed_agents_retry_status_exhausted import (
+        BetaManagedAgentsRetryStatusExhausted,
+    )
+
+    from .conftest import make_session_error
+
+    return make_session_error(
+        event_id=event_id,
+        error=BetaManagedAgentsMCPAuthenticationFailedError(
+            type="mcp_authentication_failed_error",
+            mcp_server_name="notion",
+            message="MCP server 'notion' initialize failed: access forbidden",
+            retry_status=BetaManagedAgentsRetryStatusExhausted(type="exhausted"),
+        ),
+    )
+
+
+async def test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure() -> None:
+    """The observed #79 sequence: MCP error at turn start, model answers with
+    its other tools, clean idle. The reply must reach the lifecycle's success
+    hook with the failed server named on the state."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(_mcp_failure_event("e_1")),
+            YieldEvent(make_agent_message(event_id="m_1", text="done without notion")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.error is None, "a reply produced after an MCP failure is not a failed turn"
+    assert len(lc.terminal_success) == 1, "the reply must reach on_terminal_success"
+    assert lc.terminal_failures == [], "on_terminal_failure must not fire"
+    assert [f.server_name for f in final.mcp_failures] == ["notion"]
+
+
+async def test_mcp_failure_with_no_output_finalizes_as_failure_naming_the_server() -> None:
+    """MA's `exhausted` means this turn is dead. With nothing produced the
+    turn is a failure, and the error names the server instead of a bare
+    upstream message."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(_mcp_failure_event("e_1")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.error is not None and final.error.kind == "upstream"
+    assert "'notion'" in final.error.message, "the failure must name the MCP server"
+    assert "access forbidden" in final.error.message, "MA's detail must survive"
+    assert len(lc.terminal_failures) == 1, "an empty turn after MCP failure is a failure"
+
+
+def _retrying_overloaded_event(event_id: str):  # SDK union member, inlined per guideline:testing
+    from anthropic.types.beta.sessions.beta_managed_agents_model_overloaded_error import (
+        BetaManagedAgentsModelOverloadedError,
+    )
+    from anthropic.types.beta.sessions.beta_managed_agents_retry_status_retrying import (
+        BetaManagedAgentsRetryStatusRetrying,
+    )
+
+    from .conftest import make_session_error
+
+    return make_session_error(
+        event_id=event_id,
+        error=BetaManagedAgentsModelOverloadedError(
+            type="model_overloaded_error",
+            message="overloaded",
+            retry_status=BetaManagedAgentsRetryStatusRetrying(type="retrying"),
+        ),
+    )
+
+
+async def test_retrying_error_that_never_settles_and_produces_nothing_is_a_failure() -> None:
+    """MA said `retrying`, then went idle without a settled copy or any
+    output. The kept-aside error is surfaced instead of a blank success."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(_retrying_overloaded_event("e_1")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.error is not None and "overloaded" in final.error.message
+    assert len(lc.terminal_failures) == 1, "an empty turn after a retrying error is a failure"
+
+
+async def test_retrying_error_behind_a_partial_answer_fails_when_ma_says_retries_exhausted() -> (
+    None
+):
+    """A partial paragraph, a `retrying` error, then idle with MA's own
+    `retries_exhausted`: the truncated text must not pass as a finished answer."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="m_1", text="Here is the first half")),
+            YieldEvent(_retrying_overloaded_event("e_1")),
+            YieldEvent(make_status_idle(event_id="s_1", stop_reason=make_retries_exhausted())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.error is not None and "overloaded" in final.error.message
+    assert len(lc.terminal_failures) == 1, "retries ran out behind the partial text"
+
+
+async def test_driver_acknowledges_only_after_final_delivery():
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="sevt_1", text="answer")),
+            YieldEvent(make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())),
+        ]
+    ]
+    phases = []
+
+    class SignalingLifecycle(RecordingLifecycle):
+        async def on_acknowledgment(self, phase):
+            if phase == "done":
+                assert len(self.terminal_success) == 1
+            else:
+                assert not self.terminal_success
+                assert len(fa.beta.sessions.events.sent_events) == 1
+            phases.append(phase)
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=SignalingLifecycle(),
+        cancel=asyncio.Event(),
+        billing=_EXEMPT,
+    )
+    assert phases == ["accepted", "done"]

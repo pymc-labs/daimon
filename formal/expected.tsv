@@ -1,0 +1,163 @@
+# One row per TLC run. Columns are tab-separated:
+# dir	spec	config	expected verdict	distinct states (TLC -workers 1)	TLC flags (- = none)	what it pins
+# A violates: row is a deliberately unsafe config: its counterexample is the
+# evidence that the model can still see the bug the safe config rules out.
+# ---- turn ----
+turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial terminal ordering (idle then terminated), unreachable via the live consume loop
+turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
+turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
+turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+# ---- scheduler ----
+scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
+scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
+# ---- session preparation ----
+session_preparation	SessionPreparation	SessionPreparation	clean	3532	-	per-thread advisory lock, reuse/replace/handoff safety
+session_preparation	SessionPreparation	SessionPreparationProgress	clean	3532	-	liveness: every started caller returns
+# ---- defaults reconciliation ----
+defaults_reconcile	DefaultsReconcile	DefaultsReconcileConcurrent	violates:CachedIdLive	31	-	pre-lock: two empty-list observations create duplicates; resolver caches the older ID that a later dedup archives
+defaults_reconcile	DefaultsReconcile	DefaultsReconcileLocked	clean	12	-	tenant advisory lock serializes same-tenant reconcile list/create and preserves cached-ID liveness
+# ---- continuation ----
+continuation	ContinuationDispatch	ContinuationDispatch	clean	9	-	at-most-once claim, terminal implies external effect
+continuation	ContinuationDispatch	ContinuationCrashProgress	violates:PendingEventuallySettles	9	-	documented gap: process death after claim strands the continuation
+continuation	ContinuationDispatch	ContinuationProgress	clean	5	-	crash-free progress
+continuation	ContinuationDispatch	ContinuationRecovery	violates:AtMostOneExternalEffect	17	-	hypothetical blind stale-claim retry duplicates the turn
+continuation	WakeLease	WakeLease	clean	1123	-	leased wake queue: two dispatchers, lease expiry under a live owner, bounded crashes and busy releases; the start fence keeps one external effect
+continuation	WakeLease	WakeLeaseProgress	clean	1123	-	liveness: with the lease clock and abandon sweep fair, a pending wake always settles (fixes ContinuationCrashProgress)
+continuation	WakeLease	WakeLeaseNoFence	violates:AtMostOneExternalEffect	234	-	mutation: takeover ignores the start fence (ContinuationRecovery's blind retry) and the turn runs twice
+# ---- adapter recovery ----
+adapter_recovery	AdapterRecovery	AdapterRecovery	clean	4	-	compare-and-clear + recovery before admission
+adapter_recovery	AdapterRecovery	DiscordUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Discord: blind clear + turn admitted before recovery
+adapter_recovery	AdapterRecovery	SlackUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Slack: turn admitted before recovery
+adapter_recovery	InitialCardCrash	InitialCardCrash	violates:NoFrozenCardAfterRecovery	8	-	initial card posted before active-marker commit remains frozen after restart sweep
+adapter_recovery	InitialCardCrash	InitialCardDuplicate	violates:NoDuplicateVisibleCards	10	-	unmarked initial card remains beside the next turn's card
+adapter_recovery	InitialCardIntent	InitialCardIntent	clean	11	-	committed intent precedes post; boot listing includes prepared and posted intents
+adapter_recovery	InitialCardIntent	InitialCardIntentPreWiring	violates:PostedCardHasCommittedIntent	4	-	pre-wiring adapter permits platform post before the intent transaction commits
+adapter_recovery	InitialCardReconcile	InitialCardReconcile	clean	209	-	two intents and duplicate old card: boot snapshot excludes new turns; only keyed live cards can be edited
+adapter_recovery	InitialCardReconcile	InitialCardReconcileUnsafeEdit	violates:NoTerminalCardEdited	100	-	mutation: stale found result edits a card after its terminal render removed Cancel
+adapter_recovery	InitialCardReconcile	InitialCardReconcileUnsafeSnapshot	violates:SnapshotExcludesNewIntent	24	-	mutation: refreshing the boot snapshot captures a new process turn
+adapter_recovery	InitialCardReconcile	InitialCardReconcileLossyHistory	violates:NoStrandedLiveCard	88	-	accepted residual: two complete but false-negative history reads retire a prepared intent and strand a visible card
+# ---- recovery commit boundary ----
+recovery_commit	RecoveryCommit	RecoveryCommit	clean	9	-	replacement row, dead mark and lineage link commit atomically; cancellation before commit leaves no row
+recovery_commit	RecoveryCommit	UnsafeInnerCommit	violates:NoOrphanAfterRecovery	9	-	pre-fix: separately committed replacement survives recovery rollback unlinked
+# ---- Discord guild install lifecycle ----
+discord_install	DiscordInstall	DiscordInstallUnsafe	violates:JoinedTenantLive	8	-	pre-fix: remove's archive write lands after join clears archive
+discord_install	DiscordInstall	DiscordInstallSafe	clean	16	-	per-guild lock serializes lifecycle writes; current cache gates stale join/remove work
+discord_install	DiscordInstall	DiscordBootUnsafe	violates:BootRecoveryLive	3	-	pre-fix: on_ready skips a known archived guild still present in cache
+discord_install	DiscordInstall	DiscordBootSafe	clean	16	-	startup recovers a cached archived tenant without replaying install effects
+# ---- billing ----
+billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
+billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
+billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event
+billing	OutOfOrder	OutOfOrderLocked	clean	13	-	intent lock serializes checkout completion and clawback
+# ---- wizard ----
+wizard	WizardLifecycle	WizardLifecycle	clean	92	-	guarded submit and sweep: safety
+wizard	WizardLifecycle	WizardLifecycleProgress	clean	92	-	liveness: submit settles, second submit loses, expiry settles
+wizard	WizardLifecycle	WizardStaleSubmit	violates:SubmittedUsesCurrentAnswers	37	-	pre-fix: stale submit overwrote a newer edit
+wizard	WizardLifecycle	WizardSweepRace	violates:SubmittedNeverDowngrades	67	-	pre-fix: expiry sweep downgraded an in-flight submit
+# ---- oauth callbacks, vault slot, slack install, thread queue, adapter overlap (#236) ----
+oauth	McpOAuthFlow	McpOAuthFlow	clean	4162	-	flow row: client CAS, single consume, completion stamp
+oauth	McpOAuthFlow	McpOAuthFlowPreClientCAS	violates:ExchangeMatchesIssuer	271	-	pre-7a5a74b: a reopened link overwrote the client the first browser authorised as
+oauth	McpOAuthFlow	McpOAuthFlowPreCompletion	violates:ConnectedImpliesGrant	18	-	pre-41234e9: a declined sign-in counted as connected
+oauth	McpOAuthFlow	McpOAuthFlowNoConsumeCAS	violates:AtMostOneConsume	140	-	mutation: consume without used_at IS NULL spends a replayed flow twice
+oauth	VaultSlot	VaultPreLock	violates:NoDuplicateVault	19	-	pre-2cbe69e: concurrent session creates make two vaults
+oauth	VaultSlot	VaultLocked	clean	13	-	vault get-or-create under the advisory lock
+oauth	VaultSlot	MirrorPreGrantSkip	violates:MirrorNeverFails409	3	-	pre-39450e8: mirroring onto a URL held by a grant fails every turn
+oauth	VaultSlot	MirrorGrantSkip	clean	9	-	mirror skips grant-held URLs and tolerates 409
+oauth	VaultSlot	MirrorPreRotate	violates:MirrorLeavesCurrent	3	-	pre-dc2d866: a rotated token never reaches an existing vault
+oauth	VaultSlot	MirrorRotate	clean	13	-	rotation updates in place
+oauth	VaultSlot	GrantVsMirror	violates:SignInNeverLost	17	-	regression, fixed on main by #230: a concurrent mirror makes the grant write 409 after consume
+oauth	VaultSlot	GrantVsStaleMirror	violates:MirrorNever404	14	-	regression, fixed on main by #230: the grant write replaces a stale token under a mirror update
+oauth	VaultSlot	GrantRetry	clean	259	-	#230 (merged): grant write re-reads on 404/409, mirror re-reads on 404; clean with two concurrent mirrors
+oauth	VaultSlot	GrantRetryThreeMirrors	violates:SignInNeverLost	2875	-	pre-#239 bug, now fixed: three concurrent mirrors exhaust the grant write's three attempts
+oauth	VaultSlot	GrantLocked	clean	119	-	#239 (merged) shape: grant write and mirror under the vault lock, three mirrors
+oauth	SlackInstall	SlackReinstallPre231	violates:ReinstallLeavesLiveTenant	12	-	regression, fixed on main by #231: reinstall never clears archived_at
+oauth	SlackInstall	DiscordRejoinShape	clean	12	-	Discord rejoin clears the archive (#132 shape), no late teardown
+oauth	SlackInstall	SlackLateTeardown	violates:ReinstallLeavesLiveTenant	52	-	ablation of #231: archive cleared but a late teardown deletes the reinstall's token
+oauth	SlackInstall	SlackGuardWrongOrder	violates:ReinstallLeavesLiveTenant	19	-	ablation of #231: guarded teardown between archive clear and token write re-archives
+oauth	SlackInstall	SlackReinstallFixed	clean	20	-	#231 (merged): token before archive clear, guarded one-transaction teardown
+thread_queue	ThreadQueue	QueueBeforeReact	clean	32	-	enqueue before the reaction, per-author drain
+thread_queue	ThreadQueue	DiscordReactFirst	violates:NoStrandedMention	51	-	regression, fixed on main by #228: Discord reaction awaited before enqueue strands a mention
+thread_queue	ThreadQueue	DrainMergedAuthors	violates:PrincipalIsAuthor	19	-	pre-997b3d8: drain ran every author under the first
+thread_queue	ThreadQueue	HandoffDispatchFirst	violates:HandoffOnDestination	15	-	pre-090ecc1: dispatch before marker clear ran the handoff in the old session
+thread_queue	ThreadQueue	HandoffClearFirst	clean	75	-	clear then dispatch
+thread_queue	ThreadQueue	FormDuringTail	violates:NoStrandedContinuation	200	-	regression, fixed on main by #233: a dispatch skipped during the tail waited for the next turn
+thread_queue	ThreadQueue	FormRedispatch	clean	514	-	#233 (merged): skipped dispatch reruns after release (NoStrandedMention is in the FormDispatch rows)
+thread_queue	ThreadQueue	FormDispatchNoDrain	violates:NoStrandedMention	82	-	pre-#237 bug, now fixed: a mention queued behind an out-of-turn dispatch is never drained
+thread_queue	ThreadQueue	FormDispatchDrain	clean	450	-	#237 (merged) shape: the dispatch drains queued mentions before releasing the thread
+adapter_recovery	AdapterOverlap	OverlapPreCAS	violates:NoStaleClear	229	-	pre-2d3a002 (287b719 shape): blind sweep clear wipes a marker written after its snapshot
+adapter_recovery	AdapterOverlap	OverlapCASNoStale	clean	561	-	0bc1b14/2d3a002: compare-and-clear spares a marker written after the snapshot (clean by construction)
+adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c923083 (Slack): compare-and-clear alone; a marker written before the snapshot still matches
+adapter_recovery	AdapterOverlap	OverlapGated	clean	205	-	c923083 (Slack) / #232 (Discord): admission waits for recovery
+adapter_recovery	AdapterOverlap	OrphanedTurnReuse	violates:NoMessageIntoRunning	135	-	regression, fixed on main by #232: restart orphan kept running, next message ignored
+adapter_recovery	AdapterOverlap	OrphanSweepInterrupts	clean	187	-	#232 (merged): sweep interrupts the orphan
+adapter_recovery	AdapterOverlap	OrphanSendWaits	clean	197	-	alternative: never send into a running session
+adapter_recovery	AdapterOverlap	RollingOverlap	violates:NoStolenClear	86	-	assumption: overlapping processes reap the sibling's live marker
+adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunning	102	-	accepted limitation: wizard turn beside a mention turn
+adapter_recovery	AdapterOverlap	WizardBypassRows	violates:AtMostOneLiveRow	291	-	regression, fixed on main by #238: lock-free recovery beside a wizard bind leaves two live rows
+adapter_recovery	AdapterOverlap	WizardBypassRowsLocked	clean	1580	-	#238 (merged): recovery under the bind lock, adopting the live replacement
+adapter_recovery	AdapterOverlap	SingleProcessRecovery	clean	672	-	one process: lock-free recovery is safe
+# ---- report publishing ----
+report_publish	ReportPublish	PublishSafe	clean	12	-	archive, seam result, PDF, and SQLite commit preserve visible artifact coherence
+report_publish	ReportPublish	PublishPreFix	violates:VisibleArtifactsCoherent	2	-	pre-fix: current PDF/revision exposed before the accepted bundle changes
+report_publish	PublishOverlap	PublishOverlapUnsafe	violates:VisibleArtifactsCoherent	138	-	mutation: a second publish prunes an aged archive while its seam response is pending
+report_publish	PublishOverlap	PublishOverlapSafe	clean	399	-	process-local in-flight archive protection preserves accepted concurrent publish tuples and reader snapshots
+# ---- GitHub push resync queue ----
+github_push_resync	PushResync	PushResyncSafe	clean	297	-	persisted acknowledgement and generation fence preserve current-state completion through bounded crashes
+github_push_resync	PushResync	PushResyncEarlyAck	violates:AckHasDurableGeneration	2	-	pre-queue background task: HTTP 200 can precede durable work
+github_push_resync	PushResync	PushResyncStaleComplete	violates:DoneHasCurrentBranch	29	-	mutated completion without generation fence loses the newer push
+github_push_resync	PushResync	PushResyncCrashDuplicate	violates:NoRepeatedExternalEffect	111	-	documented repeat of an external effect after crash before queue completion
+github_push_resync	PushResync	PushResyncProgress	clean	55	-	crash-free weak-fair progress after two finite arrivals and successful external writes
+# ---- metering ----
+metering	Metering	Metering	clean	8006	-	live recorder + usage sweep + per-deployment ledger with the replay-billing fix: all safety invariants
+metering	Metering	MeteringReplayGap	violates:LiveMetersWholeTurn	160	-	pre-#234: a model call seen only in the reconnect/finalize replay is never billed by the turn
+metering	Metering	MeteringPre44528cb	violates:HookOnce	230	-	pre-44528cb (and pre-#234 replay folds): an event re-emitted after a reconnect re-runs the billing hook
+metering	Metering	MeteringPre1c4df18	violates:PriceAgreement	28	-	pre-1c4df18: live recorder priced at the agent's current model, not the session's
+metering	Metering	MeteringSharedTenant	violates:NoForeignDebit	57	-	documented precondition: two deployments sharing an MA workspace and a chat workspace debit each other's sessions
+metering	Metering	MeteringSharedTenantOwned	clean	8006	-	hypothetical deployment stamp: sweep skips sessions another deployment created
+metering	Metering	MeteringSweepRace	violates:AttributionPreserved	41	-	documented residual: the sweep can commit a live session's call first, with its own attribution
+metering	Metering	MeteringExemptSwept	violates:ExemptNotBilled	41	-	pre-fix calibration (fixed by SweepSkipsExempt): the sweep debits a BillingExempt session to its tenant
+metering	Metering	MeteringExemptSkipped	clean	232	-	fix: exempt sessions are stamped daimon_billing_exempt and the sweep skips them; every invariant incl. ExemptNotBilled
+metering	BalanceGate	BalanceGate	clean	969	-	gated chat turns and classifier: every spend gated and debited, overdraft within MaxInflight x C
+metering	BalanceGate	BalanceGatePre8192ff7	violates:GatedSpend	105	-	pre-8192ff7: a reused-session Slack turn starts on a zero balance (no gate) and spends
+metering	BalanceGate	BalanceGatePre8192ff7Overdraft	violates:OverdraftBound	3398	-	pre-8192ff7, overdraft only: an ungated reused turn takes the ledger below MaxInflight x C
+metering	BalanceGate	BalanceGatePreFa83d3c	violates:GatedSpend	104	-	pre-fa83d3c: the participation classifier starts on a zero balance (no gate) and spends
+metering	BalanceGate	BalanceGatePreFa83d3cUnmetered	violates:SpendMetered	141	-	pre-fa83d3c, metering only: a finished classifier call is never debited
+metering	BalanceGate	BalanceGateHeadless	violates:OverdraftBound	192	-	documented residual: headless MCP turns are debited only by the sweep, so the gate reads a stale balance
+# ---- GitHub installation repository updates ----
+github_installation	InstallationUpdates	InstallationUpdatesStaleWrite	violates:EachCompletedDeltaIsPresent	27	-	pre-fix: overlapping read/modify/write operations replace concurrent repo deltas
+github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomic row updates preserve concurrent repo additions and removals
+github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderCreated	violates:FinalSetMatchesGitHub	5	-	delayed creation snapshot overwrites a repository delta delivered first
+github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderDeltas	violates:FinalSetMatchesGitHub	11	-	opposite repository deltas delivered out of occurrence order leave stale membership
+github_installation	InstallationReconciliation	InstallationReconciliation	clean	27	-	current-generation fence prevents stale snapshots after notification; bounded to three generations
+# ---- slack dedupe ----
+slack_cancel	CancelRegistration	CancelRegistrationSafe	clean	6	-	register the per-turn action key before Slack can expose the card
+slack_cancel	CancelRegistration	CancelRegistrationUnsafe	violates:VisibleAuthorClickCancels	4	-	pre-fix: a click can arrive after card visibility and before ts registration
+slack_dedupe	SlackDedupe	SlackDedupe	clean	953059	-	dedupe + per-author drain + 7-day prune vs redelivery window: at most one turn, one caller, no silent loss
+slack_dedupe	SlackDedupe	SlackPre997b3d8	violates:TurnPrincipal	268977	-	pre-997b3d8: the drain loop merged every queued author into one turn
+slack_dedupe	SlackDedupe	SlackPre0cda77e	violates:NoSilentLoss	595	-	pre-0cda77e: a failed turn logged and returned with nothing posted
+slack_dedupe	SlackDedupe	SlackShortRetention	violates:AtMostOneTurn	850886	-	retention shorter than Slack's redelivery window admits a redelivered mention twice
+slack_dedupe	SlackDedupe	SlackExitSafety	clean	735303	-	graceful drain preserves pre-drain callback admission; exit preserves at-most-once
+slack_dedupe	SlackDedupe	SlackCrashLoss	violates:NoSilentLoss	48	-	documented residual: a crash any time after the ack (before or after the dedupe commit) loses the mention
+slack_dedupe	SlackDedupe	SlackDrainWindow	clean	3833637	-	graceful drain preserves pre-drain callback admission and waits for acked mention handlers
+slack_dedupe	SlackDedupe	SlackPreDrainAckLoss	violates:NoUndocumentedLoss	64	-	pre-fix: drain-time handler check drops a mention received before drain
+# ---- notebook upload capability ----
+notebook_upload	NotebookUpload	UploadSafe	clean	29	-	two concurrent attempts; atomic burn before body; restart persistence; no duplicate accepted upload
+notebook_upload	NotebookUpload	CrashLoss	violates:CrashEventuallyUploads	29	-	retained gap: process death after burn and before body makes a retry fail after restart
+notebook_upload	NotebookUpload	LateBurnMutation	violates:NoDuplicateSuccessfulUpload	11	-	mutation: moving the burn after the body await permits two successes
+# ---- Discord setup panel ----
+setup_panel	SetupPanel	SetupPanelPreFix	violates:SetupTargetMatchesCard	24	-	pre-fix selection shared across concurrent Details reads misroutes setup target
+setup_panel	SetupPanel	SetupPanelPreFixCoding	violates:CodingTargetMatchesCard	25	-	pre-fix selection shared across concurrent Details reads mints coding-tools access for the wrong agent
+setup_panel	SetupPanel	SetupPanelSafe	clean	44	-	latest click owns rendering; captured target stays paired; stale reads after panel advance are dropped
+setup_panel	CodingTokenIdentity	CodingTokenIdentityNameSubstitution	violates:CardIdentityMatches	5	-	card A renders, newer same-name B appears, and name-based mint selects B
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafe	clean	5	-	card A remains the mint target after newer same-name B appears
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeUnavailable	clean	7	-	card A becomes foreign-tenant after render and is refused without minting
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeArchived	clean	7	-	card A is archived after render and is refused without minting
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeMissing	clean	7	-	card A disappears after render and is refused without minting
+# ---- per-binding GitHub skill resync result classification ----
+skill_sync	BindingResult	BindingResultSafe	clean	6	-	transient fetch failure retries; permanent attach error completes visibly
+skill_sync	BindingResult	BindingResultFetchOmitted	violates:NoTransientSuccessAck	3	-	pre-fix: skipped fetch failure is absent from failed_uploads, so queue acknowledges with no error
+skill_sync	BindingResult	BindingResultRetryAll	violates:PermanentFailureNotRetried	4	-	mutation: permanent attach failure enters retry-wait
+skill_sync	BindingIdentity	BindingIdentitySafe	clean	17	-	exact MA identity, duplicate refusal, and no wrong-agent attach; bounded A/B roster
+skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgentAttach	18	-	pre-fix: same-name B appears after A bridge resolution, name-only attach selects B
+skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
+skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim

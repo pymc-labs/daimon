@@ -18,6 +18,7 @@ supersede it with a tenant-aware variant — keep the signature stable.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 
 import jwt as pyjwt
@@ -31,6 +32,8 @@ def mint_jwt(
     now: dt.datetime,
     agent_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    chat_agent_id: uuid.UUID | None = None,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -45,6 +48,10 @@ def mint_jwt(
     - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added
       Used by the MCP ``get_cli_token`` tool to mint per-service tokens
       scoped to the agent without trusting tool-supplied parameters.
+    - ``chat_agent_id`` identifies the agent executing an ordinary chat session
+      without selecting the restricted external agent-chat tool surface.
+    - ``slack_turn_context_id`` is an execution grant used only by isolated Slack
+      DM session credentials. Readers require the matching live tenant/account row.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
@@ -57,6 +64,10 @@ def mint_jwt(
     }
     if agent_id is not None:
         claims["agent_id"] = str(agent_id)
+    if chat_agent_id is not None:
+        claims["chat_agent_id"] = str(chat_agent_id)
+    if slack_turn_context_id is not None:
+        claims["slack_turn_context_id"] = str(slack_turn_context_id)
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
@@ -149,3 +160,29 @@ async def mint_agent_mcp_token(
         secret,
         algorithm="HS256",
     )
+
+
+def token_jti(token: str) -> uuid.UUID:
+    """The jti of a token this process just signed.
+
+    Unverified on purpose: the caller minted it a statement earlier, and the
+    registry row, not the signature, is the authority on revocation.
+    """
+    claims: dict[str, object] = pyjwt.decode(token, options={"verify_signature": False})
+    raw = claims.get("jti")
+    assert isinstance(raw, str), "a minted agent token always carries a jti claim"
+    return uuid.UUID(raw)
+
+
+def coding_tool_config(*, agent_name: str, public_url: str, jwt: str) -> tuple[str, str]:
+    """The `claude mcp add` one-liner and the `.mcp.json` snippet for one agent token.
+
+    The server key is `daimon-<agent-name>` so several agents share one config file.
+    """
+    key_name = f"daimon-{agent_name}"
+    config = {key_name: {"url": public_url, "headers": {"Authorization": f"Bearer {jwt}"}}}
+    cli = (
+        f'claude mcp add --transport http "{key_name}" "{public_url}" '
+        f'--header "Authorization: Bearer {jwt}"'
+    )
+    return cli, json.dumps(config, indent=2)

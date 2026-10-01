@@ -11,9 +11,9 @@ import pytest
 # when it isn't available locally; tests execute for real on main after merge.
 pytest.importorskip("daimon.adapters.discord.billing_panel.state")
 
-from daimon.adapters.discord.billing_panel.state import COLOR_OVER_CAP  # noqa: E402
+from daimon.adapters.discord.billing_panel.state import COLOR_OVER_CAP
 
-from .conftest import _make_member_row, _make_state  # noqa: E402
+from .conftest import _make_member_row, _make_state
 
 
 def test_billing_panel_state_is_frozen() -> None:

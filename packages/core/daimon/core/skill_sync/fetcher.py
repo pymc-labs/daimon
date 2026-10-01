@@ -15,6 +15,11 @@ import io
 
 import httpx
 import structlog
+from daimon.core.github_rate_limit import (
+    GitHubRateLimitError,
+    is_rate_limit_response,
+    rate_limit_retry_after,
+)
 from daimon.core.github_repo_auth import normalize_owner_repo
 
 _log = structlog.get_logger(__name__)
@@ -76,6 +81,15 @@ class GitHubTarballFetcher:
             headers=headers,
             follow_redirects=True,
         ) as resp:
+            if await is_rate_limit_response(resp):
+                retry_after = rate_limit_retry_after(resp)
+                _log.warning(
+                    "skill_sync.fetcher.rate_limited",
+                    url=url,
+                    status=resp.status_code,
+                    retry_after=retry_after.isoformat(),
+                )
+                raise GitHubRateLimitError(retry_after)
             if resp.status_code in (401, 403):
                 _log.warning("skill_sync.fetcher.auth_error", url=url, status=resp.status_code)
                 raise GitHubAuthError(url)

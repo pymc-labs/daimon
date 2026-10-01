@@ -17,10 +17,12 @@ Integration tests cover:
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 from aioresponses import aioresponses
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.oauth_slack import (
@@ -40,13 +42,14 @@ from daimon.core.config import (
     Settings,
     SlackSettings,
 )
+from daimon.core.defaults.provisioning import provision_tenant, teardown_slack_install
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.slack_oauth import SLACK_USER_SCOPES, mint_state
 from daimon.core.stores.slack_bot_tokens import count_slack_bot_tokens, get_slack_bot_token
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.tenant_ledger import get_balance
-from daimon.core.stores.tenants import list_tenants_by_platform
+from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -466,10 +469,17 @@ async def test_install_landing_has_authorize_url_and_state(
 
 async def test_callback_persists_token_and_tenant(
     sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Happy-path callback: token + tenant persisted, success page shows workspace name."""
     fernet_key = Fernet.generate_key().decode()
     settings = _build_slack_settings()
+    alerts: list[tuple[str, str]] = []
+
+    def record_alert(url: SecretStr | None, *, key: str, message: str) -> None:
+        alerts.append((key, message))
+
+    monkeypatch.setattr("daimon.adapters.mcp.oauth_slack.alert_ops", record_alert)
     fernet = build_multifernet((fernet_key,))
 
     handler = _make_slack_exchange_handler()
@@ -491,6 +501,12 @@ async def test_callback_persists_token_and_tenant(
     assert _SLACK_TEAM_NAME in r.text, (
         "success page must show the workspace name from the exchange response"
     )
+    assert alerts == [
+        (
+            f"install:slack:{_SLACK_TEAM_ID}",
+            f"New install: Slack {_SLACK_TEAM_NAME} ({_SLACK_TEAM_ID})",
+        )
+    ]
 
     # Token row persisted.
     async with sessionmaker() as session:
@@ -505,6 +521,47 @@ async def test_callback_persists_token_and_tenant(
     slack_tenants = await list_tenants_by_platform(sessionmaker, platform="slack")
     assert any(t.id == expected_tenant_id for t in slack_tenants), (
         "callback must provision a slack tenant keyed on the team_id"
+    )
+
+
+async def test_callback_reinstall_after_uninstall_unarchives_tenant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reinstalling a workspace that uninstalled daimon leaves a live tenant.
+
+    Uninstall soft-archives the tenant; provision_tenant is ON CONFLICT DO
+    NOTHING on the existing row, so without an explicit clear the reinstalled
+    workspace kept archived_at set: its token worked, but the hub and the boot
+    defaults sweep treated it as gone.
+    """
+    await provision_tenant(sessionmaker, platform="slack", workspace_id=_SLACK_TEAM_ID)
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_SLACK_TEAM_ID)
+    await teardown_slack_install(sessionmaker, team_id=_SLACK_TEAM_ID, now=datetime.now(UTC))
+    async with sessionmaker() as session:
+        archived = await get_tenant(session, tenant_id)
+    assert archived is not None and archived.archived_at is not None
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    handler = _make_slack_exchange_handler()
+
+    def make_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10.0)  # type: ignore[arg-type]
+
+    state = mint_state(signing_secret=_SIGNING_SECRET, now=time.time())
+    app = _build_isolated_slack_app(
+        sessionmaker, settings=_build_slack_settings(), fernet=fernet, client_factory=make_client
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/oauth/slack/callback?code={_SLACK_CODE}&state={state}")
+    assert r.status_code == 200, r.text
+
+    async with sessionmaker() as session:
+        token_row = await get_slack_bot_token(session, team_id=_SLACK_TEAM_ID)
+        live = await get_tenant(session, tenant_id)
+    assert token_row is not None, "reinstall must store the fresh bot token"
+    assert live is not None and live.archived_at is None, (
+        "reinstall must clear archived_at left by the uninstall"
     )
 
 
@@ -934,3 +991,12 @@ async def test_callback_user_connect_mismatch_attempts_revoke_and_still_returns_
             s, team_id=_SLACK_TEAM_ID, slack_user_id=_SLACK_FOREIGN_USER_ID
         )
     assert row_u2 is None, "no token row should ever be stored for the foreign authed_user"
+
+
+def test_success_html_escapes_configured_bot_name() -> None:
+    response = _success_html(
+        workspace="Acme", signup_credit=Decimal("5.00"), display_name="research<bot>"
+    )
+    body = response.body.decode()
+    assert "@research&lt;bot&gt;" in body, "success instructions must escape the configured name"
+    assert "@daimon" not in body, "success instructions must not retain a hardcoded bot mention"

@@ -7,11 +7,54 @@ import json
 import uuid
 from typing import Any
 
+MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
+# Stamped on a session opened for a channel turn: the channel it runs in, the
+# thread under it (when there is one), and -- once any of its turns ran sealed --
+# the sealed id that sealed it (the channel, or a thread sealed on its own). The
+# transcript tools judge a session against the current seal policy from the
+# first two, and keep it inside the recorded seal from the third, so unsealing
+# later never opens up a transcript written under the seal.
+MA_METADATA_KEY_CHANNEL = "daimon_channel"
+MA_METADATA_KEY_THREAD = "daimon_thread"
+MA_METADATA_KEY_SEALED = "daimon_sealed"
+
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
 MA_METADATA_KEY_ACCOUNT = "daimon_account"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
+MA_METADATA_KEY_ISOLATED = "daimon_isolated"
+# Stamped on a reader variant (see `daimon.core.reader_agent`) with the
+# source agent's spec-hash-or-fallback fingerprint, so a subsequent publish
+# can tell "unchanged source, reuse the variant" from "source moved, update
+# it" without re-deriving the whole spec first.
+MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# Stamped on an MA session created for a `BillingExempt` caller, with the
+# `ExemptReason` as its value (see `daimon.core.turn.posture`). The usage sweep
+# skips a session carrying it: the operator absorbs that usage, it is never
+# debited to the tenant named by `daimon_tenant`. Absent on a billed session.
+MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
+
+# Marks a whole MA workspace as a throwaway one that the test-only workspace
+# nuke is allowed to empty. Stamped on a single sentinel agent, never on a
+# tenant resource — see `daimon.core.ma.find_workspace_disposable_sentinel`.
+MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
+MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
+
+
+def account_id_from_metadata(raw: str | None) -> uuid.UUID | None:
+    """Read the `daimon_account` stamp, treating anything unparseable as absent.
+
+    MA metadata values are free-form strings written by several generations of
+    this codebase; a value that is not a uuid means "this agent has no daimon
+    account attached", which is exactly what an unstamped agent means too.
+    """
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
 
 
 def compute_spec_fingerprint(payload: dict[str, Any]) -> str:
@@ -39,6 +82,7 @@ def build_metadata(
     account_id: uuid.UUID | None = None,
     managed: bool = False,
     spec_hash: str | None = None,
+    isolated: bool = False,
 ) -> dict[str, str]:
     """Return the MA metadata tag for `(tenant_id, local_name)`.
 
@@ -46,8 +90,8 @@ def build_metadata(
     `client.beta.environments.create` so LIST-by-client-filter can recover the
     daimon tenant and local name deterministically.
 
-    When `account_id` is provided, stamp `daimon_account=str(account_id)` so the
-    The `/agent-setup` panel can filter the roster to the invoking user.
+    When `account_id` is provided, stamp `daimon_account=str(account_id)` so
+    the roster can be filtered to the invoking user's own agents.
     When `account_id` is `None`, the `daimon_account` key is omitted entirely —
     this preserves the "tenant-scoped / no account" semantics of the seeded
     default agent (everyone's agent).
@@ -60,6 +104,12 @@ def build_metadata(
     When `spec_hash` is provided, stamp `daimon_spec_hash=<hash>` so a
     subsequent reconcile can short-circuit to SKIPPED when MA's current
     metadata already carries the same hash (the L13 idempotency contract).
+
+    When `isolated=True`, stamp `daimon_isolated="true"`. This is the stamp a
+    tool reads back off the live MA agent (never the local spec object) to
+    decide that a session for it must be created with no vault, no env-file
+    mount and no memory store. It is the string `"true"` rather than a bool
+    because MA metadata values are strings. Omitted entirely when `False`.
     """
     metadata: dict[str, str] = {
         MA_METADATA_KEY_TENANT: str(tenant_id),
@@ -71,6 +121,8 @@ def build_metadata(
         metadata[MA_METADATA_KEY_MANAGED] = "true"
     if spec_hash is not None:
         metadata[MA_METADATA_KEY_SPEC_HASH] = spec_hash
+    if isolated:
+        metadata[MA_METADATA_KEY_ISOLATED] = "true"
     return metadata
 
 

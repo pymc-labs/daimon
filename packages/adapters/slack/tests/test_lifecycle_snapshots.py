@@ -14,12 +14,13 @@ then review the diff in `__snapshots__/` before committing.
 from __future__ import annotations
 
 import asyncio
+import copy
 import types
 from typing import Any
 
 import yarl
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
-from daimon.core.turn.state import TextBlock, TurnState, UsageTotals
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from syrupy.assertion import SnapshotAssertion
 
 _POST_URL = yarl.URL("https://slack.com/api/chat.postMessage")
@@ -43,10 +44,6 @@ def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
 
 
-def _tool_use_event(name: str) -> Any:
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
-
-
 def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
     return SlackTurnLifecycle(
         client=fake.client,
@@ -59,15 +56,24 @@ def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
         register=lambda ts, ev, author_id: None,
         deregister=lambda ts: None,
         clock=clock,
+        request_id=lambda: "01TESTREQUESTID0000000000",
     )
 
 
 def _calls_snapshot(fake: Any, url: yarl.URL) -> list[dict[str, Any]]:
     calls = fake.mock.requests.get(("POST", url), [])
-    return [
-        {"blocks": call.kwargs["json"].get("blocks"), "text": call.kwargs["json"].get("text")}
-        for call in calls
-    ]
+    snapshots: list[dict[str, Any]] = []
+    for call in calls:
+        body: dict[str, Any] = call.kwargs["json"]
+        blocks = copy.deepcopy(body.get("blocks"))
+        for block in blocks or []:
+            if block.get("type") != "actions":
+                continue
+            for element in block.get("elements", []):
+                if element.get("action_id") == "cancel_turn" and "value" in element:
+                    element["value"] = "<turn-key>"
+        snapshots.append({"blocks": blocks, "text": body.get("text")})
+    return snapshots
 
 
 async def test_thinking_tool_then_success_sequence(
@@ -76,8 +82,10 @@ async def test_thinking_tool_then_success_sequence(
     clock = _make_clock([100.0, 100.0, 106.0, 116.0])
     lc = _make_lifecycle(fake_slack_web_client, clock)
 
+    await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
-    await lc.on_sse_event(_tool_use_event("Bash"))
+    bash = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    await lc.on_render(TurnState(content=[bash]))
 
     state = TurnState(
         content=[TextBlock(kind="text", text="Here is the answer.")],
@@ -102,7 +110,9 @@ async def test_terminal_failure_sequence(
     clock = _make_clock([100.0, 100.0, 112.0])
     lc = _make_lifecycle(fake_slack_web_client, clock)
 
+    await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
 
     state = TurnState(
         usage_totals=UsageTotals(

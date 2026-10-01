@@ -72,19 +72,32 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
+    EnvFileModal,
     McpCredentialModal,
     RepoBindModal,
     SkillRepoModal,
 )
+from daimon.adapters.discord.credential_oauth import start_mcp_oauth_from_click
+from daimon.adapters.discord.credential_origin import is_credential_interaction_valid
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
 )
+from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import (
     CUSTOM_ID_TEMPLATE,
     CredentialRequestKind,
     build_button_label,
     build_custom_id,
+    split_skill_repo_target,
+)
+from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.posted_controls import (
+    ALREADY_USED_MESSAGE,
+    NO_LONGER_VALID_MESSAGE,
+    WRONG_REQUESTER_MESSAGE,
+    CardKind,
+    expired_message,
 )
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import CredentialRequestRow
@@ -98,14 +111,38 @@ _log = structlog.get_logger()
 # Shown when the lookup in from_custom_id found nothing (unknown token or a
 # DB failure) — the real label (naming the exact target) only exists once a
 # row is found, so this is the best available fallback for a dead button.
-_FALLBACK_LABEL = "Add credential"
+_FALLBACK_LABEL = "Enter it privately"
 
-_NO_LONGER_VALID = "This request is no longer valid — ask again."
-_WRONG_REQUESTER = "This request was for someone else — ask again in your own thread."
-_EXPIRED = "This request expired — ask again."
-_ALREADY_USED = "This request was already used — ask again."
 _CHECK_FAILED = "Something went wrong checking this request — please try again."
 _CALLBACK_FAILED = "Something went wrong opening this form — please try again."
+
+#: Fallbacks for the two display names a row may not carry, matching
+#: `card_for_request`: a row minted before its agent was resolved names no
+#: target, and one minted outside a turn names no responder.
+_UNNAMED_AGENT: Final[str] = "the agent"
+_UNNAMED_RESPONDER: Final[str] = "Daimon"
+
+
+def _expired_message_for_row(row: CredentialRequestRow) -> str:
+    """The expired copy for this request, in the words its own card now uses.
+
+    Built from the row alone for the reason `posted_controls.edit` rebuilds
+    the card from it: the click arrives in a different process, long after
+    the post, so the durable request is the only input there is.
+    """
+    kind = cast(CardKind, row.kind)
+    repo: str | None = None
+    if kind in ("repo", "skill_repo"):
+        url, _branch, _path = split_skill_repo_target(row.target)
+        repo = normalize_owner_repo(url)
+    return expired_message(
+        kind=kind,
+        agent_name=row.target_name or _UNNAMED_AGENT,
+        responder_name=row.responder_name or _UNNAMED_RESPONDER,
+        target=row.target,
+        repo=repo,
+    )
+
 
 _PRE_FILTER_TIMEOUT_SECONDS: Final[float] = 1.5
 """Bound on the repo kind's non-admin pre-filter, measured from entry into
@@ -165,7 +202,7 @@ class CredentialRequestButton(
             async with bot.runtime.sessionmaker() as session:
                 request_row = await peek_credential_request(session, token=token)
         except SQLAlchemyError:
-            _log.exception("credential_button.lookup_failed", token_tail=token[-4:])
+            _log.exception("credential_button.lookup_failed")
             request_row = None
         if request_row is None:
             return cls(token=token, label=_FALLBACK_LABEL, request_row=None)
@@ -193,19 +230,35 @@ class CredentialRequestButton(
         try:
             request_row = self.request_row
             if request_row is None:
-                await interaction.response.send_message(_NO_LONGER_VALID, ephemeral=True)
+                await interaction.response.send_message(NO_LONGER_VALID_MESSAGE, ephemeral=True)
                 return False
             if str(interaction.user.id) != request_row.requester_platform_user_id:
-                await interaction.response.send_message(_WRONG_REQUESTER, ephemeral=True)
+                await interaction.response.send_message(WRONG_REQUESTER_MESSAGE, ephemeral=True)
+                return False
+            if not is_credential_interaction_valid(interaction, request_row):
+                await interaction.response.send_message(NO_LONGER_VALID_MESSAGE, ephemeral=True)
                 return False
             if request_row.expires_at < datetime.now(UTC):
-                await interaction.response.send_message(_EXPIRED, ephemeral=True)
+                await interaction.response.send_message(
+                    _expired_message_for_row(request_row), ephemeral=True
+                )
+                # Opportunistic, and only here: a card goes stale silently
+                # (nothing sweeps expiries), so the late click of the one
+                # person who could have used it is the event that can still
+                # correct the channel's copy. The refusal is sent first --
+                # the edit is a different message, and the clicker's own
+                # answer must not wait on it. A wrong-requester click edits
+                # nothing: it would let anyone in the channel retire a card
+                # that is still good.
+                await edit_posted_card(interaction.client, row=request_row, state="expired")
                 return False
             if request_row.used_at is not None:
-                await interaction.response.send_message(_ALREADY_USED, ephemeral=True)
+                await interaction.response.send_message(ALREADY_USED_MESSAGE, ephemeral=True)
                 return False
             return True
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception(
                 "credential_button.interaction_check_failed", err_type=type(err).__name__
             )
@@ -234,6 +287,14 @@ class CredentialRequestButton(
                 )
             elif request_row.kind == "repo":
                 await self._open_repo_modal(interaction, runtime=bot.runtime, row=request_row)
+            elif request_row.kind == "env_file":
+                await interaction.response.send_modal(
+                    EnvFileModal(runtime=bot.runtime, request_row=request_row)
+                )
+            elif request_row.kind == "mcp_oauth":
+                # No modal: the value is a browser sign-in. The requester gets
+                # a private link and the mcp process finishes the rest.
+                await start_mcp_oauth_from_click(interaction, runtime=bot.runtime, row=request_row)
             elif request_row.kind == "skill_repo":
                 # Explicit branch, not a fall-through: the `else` below is the
                 # MCP modal, so a kind added without a branch here silently
@@ -249,7 +310,9 @@ class CredentialRequestButton(
                 await interaction.response.send_modal(
                     McpCredentialModal(runtime=bot.runtime, request_row=request_row)
                 )
-        except Exception as err:  # noqa: BLE001 -- dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own dispatcher swallows anything raised here
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
+            # dispatcher swallows anything raised here
             _log.exception("credential_button.callback_failed", err_type=type(err).__name__)
             await interaction.response.send_message(_CALLBACK_FAILED, ephemeral=True)
 

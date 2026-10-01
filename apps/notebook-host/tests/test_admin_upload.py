@@ -7,6 +7,7 @@ with the same wire format the host verifies.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -84,6 +86,7 @@ def _make_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClie
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -92,7 +95,7 @@ def _make_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClie
         m.pid = 4242
         return m  # type: ignore[return-value]
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -158,6 +161,30 @@ def test_upload_single_use_replay_rejected(tmp_path: Path, monkeypatch: pytest.M
     )
     assert get_slug_paths(tmp_path, "once").notebook.read_bytes() == b"# first\n", (
         "replay does not overwrite"
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upload_replay_has_one_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _make_app(tmp_path, monkeypatch)
+    client.close()
+    token = _mint("blog", "concurrent-once", jti="concurrent-replay")
+    transport = httpx.ASGITransport(app=client.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+        first, second = await asyncio.gather(
+            async_client.put(f"/upload/{token}", content=b"# first\n"),
+            async_client.put(f"/upload/{token}", content=b"# second\n"),
+        )
+
+    assert sorted([first.status_code, second.status_code]) == [200, 409], (
+        "concurrent requests carrying one jti must have exactly one accepted burn"
+    )
+    written = get_slug_paths(tmp_path, "concurrent-once").notebook.read_bytes()
+    assert written in {b"# first\n", b"# second\n"}, (
+        "the successful request's body must be the only published upload"
     )
 
 

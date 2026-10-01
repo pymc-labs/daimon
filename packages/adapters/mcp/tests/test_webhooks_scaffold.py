@@ -8,7 +8,6 @@ lives in `test_webhooks_stripe.py`.
 from __future__ import annotations
 
 import httpx
-import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
 from daimon.core.config import (
@@ -21,8 +20,6 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
-
-pytestmark = pytest.mark.asyncio
 
 
 def _build_app(sessionmaker: async_sessionmaker[AsyncSession]) -> Starlette:

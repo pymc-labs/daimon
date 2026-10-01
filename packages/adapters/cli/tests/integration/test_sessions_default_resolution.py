@@ -13,7 +13,6 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
-    BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsModelConfig,
     BetaManagedAgentsSession,
@@ -28,8 +27,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.tenants import list_all_tenant_ids
+from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.testing import ma_environment
 from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
     EMPTY_SESSION_STATS,
     EMPTY_SESSION_USAGE,
     MARouter,
@@ -83,6 +83,7 @@ def _build_settings(defaults_root: Path) -> Settings:
         public_url = None
 
     class _Settings:
+        tool_safety = ToolSafetyPolicy()
         cli = _Cli()
         mcp = _Mcp()
         github = GithubSettings()
@@ -130,16 +131,7 @@ def _apply_router() -> MARouter:
         r"/v1/environments",
         lambda req, _m: httpx.Response(
             200,
-            json=BetaEnvironment(
-                id="env_1",
-                type="environment",
-                name="default",
-                config=EMPTY_CLOUD_CONFIG,
-                metadata={},
-                description="",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-            ).model_dump(mode="json"),
+            json=ma_environment(id="env_1", name="default").model_dump(mode="json"),
         ),
     )
     router.add(
@@ -195,19 +187,9 @@ def _session_router(tenant_id: uuid.UUID) -> MARouter:
         system=None,
     ).model_dump(mode="json")
 
-    env_item = BetaEnvironment(
-        id="env_1",
-        type="environment",
-        name="default",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    ).model_dump(mode="json")
+    env_item = ma_environment(id="env_1", name="default", tenant_id=tenant_id).model_dump(
+        mode="json"
+    )
 
     router = MARouter()
     router.add(
@@ -345,18 +327,8 @@ async def test_sessions_create_resolves_via_resolver_after_archive(
         system=None,
     ).model_dump(mode="json")
 
-    live_env = BetaEnvironment(
-        id="env_fresh",
-        type="environment",
-        name="default",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_NAME: "default",
-        },
-        description="",
-        created_at="2026-05-19T00:00:00Z",
-        updated_at="2026-05-19T00:00:00Z",
+    live_env = ma_environment(
+        id="env_fresh", name="default", tenant_id=tenant_id, created_at="2026-05-19T00:00:00Z"
     ).model_dump(mode="json")
 
     router = MARouter()

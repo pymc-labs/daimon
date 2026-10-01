@@ -6,9 +6,7 @@ AsyncAnthropic (MA API), so the real SDK code path runs in full.
 
 from __future__ import annotations
 
-import io
 import shutil
-import tarfile
 import tempfile
 import time
 import uuid
@@ -22,24 +20,11 @@ from daimon.core.defaults.report import Action
 from daimon.core.errors import DaimonError
 from daimon.core.skills.fetch import FetchResult
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.testing.archives import make_tarball
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 
 _TENANT = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
-
-
-def _make_tarball(files: dict[str, str]) -> bytes:
-    """Create an in-memory gzipped tarball from a dict of path -> content."""
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for name, content in files.items():
-            data = content.encode()
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            info.mtime = int(time.time())
-            tf.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
 
 
 _SKILL_MD = "---\nname: test-skill\ndescription: A test skill.\n---\nTest skill content.\n"
@@ -47,7 +32,7 @@ _SKILL_MD = "---\nname: test-skill\ndescription: A test skill.\n---\nTest skill 
 
 async def test_successful_sync() -> None:
     """Happy path: tarball with a SKILL.md -> MA create -> ResourceOutcome(CREATED)."""
-    tarball = _make_tarball({"my-skill/SKILL.md": _SKILL_MD})
+    tarball = make_tarball({"my-skill/SKILL.md": _SKILL_MD.encode()}, mtime=int(time.time()))
 
     def tarball_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=tarball)

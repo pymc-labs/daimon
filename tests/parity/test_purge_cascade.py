@@ -17,18 +17,11 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
-from anthropic.types.beta import (
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsModelConfig,
-    BetaManagedAgentsSession,
-)
-from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
-from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 from daimon.core.purge import AccountPurgeResult
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import find_platform_principal
+from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,55 +36,24 @@ def _build_populated_router(*, tenant_id: Any, account_id: Any) -> MARouter:
     account-tagged sessions -- the populated fake this scenario requires
     (never a bare, empty `MARouter()`)."""
     now = datetime.now(UTC)
-    agent = BetaManagedAgentsAgent(
+    agent = ma_agent(
         id="agent_parity_purge",
-        archived_at=None,
-        created_at=now,
-        description=None,
-        mcp_servers=[],
-        metadata={"daimon_tenant": str(tenant_id)},
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
         name="purge-test-agent",
-        skills=[],
-        system=None,
-        tools=[],
-        type="agent",
-        updated_at=now,
-        version=1,
+        metadata={"daimon_tenant": str(tenant_id)},
+        created_at=now,
     )
     agent_dict = agent.model_dump(mode="json")
 
-    session_dicts: list[dict[str, Any]] = []
-    for i in range(_SESSIONS_COUNT):
-        s = BetaManagedAgentsSession(
-            outcome_evaluations=[],
+    session_dicts: list[dict[str, Any]] = [
+        ma_session(
             id=f"sesn_parity_purge_{i}",
-            agent=BetaManagedAgentsSessionAgent(
-                id="agent_parity_purge",
-                description=None,
-                mcp_servers=[],
-                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
-                name="purge-test-agent",
-                skills=[],
-                system=None,
-                tools=[],
-                type="agent",
-                version=1,
-            ),
-            archived_at=None,
-            created_at=now,
+            agent=agent,
             environment_id="env_parity_purge",
             metadata={"daimon_account": str(account_id)},
-            resources=[],
-            stats=BetaManagedAgentsSessionStats(),
-            status="idle",
-            title=None,
-            type="session",
-            updated_at=now,
-            usage=BetaManagedAgentsSessionUsage(),
-            vault_ids=[],
-        )
-        session_dicts.append(s.model_dump(mode="json"))
+            created_at=now,
+        ).model_dump(mode="json")
+        for i in range(_SESSIONS_COUNT)
+    ]
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent_dict]))

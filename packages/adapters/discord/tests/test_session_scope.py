@@ -15,106 +15,32 @@ from typing import Any
 
 import httpx
 import jwt as pyjwt
-import pytest
-from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaCloudConfig,
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsSession,
-    BetaPackages,
-    BetaUnrestrictedNetwork,
-)
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.sessions import create_session
+from daimon.testing import (
+    build_fake_anthropic,
+    ma_agent,
+    ma_environment,
+    ma_session,
+    ma_session_agent,
+)
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 TEST_GUILD_ID = 123456789012345678  # arbitrary placeholder guild id
 SECRET = b"a" * 32
 PUBLIC_URL = "https://mcp.example.com/mcp"
 
-EMPTY_CLOUD_CONFIG = BetaCloudConfig(
-    type="cloud",
-    networking=BetaUnrestrictedNetwork(type="unrestricted"),
-    packages=BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
-)
-
-
-def _build_anthropic(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
-    transport = httpx.MockTransport(handler)
-    return AsyncAnthropic(
-        api_key="sk-test",
-        http_client=httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com"),
-    )
-
-
-def _make_agent() -> BetaManagedAgentsAgent:
-    return BetaManagedAgentsAgent.model_validate(
-        {
-            "id": "ag_discord",
-            "type": "agent",
-            "name": "discord-agent",
-            "model": {"id": "claude-opus-4-7"},
-            "metadata": {},
-            "description": None,
-            "archived_at": None,
-            "created_at": "2026-04-21T00:00:00Z",
-            "updated_at": "2026-04-21T00:00:00Z",
-            "version": 1,
-            "mcp_servers": [],
-            "skills": [],
-            "tools": [],
-            "system": None,
-        }
-    )
-
-
-def _make_env() -> BetaEnvironment:
-    return BetaEnvironment(
-        id="env_discord",
-        type="environment",
-        name="discord-env",
-        config=EMPTY_CLOUD_CONFIG,
-        metadata={},
-        description="",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-    )
-
 
 def _session_body(*, session_id: str, agent_id: str, environment_id: str) -> dict[str, Any]:
-    return BetaManagedAgentsSession.model_validate(
-        {
-            "id": session_id,
-            "agent": {
-                "id": agent_id,
-                "mcp_servers": [],
-                "model": {"id": "claude-opus-4-7"},
-                "name": "discord-agent",
-                "skills": [],
-                "tools": [],
-                "type": "agent",
-                "version": 1,
-            },
-            "created_at": "2026-04-21T00:00:00Z",
-            "outcome_evaluations": [],
-            "environment_id": environment_id,
-            "metadata": {},
-            "resources": [],
-            "stats": {},
-            "status": "idle",
-            "type": "session",
-            "updated_at": "2026-04-21T00:00:00Z",
-            "usage": {},
-            "vault_ids": [],
-        }
+    return ma_session(
+        id=session_id,
+        agent=ma_session_agent(id=agent_id, name="discord-agent", model="claude-opus-4-7"),
+        environment_id=environment_id,
     ).model_dump(mode="json")
 
 
@@ -184,7 +110,7 @@ def _warm_rebind_handler(
     call_log: list[tuple[str, str]],
     captured_credential_bodies: list[dict[str, Any]],
 ) -> Callable[[httpx.Request], httpx.Response]:
-    """Existing vault with one claim-less credential: expect DELETE + POST + session."""
+    """Existing vault with an upgraded chat credential stays stable."""
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -201,7 +127,12 @@ def _warm_rebind_handler(
             return httpx.Response(
                 200,
                 json={
-                    "data": [_credential_obj("vcrd_old", "vlt_warm")],
+                    "data": [
+                        {
+                            **_credential_obj("vcrd_old", "vlt_warm"),
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                        }
+                    ],
                     "has_more": False,
                 },
             )
@@ -239,7 +170,7 @@ async def test_discord_turn_creates_session_with_discord_guild_id_scope(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_discord")
 
     captured: list[dict[str, Any]] = []
-    client = _build_anthropic(
+    client = build_fake_anthropic(
         _cold_path_handler(
             account_id=account_id,
             agent_uuid=agent_uuid,
@@ -249,8 +180,8 @@ async def test_discord_turn_creates_session_with_discord_guild_id_scope(
 
     await create_session(
         client,
-        agent=_make_agent(),
-        environment=_make_env(),
+        agent=ma_agent(id="ag_discord", name="discord-agent", model="claude-opus-4-7"),
+        environment=ma_environment(id="env_discord", name="discord-env"),
         account_id=account_id,
         agent_uuid=agent_uuid,
         mcp_settings=McpSettings(
@@ -281,7 +212,7 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_discord")
 
     call_log: list[tuple[str, str]] = []
-    client = _build_anthropic(
+    client = build_fake_anthropic(
         _warm_rebind_handler(
             account_id=account_id,
             agent_uuid=agent_uuid,
@@ -292,8 +223,8 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
 
     await create_session(
         client,
-        agent=_make_agent(),
-        environment=_make_env(),
+        agent=ma_agent(id="ag_discord", name="discord-agent", model="claude-opus-4-7"),
+        environment=ma_environment(id="env_discord", name="discord-env"),
         account_id=account_id,
         agent_uuid=agent_uuid,
         mcp_settings=McpSettings(
@@ -323,7 +254,7 @@ async def test_minted_jwt_resolves_to_discord_scoped_identity(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_discord")
 
     captured: list[dict[str, Any]] = []
-    client = _build_anthropic(
+    client = build_fake_anthropic(
         _cold_path_handler(
             account_id=account_id,
             agent_uuid=agent_uuid,
@@ -333,8 +264,8 @@ async def test_minted_jwt_resolves_to_discord_scoped_identity(
 
     await create_session(
         client,
-        agent=_make_agent(),
-        environment=_make_env(),
+        agent=ma_agent(id="ag_discord", name="discord-agent", model="claude-opus-4-7"),
+        environment=ma_environment(id="env_discord", name="discord-env"),
         account_id=account_id,
         agent_uuid=agent_uuid,
         mcp_settings=McpSettings(

@@ -44,11 +44,10 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import scoped_config_write
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-pytestmark = pytest.mark.asyncio
 
 # `make_tenant` derives the tenant id from `workspace_id` the exact same way
 # `derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))`
@@ -122,20 +121,10 @@ def _make_agent(
     metadata = {"daimon_tenant": str(tenant_id)}
     if managed:
         metadata["daimon_managed"] = "true"
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id=ma_agent_id,
-        type="agent",
         name=name,
-        model={"id": "claude-sonnet-4-6"},
         metadata=metadata,
-        description=None,
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     )
 
 
@@ -182,7 +171,8 @@ def _repo_probe_transport(
     return httpx.MockTransport(handler)
 
 
-def _sent_message(interaction: MagicMock) -> Any:  # noqa: ANN401 -- MagicMock call_args positional arg is untyped by construction
+# MagicMock call_args positional arg is untyped by construction.
+def _sent_message(interaction: MagicMock) -> Any:
     """Return the ephemeral message text an interaction was sent, on whichever half fired."""
     if interaction.response.send_message.called:
         return interaction.response.send_message.call_args.args[0]
@@ -207,6 +197,11 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
 
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
     assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
+    assert "working repo" in _sent_message(interaction)
+    assert "Manage Server" in _sent_message(interaction)
+    assert "with Daimon" in _sent_message(interaction)
+    assert "keys" not in _sent_message(interaction)
+    assert "fork" not in _sent_message(interaction)
 
 
 async def test_reachable_non_managed_target_flips_with_the_scope_row(
@@ -385,12 +380,6 @@ async def test_acked_refusal_uses_followup_send(
     assert refused is True
     interaction.response.send_message.assert_not_called()
     interaction.followup.send.assert_called_once()
-
-
-async def test_shared_agent_message_matches_the_panel_gate_character_for_character() -> None:
-    assert _SHARED_AGENT_MESSAGE == panel_authz._SHARED_AGENT_MESSAGE, (
-        "the chat gate's shared-agent refusal copy must never drift from the panel's"
-    )
 
 
 @pytest.mark.parametrize(

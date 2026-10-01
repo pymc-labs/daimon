@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +29,7 @@ from daimon.adapters.discord import credential_modals as credential_modals_mod
 from daimon.adapters.discord import credential_repo_bind as credential_repo_bind_mod
 from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
+    EnvFileModal,
     McpCredentialModal,
     RepoBindModal,
     SkillRepoModal,
@@ -35,27 +37,40 @@ from daimon.adapters.discord.credential_modals import (
 from daimon.adapters.discord.credential_repo_bind import _SHARED_AGENT_MESSAGE
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import (
+    ENV_FILE_TARGET,
     build_custom_id,
     build_skill_repo_target,
     mint_request_token,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.env_file import MAX_ENV_FILE_BYTES
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.posted_controls import RECEIVED_FOOTER
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.agent_files import list_agent_files
+from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
 )
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.domain import (
+    AgentFileRow,
+    CredentialRequestRow,
+    TaskContinuationRow,
+    TenantRow,
+)
+from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
 from pydantic import HttpUrl
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SECRET_VALUE = "super-secret-env-value-do-not-leak"
@@ -90,7 +105,16 @@ def _runtime(
     settings.github.oauth_scopes = oauth_scopes
     return DiscordRuntime(
         settings=settings,
-        anthropic=anthropic if anthropic is not None else build_stub_anthropic(),
+        anthropic=anthropic
+        if anthropic is not None
+        else build_stub_anthropic(
+            _vault_handler(
+                "unused",
+                "unused",
+                [],
+                tenant_id=str(derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))),
+            )
+        ),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
@@ -107,7 +131,7 @@ def _admin_interaction(*, guild_id: int = _GUILD_ID) -> MagicMock:
     interaction = MagicMock()
     interaction.guild_id = guild_id
     interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 1
+    interaction.user.id = 100000000000000001
     interaction.user.guild_permissions.administrator = True
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
@@ -126,7 +150,7 @@ def _member_interaction(*, guild_id: int = _GUILD_ID) -> MagicMock:
     interaction = MagicMock()
     interaction.guild_id = guild_id
     interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 2
+    interaction.user.id = 100000000000000001
     interaction.user.guild_permissions.administrator = False
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
@@ -144,20 +168,10 @@ def _make_agent(
     metadata = {"daimon_tenant": str(tenant_id)}
     if managed:
         metadata[MA_METADATA_KEY_MANAGED] = "true"
-    return BetaManagedAgentsAgent(
+    return ma_agent(
         id=ma_agent_id,
-        type="agent",
         name=name,
-        model={"id": "claude-sonnet-4-6"},
         metadata=metadata,
-        description=None,
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        version=1,
-        mcp_servers=[],
-        skills=[],
-        tools=[],
-        system=None,
     )
 
 
@@ -176,7 +190,7 @@ async def _seed_repo_request(
     guild_id: int = _GUILD_ID,
 ) -> CredentialRequestRow:
     """Seed a `kind="repo"` request row, deliberately NOT mirroring
-    `_seed_env_request`'s random `workspace_id=f"g-{token[:8]}"` -- a repo
+    `_seed_env_request`'s random `workspace_id=str(_GUILD_ID)` -- a repo
     bind's gate test must land on a tenant that matches the interaction
     builders' `guild_id`, or every gate-touching assertion below passes on
     the wrong-guild branch instead of the one it names.
@@ -204,6 +218,10 @@ async def _seed_repo_request(
             requester_platform_user_id="100000000000000001",
             channel_id="chan-1",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="tester",
+            requested_work=None,
         )
     return row
 
@@ -214,10 +232,11 @@ async def _seed_skill_repo_request(
     ma_agent_id: str,
     target: str,
     guild_id: int = _GUILD_ID,
+    with_origin: bool = False,
 ) -> CredentialRequestRow:
     """Seed a `kind="skill_repo"` request row. Same real-tenant/real-account
-    reasoning as `_seed_repo_request`: `set_binding` writes a proof carrying an
-    FK to `accounts.id`."""
+    reasoning as `_seed_repo_request`: `set_skill_repo_credential` writes a
+    proof carrying an FK to `accounts.id`."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     token = mint_request_token()
@@ -234,10 +253,32 @@ async def _seed_skill_repo_request(
             target=target,
             mcp_server_url=None,
             requester_platform_user_id="100000000000000001",
-            channel_id="chan-1",
+            channel_id="333" if with_origin else "chan-1",
+            platform="discord" if with_origin else None,
+            parent_channel_id="222" if with_origin else None,
+            origin_thread_id="333" if with_origin else None,
+            posted_message_id="444" if with_origin else None,
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id=ma_agent_id,
+            target_name="tester",
+            requested_work=None,
         )
     return row
+
+
+async def _ensure_tenant(session: AsyncSession) -> TenantRow:
+    """The `_GUILD_ID` install, created once however many rows a test seeds.
+
+    `make_tenant` refuses a second insert for the same workspace, and several
+    tests below seed two requests (an env form and an MCP form) in the one
+    install they both have to agree on.
+    """
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    existing = await get_tenant(session, tenant_id)
+    if existing is not None:
+        return existing
+    return await make_tenant(session, platform="discord", workspace_id=str(_GUILD_ID))
 
 
 def _sent_message(interaction: MagicMock) -> str:
@@ -270,22 +311,42 @@ async def _seed_env_request(
     *,
     target: str = "OPENAI_API_KEY",
     expires_at: datetime | None = None,
+    with_origin: bool = False,
+    requested_work: str | None = None,
+    replaces_updated_at: datetime | None = None,
 ) -> CredentialRequestRow:
+    """Seed a `kind="env"` request row.
+
+    `requested_work` is what the card promised to resume once the value
+    lands, and `replaces_updated_at` is the exact `updated_at` of the value
+    the card offered to replace -- the two frozen facts every truthful
+    outcome below is decided from.
+    """
     token = mint_request_token()
     async with db_session_factory() as session, session.begin():
-        tenant = await make_tenant(session, platform="discord", workspace_id=f"g-{token[:8]}")
+        tenant = await _ensure_tenant(session)
+        account = await make_account(session, tenant=tenant)
         row = await create_credential_request(
             session,
             token=token,
             kind="env",
             tenant_id=tenant.id,
-            agent_id=uuid.uuid4(),
-            account_id=uuid.uuid4(),
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            account_id=account.id,
             target=target,
+            replaces_updated_at=replaces_updated_at,
             mcp_server_url=None,
             requester_platform_user_id="100000000000000001",
-            channel_id="chan-1",
+            channel_id="333" if with_origin else "chan-1",
+            platform="discord" if with_origin else None,
+            parent_channel_id="222" if with_origin else None,
+            origin_thread_id="333" if with_origin else None,
+            posted_message_id="444" if with_origin else None,
             expires_at=expires_at or (datetime.now(UTC) + timedelta(minutes=30)),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id=_MA_AGENT_ID,
+            target_name="tester",
+            requested_work=requested_work,
         )
     return row
 
@@ -294,10 +355,13 @@ async def _seed_mcp_request(
     db_session_factory: async_sessionmaker[AsyncSession],
     *,
     mcp_server_url: str = "https://ext.example.com/mcp",
+    with_origin: bool = False,
+    requested_work: str | None = None,
 ) -> CredentialRequestRow:
     token = mint_request_token()
     async with db_session_factory() as session, session.begin():
-        tenant = await make_tenant(session, platform="discord", workspace_id=f"g-{token[:8]}")
+        tenant = await _ensure_tenant(session)
+        account = await make_account(session, tenant=tenant)
         row = await create_credential_request(
             session,
             token=token,
@@ -307,36 +371,96 @@ async def _seed_mcp_request(
             # re-deriving this uuid5, so a random value would make every
             # attach take the agent-not-found branch.
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
-            account_id=uuid.uuid4(),
+            account_id=account.id,
             target="linear",
             mcp_server_url=mcp_server_url,
             requester_platform_user_id="100000000000000001",
-            channel_id="chan-1",
+            channel_id="333" if with_origin else "chan-1",
+            platform="discord" if with_origin else None,
+            parent_channel_id="222" if with_origin else None,
+            origin_thread_id="333" if with_origin else None,
+            posted_message_id="444" if with_origin else None,
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id=_MA_AGENT_ID,
+            target_name="tester",
+            requested_work=requested_work,
         )
     return row
 
 
 def _interaction() -> MagicMock:
     interaction = MagicMock()
+    interaction.guild_id = _GUILD_ID
+    interaction.user.id = 100000000000000001
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
     interaction.edit_original_response = AsyncMock()
     return interaction
 
 
-def _consumed_button_labels(interaction: MagicMock) -> list[str]:
-    """Labels of the disabled buttons the modal edited onto the request message."""
-    labels: list[str] = []
-    for call in interaction.edit_original_response.call_args_list:
-        view = call.kwargs.get("view")
-        if view is None:
-            continue
-        for item in view.children:
-            if isinstance(item, discord.ui.Button):
-                labels.append(str(item.label))
-                assert item.disabled, "the confirmation button must be disabled"
-    return labels
+def _as_card_interaction(interaction: MagicMock) -> MagicMock:
+    """Point an interaction at the card of a row seeded `with_origin=True`.
+
+    `is_credential_interaction_valid` compares the thread, parent and posted
+    message against the row, so a card-carrying row needs an interaction that
+    agrees with it; the partial-message chain is the seam
+    `edit_posted_card` re-renders the card through. Applied to whichever
+    builder a test needs -- the admin and member builders included, since
+    the replacement gate reads the clicker's live guild permissions.
+    """
+    interaction.type = discord.InteractionType.modal_submit
+    interaction.message = None
+    interaction.channel_id = 333
+    interaction.channel = MagicMock(spec=discord.Thread)
+    interaction.channel.parent_id = 222
+    _partial_card(interaction).edit = AsyncMock()
+    return interaction
+
+
+def _card_interaction() -> MagicMock:
+    """A plain modal submit on a card-carrying row."""
+    return _as_card_interaction(_interaction())
+
+
+async def _queued_continuation(
+    db_session_factory: async_sessionmaker[AsyncSession], row: CredentialRequestRow
+) -> TaskContinuationRow | None:
+    """The turn this request queued, if it queued one."""
+    async with db_session_factory() as session:
+        return await get_continuation(session, idempotency_key=row.idempotency_key)
+
+
+async def _stored_key(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    row: CredentialRequestRow,
+    key: str,
+) -> AgentFileRow | None:
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    return next((file for file in files if file.key == key), None)
+
+
+def _partial_card(interaction: MagicMock) -> MagicMock:
+    """The partial message `edit_posted_card` re-renders, off the mock chain."""
+    channel = interaction.client.get_partial_messageable.return_value
+    return channel.get_partial_message.return_value  # pyright: ignore[reportAny]
+
+
+def _card_edits(interaction: MagicMock) -> list[discord.ui.LayoutView]:
+    """Every view the modal re-rendered the request's own card with."""
+    return [call.kwargs["view"] for call in _partial_card(interaction).edit.call_args_list]
+
+
+def _card_text(view: discord.ui.LayoutView) -> str:
+    """All text the rendered card shows, newline-joined."""
+    return "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+
+
+def _card_buttons(view: discord.ui.LayoutView) -> list[discord.ui.Button[Any]]:
+    return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
 
 
 # --- EnvCredentialModal ------------------------------------------------------
@@ -359,84 +483,96 @@ async def test_env_modal_submit_consumes_token_and_writes_agent_file(
     assert rows[0].key == "OPENAI_API_KEY", "the key must come from the consumed row's target"
     assert rows[0].content == _SECRET_VALUE, "the value comes from the modal's TextInput"
 
-    toast = interaction.followup.send.call_args.args[0]
-    assert "OPENAI_API_KEY" in toast, "confirmation names the key"
-    assert _SECRET_VALUE not in toast, "confirmation never echoes the secret value"
+    interaction.followup.send.assert_not_awaited()
+    _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
 
 
-async def test_env_modal_successful_submit_disables_the_request_button(
+async def test_env_modal_successful_submit_edits_the_card_into_the_received_state(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="STRIPE_KEY")
+    row = await _seed_env_request(db_session_factory, target="STRIPE_KEY", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _card_interaction()
     await modal.on_submit(interaction)
 
     interaction.response.defer.assert_awaited_once_with()
-    assert _consumed_button_labels(interaction) == ["✓ Received"], (
-        "a spent request must leave a disabled confirmation on the button's own message"
+    edits = _card_edits(interaction)
+    assert len(edits) == 2, (
+        "the card moves twice: to received when the consume commits, then to what happened"
     )
+    assert RECEIVED_FOOTER in _card_text(edits[0]), (
+        "the received card must say the value arrived and is being saved"
+    )
+    assert "STRIPE_KEY saved for tester." in _card_text(edits[1]), (
+        "the terminal card must report the write that actually landed"
+    )
+    assert _card_buttons(edits[0]) == [], "a spent request must offer no button to click again"
+    assert _card_buttons(edits[1]) == [], "the terminal card offers no button either"
 
 
 async def test_env_modal_rejected_value_leaves_the_request_button_live(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="NEVER_SET")
+    row = await _seed_env_request(db_session_factory, target="NEVER_SET", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = "   "  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _card_interaction()
     await modal.on_submit(interaction)
 
     interaction.edit_original_response.assert_not_awaited()
-    assert _consumed_button_labels(interaction) == [], (
-        "nothing was consumed, so the button must stay clickable for a real value"
+    assert _card_edits(interaction) == [], (
+        "nothing was consumed, so the card must stay in its requested state"
     )
 
 
 async def test_env_modal_dead_request_does_not_touch_the_button(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="ONE_SHOT")
+    row = await _seed_env_request(db_session_factory, target="ONE_SHOT", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
 
     first = EnvCredentialModal(runtime=runtime, request_row=row)
     first.value_input._value = "first-value"  # pyright: ignore[reportPrivateUsage]
-    await first.on_submit(_interaction())
+    await first.on_submit(_card_interaction())
 
     second = EnvCredentialModal(runtime=runtime, request_row=row)
     second.value_input._value = "second-value"  # pyright: ignore[reportPrivateUsage]
-    second_interaction = _interaction()
+    second_interaction = _card_interaction()
     await second.on_submit(second_interaction)
 
-    # The resubmission consumed nothing, so it must not redraw the button.
+    # The resubmission consumed nothing, so it must not redraw the card.
     second_interaction.edit_original_response.assert_not_awaited()
+    assert _card_edits(second_interaction) == [], (
+        "a resubmission on a spent request must leave the card as the first one left it"
+    )
 
 
-async def test_env_modal_reports_success_even_when_the_button_edit_fails(
+async def test_env_modal_stores_the_value_even_when_the_card_edit_fails(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS")
+    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS_TOKEN", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
-    interaction.edit_original_response = AsyncMock(
+    interaction = _card_interaction()
+    _partial_card(interaction).edit = AsyncMock(
         side_effect=discord.HTTPException(MagicMock(), "message deleted")
     )
     await modal.on_submit(interaction)
 
     rows = await list_agent_files(db_session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    assert len(rows) == 1, "the secret is written before the confirmation edit is attempted"
-    toast = interaction.followup.send.call_args.args[0]
-    assert "EDIT_FAILS" in toast, (
-        "a failed confirmation edit is a feedback downgrade, never a failed submission"
+    assert len(rows) == 1, "the secret is written before the card edit is attempted"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "applied", (
+        "a card that could not be redrawn is a feedback downgrade, never a failed submission"
     )
 
 
@@ -536,17 +672,16 @@ async def test_env_modal_value_over_byte_cap_writes_nothing_and_does_not_consume
 async def test_env_modal_confirmation_states_shared_agent_exposure(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="SHARED_KEY")
+    row = await _seed_env_request(db_session_factory, target="SHARED_KEY", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _card_interaction()
     await modal.on_submit(interaction)
 
-    toast = interaction.followup.send.call_args.args[0]
-    assert "anyone who talks to this agent" in toast, (
-        "confirmation must disclose the credential is usable by every caller of the agent"
+    assert "Anyone who talks to tester can use it." in _card_text(_card_edits(interaction)[-1]), (
+        "the card must disclose the credential is usable by every caller of the agent"
     )
 
 
@@ -573,6 +708,32 @@ async def test_env_modal_never_logs_the_secret_value(
 
 
 _MA_AGENT_ID = "agent_01CredModal"
+
+
+async def test_env_modal_without_crypto_keys_tells_the_person_and_keeps_the_request(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """H6: no DAIMON_CRYPTO__KEYS means nothing is stored and the person learns why."""
+    row = await _seed_env_request(db_session_factory, target="OPENAI_API_KEY")
+    keyless = async_sessionmaker(
+        bind=db_session_factory.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    runtime = _runtime(sessionmaker=keyless)
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _interaction()
+    await modal.on_submit(interaction)
+
+    rows = await list_agent_files(db_session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert rows == [], "nothing is stored without encryption keys"
+    spent = await peek_credential_request(db_session, token=row.token)
+    assert spent is not None and spent.used_at is None, "the request stays live for a retry"
+    assert "DAIMON_CRYPTO__KEYS" in _sent_message(interaction), "the operator step is named"
+    _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
 
 
 def _ma_agent_json(tenant_id: str, *, mcp_servers: list[dict[str, str]] | None = None) -> Any:
@@ -603,22 +764,25 @@ def _vault_handler(
     tenant_id: str = "",
     agent_updates: list[dict[str, Any]] | None = None,
 ) -> Any:
+    # The agent keeps what was attached, so the publish step's re-read sees it.
+    attached: list[dict[str, str]] = []
+
     def _handler(req: httpx.Request) -> httpx.Response:
         # Agent routes back the attach half of the flow (#49): the modal must
         # add the server to the agent it just stored a credential for.
         if req.method == "GET" and req.url.path == "/v1/agents":
             return httpx.Response(
-                200, json={"data": [_ma_agent_json(tenant_id)], "has_more": False}
+                200,
+                json={"data": [_ma_agent_json(tenant_id, mcp_servers=attached)], "has_more": False},
             )
         if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
-            return httpx.Response(200, json=_ma_agent_json(tenant_id))
+            return httpx.Response(200, json=_ma_agent_json(tenant_id, mcp_servers=attached))
         if req.method == "POST" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
             body = json.loads(req.content)
             if agent_updates is not None:
                 agent_updates.append(body)
-            return httpx.Response(
-                200, json=_ma_agent_json(tenant_id, mcp_servers=body.get("mcp_servers") or [])
-            )
+            attached[:] = body.get("mcp_servers") or []
+            return httpx.Response(200, json=_ma_agent_json(tenant_id, mcp_servers=attached))
         if req.method == "GET" and req.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -662,7 +826,9 @@ async def test_mcp_modal_submit_consumes_token_and_writes_vault_credential(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_mcp_request(db_session_factory, mcp_server_url="https://ext.example.com/mcp")
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://ext.example.com/mcp", with_origin=True
+    )
     vault_id = "vlt_credmodal"
     per_agent_display = f"daimon-mcp:{row.account_id}:{row.agent_id}"
     creds_created: list[dict[str, Any]] = []
@@ -685,7 +851,7 @@ async def test_mcp_modal_submit_consumes_token_and_writes_vault_credential(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _card_interaction()
     await modal.on_submit(interaction)
 
     assert len(creds_created) == 1, "exactly one credential must be POSTed to the per-agent vault"
@@ -707,10 +873,12 @@ async def test_mcp_modal_submit_consumes_token_and_writes_vault_credential(
         for t in attached["tools"]
     ), "MA rejects an mcp_servers entry with no matching mcp_toolset, so both must be written"
 
-    toast = interaction.followup.send.call_args.args[0]
-    assert "anyone who talks to this agent" in toast.lower(), (
-        "confirmation must disclose the credential is usable by every caller of the agent"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "tester is connected to linear." in card, "the card names what was connected"
+    assert "its tools are available from your next message here" in card.lower(), (
+        "the card must say when the connection becomes usable"
     )
+    interaction.followup.send.assert_not_awaited()
 
 
 async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no_vault_write(
@@ -734,7 +902,11 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "not configured" in message, "must report the daimon-mcp misconfiguration"
+    assert "Ask the operator to finish setup" in message, "must name who can fix setup"
+    assert "Nothing was saved" in message, "the guard runs before any value is written"
+    assert "public_url" not in message and "jwt_secret" not in message, (
+        "internal setting names must not be shown to people"
+    )
 
     # The token must still be unconsumed -- retry with configured settings must succeed.
     retry_runtime = _runtime(
@@ -754,17 +926,30 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     retry_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
     retry_interaction = _interaction()
     await retry_modal.on_submit(retry_interaction)
-    retry_message = retry_interaction.followup.send.call_args.args[0]
-    assert "not configured" not in retry_message, (
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "applied", (
         "the request must still be consumable once daimon-mcp is configured"
     )
+    retry_interaction.followup.send.assert_not_awaited()
 
 
-async def test_mcp_modal_vault_write_failure_surfaces_only_exception_class_name(
+async def test_mcp_modal_vault_write_failure_keeps_exception_details_private(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     def _failing_vault(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/agents":
+            agent = ma_agent(
+                id=_MA_AGENT_ID,
+                name="test-agent",
+                metadata={
+                    "daimon_tenant": str(
+                        derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+                    )
+                },
+            )
+            return list_response([agent.model_dump(mode="json")])
         raise httpx.ConnectError("upstream reset by peer -- request envelope: secret=abc123")
 
     row = await _seed_mcp_request(db_session_factory)
@@ -781,7 +966,7 @@ async def test_mcp_modal_vault_write_failure_surfaces_only_exception_class_name(
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "APIConnectionError" in message, "only the exception class name is surfaced"
+    assert "APIConnectionError" not in message, "exception class names stay in operator logs"
     assert "secret=abc123" not in message, (
         "the stringified exception (which can carry the request envelope) must never reach the user"
     )
@@ -797,9 +982,20 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
     """
 
     def _failing_vault(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/agents":
+            agent = ma_agent(
+                id=_MA_AGENT_ID,
+                name="test-agent",
+                metadata={
+                    "daimon_tenant": str(
+                        derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+                    )
+                },
+            )
+            return list_response([agent.model_dump(mode="json")])
         raise httpx.ConnectError("upstream reset by peer")
 
-    row = await _seed_mcp_request(db_session_factory)
+    row = await _seed_mcp_request(db_session_factory, with_origin=True)
     runtime = _runtime(
         sessionmaker=db_session_factory,
         anthropic=build_stub_anthropic(_failing_vault),
@@ -809,14 +1005,70 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    edits = _card_edits(interaction)
+    assert RECEIVED_FOOTER in _card_text(edits[0]), (
+        "a consumed request moves its card to received regardless of the write's outcome"
+    )
+    assert _card_buttons(edits[0]) == [], "the received card offers no button to click again"
+    assert "Nothing was saved for tester." in _card_text(edits[-1]), (
+        "a card left on 'Saving…' would describe a save that has already stopped"
+    )
+    message = interaction.followup.send.call_args.args[0]
+    assert "Nothing was saved" in message, "the failure must still be reported"
+    assert "APIConnectionError" not in message, "exception classes stay in operator logs"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "write_failed", (
+        "the spent request records that nothing was written"
+    )
+    assert await _queued_continuation(db_session_factory, row) is None, (
+        "no turn may resume on a token that never reached a store"
+    )
+
+
+async def test_mcp_missing_server_url_records_write_failed_rather_than_staying_pending(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A row that lost the server it named cannot be saved against anything.
+
+    The consume already happened, so the request has to end somewhere: it
+    ends as `write_failed`, and no continuation is queued, because there is
+    no connection for a waiting turn to use.
+    """
+    row = await _seed_mcp_request(db_session_factory, mcp_server_url=None)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                "vlt_no_url",
+                f"daimon-mcp:{row.account_id}:{row.agent_id}",
+                [],
+                tenant_id=str(row.tenant_id),
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
     interaction = _interaction()
     await modal.on_submit(interaction)
 
-    assert _consumed_button_labels(interaction) == ["✓ Received"], (
-        "a consumed request disables its button regardless of the write's outcome"
+    assert "missing its server URL" in _sent_message(interaction), (
+        "the submitter is still told why nothing happened"
     )
-    message = interaction.followup.send.call_args.args[0]
-    assert "APIConnectionError" in message, "the failure is still reported in the reply"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "write_failed", (
+        "the spent request must not sit with no recorded outcome"
+    )
+    assert await _queued_continuation(db_session_factory, row) is None, (
+        "nothing was saved, so no turn is owed"
+    )
 
 
 async def test_mcp_modal_never_logs_the_raw_token(
@@ -827,7 +1079,9 @@ async def test_mcp_modal_never_logs_the_raw_token(
     per_agent_display = f"daimon-mcp:{row.account_id}:{row.agent_id}"
     runtime = _runtime(
         sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(_vault_handler(vault_id, per_agent_display, [])),
+        anthropic=build_stub_anthropic(
+            _vault_handler(vault_id, per_agent_display, [], tenant_id=str(row.tenant_id))
+        ),
         public_url=HttpUrl("https://mcp.example.com/mcp"),
         jwt_secret="x" * 32,
     )
@@ -1086,11 +1340,9 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert hygiene_pat not in repr(entry), (
             f"[{scenario}] no log record may contain the pasted token"
         )
-        pat_masked = entry.get("pat_masked")
-        if pat_masked is not None:
-            assert pat_masked != hygiene_pat, (
-                f"[{scenario}] the mask itself must not equal the full value"
-            )
+        assert not {"pat_masked", "token_masked", "masked"} & entry.keys(), (
+            f"[{scenario}] no log record may carry even a masked tail of the token"
+        )
 
     minted_custom_id = build_custom_id(row.token)
     assert hygiene_pat not in minted_custom_id, (
@@ -1108,7 +1360,8 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert "can't access this repo" in message
     elif scenario == "unexpected_exception":
         message = _sent_message(interaction)
-        assert "ConnectError" in message, "only the exception class name must be surfaced"
+        assert "ConnectError" not in message, "exception classes stay in operator logs"
+        assert "working repo did not finish" in message, "the failed operation must be clear"
     elif scenario == "refused_by_gate":
         assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
         assert not any(
@@ -1122,14 +1375,17 @@ async def test_repo_modal_never_leaks_the_pasted_token(
 # --- SkillRepoModal -----------------------------------------------------
 
 
-async def test_skill_repo_modal_binds_the_repo_so_a_later_sync_can_resolve_the_pat(
+async def test_skill_repo_submission_writes_the_skill_credential_not_the_working_repo_binding(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The pasted token must produce an agent_repo_binding row, not just a
-    credential. The skill-sync resolver walks this tenant's bindings FOR THIS
-    REPO to find a per-agent PAT, so without the row the stored token is
-    unreachable and every later sync falls back to an anonymous 404."""
+    """The pasted token lands as this repo's SKILL credential, and nowhere else.
+
+    A later sync of the same repo resolves its token from that row, so it has
+    to exist -- but writing an `agent_repo_binding` instead (or as well) would
+    silently move the working repo the agent clones and runs, which is a
+    separate decision with its own admin gate that a skill import must never
+    make."""
     ma_agent_id = "agent_skill_repo_bind"
     monkeypatch.setattr(
         credential_repo_bind_mod, "pat_can_access_repo", AsyncMock(return_value=True)
@@ -1155,13 +1411,23 @@ async def test_skill_repo_modal_binds_the_repo_so_a_later_sync_can_resolve_the_p
     await modal.on_submit(_admin_interaction())
 
     async with db_session_factory() as session:
+        credential = await get_skill_repo_credential(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            repo_url="https://github.com/o/skills-repo",
+        )
         binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    assert binding is not None, (
-        "a pasted skill-repo token must bind the repo -- without the binding the "
-        "credential is stored but unreachable, which is the loop this pins"
+    assert credential is not None, (
+        "without this row the stored token is unreachable and every later sync of the "
+        "skill repo falls back to an anonymous 404"
     )
-    assert binding.ma_secret_ref == f"inline-pat:{row.agent_id}"
-    assert binding.proof_kind == "pat"
+    assert credential.ma_secret_ref == f"inline-pat:{row.agent_id}"
+    assert credential.proof_kind == "pat"
+    assert credential.default_branch == "main", "the branch comes from the request's own target"
+    assert binding is None, (
+        "a skill import must not change the working repo the agent clones and runs"
+    )
 
 
 async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_agent(
@@ -1195,6 +1461,7 @@ async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_ag
         db_session_factory,
         ma_agent_id=ma_agent_id,
         target=build_skill_repo_target("https://github.com/o/attach-repo", "main", ""),
+        with_origin=True,
     )
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
     agent = _make_agent(ma_agent_id=ma_agent_id, tenant_id=tenant_id, name="daimon", managed=True)
@@ -1219,10 +1486,1391 @@ async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_ag
 
     modal = SkillRepoModal(runtime=runtime, request_row=row)
     modal.pat_in._value = "ghp_attach_token"  # pyright: ignore[reportPrivateUsage]
-    await modal.on_submit(_admin_interaction())
+    interaction = _as_card_interaction(_admin_interaction())
+    await modal.on_submit(interaction)
 
     assert updates, "the modal must call agents.update to attach the imported skills"
     attached_ids = {entry["skill_id"] for entry in updates[-1]["skills"]}
     assert "skill_01imported" in attached_ids, (
         "the newly imported skill must be attached to the agent the request named"
     )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "1 skill added to tester from o/attach-repo." in card, (
+        "the card counts what was imported and names where it came from"
+    )
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure_stage", ["verification", "authorization", "import"])
+async def test_skill_repo_failure_reports_only_confirmed_token_saves(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id="agent_skill_repo_failure",
+        target=build_skill_repo_target("https://github.com/o/skills-repo", "main", ""),
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(
+            lambda request: list_response(
+                [
+                    ma_agent(
+                        id="agent_skill_repo_failure",
+                        name="test-agent",
+                        metadata={"daimon_tenant": str(row.tenant_id)},
+                    ).model_dump(mode="json")
+                ]
+            )
+        ),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+    probes = 0
+
+    def github_response(request: httpx.Request) -> httpx.Response:
+        nonlocal probes
+        if request.url.path == "/repos/o/skills-repo":
+            probes += 1
+            if failure_stage == "verification":
+                raise httpx.ConnectError("private upstream detail", request=request)
+            if failure_stage == "authorization" and probes == 2:
+                return httpx.Response(403)
+            return httpx.Response(200, json={"private": True})
+        raise httpx.ConnectError("private upstream detail", request=request)
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        partial(original_client, transport=httpx.MockTransport(github_response)),
+    )
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_skill_failure_token"  # pyright: ignore[reportPrivateUsage]  # Discord input boundary
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    message = interaction.followup.send.call_args.args[0]
+    async with db_session_factory() as session:
+        credential = await get_skill_repo_credential(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            repo_url="https://github.com/o/skills-repo",
+        )
+        persisted = await peek_credential_request(session, token=row.token)
+    if failure_stage == "import":
+        assert credential is not None, "the skill credential was committed before import failed"
+        assert "Token saved" in message, "an import failure must preserve confirmed save success"
+        assert persisted is not None and persisted.outcome == "write_failed", (
+            "a stored token whose skills never imported is not an applied request"
+        )
+    else:
+        assert credential is None, "failed authorization must not store the token"
+        assert "Token saved" not in message and "Token stored" not in message, (
+            "a failure before storage must not claim that the token was saved"
+        )
+    assert "retry" in message, "a consumed request needs a concrete retry instruction"
+    assert "private upstream detail" not in message and "ConnectError" not in message, (
+        "unexpected exception details stay in operator logs"
+    )
+
+
+@pytest.mark.parametrize("wrong_install", [False, True])
+async def test_env_submit_rechecks_requester_and_install_before_consuming(
+    db_session_factory: async_sessionmaker[AsyncSession], wrong_install: bool
+) -> None:
+    row = await _seed_env_request(db_session_factory)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE
+    interaction = _interaction()
+    if wrong_install:
+        interaction.guild_id = 222
+    else:
+        interaction.user.id = 999
+    await modal.on_submit(interaction)
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert persisted is not None and persisted.used_at is None, (
+        "an invalid caller must not consume the request"
+    )
+    assert files == [], "an invalid caller must not write a credential"
+    assert "no longer valid" in interaction.followup.send.call_args.args[0], (
+        "submission must honestly refuse changed authority"
+    )
+
+
+@pytest.mark.parametrize("recreated", [False, True])
+async def test_env_submit_never_saves_to_a_deleted_target_or_recreated_namesake(
+    db_session_factory: async_sessionmaker[AsyncSession], recreated: bool
+) -> None:
+    row = await _seed_env_request(db_session_factory)
+    namesake = ma_agent(
+        id="agent_recreated",
+        name="test-agent",
+        metadata={"daimon_tenant": str(row.tenant_id)},
+    )
+    anthropic = build_fake_anthropic(
+        lambda request: list_response([namesake.model_dump(mode="json")] if recreated else [])
+    )
+    modal = EnvCredentialModal(
+        runtime=_runtime(sessionmaker=db_session_factory, anthropic=anthropic), request_row=row
+    )
+    modal.value_input._value = _SECRET_VALUE
+    interaction = _interaction()
+    await modal.on_submit(interaction)
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert persisted is not None and persisted.used_at is None, (
+        "missing identity must not consume the request"
+    )
+    assert files == [], "a namesake must not receive the old target's credential"
+    assert "no longer exists" in interaction.followup.send.call_args.args[0], (
+        "missing target needs a specific explanation"
+    )
+
+
+async def test_env_submit_updates_stored_card_when_modal_payload_omits_message(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_request(db_session_factory, with_origin=True)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE
+    interaction = _interaction()
+    interaction.type = discord.InteractionType.modal_submit
+    interaction.message = None
+    interaction.channel_id = 333
+    interaction.channel = MagicMock(spec=discord.Thread)
+    interaction.channel.parent_id = 222
+    partial_channel = interaction.client.get_partial_messageable.return_value
+    card = partial_channel.get_partial_message.return_value
+    card.edit = AsyncMock()
+    await modal.on_submit(interaction)
+    interaction.client.get_partial_messageable.assert_called_with(333)
+    partial_channel.get_partial_message.assert_called_with(444)
+    assert card.edit.await_count == 2, "the card moves to received, then to applied"
+    interaction.edit_original_response.assert_not_awaited()
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert len(files) == 1, (
+        "an authenticated modal remains valid without an optional message payload"
+    )
+
+
+# --- EnvFileModal ------------------------------------------------------------
+
+
+async def _seed_env_file_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    with_origin: bool = True,
+) -> CredentialRequestRow:
+    """Seed a `kind="env_file"` request row, carrying its card by default:
+    the file form's only success receipt is the card it edits, so a row with
+    no posted message would make the interesting assertion unobservable."""
+    token = mint_request_token()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(_GUILD_ID))
+        row = await create_credential_request(
+            session,
+            token=token,
+            kind="env_file",
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            account_id=uuid.uuid4(),
+            target=ENV_FILE_TARGET,
+            mcp_server_url=None,
+            requester_platform_user_id="100000000000000001",
+            channel_id="333" if with_origin else "chan-1",
+            platform="discord" if with_origin else None,
+            parent_channel_id="222" if with_origin else None,
+            origin_thread_id="333" if with_origin else None,
+            posted_message_id="444" if with_origin else None,
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            idempotency_key=uuid.uuid4(),
+            target_ma_agent_id="ag_test",
+            target_name="tester",
+            requested_work=None,
+        )
+    return row
+
+
+def _uploaded(content: bytes, *, size: int | None = None) -> MagicMock:
+    """One uploaded attachment, faked at the platform boundary.
+
+    `size` is what Discord announces in the interaction payload, which the
+    form reads before downloading anything; it defaults to the truth.
+    """
+    attachment = MagicMock(spec=discord.Attachment)
+    attachment.size = len(content) if size is None else size
+    attachment.read = AsyncMock(return_value=content)
+    return attachment
+
+
+def _env_file_modal(
+    *,
+    runtime: DiscordRuntime,
+    row: CredentialRequestRow,
+    attachment: MagicMock | None,
+) -> EnvFileModal:
+    modal = EnvFileModal(runtime=runtime, request_row=row)
+    modal.file_input._values = [] if attachment is None else [attachment]  # pyright: ignore[reportPrivateUsage]
+    return modal
+
+
+async def test_env_file_oversize_attachment_is_refused_before_download(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    attachment = _uploaded(b"TOGGL_TOKEN=abc\n", size=MAX_ENV_FILE_BYTES + 1)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory), row=row, attachment=attachment
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    attachment.read.assert_not_awaited()
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert persisted is not None and persisted.used_at is None, (
+        "a file too large to read costs nothing -- the request must stay clickable"
+    )
+    assert files == [], "nothing may be written from a file that was never downloaded"
+    assert _card_edits(interaction) == [], "the card must stay in its requested state"
+    assert "too big" in _sent_message(interaction), (
+        "the person needs to know the file itself is the problem"
+    )
+
+
+async def test_env_file_parse_error_does_not_consume_the_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"TOGGL_TOKEN\nOPENAI_API_KEY=ok\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert persisted is not None and persisted.used_at is None, (
+        "a typo in the file must not burn the one click this card is good for"
+    )
+    assert files == [], "a rejected file is rejected whole -- not even its readable line lands"
+    assert _card_edits(interaction) == [], (
+        "nothing was consumed, so the card must stay in its requested state"
+    )
+    message = _sent_message(interaction)
+    assert "line 1" in message, "the rejection names the line that could not be read"
+    assert "No keys were saved for tester" in message, "the rejection names the agent"
+
+
+async def test_env_file_collision_refuses_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="TOGGL_TOKEN",
+            content="the-value-already-stored",
+            set_by_account_id=None,
+        )
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"TOGGL_TOKEN=replacement-value\nNEW_KEY=brand-new-value\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert [file.key for file in files] == ["TOGGL_TOKEN"], (
+        "one colliding key refuses the whole file -- the other key must not land alone"
+    )
+    assert files[0].content == "the-value-already-stored", (
+        "the key that was already set must keep the value it had"
+    )
+    assert persisted is not None and persisted.outcome == "stale_replacement", (
+        "the spent request must record that it refused rather than applied"
+    )
+
+    edits = _card_edits(interaction)
+    assert len(edits) == 1, "a refused upload re-renders its own card exactly once"
+    card = _card_text(edits[0])
+    assert "TOGGL_TOKEN" in card and "line 1" in card, (
+        "the refusal names the colliding key and where it was in the file"
+    )
+    assert "replacement-value" not in card and "the-value-already-stored" not in card, (
+        "no value may reach the card -- it is public to the channel"
+    )
+    assert "TOGGL_TOKEN" in _sent_message(interaction), (
+        "the uploader gets the same refusal without having to read the card"
+    )
+
+
+async def test_env_file_valid_upload_writes_all_keys_atomically_and_edits_card_applied(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(
+            b"# our keys\nTOGGL_TOKEN=toggl-secret\nexport OPENAI_API_KEY='openai-secret'\n"
+        ),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert {file.key: file.content for file in files} == {
+        "OPENAI_API_KEY": "openai-secret",
+        "TOGGL_TOKEN": "toggl-secret",
+    }, "every key in an accepted file lands, with the value the file gave it"
+    assert persisted is not None and persisted.outcome == "applied", (
+        "the spent request must record that the import landed"
+    )
+
+    edits = _card_edits(interaction)
+    assert len(edits) == 1, "an applied upload re-renders its own card exactly once"
+    card = _card_text(edits[0])
+    assert "2 keys saved for tester" in card, "the card counts what was saved"
+    assert "toggl-secret" not in card and "openai-secret" not in card, "no value may reach the card"
+    interaction.followup.send.assert_not_awaited()
+
+
+async def test_env_file_key_appearing_mid_write_rolls_back_the_whole_file(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The compare-and-set that fails on the second key must undo the first.
+
+    A key can be created between the collision read and the write, and the
+    store reports that as a failed precondition rather than raising. Without
+    the savepoint the file would land half-applied -- the one failure mode
+    nobody notices, because the agent simply behaves as if one key were
+    never given.
+    """
+    row = await _seed_env_file_request(db_session_factory)
+    real_put = credential_modals_mod.put_agent_file_if_unchanged
+    seen: list[str] = []
+
+    async def _fails_on_the_second_key(session: AsyncSession, **kwargs: Any) -> Any:
+        seen.append(str(kwargs["key"]))
+        if len(seen) == 1:
+            return await real_put(session, **kwargs)
+        return None
+
+    monkeypatch.setattr(
+        credential_modals_mod, "put_agent_file_if_unchanged", _fails_on_the_second_key
+    )
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"FIRST_KEY=first-value\nSECOND_KEY=second-value\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert seen == ["FIRST_KEY", "SECOND_KEY"], "the write loop must reach the failing key"
+    assert files == [], "the key written before the failure must be rolled back with it"
+    assert persisted is not None and persisted.used_at is not None, (
+        "the request stays spent: the savepoint rolls back the writes, not the consume"
+    )
+    assert persisted.outcome == "stale_replacement", (
+        "a key that appeared mid-write is recorded the same way a collision is"
+    )
+    card = _card_text(_card_edits(interaction)[0])
+    assert "SECOND_KEY" in card, "the refusal names the key that was already set"
+    assert "second-value" not in card and "first-value" not in card, "no value may reach the card"
+
+
+# --- submission outcomes: continuation, replacement, dispatch ----------------
+
+
+async def test_env_submission_records_a_private_input_continuation_in_the_same_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The value and the follow-up turn it unblocks commit together, or not at all.
+
+    A continuation queued without its value would run a billed turn against a
+    key the agent does not have; a value stored without its continuation would
+    leave the person waiting for a turn nobody will run.
+    """
+    row = await _seed_env_request(
+        db_session_factory,
+        target="TOGGL_TOKEN",
+        with_origin=True,
+        requested_work="chart last month's tracked hours",
+    )
+    runtime = _runtime(sessionmaker=db_session_factory)
+
+    async def _write_fails(session: AsyncSession, **kwargs: Any) -> Any:
+        raise RuntimeError("the write blew up")
+
+    monkeypatch.setattr(credential_modals_mod, "put_agent_file_if_unchanged", _write_fails)
+    doomed = EnvCredentialModal(runtime=runtime, request_row=row)
+    doomed.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await doomed.on_submit(_card_interaction())
+
+    assert await _queued_continuation(db_session_factory, row) is None, (
+        "a write that rolled back must leave no turn queued behind it"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.used_at is None, (
+        "the consume rolls back with the write it shares a transaction with"
+    )
+
+    monkeypatch.undo()
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_card_interaction())
+
+    queued = await _queued_continuation(db_session_factory, row)
+    assert queued is not None, "an applied value owes exactly one queued turn"
+    assert queued.status == "pending", "the modal queues the turn; it never claims it"
+    assert queued.reason == "private_input_applied", (
+        "the reason distinguishes this from a task handoff's continuation"
+    )
+    assert queued.idempotency_key == row.idempotency_key, (
+        "the request's own key is what makes the queued turn at-most-once"
+    )
+    assert queued.requested_work == "chart last month's tracked hours", (
+        "the turn resumes the work the card promised, in the person's own words"
+    )
+    assert queued.thread_id == "333" and queued.parent_channel_id == "222", (
+        "the turn is addressed to the thread the card was posted in"
+    )
+    assert queued.target_ma_agent_id == _MA_AGENT_ID, (
+        "the destination is the concrete agent the row froze, never a name"
+    )
+    stored = await _stored_key(db_session_factory, row, "TOGGL_TOKEN")
+    assert stored is not None and stored.content == _SECRET_VALUE, (
+        "the value the turn needs landed in the same transaction"
+    )
+
+
+async def test_env_submission_records_none_requested_work_for_a_save_only_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Nothing was waiting on this key, so the card promises no turn."""
+    row = await _seed_env_request(db_session_factory, target="SAVE_ONLY_TOKEN", with_origin=True)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    queued = await _queued_continuation(db_session_factory, row)
+    assert queued is not None and queued.requested_work is None, (
+        "a save-only request is still recorded, carrying no work to resume"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "SAVE_ONLY_TOKEN saved for tester." in card, "the card reports the key that landed"
+    assert "next message" not in card, (
+        "with nothing waiting on it, the card must not promise a turn"
+    )
+
+
+async def test_stale_replacement_leaves_the_stored_value_alone_and_renders_superseded(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The card promised to replace a specific value; that value already moved."""
+    row = await _seed_env_request(
+        db_session_factory,
+        target="ROTATING_KEY",
+        with_origin=True,
+        requested_work="rerun the export with the new key",
+        replaces_updated_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="ROTATING_KEY",
+            content="the-value-someone-else-wrote",
+            set_by_account_id=None,
+        )
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_admin_interaction())
+    await modal.on_submit(interaction)
+
+    stored = await _stored_key(db_session_factory, row, "ROTATING_KEY")
+    assert stored is not None and stored.content == "the-value-someone-else-wrote", (
+        "a failed precondition must leave the current value exactly as it was"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement", (
+        "the spent request records that it replaced nothing"
+    )
+    assert await _queued_continuation(db_session_factory, row) is None, (
+        "no value landed, so no turn may resume the work waiting on it"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "ROTATING_KEY was not replaced for tester." in card, (
+        "the card must say the replacement did not happen"
+    )
+    assert "Someone else changed it while this form was open." in card, "and say why"
+    assert _SECRET_VALUE not in card, "no value may reach the card"
+    assert "was not replaced" in _sent_message(interaction), (
+        "the submitter is told the same thing without having to read the card"
+    )
+
+
+async def test_replacement_needs_admin_at_submit_renders_refused_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Replacing a key on a shared agent is re-decided when the form is submitted.
+
+    The precondition itself is satisfiable here -- the stored value is exactly
+    the one the card froze -- so only the gate can stop this write, which is
+    the mutation this test pins.
+    """
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        stored = await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            key="SHARED_SECRET",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    row = await _seed_env_request(
+        db_session_factory,
+        target="SHARED_SECRET",
+        with_origin=True,
+        requested_work="rerun the nightly export",
+        replaces_updated_at=stored.updated_at,
+    )
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=_MA_AGENT_ID, tenant_id=tenant_id, name="daimon", managed=True)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    current = await _stored_key(db_session_factory, row, "SHARED_SECRET")
+    assert current is not None and current.content == "the-value-in-use", (
+        "a refused replacement must not touch the value in use"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.used_at is not None, (
+        "the click is spent either way: the gate runs after the consume"
+    )
+    assert persisted.outcome == "write_failed", "the trail records that nothing was written"
+    assert await _queued_continuation(db_session_factory, row) is None, (
+        "a refused write owes no turn"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "SHARED_SECRET was not replaced for tester." in card, (
+        "the card must say the replacement was refused"
+    )
+    assert "An admin can ask" in card, "and say who can make it"
+    assert "was not replaced" in _sent_message(interaction), (
+        "the submitter gets the refusal in their own reply too"
+    )
+
+
+async def test_success_paths_send_no_ephemeral_receipt(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The card is the receipt; an ephemeral would say the same thing twice."""
+    env_row = await _seed_env_request(db_session_factory, target="NO_TOAST_TOKEN", with_origin=True)
+    env_modal = EnvCredentialModal(
+        runtime=_runtime(sessionmaker=db_session_factory), request_row=env_row
+    )
+    env_modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    env_interaction = _card_interaction()
+    await env_modal.on_submit(env_interaction)
+    env_interaction.followup.send.assert_not_awaited()
+    assert "NO_TOAST_TOKEN saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
+        "sanity: the card this receipt was dropped in favour of actually rendered"
+    )
+
+    mcp_row = await _seed_mcp_request(db_session_factory, with_origin=True)
+    mcp_runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                "vlt_no_toast",
+                f"daimon-mcp:{mcp_row.account_id}:{mcp_row.agent_id}",
+                [],
+                tenant_id=str(mcp_row.tenant_id),
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    mcp_modal = McpCredentialModal(runtime=mcp_runtime, request_row=mcp_row)
+    mcp_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+    mcp_interaction = _card_interaction()
+    await mcp_modal.on_submit(mcp_interaction)
+    mcp_interaction.followup.send.assert_not_awaited()
+    assert "tester is connected to linear." in _card_text(_card_edits(mcp_interaction)[-1]), (
+        "sanity: the card this receipt was dropped in favour of actually rendered"
+    )
+
+
+async def test_dispatch_is_spawned_after_the_card_edit_on_the_origin_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The follow-up turn is handed to the bot, never awaited inside the form.
+
+    Awaiting a billed turn here would blow the interaction's lifetime long
+    before the turn finished, and it must not start until the card the person
+    is watching already says what happened.
+    """
+    row = await _seed_env_request(
+        db_session_factory,
+        target="DISPATCHED_KEY",
+        with_origin=True,
+        requested_work="finish the export you started",
+    )
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    thread = MagicMock(spec=discord.Thread)
+    interaction.client.get_channel = MagicMock(return_value=thread)
+    interaction.client.dispatch_continuations_in_thread = MagicMock()
+    interaction.client._spawn = MagicMock()
+    order = MagicMock()
+    order.attach_mock(_partial_card(interaction).edit, "card_edit")
+    order.attach_mock(interaction.client._spawn, "spawn")
+
+    await modal.on_submit(interaction)
+
+    interaction.client.get_channel.assert_called_once_with(333)
+    interaction.client.dispatch_continuations_in_thread.assert_called_once_with(
+        tenant_id=row.tenant_id, thread=thread, guild_id=str(_GUILD_ID)
+    )
+    interaction.client._spawn.assert_called_once_with(
+        interaction.client.dispatch_continuations_in_thread.return_value
+    )
+    assert [call[0] for call in order.mock_calls] == ["card_edit", "card_edit", "spawn"], (
+        "the turn is only handed over once the card already reports the write"
+    )
+
+
+async def test_dispatch_is_skipped_when_the_origin_is_no_longer_a_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A destination that is not a thread cannot host a turn, so none is spawned."""
+    row = await _seed_env_request(
+        db_session_factory,
+        target="GONE_THREAD_KEY",
+        with_origin=True,
+        requested_work="finish the export you started",
+    )
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    interaction.client.get_channel = MagicMock(return_value=None)
+    interaction.client.fetch_channel = AsyncMock(
+        side_effect=discord.NotFound(MagicMock(status=404), "unknown channel")
+    )
+    interaction.client._spawn = MagicMock()
+
+    await modal.on_submit(interaction)
+
+    interaction.client._spawn.assert_not_called()
+    stored = await _stored_key(db_session_factory, row, "GONE_THREAD_KEY")
+    assert stored is not None, "the value still landed; only its follow-up could not be started"
+
+
+async def test_env_file_upload_queues_its_continuation_with_the_keys(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A whole file lands under the same rule one key does: keys and turn together."""
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"TOGGL_TOKEN=toggl-secret\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    queued = await _queued_continuation(db_session_factory, row)
+    assert queued is not None and queued.reason == "private_input_applied", (
+        "an accepted file owes the same queued turn a single key does"
+    )
+    assert queued.requested_work is None, "this card carried no work to resume"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "1 key saved for tester." in card, "the card counts what landed"
+    assert "next message" not in card, "nothing was waiting on the file, so no turn is promised"
+
+
+async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 401/403 from the server at the door: nothing stored, nothing attached,
+    the card refused with the way out named (the case a Notion token hit)."""
+    import dataclasses
+
+    from daimon.core.mcp_oauth import McpProbe
+
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://mcp.notion.com/mcp", with_origin=True
+    )
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    probed: list[tuple[str, str]] = []
+
+    async def probe(url: str, token: str) -> McpProbe:
+        probed.append((url, token))
+        return McpProbe(status_code=403, resource_metadata_url=None)
+
+    runtime = dataclasses.replace(
+        _runtime(
+            sessionmaker=db_session_factory,
+            anthropic=build_stub_anthropic(
+                _vault_handler(
+                    "vlt_probe",
+                    f"daimon-mcp:{row.account_id}:{row.agent_id}",
+                    creds_created,
+                    tenant_id=str(row.tenant_id),
+                    agent_updates=agent_updates,
+                )
+            ),
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret="x" * 32,
+        ),
+        mcp_token_probe=probe,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    assert probed == [("https://mcp.notion.com/mcp", _MCP_TOKEN)], "the server is asked first"
+    assert creds_created == [], "a rejected token is never written to a vault"
+    assert agent_updates == [], "and the server is never attached"
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "token_rejected"
+    text = interaction.followup.send.call_args.args[0]
+    assert "did not accept" in text and "connect it with your account" in text, (
+        "the person learns the token was refused and that OAuth is the way out"
+    )
+
+
+# --- key-name policy at submit ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target", ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION"]
+)
+async def test_env_modal_member_cannot_store_a_non_secret_name(
+    db_session_factory: async_sessionmaker[AsyncSession], target: str
+) -> None:
+    """The submitter's live role decides the name: a member may store secrets only."""
+    row = await _seed_env_request(db_session_factory, target=target)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _member_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], f"a member must not store {target}"
+    assert persisted is not None and persisted.used_at is None, "a refusal spends nothing"
+    assert target in _sent_message(interaction), "the refusal names the key"
+    _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
+
+
+async def test_env_modal_admin_may_store_an_identity_name_but_not_a_tool_control(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ok = await _seed_env_request(db_session_factory, target="SNOWFLAKE_USER")
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=ok)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    denied = await _seed_env_request(db_session_factory, target="R_LIBS_USER")
+    modal = EnvCredentialModal(
+        runtime=_runtime(sessionmaker=db_session_factory), request_row=denied
+    )
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=ok.tenant_id, agent_id=ok.agent_id)
+    assert [f.key for f in files] == ["SNOWFLAKE_USER"], (
+        "an admin may add an identity name; no one may add a code-loading name"
+    )
+
+
+@pytest.mark.parametrize(
+    "content", [b"API_KEY=ok\nSNOWFLAKE_USER=x\n", b"API_KEY=ok\nR_ENVIRON_USER=/tmp/x\n"]
+)
+async def test_env_file_member_upload_with_a_non_secret_name_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], content: bytes
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory), row=row, attachment=_uploaded(content)
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "a member upload with a non-secret name is refused whole"
+    assert persisted is not None and persisted.used_at is None, "the refusal spends nothing"
+
+
+async def test_mcp_agent_gone_before_the_attach_saves_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The agent did not survive the form: the attach comes first, so nothing is
+    stored anywhere, and the card says so."""
+    row = await _seed_mcp_request(
+        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
+    )
+    vault = _vault_handler(
+        "vlt_agent_gone",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        [],
+        tenant_id=str(row.tenant_id),
+    )
+
+    # The agent survives the pre-consume target check and is gone by the time
+    # the attach looks it up — the only window in which this branch is real.
+    lookups = 0
+
+    def _agent_gone(request: httpx.Request) -> httpx.Response:
+        nonlocal lookups
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            lookups += 1
+            if lookups > 1:
+                return httpx.Response(200, json={"data": [], "has_more": False})
+        return vault(request)
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(_agent_gone),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "Nothing was saved for tester." in card
+    assert _MCP_TOKEN not in card, "no token may reach the card"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
+    assert persisted is not None and persisted.outcome == "write_failed"
+    assert stored == 0, "no agent-wide token is published without an attach"
+    assert await _queued_continuation(db_session_factory, row) is None
+
+
+async def test_mcp_attach_failure_publishes_no_token(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The attach comes before the token is published: when it fails, nothing is
+    stored, no other session can mirror anything, and no work resumes."""
+    row = await _seed_mcp_request(
+        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
+    )
+    vault = _vault_handler(
+        "vlt_attach_fail",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        [],
+        tenant_id=str(row.tenant_id),
+    )
+
+    def _attach_fails(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            raise httpx.ConnectError("upstream reset by peer")
+        return vault(request)
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(_attach_fails),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "Nothing was saved for tester." in card
+    assert _MCP_TOKEN not in card, "no token may reach the card"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
+    assert persisted is not None and persisted.outcome == "write_failed"
+    assert stored == 0, "no agent-wide token is published without an attach"
+    assert await _queued_continuation(db_session_factory, row) is None
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member-refused", "admin-allowed"])
+async def test_mcp_modal_repointing_an_existing_server_on_a_shared_agent_needs_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    admin: bool,
+) -> None:
+    """H2: the agent already has `linear` elsewhere and is the deployment default.
+
+    A member's submission is refused before any vault write or attach; an
+    admin's repoints it.
+    """
+    import dataclasses
+
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://attacker.example/mcp", with_origin=True
+    )
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    existing = [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/sse"}]
+    inner = _vault_handler(
+        "vlt_replace",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        creds_created,
+        tenant_id=str(row.tenant_id),
+        agent_updates=agent_updates,
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        agent = _ma_agent_json(str(row.tenant_id), mcp_servers=existing)
+        if req.method == "GET" and req.url.path == "/v1/agents":
+            return httpx.Response(200, json={"data": [agent], "has_more": False})
+        if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            return httpx.Response(200, json=agent)
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _runtime(
+            sessionmaker=db_session_factory,
+            anthropic=build_stub_anthropic(handler),
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret="x" * 32,
+        ),
+        deployment_default=DeploymentDefault(agent_name="test-agent"),
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_admin_interaction() if admin else _member_interaction())
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.used_at is not None
+    if admin:
+        assert len(agent_updates) == 1
+        assert {"name": "linear", "type": "url", "url": "https://attacker.example/mcp"} in (
+            agent_updates[0]["mcp_servers"]
+        )
+    else:
+        assert creds_created == [], "a refused replacement writes no vault token"
+        assert agent_updates == [], "and never repoints the server"
+        assert spent.outcome == "write_failed"
+        assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_mcp_modal_member_cannot_overwrite_the_shared_token_of_a_connected_server(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """H2: same name, same URL, but the agent-wide token already exists (or the URL
+    is already connected): a member's paste would become everyone's credential."""
+    import dataclasses
+
+    from daimon.core.agent_mcp_credentials import (
+        resolve_agent_mcp_credentials,
+        save_agent_mcp_credential,
+    )
+
+    url = "https://ext.example.com/mcp"
+    row = await _seed_mcp_request(db_session_factory, mcp_server_url=url, with_origin=True)
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    existing = [{"name": "linear", "type": "url", "url": url}]
+    inner = _vault_handler(
+        "vlt_overwrite",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        creds_created,
+        tenant_id=str(row.tenant_id),
+        agent_updates=agent_updates,
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        agent = _ma_agent_json(str(row.tenant_id), mcp_servers=existing)
+        if req.method == "GET" and req.url.path == "/v1/agents":
+            return httpx.Response(200, json={"data": [agent], "has_more": False})
+        if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            return httpx.Response(200, json=agent)
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _runtime(
+            sessionmaker=db_session_factory,
+            anthropic=build_stub_anthropic(handler),
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret="x" * 32,
+        ),
+        deployment_default=DeploymentDefault(agent_name="test-agent"),
+    )
+    fernet = runtime.turn_deps.fernet
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        mcp_server_url=url,
+        plaintext_token="the-real-token",
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    stored = await resolve_agent_mcp_credentials(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+    )
+    assert [c.token for c in stored] == ["the-real-token"], "the shared token is unchanged"
+    assert creds_created == [] and agent_updates == []
+    assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_overwritten(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Barrier: member admitted (no token yet) -> admin saves the first shared token ->
+    member resumes. The store re-checks under its lock: admin's ciphertext stays."""
+    from daimon.adapters.discord import credential_modals
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+    from sqlalchemy import text as sql_text
+
+    url = "https://ext.example.com/mcp"
+    row = await _seed_mcp_request(db_session_factory, mcp_server_url=url, with_origin=True)
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                "vlt_barrier",
+                f"daimon-mcp:{row.account_id}:{row.agent_id}",
+                creds_created,
+                tenant_id=str(row.tenant_id),
+                agent_updates=agent_updates,
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    fernet = runtime.turn_deps.fernet
+    real_decide = credential_modals.decide_mcp_connect
+
+    async def decide_then_admin_writes(*args: Any, **kwargs: Any) -> Any:
+        decision = await real_decide(*args, **kwargs)
+        assert not decision.replaces, "the member saw no token and no server"
+        await save_agent_mcp_credential(
+            sessionmaker=db_session_factory,
+            fernet=fernet,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            mcp_server_url=url,
+            plaintext_token="admin-token",
+        )
+        return decision
+
+    monkeypatch.setattr(credential_modals, "decide_mcp_connect", decide_then_admin_writes)
+
+    async def ciphertext() -> bytes:
+        async with db_session_factory() as session:
+            return (
+                await session.execute(sql_text("SELECT encrypted_token FROM agent_mcp_credentials"))
+            ).scalar_one()
+
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    admin_ciphertext = await ciphertext()
+    assert fernet.decrypt(admin_ciphertext).decode() == "admin-token"
+    assert creds_created == [], "refused before the personal vault write"
+    # The attach of a brand-new server name comes first and stays, token-less.
+    assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_adding_an_alias_of_a_held_key_is_a_replacement_for_the_gate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GITHUB_TOKEN beside a held GH_TOKEN retargets `gh`: a member on a shared agent is refused."""
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=_MA_AGENT_ID, tenant_id=tenant_id, name="daimon", managed=True)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None, (
+        "an alias that would retarget a held credential is refused like an overwrite"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "write_failed"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN was not added" in card, "the card says the new key was not added"
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in card, "and names both keys"
+    assert "GH_TOKEN was not replaced" not in card
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in _sent_message(interaction)
+
+
+async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias read before the gate is repeated inside the write transaction."""
+    import daimon.adapters.discord.credential_modals as modals_mod
+
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    real = modals_mod.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # The pre-transaction read: nothing held yet.
+            return ()
+        # Someone stored GH_TOKEN in between; the second read is the real one.
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(modals_mod, "list_turn_key_names", first_read_misses_the_alias)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_card_interaction())
+
+    assert calls == 2, "the alias must be re-read under the write"
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement"
+
+
+async def test_env_file_import_refuses_an_alias_of_a_held_key_and_names_both(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert [f.key for f in files] == ["GH_TOKEN"], (
+        "an import that shadows a held key writes nothing"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in card, "the refusal names both keys"
+    assert "secret-b" not in card, "no value on the card"
+
+
+async def test_env_file_with_both_names_of_an_alias_pair_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "an ambiguous file writes nothing"
+    assert persisted is not None and persisted.used_at is None, "a parse refusal spends nothing"
+    sent = _sent_message(interaction)
+    assert "same tool" in sent and "secret-" not in sent
+
+
+async def _aws_pair_and_secret_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> CredentialRequestRow:
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID)
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key="AWS_ACCESS_KEY_ID",
+            content="AKIAEXAMPLE",
+            set_by_account_id=None,
+        )
+        secret = await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key="AWS_SECRET_ACCESS_KEY",
+            content="old-secret",
+            set_by_account_id=None,
+        )
+    return await _seed_env_request(
+        db_session_factory,
+        target="AWS_SECRET_ACCESS_KEY",
+        with_origin=True,
+        replaces_updated_at=secret.updated_at,
+    )
+
+
+async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The stored AWS_ACCESS_KEY_ID is a family member, not a newly appeared conflict."""
+    row = await _aws_pair_and_secret_request(db_session_factory)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = "new-secret"  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_as_card_interaction(_admin_interaction()))
+
+    current = await _stored_key(db_session_factory, row, "AWS_SECRET_ACCESS_KEY")
+    assert current is not None and current.content == "new-secret", "the rotation lands"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "applied"
+
+
+async def test_a_family_change_during_an_admin_rotation_is_still_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.adapters.discord.credential_modals as modals_mod
+
+    row = await _aws_pair_and_secret_request(db_session_factory)
+    real = modals_mod.list_turn_key_names
+    calls = 0
+
+    async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await put_agent_file(
+                session,
+                tenant_id=row.tenant_id,
+                agent_id=row.agent_id,
+                key="AWS_SESSION_TOKEN",
+                content="grafted",
+                set_by_account_id=None,
+            )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(modals_mod, "list_turn_key_names", family_changes_after_the_gate)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = "new-secret"  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_as_card_interaction(_admin_interaction()))
+
+    current = await _stored_key(db_session_factory, row, "AWS_SECRET_ACCESS_KEY")
+    assert current is not None and current.content == "old-secret"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement"

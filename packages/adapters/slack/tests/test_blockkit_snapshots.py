@@ -13,8 +13,8 @@ then review the diff in `__snapshots__/` before committing.
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.slack.agent_setup.views import build_error_view
-from daimon.adapters.slack.blockkit import State, TrailEntry, TurnPhase, to_blocks
+from daimon.adapters.slack.agent_setup.panel_views import build_error_view
+from daimon.adapters.slack.blockkit import State, TurnPhase, to_blocks
 from syrupy.assertion import SnapshotAssertion
 
 _FIXED_REQUEST_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -42,7 +42,7 @@ _STATES: dict[str, tuple[State, float | None]] = {
             phase=TurnPhase.TOOL_RUNNING,
             agent_name="Atlas",
             started_at=100.0,
-            trail=(TrailEntry(emoji="⚙️", text="Bash"),),
+            tool_lines=("🖋️ Running a command",),
         ),
         110.0,
     ),
@@ -51,12 +51,14 @@ _STATES: dict[str, tuple[State, float | None]] = {
             phase=TurnPhase.TOOL_RUNNING,
             agent_name="Atlas",
             started_at=100.0,
-            trail=(
-                TrailEntry(emoji="⚙️", text="Read"),
-                TrailEntry(emoji="⚙️", text="Write"),
-                TrailEntry(emoji="⚙️", text="Bash"),
-                TrailEntry(emoji="⚙️", text="Grep"),
-                TrailEntry(emoji="⚙️", text="Glob"),
+            tool_lines=(
+                "+3 earlier",
+                "✔️ Read a file",
+                "🚫 Wrote a file",
+                "✔️ Search issues (tracker)",
+                "✔️ Listed files",
+                "🔍 Searching files",
+                "🖋️ Running a command",
             ),
             text_preview="Preview text describing the ongoing work.",
             usage_in=1500,
@@ -70,7 +72,6 @@ _STATES: dict[str, tuple[State, float | None]] = {
             phase=TurnPhase.DONE,
             agent_name="Atlas",
             started_at=100.0,
-            trail=(TrailEntry(emoji="✅", text="complete"),),
             usage_in=1500,
             usage_out=320,
             cost_str="$0.04",
@@ -82,7 +83,6 @@ _STATES: dict[str, tuple[State, float | None]] = {
             phase=TurnPhase.DONE,
             agent_name="Atlas",
             started_at=100.0,
-            trail=(TrailEntry(emoji="✅", text="complete"),),
             usage_in=1500,
             usage_out=320,
         ),
@@ -93,7 +93,7 @@ _STATES: dict[str, tuple[State, float | None]] = {
             phase=TurnPhase.ERROR,
             agent_name="Atlas",
             started_at=100.0,
-            trail=(TrailEntry(emoji="❌", text="rate limited"),),
+            error_reason="rate limited",
             usage_in=100,
             usage_out=50,
         ),

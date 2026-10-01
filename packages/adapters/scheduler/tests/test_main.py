@@ -20,12 +20,11 @@ from decimal import Decimal
 
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
     _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
+    _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
+    _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
@@ -40,10 +39,25 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.usage_recording import record_turn_usage
+from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.fixture
+def db_session_factory(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+) -> async_sessionmaker[AsyncSession]:
+    """Concurrent fire finalizers need independent connections, as in production.
+
+    db_session triggers schema cleanup; these tests commit setup before dispatch.
+    """
+    return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
 
 _TEST_BILLING = BillingConfig(
     secret_key=SecretStr("sk_test"),
@@ -67,12 +81,7 @@ async def test_caps_adapter_returns_true_when_user_over_cap(
         platform_user_id="u1",
         managed_session_id="prev_sess",
         model="claude-opus-4-7",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=10_000_000,
-            output_tokens=10_000_000,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=10_000_000, output_tokens=10_000_000),
         event_id="prev_evt",
     )
     await db_session.commit()
@@ -123,12 +132,7 @@ async def test_fire_skips_on_over_cap(
         platform_user_id="u1",
         managed_session_id="prev_sess",
         model="claude-opus-4-7",
-        model_usage=BetaManagedAgentsSpanModelUsage(
-            input_tokens=10_000_000,
-            output_tokens=10_000_000,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+        model_usage=ma_model_usage(input_tokens=10_000_000, output_tokens=10_000_000),
         event_id="prev_evt",
     )
     await db_session.commit()
@@ -148,6 +152,7 @@ async def test_fire_skips_on_over_cap(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert fired == [], "over-cap routine must not fire"
@@ -208,6 +213,7 @@ async def test_run_one_tick_resolves_tenant_per_row(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert set(captured_tenant_ids) == {
@@ -576,7 +582,7 @@ async def test_fire_uses_deployment_default(
     instead of hardcoded 'daimon'/'default' string literals.
     RED until Plan 03 (DeploymentDefault) + Plan 08 (_build_fire signature update) land.
     """
-    from daimon.core.scope import DeploymentDefault  # noqa: PLC0415
+    from daimon.core.scope import DeploymentDefault
 
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -791,3 +797,469 @@ async def test_sweep_wizard_sessions_forwards_sessionmaker_and_returns_cleanly(
     assert captured_sm == [db_session_factory], (
         "wrapper must forward the injected sessionmaker to the core sweep unchanged"
     )
+
+
+async def test_sweep_slack_event_dedup_swallows_sqlalchemy_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A SQLAlchemyError from the core sweep must not propagate — the wrapper's
+    named boundary catch exists so a DB hiccup cannot kill the scheduler loop."""
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_expired_slack_event_dedup",
+        side_effect=SQLAlchemyError("boom"),
+    ):
+        await _sweep_slack_event_dedup(db_session_factory)  # must not raise
+
+
+async def test_sweep_slack_event_dedup_forwards_sessionmaker_and_returns_cleanly(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Happy path: the wrapper forwards the injected sessionmaker to the core
+    sweep and passes a timezone-aware `now`."""
+    captured_sm: list[async_sessionmaker[AsyncSession]] = []
+    captured_now: list[datetime] = []
+
+    async def fake_sweep(
+        sm: async_sessionmaker[AsyncSession], *, now: datetime, limit: int = 500
+    ) -> int:
+        captured_sm.append(sm)
+        captured_now.append(now)
+        return 0
+
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_expired_slack_event_dedup",
+        side_effect=fake_sweep,
+    ):
+        await _sweep_slack_event_dedup(db_session_factory)
+
+    assert captured_sm == [db_session_factory], (
+        "wrapper must forward the injected sessionmaker to the core sweep unchanged"
+    )
+    assert captured_now[0].tzinfo is not None, (
+        "wrapper must pass a timezone-aware `now` to the core sweep"
+    )
+
+
+async def test_sweep_retired_turn_card_intents_swallows_sqlalchemy_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_retired_turn_card_intents",
+        side_effect=SQLAlchemyError("boom"),
+    ):
+        await _sweep_retired_turn_card_intents(db_session_factory)
+
+
+async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: list[tuple[async_sessionmaker[AsyncSession], datetime]] = []
+
+    async def fake_sweep(sm: async_sessionmaker[AsyncSession], *, now: datetime) -> int:
+        captured.append((sm, now))
+        return 0
+
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_retired_turn_card_intents",
+        side_effect=fake_sweep,
+    ):
+        await _sweep_retired_turn_card_intents(db_session_factory)
+
+    assert captured[0][0] is db_session_factory
+    assert captured[0][1].tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("policy_sql", "expected_error"),
+    [
+        ('{"invoker_user_ids": ["staff"]}', "invoker_not_allowed"),
+        ("null", "access_policy_unreadable"),
+        ('{"agent_channel_pins": {"daimon": ["rx-chan"]}}', "agent_pinned_elsewhere"),
+    ],
+    ids=["creator-not-allowlisted", "unreadable-policy", "agent-pinned-elsewhere"],
+)
+async def test_fire_skips_routine_the_invoker_policy_refuses(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    policy_sql: str,
+    expected_error: str,
+) -> None:
+    """SYS-047: a routine fires as its creator, so taking the creator off the
+    allowlist stops it; a policy that can't be read stops it too."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": policy_sql},
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await db_session.commit()
+
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.run_turn",
+        side_effect=AssertionError("a refused routine must not run a turn"),
+    ):
+        await fire(row)
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None, "routine row must still exist after the skip"
+    assert fetched.last_error == expected_error, f"got {fetched.last_error!r}"
+    await fake_client.close()
+
+
+# --- FEAT-085: routine destination and fallback post -----------------------
+
+
+async def _fire_with_fake_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    destination: tuple[str, str] | None,
+    agent_posts_to: str | None,
+    policy: object | None = None,
+) -> tuple[RoutineRow, dict[str, object]]:
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+
+    now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    if policy is not None:
+        from daimon.core.stores.access_policy import set_access_policy
+
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)  # type: ignore[arg-type]
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="U_DEST",
+        agent_id="agent_dest",
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone_="Europe/Lisbon",
+        trigger_message="summarize the week",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind=destination[0] if destination else None,
+        destination_id=destination[1] if destination else None,
+    )
+    await db_session.commit()
+    seen: dict[str, object] = {}
+
+    async def fake_run_turn(**kwargs: object) -> object:
+        seen.update(kwargs)
+        blocks: list[ToolUseBlock] = []
+        if agent_posts_to is not None:
+            blocks.append(
+                ToolUseBlock(
+                    kind="tool_use",
+                    id="tu_post",
+                    type="agent.mcp_tool_use",
+                    name="send_message",
+                    input={"channel_id": agent_posts_to, "content": "done"},
+                    mcp_server_name="daimon-mcp",
+                    status="complete",
+                )
+            )
+        on_state = kwargs["on_state"]
+        assert callable(on_state)
+        on_state(TurnState(content=list(blocks)))
+        return "Weekly summary: all green."
+
+    fire = await _build_fire(
+        client=AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999"),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_dest"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+    ):
+        await fire(row)
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    return after, seen
+
+
+async def test_fire_without_destination_is_unchanged(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _fire_with_fake_turn(
+        db_session, db_session_factory, monkeypatch, destination=None, agent_posts_to=None
+    )
+
+    assert seen["trigger_message"] == "summarize the week", "no controls without a destination"
+    assert after.last_result_tail == "Weekly summary: all green."
+    assert after.delivery_status is None, "nothing queued without a destination"
+
+
+async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert trigger.startswith("<turn_controls>\n")
+    assert '"channel_id": "111222333"' in trigger
+    assert '"schedule": "0 9 * * 1"' in trigger
+    assert trigger.endswith("</turn_controls>\nsummarize the week")
+    assert after.delivery_status == "pending"
+
+
+async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to="111222333",
+    )
+
+    assert (after.delivery_status, after.delivery_note) == ("skipped", "agent_posted")
+
+
+async def test_fire_posting_elsewhere_still_queues_the_fallback(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to="999",
+    )
+
+    assert after.delivery_status == "pending"
+
+
+async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eval regression: the controls must not tell the agent to post into a
+    channel the access policy now protects (send_message has no guard yet)."""
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(protected_channel_ids=("111222333",)),
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert "do not post there" in trigger
+    assert "posts the end of your final reply there" not in trigger
+    assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"
+
+
+@pytest.mark.parametrize(
+    ("kind", "policy_kwargs"),
+    [
+        # A thread under a channel protected since: the scheduler cannot see
+        # the thread's parent, so it must not invite a direct post.
+        ("thread", {"protected_channel_ids": ("444",)}),
+        ("thread", {"protected_category_ids": ("77",)}),
+        # A channel in a category protected since.
+        ("channel", {"protected_category_ids": ("77",)}),
+    ],
+)
+async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    policy_kwargs: dict[str, tuple[str, ...]],
+) -> None:
+    """Review regression (round 2): fire-time protection only checked the id,
+    so a thread under a protected parent/category was still offered."""
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=(kind, "111222333"),
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(**policy_kwargs),
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert "Do not post to the destination yourself" in trigger
+    assert "posts the end of your final reply there" not in trigger
+    assert after.delivery_status == "pending", "the poster resolves placement and delivers"
+
+
+async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    _after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(protected_channel_ids=("999",)),
+    )
+
+    assert "posts the end of your final reply there" in str(seen["trigger_message"])
+
+
+@pytest.mark.parametrize(
+    ("destination", "pinned_out"),
+    [(None, True), ("999000999", True), ("111000111", False)],
+    ids=["no-destination", "other-channel", "pinned-channel"],
+)
+async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str | None,
+    pinned_out: bool,
+) -> None:
+    """The routine saved its config name; the pin is on the agent's display name.
+    The fire must check the resolved agent's names, not the saved name alone."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing import ma_agent
+
+    now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("111000111",)}),
+    )
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="U_PIN",
+        agent_id="agent_dest",
+        agent_name="acme-config",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="report",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="channel" if destination else None,
+        destination_id=destination,
+    )
+    await db_session.commit()
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    ran: list[object] = []
+
+    async def fake_run_turn(**kwargs: object) -> object:
+        ran.append(kwargs)
+        return "done"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_dest"
+
+    agent = ma_agent(
+        id="agent_dest",
+        name="Acme Display",
+        tenant_id=tenant.id,
+        metadata={"daimon_name": "acme-config"},
+    )
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+        unittest.mock.patch.object(
+            client.beta.agents, "retrieve", new=unittest.mock.AsyncMock(return_value=agent)
+        ),
+    ):
+        await fire(row)
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    if pinned_out:
+        assert after.last_error == "agent_pinned_elsewhere" and ran == []
+    else:
+        assert after.last_error is None and len(ran) == 1
+    await client.close()

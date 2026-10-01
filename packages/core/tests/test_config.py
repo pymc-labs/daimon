@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import base64
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import pytest
-from daimon.core.config import McpSettings, Settings, load_settings
-from pydantic import HttpUrl, ValidationError
+from cryptography.fernet import Fernet
+from daimon.core.config import (
+    AnthropicSettings,
+    ArtifactsSettings,
+    DatabaseSettings,
+    HubSettings,
+    McpSettings,
+    Settings,
+    SlackSettings,
+    TeamsSettings,
+    load_settings,
+)
+from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
 
 
 def test_load_settings_parses_nested_delimiter_when_env_provided(
@@ -25,6 +38,18 @@ def test_load_settings_parses_nested_delimiter_when_env_provided(
     assert settings.anthropic.api_key.get_secret_value() == "sk-test"
     assert settings.cli.local_user == "alice"
     assert settings.log.level == "DEBUG"
+
+
+def test_ops_webhook_is_optional_and_reads_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_OPS__ALERT_WEBHOOK_URL", raising=False)
+    assert load_settings(_env_file=None).ops.alert_webhook_url is None
+
+    monkeypatch.setenv("DAIMON_OPS__ALERT_WEBHOOK_URL", "https://discord.com/api/webhooks/test")
+    webhook = load_settings(_env_file=None).ops.alert_webhook_url
+    assert webhook is not None
+    assert webhook.get_secret_value() == "https://discord.com/api/webhooks/test"
 
 
 def test_load_settings_defaults_cli_local_user_to_env_user_when_unset(
@@ -65,6 +90,62 @@ def test_load_settings_accepts_explicit_overrides_when_passed() -> None:
         }
     )
     assert settings.cli.local_user == "carol"
+
+
+def test_artifacts_settings_are_off_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+
+    assert load_settings(_env_file=None).artifacts is None
+
+
+def test_artifacts_settings_parse_nested_env_with_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__ENDPOINT_URL", "https://bucket.example.test")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__BUCKET", "private-artifacts")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__ACCESS_KEY_ID", "access-key")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__SECRET_ACCESS_KEY", "secret-key")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__REGION", "auto")
+
+    artifacts = load_settings(_env_file=None).artifacts
+
+    assert isinstance(artifacts, ArtifactsSettings)
+    assert artifacts.bucket == "private-artifacts"
+    assert artifacts.region == "auto"
+    assert artifacts.url_ttl_seconds == 600
+    assert artifacts.embed_images is True
+
+
+def test_artifacts_image_embedding_can_be_disabled_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__ENDPOINT_URL", "https://bucket.example.test")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__BUCKET", "private-artifacts")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__ACCESS_KEY_ID", "access-key")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__SECRET_ACCESS_KEY", "secret-key")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__EMBED_IMAGES", "false")
+
+    artifacts = load_settings(_env_file=None).artifacts
+
+    assert artifacts is not None
+    assert artifacts.embed_images is False
+
+
+@pytest.mark.parametrize("ttl", [0, 86_401])
+def test_artifacts_url_ttl_rejects_values_outside_bounds(ttl: int) -> None:
+    with pytest.raises(ValidationError):
+        ArtifactsSettings(
+            endpoint_url="https://bucket.example.test",
+            bucket="private-artifacts",
+            access_key_id="access-key",
+            secret_access_key="secret-key",
+            url_ttl_seconds=ttl,
+        )
 
 
 def test_mcp_settings_both_unset_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -519,3 +600,196 @@ def test_slack_settings_max_concurrent_turns_per_tenant_defaults_to_3(
     assert settings.slack.max_concurrent_turns_per_tenant == 3, (
         "max_concurrent_turns_per_tenant must default to 3 (STURN-06 per-tenant cap)"
     )
+
+
+# --- HubSettings tests ---
+
+
+def test_hub_settings_default_to_unconfigured() -> None:
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+    )
+    assert settings.hub.slack_configured is False, (
+        f"slack hub must be unconfigured by default, got {settings.hub!r}"
+    )
+    assert settings.hub.discord_configured is False, (
+        f"discord hub must be unconfigured by default, got {settings.hub!r}"
+    )
+
+
+def test_hub_settings_platform_configured_requires_both_id_and_secret() -> None:
+    hub = HubSettings(discord_client_id="123")
+    assert hub.discord_configured is False, "client id alone must not count as configured"
+    hub = HubSettings(discord_client_id="123", discord_client_secret=SecretStr("s"))
+    assert hub.discord_configured is True, "id plus secret must count as configured"
+
+
+def test_hub_settings_accepts_a_fernet_shaped_signing_key() -> None:
+    key = Fernet.generate_key().decode()
+    hub = HubSettings(jwt_signing_key=SecretStr(key))
+    assert hub.jwt_signing_key is not None and hub.jwt_signing_key.get_secret_value() == key, (
+        f"a Fernet-generated key must be accepted unchanged, got {hub.jwt_signing_key!r}"
+    )
+
+
+def test_hub_settings_rejects_a_passphrase_signing_key() -> None:
+    with pytest.raises(ValidationError, match="DAIMON_HUB__JWT_SIGNING_KEY"):
+        HubSettings(jwt_signing_key=SecretStr("hunter2"))
+
+
+def test_hub_settings_rejects_a_signing_key_of_the_wrong_length() -> None:
+    short = base64.urlsafe_b64encode(b"\x00" * 16).decode()
+    with pytest.raises(ValidationError, match="DAIMON_HUB__JWT_SIGNING_KEY"):
+        HubSettings(jwt_signing_key=SecretStr(short))
+
+
+def test_hub_settings_default_redirect_allowlist_is_loopback_and_claude() -> None:
+    hub = HubSettings()
+    assert hub.allowed_client_redirect_uris == [
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "https://claude.ai/*",
+        "https://claude.com/*",
+    ], f"got {hub.allowed_client_redirect_uris!r}"
+
+
+def test_hub_settings_redirect_allowlist_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS", '["https://ide.example/*"]')
+    settings = load_settings(_env_file=None)
+    assert settings.hub.allowed_client_redirect_uris == ["https://ide.example/*"], (
+        f"got {settings.hub.allowed_client_redirect_uris!r}"
+    )
+
+
+def test_hub_settings_read_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_HUB__SLACK_CLIENT_ID", "slack-id")
+    monkeypatch.setenv("DAIMON_HUB__SLACK_CLIENT_SECRET", "slack-secret")
+    settings = load_settings(_env_file=None)
+    assert settings.hub.slack_client_id == "slack-id", f"got {settings.hub.slack_client_id!r}"
+    assert settings.hub.slack_configured is True, "env-provided id+secret must configure slack"
+
+
+def test_thread_naming_defaults_on_with_bounded_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_THREAD_NAMING__ENABLED", raising=False)
+    settings = load_settings(_env_file=None)
+    assert settings.thread_naming.enabled is True, "auto thread naming is on by default"
+    assert settings.thread_naming.max_input_chars == 2000, (
+        "the naming prompt is bounded to 2000 chars of the opening message by default"
+    )
+    assert settings.thread_naming.timeout_seconds == 5.0, (
+        "a mention waits at most 5 s for a title before the thread opens by default"
+    )
+
+
+def test_thread_naming_parsed_from_top_level_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_THREAD_NAMING__ENABLED", "false")
+    monkeypatch.setenv("DAIMON_THREAD_NAMING__MAX_INPUT_CHARS", "500")
+    monkeypatch.setenv("DAIMON_THREAD_NAMING__TIMEOUT_SECONDS", "2.5")
+    settings = load_settings(_env_file=None)
+    assert settings.thread_naming.enabled is False, (
+        "DAIMON_THREAD_NAMING__ENABLED=false must turn the feature off"
+    )
+    assert settings.thread_naming.max_input_chars == 500, (
+        "DAIMON_THREAD_NAMING__MAX_INPUT_CHARS must override the input bound"
+    )
+    assert settings.thread_naming.timeout_seconds == 2.5, (
+        "DAIMON_THREAD_NAMING__TIMEOUT_SECONDS must override the wait for a title"
+    )
+
+
+def test_slack_display_name_defaults_to_daimon() -> None:
+    settings = SlackSettings(signing_secret=SecretStr("test"), app_token=SecretStr("xapp-test"))
+    assert settings.bot_display_name == "daimon", "unset display name must preserve existing copy"
+
+
+@pytest.mark.parametrize(
+    "name", ["", "a" * 33, "bot@name", "bot#name", "bot:name", "bot`name", "bot\\name"]
+)
+def test_slack_display_name_rejects_invalid_names(name: str) -> None:
+    with pytest.raises(ValidationError):
+        SlackSettings(
+            signing_secret=SecretStr("test"),
+            app_token=SecretStr("xapp-test"),
+            bot_display_name=name,
+        )
+
+
+def test_teams_tenant_id_canonicalizes_uuid_case() -> None:
+    """An uppercase Entra portal paste normalizes to the canonical UUID form
+    the resolver and provision_tenant both compare against."""
+    settings = TeamsSettings(
+        client_id=str(UUID(int=1)),
+        client_secret=SecretStr("test"),
+        tenant_id=str(UUID(int=0xABCDEF)).upper(),
+    )
+    assert settings.tenant_id == str(UUID(int=0xABCDEF))
+
+
+def test_teams_tenant_id_rejects_non_uuid() -> None:
+    with pytest.raises(ValidationError):
+        TeamsSettings(
+            client_id=str(UUID(int=1)),
+            client_secret=SecretStr("test"),
+            tenant_id="not-a-tenant-uuid",
+        )
+
+
+def test_teams_admin_user_ids_canonicalize_and_reject_non_uuids() -> None:
+    base = {"client_id": "id", "client_secret": SecretStr("s"), "tenant_id": str(UUID(int=1))}
+    admin = str(UUID(int=7))
+    assert TeamsSettings(**base, admin_user_ids=(admin.upper(),)).admin_user_ids == (admin,)
+    with pytest.raises(ValidationError):
+        TeamsSettings(**base, admin_user_ids=("alice",))
+
+
+def test_completion_policy_validates_and_normalizes_uuid_keys(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    tenant = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"AAAAAAAA-0000-0000-0000-000000000001": true}')
+    assert load_settings(_env_file=None).completion_pings == {tenant: True}
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"typo": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)
+
+
+def test_table_rendering_map_validates_and_normalizes_uuid_keys(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    tenant = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    monkeypatch.setenv("DAIMON_TABLE_RENDERING", '{"AAAAAAAA-0000-0000-0000-000000000001": true}')
+    assert load_settings(_env_file=None).table_rendering == {tenant: True}
+    monkeypatch.setenv("DAIMON_TABLE_RENDERING", '{"not-a-uuid": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)
+
+
+@pytest.mark.parametrize("days", ["90", "7", "0"])
+def test_security_audit_retention_environment(monkeypatch, days):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", days)
+    assert load_settings(_env_file=None).security_audit_retention_days == int(days)
+
+
+def test_security_audit_retention_default_and_negative_rejection(monkeypatch):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", raising=False)
+    assert load_settings(_env_file=None).security_audit_retention_days == 90
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "-1")
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        load_settings(_env_file=None)

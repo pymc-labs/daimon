@@ -23,9 +23,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping
+from typing import cast
 
 import httpx
 import jwt
+from daimon.core.github_rate_limit import (
+    GitHubRateLimitError,
+    is_rate_limit_response,
+    rate_limit_retry_after,
+)
 
 _APP_INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
 
@@ -95,6 +102,8 @@ async def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
+    repository: str,
+    permissions: Mapping[str, str] | None = None,
 ) -> str:
     """Exchange an App JWT for an installation access token (1h TTL).
 
@@ -102,18 +111,37 @@ async def mint_installation_token(
     with the required GitHub headers. Raises httpx.HTTPStatusError on non-2xx —
     never returns a sentinel (architecture rule: no exception-to-sentinel conversion).
 
+    The token is always narrowed to the one ``repository`` the caller is
+    authorized for. An installation typically covers many repositories and is
+    created by the repo owner for their own use, while every caller here acts
+    on behalf of a single binding whose recorded proof covers one repository;
+    an un-narrowed token would carry access to every repository in the
+    installation. ``repository`` is required so no caller can mint an
+    installation-wide token by omission.
+
     Args:
         http_client: Injected async HTTP client. Caller owns lifecycle.
         jwt: Signed App JWT from build_app_jwt.
         installation_id: Numeric GitHub installation ID.
+        repository: Repository name (no owner prefix) the token is scoped to.
+        permissions: Optional permission subset (e.g. ``{"contents": "read"}``);
+            None keeps the installation's granted permissions.
 
     Returns:
         The installation access token string from the JSON response.
 
     Raises:
-        httpx.HTTPStatusError: On any non-2xx response from GitHub.
+        GitHubRateLimitError: On an explicit rate-limit response.
+        httpx.HTTPStatusError: On other non-2xx responses from GitHub.
     """
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+    if not repository or "/" in repository:
+        raise ValueError(
+            f"installation tokens must be scoped to one repository name, got {repository!r}"
+        )
+    request_body: dict[str, object] = {"repositories": [repository]}
+    if permissions is not None:
+        request_body["permissions"] = dict(permissions)
     resp = await http_client.post(
         url,
         headers={
@@ -121,7 +149,10 @@ async def mint_installation_token(
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
+        json=request_body,
     )
+    if await is_rate_limit_response(resp):
+        raise GitHubRateLimitError(rate_limit_retry_after(resp))
     resp.raise_for_status()
     body: dict[str, object] = resp.json()
     if not isinstance(body, dict) or "token" not in body:  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -130,6 +161,157 @@ async def mint_installation_token(
             f"(installation_id={installation_id})"
         )
     return str(body["token"])
+
+
+async def mint_installation_listing_token(
+    http_client: httpx.AsyncClient,
+    *,
+    jwt: str,
+    installation_id: int,
+) -> str:
+    """Mint a metadata-only installation token for listing its repositories.
+
+    Unlike ``mint_installation_token``, this deliberately does not restrict the
+    token to one repository: the installation repositories endpoint must return
+    the full set. The token has only metadata read permission and is used only
+    by the reconciliation worker.
+    """
+    url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+    response = await http_client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"permissions": {"metadata": "read"}},
+    )
+    response.raise_for_status()
+    body: object = response.json()
+    if not isinstance(body, dict):
+        raise ValueError(
+            f"GitHub installation-token response is not an object "
+            f"(installation_id={installation_id})"
+        )
+    body_object = cast(dict[str, object], body)
+    token = body_object.get("token")
+    if not isinstance(token, str):
+        raise ValueError(
+            f"GitHub installation-token response missing string 'token' "
+            f"(installation_id={installation_id})"
+        )
+    return token
+
+
+async def get_app_installation_account(
+    http_client: httpx.AsyncClient,
+    *,
+    jwt: str,
+    installation_id: int,
+) -> str | None:
+    """Return the account login, or None when GitHub confirms uninstall."""
+    url = f"https://api.github.com/app/installations/{installation_id}"
+    response = await http_client.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    body: object = response.json()
+    if not isinstance(body, dict):
+        raise ValueError(f"GitHub installation response is not an object ({installation_id})")
+    body_object = cast(dict[str, object], body)
+    account = body_object.get("account")
+    if not isinstance(account, dict):
+        raise ValueError(
+            f"GitHub installation response is missing account.login ({installation_id})"
+        )
+    account_object = cast(dict[str, object], account)
+    login = account_object.get("login")
+    if not isinstance(login, str):
+        raise ValueError(
+            f"GitHub installation response is missing account.login ({installation_id})"
+        )
+    return login
+
+
+async def list_installation_repositories(
+    http_client: httpx.AsyncClient,
+    *,
+    token: str,
+) -> list[str]:
+    """Fetch and validate every page of the installation repository listing."""
+    url = "https://api.github.com/installation/repositories"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    repos: list[str] = []
+    seen: set[str] = set()
+    seen_next_links: set[str] = set()
+    total_count: int | None = None
+    page = 1
+    while True:
+        response = await http_client.get(
+            url, headers=headers, params={"per_page": 100, "page": page}
+        )
+        response.raise_for_status()
+        body: object = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("GitHub installation-repositories response is malformed")
+        body_object = cast(dict[str, object], body)
+        page_total = body_object.get("total_count")
+        if not isinstance(page_total, int) or isinstance(page_total, bool) or page_total < 0:
+            raise ValueError("GitHub installation-repositories response has invalid total_count")
+        if total_count is None:
+            total_count = page_total
+        elif page_total != total_count:
+            raise ValueError("GitHub installation-repositories total_count changed between pages")
+        repository_list = body_object.get("repositories")
+        if not isinstance(repository_list, list):
+            raise ValueError("GitHub installation-repositories response is malformed")
+        seen_before_page = len(seen)
+        for repository in cast(list[object], repository_list):
+            if not isinstance(repository, dict):
+                raise ValueError("GitHub installation-repositories page has a malformed repository")
+            repository_object = cast(dict[str, object], repository)
+            full_name = repository_object.get("full_name")
+            if not isinstance(full_name, str):
+                raise ValueError("GitHub installation-repositories page has a malformed repository")
+            if not full_name or full_name.count("/") != 1:
+                raise ValueError("GitHub installation-repositories page has an invalid full_name")
+            if full_name not in seen:
+                repos.append(full_name)
+                seen.add(full_name)
+        if len(seen) > total_count:
+            raise ValueError(
+                "GitHub installation-repositories returned more repositories than total_count"
+            )
+        if "next" not in response.links:
+            if len(seen) != total_count:
+                raise ValueError(
+                    "GitHub installation-repositories page count does not match total_count"
+                )
+            return repos
+        if not repository_list:
+            raise ValueError(
+                "GitHub installation-repositories returned an empty page with a next link"
+            )
+        if len(seen) == seen_before_page or len(seen) >= total_count:
+            raise ValueError(
+                "GitHub installation-repositories page cannot make progress toward total_count"
+            )
+        next_url = response.links["next"].get("url")
+        if not isinstance(next_url, str) or next_url in seen_next_links:
+            raise ValueError("GitHub installation-repositories repeated or malformed next link")
+        seen_next_links.add(next_url)
+        page += 1
 
 
 async def get_installation_id_for_repo(

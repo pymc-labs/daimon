@@ -14,21 +14,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.beta_managed_agents_agent import BetaManagedAgentsAgent
-from anthropic.types.beta.beta_managed_agents_model_config import (
-    BetaManagedAgentsModelConfig,
-)
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
@@ -41,32 +42,20 @@ _list_routines_impl = _routines_mod._list_routines_impl  # pyright: ignore[repor
 _update_routine_impl = _routines_mod._update_routine_impl  # pyright: ignore[reportPrivateUsage]
 _require_platform_user_id = _routines_mod._require_platform_user_id  # pyright: ignore[reportPrivateUsage]
 
-pytestmark = pytest.mark.asyncio
-
 
 def _ma_agent(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, object]:
     """Construct a real ``BetaManagedAgentsAgent`` payload tagged for ``tenant_id``.
 
     Inline at the call site per guideline:testing — no factory indirection.
     """
-    agent = BetaManagedAgentsAgent(
+    agent = ma_agent(
         id=agent_id,
-        type="agent",
         name=name,
-        version=1,
-        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
-        system=None,
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={
             MA_METADATA_KEY_TENANT: str(tenant_id),
             MA_METADATA_KEY_NAME: name,
         },
-        mcp_servers=[],
-        tools=[],
-        skills=[],
-        created_at="2026-05-19T00:00:00Z",  # type: ignore[arg-type]
-        updated_at="2026-05-19T00:00:00Z",  # type: ignore[arg-type]
-        archived_at=None,
-        description=None,
     )
     return agent.model_dump(mode="json")
 
@@ -102,15 +91,23 @@ def _auth_identity(
     platform_user_id: str | None = "u_test",
     tenant_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    talking_to: str | None = "ag_resolved",
 ) -> AuthIdentity:
+    """A member in a chat turn with the MA agent ``talking_to`` (None: no agent)."""
+    tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
     return AuthIdentity(
         account_id=uuid.uuid4(),
-        tenant_id=tenant_id if tenant_id is not None else uuid.uuid4(),
+        tenant_id=tenant_id,
         role=Role.USER,
         platform=platform,
         external_id=external_id,
         platform_user_id=platform_user_id,
         is_admin=is_admin,
+        chat_agent_id=(
+            None
+            if talking_to is None
+            else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to)
+        ),
     )
 
 
@@ -233,7 +230,7 @@ async def test_list_routines_returns_only_caller_tenant(
     await db_session.flush()
 
     runtime = _runtime(sessionmaker)
-    auth = _auth_identity(tenant_id=tenant_a.id)
+    auth = _auth_identity(tenant_id=tenant_a.id, is_admin=True)
     rows = await _list_routines_impl(runtime, auth)
 
     assert len(rows) == 1, "list must return only routines in the caller's tenant"
@@ -258,7 +255,7 @@ async def test_get_routine_returns_row_in_same_tenant(
     await db_session.flush()
 
     runtime = _runtime(sessionmaker)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
     row = await _get_routine_impl(runtime, auth, routine_id=created.id)
 
     assert row.id == created.id, "get must return the correct row"
@@ -318,7 +315,7 @@ async def test_update_routine_patches_only_provided_fields(
     await db_session.commit()
 
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, talking_to="agent_a")
     updated = await _update_routine_impl(runtime, auth, routine_id=created.id, enabled=False)
 
     assert updated.enabled is False, "enabled must be updated to False"
@@ -349,7 +346,7 @@ async def test_update_routine_recomputes_next_fire_at_when_cron_changes(
     await db_session.commit()
 
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, talking_to="agent_a")
     updated = await _update_routine_impl(
         runtime, auth, routine_id=created.id, cron_expr="0 10 * * *"
     )
@@ -381,7 +378,7 @@ async def test_update_routine_recomputes_next_fire_at_when_timezone_changes(
     await db_session.commit()
 
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, talking_to="agent_a")
     updated = await _update_routine_impl(
         runtime, auth, routine_id=created.id, timezone="America/New_York"
     )
@@ -470,7 +467,7 @@ async def test_delete_routine_raises_for_cross_tenant(
         await _delete_routine_impl(runtime, auth, routine_id=created.id)
 
     # Original row must survive the failed cross-tenant delete
-    owner_auth = _auth_identity(tenant_id=tenant_owner.id)
+    owner_auth = _auth_identity(tenant_id=tenant_owner.id, is_admin=True)
     row = await _get_routine_impl(runtime, owner_auth, routine_id=created.id)
     assert row.id == created.id, "row must survive a failed cross-tenant delete"
 
@@ -603,7 +600,7 @@ async def test_update_routine_renames_agent(
         [_ma_agent(agent_id="ag_other", name="other", tenant_id=tenant.id)]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, talking_to="ag_other")
     updated = await _update_routine_impl(runtime, auth, routine_id=created.id, agent_name="other")
     assert updated.agent_name == "other", "new agent_name must be persisted"
     assert updated.agent_id == "ag_other", (
@@ -715,7 +712,9 @@ async def test_owner_update_and_delete_succeed_when_caller_is_creator(
     await db_session.commit()
 
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant.id, platform_user_id="U_owner", is_admin=False)
+    auth = _auth_identity(
+        tenant_id=tenant.id, platform_user_id="U_owner", is_admin=False, talking_to="agent_a"
+    )
     updated = await _update_routine_impl(
         runtime, auth, routine_id=created.id, trigger_message="updated by owner"
     )
@@ -815,3 +814,701 @@ async def test_admin_update_and_delete_succeed_when_caller_is_non_owner_admin(
 
     result = await _delete_routine_impl(runtime, auth, routine_id=created.id)
     assert result.deleted is True, "an admin must be able to delete a routine they did not create"
+
+
+async def test_catch_up_policy_create_update_and_owner_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="agent_policy", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(db_session_factory, client=client)
+    owner = _auth_identity(tenant_id=tenant.id, platform_user_id="owner", talking_to="agent_policy")
+    row = await _create_routine_impl(
+        runtime,
+        owner,
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone="UTC",
+        trigger_message="run",
+        catch_up_policy="run-once",
+    )
+    assert row.catch_up_policy == "run-once"
+    intruder = _auth_identity(tenant_id=tenant.id, platform_user_id="other")
+    with pytest.raises(ToolError, match="routine not found"):
+        await _update_routine_impl(runtime, intruder, routine_id=row.id, catch_up_policy="skip")
+    updated = await _update_routine_impl(runtime, owner, routine_id=row.id, catch_up_policy="skip")
+    assert updated.catch_up_policy == "skip"
+    assert updated.next_fire_at == row.next_fire_at
+    await client.close()
+
+
+# --- FEAT-085: destination -----------------------------------------------------
+
+_GUILD = "424242"
+
+
+def _discord_channels(monkeypatch: pytest.MonkeyPatch, channels: dict[int, object]) -> None:
+    """Fake the REST client: `fetch_channel` returns from `channels` or 404s."""
+    import contextlib
+
+    import discord
+
+    class _Client:
+        async def fetch_channel(self, channel_id: int) -> object:
+            if channel_id not in channels:
+                raise discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
+            return channels[channel_id]
+
+    @contextlib.asynccontextmanager
+    async def fake_rest_client(token: object) -> Any:
+        yield _Client()
+
+    monkeypatch.setattr(_routines_mod, "rest_client", fake_rest_client)
+    monkeypatch.setattr(_routines_mod, "_require_bot_token", lambda runtime: "token")
+
+    async def fake_resolve_member(c: object, guild_id: str, user_id: str) -> tuple[None, object]:
+        return None, _CALLER
+
+    monkeypatch.setattr(_routines_mod, "_resolve_member", fake_resolve_member)
+
+
+# The caller as a guild member; channel permissions come from the fakes below.
+_CALLER = MagicMock(guild_permissions=MagicMock(administrator=False))
+
+
+def _perms(*, view: bool = True, send: bool = True, manage_threads: bool = False) -> object:
+    return MagicMock(
+        view_channel=view,
+        send_messages=send,
+        send_messages_in_threads=send,
+        manage_threads=manage_threads,
+    )
+
+
+def _text_channel(
+    *, guild_id: str = _GUILD, category_id: int | None = None, perms: object | None = None
+) -> object:
+    from types import SimpleNamespace
+
+    import discord
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.guild = SimpleNamespace(id=int(guild_id))
+    channel.category_id = category_id
+    channel.permissions_for = MagicMock(return_value=perms if perms is not None else _perms())
+    return channel
+
+
+def _private_thread(*, parent: object, caller_is_member: bool) -> object:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import discord
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild = SimpleNamespace(id=int(_GUILD))
+    thread.parent = parent
+    thread.parent_id = 444
+    thread.type = discord.ChannelType.private_thread
+    thread.permissions_for = MagicMock(return_value=_perms())
+    if caller_is_member:
+        thread.fetch_member = AsyncMock(return_value=object())
+    else:
+        thread.fetch_member = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="Not Found"), "no")
+        )
+    return thread
+
+
+def _slack_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    is_member: bool = True,
+    info_error: str | None = None,
+    thread_found: bool = True,
+    is_private: bool = False,
+    caller_in_channel: bool = True,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    client = MagicMock()
+    if info_error is not None:
+        response = MagicMock(spec=AsyncSlackResponse)
+        response.data = {"ok": False, "error": info_error}
+        client.conversations_info = AsyncMock(side_effect=SlackApiError("err", response))
+    else:
+        client.conversations_info = AsyncMock(
+            return_value={
+                "channel": {"id": "C0123ABC", "is_member": is_member, "is_private": is_private}
+            }
+        )
+    client.users_info = AsyncMock(return_value={"user": {"id": "u_test"}})
+    client.conversations_members = AsyncMock(
+        return_value={"members": ["u_test"] if caller_in_channel else ["U_OTHER"]}
+    )
+    replies: dict[str, object] = {"messages": [{"ts": "1717.5"}] if thread_found else []}
+    client.conversations_replies = AsyncMock(return_value=replies)
+
+    async def fake_client(runtime: object, *, team_id: str) -> object:
+        assert team_id == "T_TEST", "resolved in the caller's own workspace"
+        return client
+
+    monkeypatch.setattr(_routines_mod, "slack_web_client", fake_client)
+
+
+async def _create(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    *,
+    platform: str,
+    kind: str,
+    destination_id: str,
+    policy: object | None = None,
+) -> object:
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)  # type: ignore[arg-type]
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    return await _create_routine_impl(
+        _runtime(committing_sessionmaker, client=client),
+        _auth_identity(
+            tenant_id=tenant.id,
+            platform=platform,
+            external_id=_GUILD if platform == "discord" else "T_TEST",
+            platform_user_id="111" if platform == "discord" else "u_test",
+        ),
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone="UTC",
+        trigger_message="weekly summary",
+        destination_kind=kind,  # type: ignore[arg-type]
+        destination_id=destination_id,
+    )
+
+
+async def test_create_routine_saves_a_reachable_destination_in_this_guild(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _discord_channels(monkeypatch, {1234: _text_channel()})
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="discord",
+        kind="channel",
+        destination_id="1234",
+    )
+    assert (row.destination_kind, row.destination_id) == ("channel", "1234")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("channels", "destination_id", "kind", "message"),
+    [
+        ({1234: "other-guild"}, "1234", "channel", "not in this server"),
+        ({}, "1234", "channel", "cannot see"),
+        ({1234: "text"}, "general", "channel", "invalid destination_id"),
+        ({1234: "text"}, "1234", "thread", "use destination_kind=channel"),
+    ],
+)
+async def test_create_routine_refuses_an_unusable_discord_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    channels: dict[int, str],
+    destination_id: str,
+    kind: str,
+    message: str,
+) -> None:
+    built = {
+        cid: _text_channel(guild_id="999" if what == "other-guild" else _GUILD)
+        for cid, what in channels.items()
+    }
+    _discord_channels(monkeypatch, built)
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind=kind,
+            destination_id=destination_id,
+        )
+
+
+async def test_create_routine_refuses_a_channel_in_a_protected_category(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    _discord_channels(monkeypatch, {1234: _text_channel(category_id=77)})
+    with pytest.raises(ToolError, match="protected channel"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="channel",
+            destination_id="1234",
+            policy=TenantAccessPolicy(protected_category_ids=("77",)),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "kind", "destination_id", "message"),
+    [
+        ({}, "thread", "C0123ABC", "invalid destination_id"),
+        ({"is_member": False}, "channel", "C0123ABC", "invite it"),
+        ({"info_error": "channel_not_found"}, "channel", "C0123ABC", "could not find"),
+        ({"thread_found": False}, "thread", "C0123ABC:1717.5", "no thread"),
+    ],
+)
+async def test_create_routine_refuses_an_unusable_slack_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    kind: str,
+    destination_id: str,
+    message: str,
+) -> None:
+    _slack_client(monkeypatch, **kwargs)  # type: ignore[arg-type]
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="slack",
+            kind=kind,
+            destination_id=destination_id,
+        )
+
+
+async def test_create_routine_saves_a_slack_thread_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slack_client(monkeypatch)
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="slack",
+        kind="thread",
+        destination_id="C0123ABC:1717.5",
+    )
+    assert row.destination_id == "C0123ABC:1717.5"  # type: ignore[attr-defined]
+
+
+async def test_create_routine_needs_both_destination_fields(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    with pytest.raises(ToolError, match="together"):
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(tenant_id=tenant.id),
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="x",
+            destination_kind="channel",
+        )
+
+
+async def test_update_routine_sets_and_clears_a_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _discord_channels(monkeypatch, {55: _text_channel()})
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="orig",
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant.id, external_id=_GUILD, talking_to="agent_a")
+
+    set_ = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, destination_kind="channel", destination_id="55"
+    )
+    cleared = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, clear_destination=True
+    )
+
+    assert (set_.destination_kind, set_.destination_id) == ("channel", "55")
+    assert set_.trigger_message == "orig"
+    assert (cleared.destination_kind, cleared.destination_id) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("channel", "message"),
+    [
+        (lambda: _text_channel(perms=_perms(send=False)), "you cannot post"),
+        (lambda: _text_channel(perms=_perms(view=False)), "you cannot post"),
+    ],
+)
+async def test_create_routine_refuses_a_discord_channel_the_caller_cannot_post_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: Any,
+    message: str,
+) -> None:
+    """Review regression (round 3): the bot could post there, the caller could
+    not — a routine must not become a way around send_message's checks."""
+    _discord_channels(monkeypatch, {1234: channel()})
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="channel",
+            destination_id="1234",
+        )
+
+
+async def test_create_routine_refuses_a_private_thread_the_caller_is_not_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {1234: _private_thread(parent=parent, caller_is_member=False), 444: parent}
+    )
+    with pytest.raises(ToolError, match="you cannot post"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="thread",
+            destination_id="1234",
+        )
+
+
+async def test_create_routine_accepts_a_private_thread_the_caller_is_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {1234: _private_thread(parent=parent, caller_is_member=True), 444: parent}
+    )
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="discord",
+        kind="thread",
+        destination_id="1234",
+    )
+    assert row.destination_kind == "thread"  # type: ignore[attr-defined]
+
+
+async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review regression (round 3): daimon is in the private channel, the
+    caller is not."""
+    _slack_client(monkeypatch, is_private=True, caller_in_channel=False)
+    with pytest.raises(ToolError, match="you cannot post"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="slack",
+            kind="channel",
+            destination_id="C0123ABC",
+        )
+
+
+async def test_create_routine_refuses_a_pinned_agent_without_a_pinned_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A routine would run the pinned agent headless, outside any channel."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("111111111111111111",)}),
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(platform="discord", external_id="guild_pin", tenant_id=tenant.id)
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
+
+
+async def test_create_routine_refuses_a_member_scheduling_another_projects_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A fired routine runs with its agent's repo, keys and memory: a member talking
+    to their own project's agent must not schedule another client's agent."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent(agent_id="ag_clientb", name="clientb-project", tenant_id=tenant.id),
+            _ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id),
+        ]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
+
+    with pytest.raises(ToolError, match="only a workspace or server admin can schedule it"):
+        await _create_routine_impl(
+            runtime,
+            member,
+            agent_name="acme-project",
+            cron_expr="0 9 * * *",
+            timezone="UTC",
+            trigger_message="summarize everything in your memory",
+        )
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+    assert await _list_routines_impl(runtime, admin) == [], "a refused routine saves nothing"
+
+    own = await _create_routine_impl(
+        runtime,
+        member,
+        agent_name="clientb-project",
+        cron_expr="0 9 * * *",
+        timezone="UTC",
+        trigger_message="daily standup",
+    )
+    assert own.agent_id == "ag_clientb", "the agent you are talking to stays schedulable"
+    by_admin = await _create_routine_impl(
+        runtime,
+        _auth_identity(tenant_id=tenant.id, is_admin=True, talking_to=None),
+        agent_name="acme-project",
+        cron_expr="0 9 * * *",
+        timezone="UTC",
+        trigger_message="weekly report",
+    )
+    assert by_admin.agent_id == "ag_acme", "an admin may schedule any agent"
+
+
+async def test_update_routine_refuses_a_member_moving_it_to_another_projects_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_clientb",
+        agent_name="clientb-project",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="daily standup",
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
+
+    with pytest.raises(ToolError, match="only a workspace or server admin"):
+        await _update_routine_impl(
+            runtime, member, routine_id=created.id, agent_name="acme-project"
+        )
+    async with committing_sessionmaker() as session:
+        row = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert row is not None and row.agent_id == "ag_clientb", "a refused update changes nothing"
+
+
+async def test_routine_reads_hide_other_members_routines(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """Another client's routine trigger and last result are that client's work."""
+    tenant = await make_tenant(db_session)
+    theirs = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_acme",
+        agent_id="ag_acme",
+        agent_name="acme-project",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="acme pipeline numbers",
+    )
+    mine = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_clientb",
+        agent_name="clientb-project",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="daily standup",
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    member = _auth_identity(tenant_id=tenant.id)
+
+    assert [row.id for row in await _list_routines_impl(runtime, member)] == [mine.id]
+    with pytest.raises(ToolError, match="routine not found"):
+        await _get_routine_impl(runtime, member, routine_id=theirs.id)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+    assert {row.id for row in await _list_routines_impl(runtime, admin)} == {theirs.id, mine.id}
+
+
+_PINNED_CHANNEL = "111111111111111111"
+
+
+@pytest.mark.parametrize("change", ["clear-destination", "switch-to-pinned-agent"])
+async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    change: str,
+) -> None:
+    """An update is a save too: it must not leave a pinned agent's routine posting
+    anywhere but a pinned channel, whether by dropping the destination or by
+    switching an unpinned routine onto the pinned agent. Admins included."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": (_PINNED_CHANNEL,)}),
+    )
+    pinned_routine = change == "clear-destination"
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_resolved" if pinned_routine else "ag_other",
+        agent_name="daimon" if pinned_routine else "other",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="daily",
+        destination_kind="channel" if pinned_routine else None,
+        destination_id=_PINNED_CHANNEL if pinned_routine else None,
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        if pinned_routine:
+            await _update_routine_impl(
+                runtime, admin, routine_id=created.id, clear_destination=True
+            )
+        else:
+            await _update_routine_impl(runtime, admin, routine_id=created.id, agent_name="daimon")
+    async with committing_sessionmaker() as session:
+        row = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert row is not None and row.agent_id == created.agent_id
+    assert row.destination_id == created.destination_id, "a refused update changes nothing"
+
+
+def _display_named_agent(tenant_id: uuid.UUID) -> dict[str, object]:
+    return ma_agent(
+        id="ag_resolved",
+        name="Acme Display",
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
+    ).model_dump(mode="json")
+
+
+async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """The caller names the config name; the pin is on the display name."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": (_PINNED_CHANNEL,)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _create_routine_impl(
+            runtime,
+            _auth_identity(tenant_id=tenant.id, is_admin=True),
+            agent_name="acme-config",
+            cron_expr="0 9 * * *",
+            timezone="UTC",
+            trigger_message="report",
+        )
+
+
+async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A routine saved before the pin, under the config name, must not keep being
+    editable into running the pinned agent outside its channels."""
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_resolved",
+        agent_name="acme-config",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="report",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": (_PINNED_CHANNEL,)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _update_routine_impl(
+            runtime,
+            _auth_identity(tenant_id=tenant.id, is_admin=True),
+            routine_id=created.id,
+            trigger_message="report, but more",
+        )

@@ -12,9 +12,15 @@ import httpx
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsVault
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsVault
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.adapters.cli import main as main_mod
-from daimon.adapters.cli.commands.mcp import mcp_sweep_credentials, mcp_url, mint_token
+from daimon.adapters.cli.commands.mcp import (
+    mcp_sweep_credentials,
+    mcp_url,
+    mint_agent_token,
+    mint_token,
+)
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import (
     AnthropicSettings,
@@ -23,6 +29,8 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.errors import ConfigError
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -123,6 +131,244 @@ async def test_mcp_mint_token_requires_secret(
 
     with pytest.raises(ConfigError, match="JWT_SECRET"):
         await mint_token(rt=rt, os_user=None)
+
+
+# ---------------------------------------------------------------------------
+# mint-agent-token tests
+# ---------------------------------------------------------------------------
+
+
+def _agent_wire(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, Any]:
+    """Serialized BetaManagedAgentsAgent for a GET /v1/agents list response."""
+    now = dt.datetime(2026, 6, 1, tzinfo=dt.UTC)
+    return BetaManagedAgentsAgent(
+        id=agent_id,
+        type="agent",
+        name=name,
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed=None),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: name},
+        description=None,
+        archived_at=None,
+        created_at=now,
+        updated_at=now,
+        version=1,
+        mcp_servers=[],
+        skills=[],
+        tools=[],
+        system="you are helpful",
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_mint_agent_token_success_writes_one_row_and_prints_token(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful mint prints a token on stdout and writes exactly one
+    mcp_tokens row whose label matches what was passed."""
+    from daimon.adapters.cli.commands import mcp as mcp_cmd
+    from daimon.core.mcp_auth import mint_agent_mcp_token as real_mint_agent_mcp_token
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    tenant_id = await _seed_tenant(schema_sessionmaker)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET" and req.url.path == "/v1/agents"
+        return httpx.Response(
+            200,
+            json={
+                "data": [_agent_wire(agent_id="ag_reader", name="my-agent", tenant_id=tenant_id)],
+                "has_more": False,
+            },
+        )
+
+    secret = "a" * 32
+    settings = _build_settings(jwt_secret=secret)
+    anthropic = build_fake_anthropic(handler)
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", settings)
+    object.__setattr__(rt, "anthropic", anthropic)
+    object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
+    rt = cast(CliRuntime, rt)
+
+    # Spy on the write call itself — schema-per-test fixtures use
+    # schema_translate_map, which raw text() SQL does not honour, so a
+    # row-count query would silently hit the wrong schema. Counting real
+    # invocations of the store-backed writer is the reliable signal.
+    calls: list[dict[str, Any]] = []
+
+    async def spy_mint_agent_mcp_token(session: AsyncSession, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return await real_mint_agent_mcp_token(session, **kwargs)
+
+    monkeypatch.setattr(mcp_cmd, "mint_agent_mcp_token", spy_mint_agent_mcp_token)
+
+    await mint_agent_token(
+        rt=rt, tenant=str(tenant_id), agent="my-agent", label="ops-debug", ttl_days=90
+    )
+
+    out = capsys.readouterr().out
+    token = out.strip().splitlines()[-1]
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert claims["agent_id"], "token must carry an agent_id claim"
+
+    assert len(calls) == 1, "mint_agent_mcp_token (the sole writer) must be called exactly once"
+    async with schema_sessionmaker() as s:
+        row = await get_mcp_token(s, jti=uuid.UUID(claims["jti"]))
+    assert row is not None, "the minted jti must have a corresponding row"
+    assert row.label == "ops-debug"
+
+
+@pytest.mark.asyncio
+async def test_mint_agent_token_ttl_days_sets_exp(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--ttl-days 1 produces a token whose exp claim is about one day out."""
+    tenant_id = await _seed_tenant(schema_sessionmaker)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [_agent_wire(agent_id="ag_ttl", name="ttl-agent", tenant_id=tenant_id)],
+                "has_more": False,
+            },
+        )
+
+    secret = "b" * 32
+    settings = _build_settings(jwt_secret=secret)
+    anthropic = build_fake_anthropic(handler)
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", settings)
+    object.__setattr__(rt, "anthropic", anthropic)
+    object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
+    rt = cast(CliRuntime, rt)
+
+    before = dt.datetime.now(dt.UTC)
+    await mint_agent_token(rt=rt, tenant=str(tenant_id), agent="ttl-agent", label=None, ttl_days=1)
+    out = capsys.readouterr().out
+    token = out.strip().splitlines()[-1]
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+
+    expected = before + dt.timedelta(days=1)
+    actual = dt.datetime.fromtimestamp(claims["exp"], tz=dt.UTC)
+    assert abs((actual - expected).total_seconds()) < 60, (
+        "exp should land about one day (ttl_days=1) after mint time"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mint_agent_token_unknown_agent_exits_nonzero_and_writes_no_row(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown --agent raises ConfigError and writes no token row."""
+    from daimon.adapters.cli.commands import mcp as mcp_cmd
+
+    tenant_id = await _seed_tenant(schema_sessionmaker)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [], "has_more": False})
+
+    settings = _build_settings(jwt_secret="c" * 32)
+    anthropic = build_fake_anthropic(handler)
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", settings)
+    object.__setattr__(rt, "anthropic", anthropic)
+    object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
+    rt = cast(CliRuntime, rt)
+
+    calls: list[Any] = []
+
+    async def spy_mint_agent_mcp_token(session: AsyncSession, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        raise AssertionError("must not be called when the agent is unknown")
+
+    monkeypatch.setattr(mcp_cmd, "mint_agent_mcp_token", spy_mint_agent_mcp_token)
+
+    with pytest.raises(ConfigError, match="no-such-agent"):
+        await mint_agent_token(
+            rt=rt, tenant=str(tenant_id), agent="no-such-agent", label=None, ttl_days=90
+        )
+
+    assert calls == [], "the writer must never be reached for an unknown agent"
+
+
+@pytest.mark.asyncio
+async def test_mint_agent_token_requires_secret_writes_no_row(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settings object with no mcp.jwt_secret exits non-zero and writes no row."""
+    from daimon.adapters.cli.commands import mcp as mcp_cmd
+
+    tenant_id = await _seed_tenant(schema_sessionmaker)
+    settings = _build_settings(jwt_secret=None)
+    rt = _make_rt(settings=settings, sessionmaker=schema_sessionmaker)
+
+    calls: list[Any] = []
+
+    async def spy_mint_agent_mcp_token(session: AsyncSession, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        raise AssertionError("must not be called when jwt_secret is unset")
+
+    monkeypatch.setattr(mcp_cmd, "mint_agent_mcp_token", spy_mint_agent_mcp_token)
+
+    with pytest.raises(ConfigError, match="JWT_SECRET"):
+        await mint_agent_token(
+            rt=rt, tenant=str(tenant_id), agent="whatever", label=None, ttl_days=90
+        )
+
+    assert calls == [], "the writer must never be reached when jwt_secret is unset"
+
+
+def test_mcp_mint_agent_token_via_runner_prints_token(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Typer-level smoke: `daimon mcp mint-agent-token` reaches mint_agent_token
+    and prints a bare token on stdout."""
+    import asyncio
+    import contextlib
+
+    from daimon.adapters.cli.commands import mcp as mcp_cmd
+
+    tenant_id = asyncio.run(_seed_tenant(schema_sessionmaker))
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    _agent_wire(agent_id="ag_runner", name="runner-agent", tenant_id=tenant_id)
+                ],
+                "has_more": False,
+            },
+        )
+
+    settings = _build_settings(jwt_secret="d" * 32)
+    monkeypatch.setattr(mcp_cmd, "load_settings", lambda: settings)
+
+    @contextlib.asynccontextmanager
+    async def _fake_build_runtime(_settings: Settings) -> AsyncIterator[CliRuntime]:
+        rt = object.__new__(CliRuntime)
+        object.__setattr__(rt, "settings", settings)
+        object.__setattr__(rt, "anthropic", build_fake_anthropic(handler))
+        object.__setattr__(rt, "sessionmaker", schema_sessionmaker)
+        yield cast(CliRuntime, rt)
+
+    monkeypatch.setattr(mcp_cmd, "build_runtime", _fake_build_runtime)
+
+    result = runner.invoke(
+        main_mod.app,
+        ["mcp", "mint-agent-token", "--tenant", str(tenant_id), "--agent", "runner-agent"],
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+    token = result.stdout.strip().splitlines()[-1]
+    pyjwt.decode(token, "d" * 32, algorithms=["HS256"])
 
 
 def test_mcp_url_via_runner_prints_url(

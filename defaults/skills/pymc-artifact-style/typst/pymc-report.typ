@@ -3,7 +3,7 @@
 //  -------------------------------------------------------------------------
 //  Design language:
 //    · Body / captions ......... Inter            (humanist sans, long-read)
-//    · Headings / display ...... Archivo Expanded  (wide grotesque, brand)
+//    · Headings / display ...... Inter             (website headline family)
 //    · Mathematics ............. Fira Math         (sans-serif math)
 //    · Layout .................. Tufte-style ~⅔ text column + wide margin
 //                                for figures, captions and sidenotes
@@ -11,12 +11,19 @@
 //                                restrained color, comfortable measure,
 //                                one idea per rule, tables without verticals.
 //
-//  Brand palette (from the 2025 Brand Guideline):
-//    Deep Navy Blue  #0C1F40   (primary / text)
-//    Pastel Aqua     #B4E7DD   (main 02 / rules, accents)
-//    Soft Periwinkle #9FAAE2   (secondary)
-//    Soft White      #F7F7F7   (surfaces)
-//    Peach Orange    #F6AE72   (accent — use sparingly)
+//  Brand palette (pymc-labs.com, MarketingLayout.BTaXrrww.css, 2026-09-28):
+//    Navy            #0C1F40   (primary / text)
+//    Navy deep       #07142A   (dark surfaces, footer)
+//    Navy header     #071530   (dark header band)
+//    Aqua            #B4E7DD   (rules, spines, fills)
+//    Periwinkle      #9FAAE2   (secondary fills, series)
+//    Peach           #F6AE72   (warm fill — use sparingly)
+//    Violet          #C8B4E7   (optional fill)
+//    Soft white      #F7F7F7   (surfaces)
+//  Text accents (readable on white / soft white; the pale colors are not):
+//    Teal            #0C9E82   (accent text, icons; pairs with an aqua tint)
+//    Indigo          #5462C4   (link / interactive accent text)
+//    Dark orange     #C4720A   (warm status text; pairs with a peach tint)
 // ============================================================================
 
 #import "@preview/marginalia:0.2.0" as marginalia
@@ -29,19 +36,25 @@
 #let periwinkle = rgb("#9FAAE2")
 #let soft-white = rgb("#F7F7F7")
 #let peach      = rgb("#F6AE72")
-#let ink        = rgb("#000000")             // default text color — black
-#let muted      = ink                         // all text is black (per designer notes)
+#let navy-deep   = rgb("#07142A")
+#let navy-header = rgb("#071530")
+#let violet      = rgb("#C8B4E7")
+#let teal        = rgb("#0C9E82")   // text accents: readable on white
+#let indigo      = rgb("#5462C4")
+#let dark-orange = rgb("#C4720A")
+#let ink        = navy                       // website text color
+#let muted      = ink
 #let hairline   = navy.lighten(78%)          // faint structural rules (not text)
 
 // ---------------------------------------------------------------------------
 //  Fonts
 // ---------------------------------------------------------------------------
 #let body-font    = "Inter"        // bundled rsms static; registers as family "Inter"
-#let heading-font = "Archivo"      // Typst folds the OS/2 width into `stretch`, so the
-                                   // family is "Archivo"; "Archivo Expanded" does NOT resolve
+#let heading-font = "Inter"        // website headline family
 #let math-font    = "Fira Math"    // sans math
-#let mono-font    = "Fira Mono"    // code/monospace (Inter has no mono; Fira ties to the math)
-#let heading-stretch = 125%        // selects the bundled Expanded static face
+#let mono-font    = "JetBrains Mono"
+#let heading-stretch = 100%
+#let heading-tracking = -0.02em   // website h1 letter-spacing
 
 // small helper: content -> string (best-effort, for document metadata)
 #let to-string(content) = {
@@ -80,7 +93,7 @@
 // (draft: false) build. Usage: `caption: [ … #figtag("brisk-otter-lamp")]`.
 #let figtag(code) = context if _draft.get() {
   // box() keeps the code on one line (no mid-word hyphenation in the margin)
-  [#h(0.35em)#box(text(font: mono-font, fill: peach.darken(18%))[#("[" + code + "]")])]
+  [#h(0.35em)#box(text(font: mono-font, fill: dark-orange)[#("[" + code + "]")])]
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +260,7 @@
   ]
 }
 
-// A "key number" pulled into the margin: large Archivo value + tight label.
+// A "key number" pulled into the margin: large Inter value + tight label.
 // Both scale with the body font size (≈20pt / 8pt at the 10.5pt default).
 #let keyfigure(value, label) = context {
   let fs = _fs.get()
@@ -282,7 +295,7 @@
     stroke: (left: _spine-w + aqua), radius: 2pt, breakable: false,
   )[
     // title: a headline, but smaller than a section heading
-    #context text(font: heading-font, stretch: heading-stretch, weight: "regular",
+    #context text(font: heading-font, stretch: heading-stretch, weight: "medium",
           size: 1.3 * _fs.get(), fill: ink)[#title]
     #v(0.6em)
     #set par(first-line-indent: 0pt, justify: false)
@@ -363,17 +376,12 @@
 #let cover(
   title: none, subtitle: none, client: none, date: none,
   author: none, status: "Confidential", paper: "a4",
-  logo: "../assets/pymc-labs-logo.png",
-  cover-background: 4,              // 4 or 9 (the two approved brand graphics),
-                                   // none for a plain cover, or a custom image path
+  logo: "../assets/pymc-labs-logo-dark.png",
+  cover-background: none,              // plain by default, or a custom image path
   draft: false,                    // true → a bold DRAFT mark in the top-right
 ) = {
   let g = _tufte-geom(paper)
-  // Resolve the cover-background shorthand: 4 / 9 map to the bundled brand
-  // graphics; anything else is treated as a path (or none).
-  let _bg = if cover-background == 4 { "../assets/cover-4.png" }
-            else if cover-background == 9 { "../assets/cover-9.png" }
-            else { cover-background }
+  let _bg = cover-background
   // Cover uses its own tighter margin (sleeker, content closer to the edges)
   // than the Tufte body pages.
   let cm = 12.75mm
@@ -390,7 +398,7 @@
       {
         set align(right)
         if draft {
-          text(font: body-font, fill: peach.darken(18%), weight: "bold",
+          text(font: body-font, fill: dark-orange, weight: "bold",
                size: 16pt, tracking: 0.08em)[DRAFT]
           v(8pt)
         }
@@ -398,7 +406,7 @@
           #set par(leading: 0.55em, justify: false)
           #if client != none [Prepared for #client \ ]
           #if date != none [#date \ ]
-          #if status != none [#text(fill: peach.darken(18%))[#status]]
+          #if status != none [#text(fill: dark-orange)[#status]]
         ]
       },
     )
@@ -409,8 +417,8 @@
     #block(width: 86%)[
       #set par(justify: false, first-line-indent: 0pt)
       #set text(hyphenate: false)
-      #text(font: heading-font, stretch: heading-stretch, weight: "regular",
-            size: 46pt, fill: navy)[
+      #text(font: heading-font, stretch: heading-stretch, weight: "semibold",
+            tracking: heading-tracking, size: 46pt, fill: navy)[
         #set par(leading: 0.32em)
         #title
       ]
@@ -442,8 +450,8 @@
   number-equations: true,
   number-headings: false,           // true → "1.1" section numbers (long reports)
   font-size: 9.5pt,                 // body text size; headings scale with it
-  logo: "../assets/pymc-labs-logo.png",
-  cover-background: 4,               // cover graphic: 4 or 9 (none for plain, or a path)
+  logo: "../assets/pymc-labs-logo-dark.png",
+  cover-background: none,               // none for plain; a path for supplied artwork
   draft: false,                     // true → DRAFT mark on the cover + footer
   highlight-code: false,            // true → brand syntax colors in code blocks
   body,
@@ -466,9 +474,9 @@
 
   // — global text & paragraph —
   set text(font: body-font, size: font-size, fill: ink, lang: "en",
-           weight: "light", hyphenate: true, fallback: true)
-  // Light body → render *strong* emphasis as Medium (not Bold)
-  show strong: it => text(weight: "medium", it.body)
+           weight: "regular", hyphenate: true, fallback: true)
+  // Semibold emphasis against regular body text.
+  show strong: it => text(weight: "semibold", it.body)
   // Tufte-style: left-aligned (ragged-right) in both columns — lighter, and
   // avoids justification gaps/rivers in the narrow margin.
   // Block paragraphs: no first-line indent, a small gap between paragraphs.
@@ -495,11 +503,13 @@
               supplement: [Section])
   show heading: set text(font: heading-font, fill: ink)
   show heading.where(level: 1): it => block(above: 3.0em, below: 1.9em)[
-    #set text(stretch: heading-stretch, weight: "regular", size: 1.70 * font-size)
+    #set text(stretch: heading-stretch, weight: "semibold", tracking: heading-tracking,
+              size: 1.70 * font-size)
     #if it.numbering != none [#counter(heading).display(it.numbering)#h(0.55em)]#it.body
   ]
   show heading.where(level: 2): it => block(above: 1.7em, below: 1.2em)[
-    #set text(stretch: heading-stretch, weight: "regular", size: 1.33 * font-size)
+    #set text(stretch: heading-stretch, weight: "medium", tracking: -0.015em,
+              size: 1.33 * font-size)
     #if it.numbering != none [#counter(heading).display(it.numbering)#h(0.5em)]#it.body
   ]
   show heading.where(level: 3): it => block(above: 1.4em, below: 0.85em)[
@@ -518,7 +528,7 @@
   // header row: same body font as the rest, just bold
   show table.cell.where(y: 0): set text(weight: "medium")
 
-  // — raw / code (Fira Mono on soft-white surfaces) —
+  // — raw / code (JetBrains Mono on soft-white surfaces) —
   // Monochrome navy by default (restrained); with highlight-code, code blocks
   // take the brand syntax theme (lib/brand-code.tmTheme). Themed token colors
   // are explicit and override the ambient navy; untokenised text stays navy.
@@ -536,7 +546,7 @@
   // the first character down the wrapped lines, with a small corner to the right
   // at the bottom. The indent is paragraph hanging-indent and the bracket is a
   // drawn line(), so neither becomes characters when the code is copied.
-  // (Fira Mono advance ≈ 0.6em per char.)
+  // (JetBrains Mono advance ≈ 0.6em per char.)
   show raw.where(block: true): it => block(
     fill: soft-white, width: 100%, radius: 0pt,
     inset: (x: 11pt, y: 9pt), above: 2.0em, below: 2.0em,
@@ -596,9 +606,9 @@
     v(4pt)
     grid(columns: (1fr, auto, 1fr), align: (left, center, right),
       text(font: body-font, size: 8pt, fill: ink)[
-        PyMC Labs#if status != none [ · #text(fill: peach.darken(18%))[#status]]
+        PyMC Labs#if status != none [ · #text(fill: dark-orange)[#status]]
       ],
-      if draft { text(font: body-font, size: 8pt, fill: peach.darken(18%))[\[DRAFT\]] },
+      if draft { text(font: body-font, size: 8pt, fill: dark-orange)[\[DRAFT\]] },
       text(font: heading-font, size: 8pt, fill: ink)[
         #counter(page).display("1")
       ],
@@ -610,7 +620,7 @@
   // blocks to the exact column. Zero-size / invisible. Read with:
   //   typst query FILE.typ "<pymc-code-cols>" --field value --one
   // Width = page − page margins − margin column − gutter − code inset (2×11pt),
-  // divided by the measured Fira Mono advance at the body/code size.
+  // divided by the measured JetBrains Mono advance at the body/code size.
   context {
     let pw = if paper == "us-letter" { 8.5in } else { 210mm }
     let usable = pw - g.left - g.right - g.mcol - g.gutter - 22pt
@@ -632,8 +642,8 @@
   if outline-depth > 0 {
     // "Contents" title styled like a section heading (no number), space below
     block(above: 3.0em, below: 1.5em)[
-      #text(font: heading-font, stretch: heading-stretch, weight: "regular",
-            size: 1.70 * font-size, fill: ink)[Contents]
+      #text(font: heading-font, stretch: heading-stretch, weight: "semibold",
+            tracking: heading-tracking, size: 1.70 * font-size, fill: ink)[Contents]
     ]
     show outline.entry: it => {
       set text(font: body-font, fill: ink, weight: "light")

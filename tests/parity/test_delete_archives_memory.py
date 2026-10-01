@@ -1,20 +1,21 @@
 """Scenario (d): delete -> memory archived, on both platforms.
 
 After `driver.delete_agent` on a tenant with an MA agent + a bound memory
-store, `agent_lifecycle.archive_memory_store_best_effort` must have archived
-the MA-side store AND cleared the local binding row -- identically on
-Discord and Slack, since both adapters' `delete_agent` call the same core
-helper (`daimon.core.agent_lifecycle.archive_memory_store_best_effort`).
+store, the archive must have archived the MA-side store AND cleared the local
+binding row -- identically on Discord and Slack. Deleting an agent left the
+panel in the read-only rewrite, so both drivers now run the chat tool
+(`tools/agents._archive_agent_impl`) with their own platform's AuthIdentity,
+and it is the tool's `archive_memory_store_for_agent` call under test.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import cast
 
 import httpx
+from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.agent_memory_stores import get_memory_store_id, insert_memory_store
 from daimon.core.stores.domain import Platform
@@ -22,49 +23,15 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     MARouter,
-    NotHandled,
     build_fake_anthropic,
     combine_handlers,
+    make_archive_agent_handler,
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .drivers.protocol import PlatformDriver
-
-
-def _make_archive_agent_handler() -> Callable[[httpx.Request], httpx.Response]:
-    """`make_fake_ma_handler` doesn't implement POST .../archive -- add it here.
-
-    Mirrors packages/adapters/discord/tests/agent_setup/test_delete_agent_memory.py.
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
-        if request.method != "POST" or not m:
-            raise NotHandled
-        now = datetime.now(UTC).isoformat()
-        return httpx.Response(
-            200,
-            json={
-                "id": m.group("id"),
-                "type": "agent",
-                "name": "doomed",
-                "version": 2,
-                "model": {"id": "claude-sonnet-4-6", "speed": "standard"},
-                "system": None,
-                "metadata": {},
-                "mcp_servers": [],
-                "tools": [],
-                "skills": [],
-                "created_at": now,
-                "updated_at": now,
-                "archived_at": now,
-                "description": None,
-            },
-        )
-
-    return handler
 
 
 def _wrap_as_marouter_handler(
@@ -94,7 +61,7 @@ async def test_delete_agent_archives_memory_store(
 
     mem_state = FakeMemoryStoreState()
     combined = combine_handlers(
-        _make_archive_agent_handler(),
+        make_archive_agent_handler(),
         make_fake_memory_store_handler(mem_state),
         make_fake_ma_handler(),
     )
@@ -104,10 +71,18 @@ async def test_delete_agent_archives_memory_store(
         router.add(method, r".*", wrapped)
 
     seed_client = build_fake_anthropic(router.dispatch)
+    # `daimon_account` is what marks the agent as something this install made
+    # rather than a system agent the deployment seeded; the archive path
+    # refuses an unstamped agent, so the seed carries the stamp a real create
+    # would have written.
     agent = await seed_client.beta.agents.create(
         name="doomed",
         model="claude-sonnet-4-6",
-        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "doomed"},
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_name": "doomed",
+            "daimon_account": str(derive_guild_account_uuid(tenant.id)),
+        },
     )
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(agent.id))
     store = await seed_client.beta.memory_stores.create(name="m", description="d")

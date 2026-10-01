@@ -8,10 +8,7 @@ from typing import cast
 import httpx
 import pytest
 import typer
-from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaCloudConfig, BetaEnvironment
-from anthropic.types.beta.beta_packages import BetaPackages
-from anthropic.types.beta.beta_unrestricted_network import BetaUnrestrictedNetwork
+from anthropic.types.beta import BetaCloudConfig, BetaPackages, BetaUnrestrictedNetwork
 from daimon.adapters.cli.commands.environments import (
     environments_archive,
     environments_create,
@@ -21,15 +18,14 @@ from daimon.adapters.cli.commands.environments import (
     environments_list,
     environments_update,
 )
-from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings
 from daimon.core.errors import StoreError
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
+from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import build_cli_runtime
 
 # These tests create their tenant explicitly as cli:local (the tenant
 # discover_tenant derives for the CLI) and tag MA resources against it, so they
@@ -45,22 +41,6 @@ class _FakeSettings:
     cli = _FakeCli()
 
 
-def _build_rt(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    router: MARouter,
-) -> CliRuntime:
-    transport = httpx.MockTransport(router.dispatch)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client)
-    return CliRuntime(
-        settings=cast(Settings, _FakeSettings()),
-        anthropic=client,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
-
-
 def _env_json(
     *,
     env_id: str,
@@ -69,32 +49,23 @@ def _env_json(
     init_script: str | None = None,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    config = BetaCloudConfig(
-        type="cloud",
-        networking=BetaUnrestrictedNetwork(type="unrestricted"),
-        packages=BetaPackages(
-            type="packages",
-            apt=[],
-            cargo=[],
-            gem=[],
-            go=[],
-            npm=[],
-            pip=[],
-        ),
-        init_script=init_script,  # pyright: ignore[reportCallIssue]
-        environment=environment,  # pyright: ignore[reportCallIssue]
+    config = EMPTY_CLOUD_CONFIG
+    if init_script is not None or environment is not None:
+        # Retrieve-only fields the SDK does not declare on BetaCloudConfig;
+        # the model allows extras, so validate them in through a dict
+        # (the typed constructor rejects undeclared keyword arguments).
+        config = BetaCloudConfig.model_validate(
+            {
+                "type": "cloud",
+                "networking": BetaUnrestrictedNetwork(type="unrestricted"),
+                "packages": BetaPackages(apt=[], cargo=[], gem=[], go=[], npm=[], pip=[]),
+                "init_script": init_script,
+                "environment": environment,
+            }
+        )
+    return ma_environment(id=env_id, name=name, config=config, metadata=metadata).model_dump(
+        mode="json"
     )
-    return BetaEnvironment(
-        id=env_id,
-        type="environment",
-        name=name,
-        config=config,
-        description="",
-        metadata=metadata or {},
-        archived_at=None,
-        created_at="2026-04-22T00:00:00Z",
-        updated_at="2026-04-22T00:00:00Z",
-    ).model_dump(mode="json")
 
 
 @pytest.mark.asyncio
@@ -120,7 +91,7 @@ async def test_environments_list_returns_ma_columns(
     router.add("GET", r"/v1/environments", lambda req, m: list_response([env1, env2]))
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
     await environments_list(rt=rt, console=console, as_json=False)
 
     out = cast(StringIO, console.file).getvalue()
@@ -147,7 +118,7 @@ async def test_environments_get_resolves_via_tag(
     router.add("GET", r"/v1/environments", lambda req, m: list_response([env_data]))
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     # Should not raise StoreError
     await environments_get(rt=rt, console=console, name="mine", as_json=False)
@@ -165,7 +136,7 @@ async def test_environments_get_not_found_raises(
     router.add("GET", r"/v1/environments", lambda req, m: list_response([]))
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     with pytest.raises(StoreError, match="no environment named"):
         await environments_get(rt=rt, console=console, name="ghost", as_json=False)
@@ -193,7 +164,7 @@ async def test_environments_create_calls_sdk_create(
     router.add("POST", r"/v1/environments", on_create)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     spec_path = tmp_path / "env.yaml"
     spec_path.write_text("name: new-env\nconfig:\n  type: cloud\n")
@@ -236,7 +207,7 @@ async def test_environments_create_rejects_duplicate_name(
     router.add("POST", r"/v1/environments", on_create)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     spec_path = tmp_path / "env.yaml"
     spec_path.write_text("name: dupe\nconfig:\n  type: cloud\n")
@@ -277,7 +248,7 @@ async def test_environments_fork_rejects_existing_dst(
     router.add("POST", r"/v1/environments", on_create)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     with pytest.raises(StoreError, match="already exists in this server"):
         await environments_fork(rt=rt, console=console, src="source", dst="forked")
@@ -310,7 +281,7 @@ async def test_environments_update_no_version_param(
     router.add("POST", r"/v1/environments/env_upd", on_update)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     spec_path = tmp_path / "env.yaml"
     spec_path.write_text("name: my-env\nconfig:\n  type: cloud\n")
@@ -361,7 +332,7 @@ async def test_environments_fork_narrows_config(
     router.add("POST", r"/v1/environments", on_create)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await environments_fork(rt=rt, console=console, src="source", dst="forked")
 
@@ -384,7 +355,7 @@ async def test_environments_fork_missing_dst_raises(
     """fork raises BadParameter when dst is None."""
     router = MARouter()
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     with pytest.raises(typer.BadParameter, match="destination name is required"):
         await environments_fork(rt=rt, console=console, src="same", dst=None)
@@ -397,7 +368,7 @@ async def test_environments_fork_same_name_raises(
     """fork raises StoreError when dst equals src."""
     router = MARouter()
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     with pytest.raises(StoreError, match="conflicts with source"):
         await environments_fork(rt=rt, console=console, src="same", dst="same")
@@ -429,7 +400,7 @@ async def test_environments_archive_calls_sdk_archive(
     router.add("POST", r"/v1/environments/env_arc/archive", on_archive)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await environments_archive(rt=rt, console=console, name="to-archive", yes=True)
 
@@ -462,7 +433,7 @@ async def test_environments_delete_success(
     router.add("DELETE", r"/v1/environments/env_del", on_delete)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await environments_delete(rt=rt, console=console, name="to-delete", yes=True)
 
@@ -502,7 +473,7 @@ async def test_environments_delete_409_falls_back_to_archive(
     router.add("POST", r"/v1/environments/env_409/archive", on_archive)
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await environments_delete(rt=rt, console=console, name="conflict-env", yes=True)
 

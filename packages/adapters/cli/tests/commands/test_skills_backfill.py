@@ -51,6 +51,8 @@ from daimon.testing.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import build_cli_runtime
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -60,27 +62,12 @@ _WORKSPACE_ID_A = "guild_backfill_001"
 _WORKSPACE_ID_B = "guild_backfill_002"
 
 
-def _build_rt(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    router: MARouter,
-) -> CliRuntime:
-    transport = httpx.MockTransport(router.dispatch)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client)
+class _FakeCli:
+    local_user = "testuser"
 
-    class _FakeCli:
-        local_user = "testuser"
 
-    class _FakeSettings:
-        cli = _FakeCli()
-
-    return CliRuntime(
-        settings=cast(Settings, _FakeSettings()),
-        anthropic=client,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
+class _FakeSettings:
+    cli = _FakeCli()
 
 
 def _agent_json(
@@ -297,7 +284,7 @@ async def test_dry_run_enumerates_rows_without_writing(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await skills_backfill(rt=rt, console=console, yes=True, dry_run=True)
 
@@ -442,7 +429,7 @@ async def test_apply_creates_seeded_skill_and_repins_agent(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router2)
+    rt = build_cli_runtime(db_session_factory, router=router2, settings=_FakeSettings())
 
     await skills_backfill(rt=rt, console=console, yes=True, dry_run=False)
 
@@ -680,7 +667,7 @@ async def test_apply_idempotent_second_run_is_noop(
 
     out = StringIO()
     console = Console(file=out, force_terminal=False, highlight=False, width=120)
-    rt = _build_rt(db_session_factory, router)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
     await skills_backfill(rt=rt, console=console, yes=True, dry_run=False)
 

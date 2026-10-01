@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
-
-pytestmark = pytest.mark.asyncio
 
 
 async def test_insert_entry_fresh_key_returns_true_and_creates_one_row(

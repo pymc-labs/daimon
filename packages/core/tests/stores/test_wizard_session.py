@@ -8,12 +8,15 @@ the platform-user-scoped erasure helpers.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 
 from daimon.core.stores import wizard_session as store
 from daimon.core.stores.domain import WizardSessionRow
+from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant, make_wizard_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 
 async def test_create_wizard_session_returns_pydantic_row_and_get_matches(
@@ -172,19 +175,131 @@ async def test_try_claim_submit_returns_row_on_first_call_and_none_on_second(
     now = datetime.now(UTC)
 
     first = await store.try_claim_submit(
-        db_session, short_id=created.id, answers={"choice": ["a"]}, current_step=1, now=now
+        db_session,
+        short_id=created.id,
+        answers={"choice": ["a"]},
+        current_step=1,
+        expected_updated_at=created.updated_at,
+        now=now,
     )
     second = await store.try_claim_submit(
         db_session,
         short_id=created.id,
         answers={"choice": ["a"]},
         current_step=1,
+        expected_updated_at=first.updated_at if first is not None else created.updated_at,
         now=now + timedelta(seconds=1),
     )
 
     assert first is not None
     assert first.status == "submitted"
     assert second is None, "a second claim of an already-submitted row must return None"
+
+
+async def test_try_claim_submit_does_not_overwrite_a_newer_edit(db_session: AsyncSession) -> None:
+    """A submit callback built from an old read must not replace a later edit."""
+    created = await make_wizard_session(db_session, answers={"choice": ["old"]}, current_step=1)
+    latest_answers = {"choice": ["new"]}
+    # Even equal clock readings need a fresh optimistic-concurrency token.
+    edited_at = created.updated_at
+    edit_count = await store.update_wizard_state(
+        db_session,
+        short_id=created.id,
+        answers=latest_answers,
+        current_step=1,
+        expected_updated_at=created.updated_at,
+        now=edited_at,
+    )
+    assert edit_count == 1
+
+    claimed = await store.try_claim_submit(
+        db_session,
+        short_id=created.id,
+        answers=created.answers,
+        current_step=created.current_step,
+        expected_updated_at=created.updated_at,
+        now=edited_at + timedelta(seconds=1),
+    )
+
+    assert claimed is None, "a submit from before an edit must lose its stale claim"
+    current = await store.get_wizard_session(db_session, short_id=created.id)
+    assert current is not None
+    assert current.status == "open", "the stale submit must not claim the edited form"
+    assert current.answers == latest_answers, "the stale submit must preserve the newer edit"
+    assert current.updated_at > created.updated_at, "every edit must advance the concurrency token"
+
+
+async def test_expiry_sweep_does_not_abandon_a_pre_expiry_submit_in_flight(
+    db_session: AsyncSession,
+    db_schema: str,
+) -> None:
+    """The sweep's id snapshot must not overwrite a submit that commits first."""
+    expires_at = datetime.now(UTC) + timedelta(seconds=2)
+    created = await make_wizard_session(
+        db_session,
+        answers={"choice": ["a"]},
+        expires_at=expires_at,
+        now=expires_at - timedelta(hours=1),
+    )
+    await db_session.commit()
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    independent_sessions = async_sessionmaker(bind=engine, expire_on_commit=False)
+    submit_now = expires_at - timedelta(seconds=1)
+    sweep_now = expires_at + timedelta(seconds=1)
+    candidate_selected = asyncio.Event()
+    continue_sweep = asyncio.Event()
+
+    async def claim_and_hold() -> None:
+        async with independent_sessions() as session, session.begin():
+            claimed = await store.try_claim_submit(
+                session,
+                short_id=created.id,
+                answers={"choice": ["a"]},
+                current_step=1,
+                expected_updated_at=created.updated_at,
+                now=submit_now,
+            )
+            assert claimed is not None, "pre-expiry submit should win its claim"
+            await candidate_selected.wait()
+
+    async def select_then_sweep() -> int:
+        async with independent_sessions() as session, session.begin():
+            execute = session.execute
+            first_execute = True
+
+            async def pause_after_candidate_query(*args: object, **kwargs: object) -> object:
+                nonlocal first_execute
+                result = await execute(*args, **kwargs)  # type: ignore[arg-type]
+                if first_execute:
+                    first_execute = False
+                    candidate_selected.set()
+                    await continue_sweep.wait()
+                return result
+
+            session.execute = pause_after_candidate_query  # type: ignore[method-assign]
+            return await store.abandon_expired_wizard_sessions(session, now=sweep_now)
+
+    try:
+        claim_task = asyncio.create_task(claim_and_hold())
+        sweep_task = asyncio.create_task(select_then_sweep())
+        await candidate_selected.wait()
+        # The candidate SELECT has completed while the claim UPDATE is still
+        # uncommitted, so PostgreSQL exposes the previous open row to the sweep.
+        # Commit the claim before allowing its second UPDATE to run.
+        await claim_task
+        continue_sweep.set()
+        flipped = await sweep_task
+
+        assert flipped == 0, "expiry sweep must recheck status after a concurrent submit commits"
+        async with independent_sessions() as session:
+            refreshed = await store.get_wizard_session(session, short_id=created.id)
+        assert refreshed is not None
+        assert refreshed.status == "submitted", "a submitted wizard must remain terminal"
+    finally:
+        continue_sweep.set()
+        await engine.dispose()
 
 
 async def test_concurrent_try_claim_submit_yields_exactly_one_winner(
@@ -204,7 +319,12 @@ async def test_concurrent_try_claim_submit_yields_exactly_one_winner(
     async def claim() -> WizardSessionRow | None:
         async with db_session_factory() as session:
             row = await store.try_claim_submit(
-                session, short_id=created.id, answers={"choice": ["a"]}, current_step=1, now=now
+                session,
+                short_id=created.id,
+                answers={"choice": ["a"]},
+                current_step=1,
+                expected_updated_at=created.updated_at,
+                now=now,
             )
             await session.commit()
             return row

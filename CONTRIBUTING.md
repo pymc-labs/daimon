@@ -9,12 +9,16 @@ look for in a pull request.
 - `packages/core/` — `daimon-core` library. Owns schema (Alembic migrations),
   stores, Managed Agents helpers, and the turn pipeline. No adapter imports.
 - `packages/adapters/cli/` — `daimon` binary (Typer CLI).
-- `packages/adapters/{mcp,discord,slack,scheduler}/` — platform adapters. Each
+- `packages/adapters/{mcp,discord,slack,teams,scheduler}/` — platform adapters. Each
   owns one platform's I/O, rendering, and auth; adapters never import from
   each other.
+- `packages/mux/` — provider-agnostic managed-agent interface.
 - `packages/testing/` — shared test fixtures/harness.
 - `apps/notebook-host/` — standalone marimo notebook host service.
+- `apps/report-host/` — standalone report host service.
+- `plugin/` — Claude Code plugin (commands and skills).
 - `defaults/` — YAML sources for seeded agents, environments, and skills.
+- `docs/` — operator documentation.
 
 Dependency rule (enforced by `import-linter` in CI):
 
@@ -35,10 +39,14 @@ export DAIMON_DATABASE__TEST_URL=postgresql+asyncpg://daimon:daimon@localhost:54
 uv run pytest
 ```
 
-Tests run against a real Postgres, not an in-memory fake — each test gets its
-own schema (`CREATE SCHEMA test_<uuid>` + `DROP SCHEMA ... CASCADE`) for
-isolation, so `uv run pytest` is safe to run repeatedly and concurrently
-against the same `daimon_test` database.
+Tests run against a real Postgres, not an in-memory fake. Each pytest worker
+owns one schema (`test_w<pid>_<nonce>`), created once per run and dropped at
+the end; every ORM table in it is wiped before each test. Because the schema
+name carries the worker's pid, concurrent runs and several worktrees can all
+point at the same `daimon_test` database safely. Mark a test that runs its own
+DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
+instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
+behind by a killed run.
 
 Install pre-commit hooks once so the gates below run automatically on every
 commit:
@@ -49,7 +57,7 @@ uv run pre-commit install
 
 ## Quality gates
 
-Every PR must keep all four green:
+Every PR must keep these four green:
 
 ```bash
 uv run pytest                              # tests (needs Postgres, see above)
@@ -60,6 +68,27 @@ uv run lint-imports                        # package boundary contracts
 
 Pyright runs in strict mode project-wide — new code should carry precise
 types rather than `Any`.
+
+CI runs those four across its jobs. Its `lint` job also runs the repo's own
+linters — `scripts/lint_discord_modals.py` for Discord modal conventions,
+`scripts/lint_anti_patterns.sh` for test anti-patterns, plus the migration
+marker and leakage linters described below — and checks that the generated
+documentation still matches the code:
+
+```bash
+uv run python scripts/generate_env_example.py --check      # .env.example
+uv run python scripts/generate_config_reference.py --check # docs/configuration.md
+uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
+```
+
+Those three pages are written by generators, so a change to a settings field's
+`Field(description=...)` or to an MCP tool's docstring is a change to their
+source: re-run the generator without `--check` and commit the result, rather
+than editing the page. `CLAUDE.md` has the table of which change means which
+generator, and which pages are maintained by hand.
+
+The pre-commit hooks from the setup above run the linters and the generator
+checks on `git commit`; `pytest` stays a manual step.
 
 ### Migration downgrade-safety markers
 
@@ -76,6 +105,20 @@ value. `scripts/lint_migrations.py` (wired into pre-commit and CI)
 AST-cross-checks the declared value against the `downgrade()` body, so
 declaring `unsupported` requires actually raising `NotImplementedError`.
 
+### Designators in comments
+
+Comments and test names cite short ids: `D-14` is an architecture decision,
+`T-05-04a` a threat-model item, `SYNC-03` and friends a requirement. They
+are traceability anchors, not tickets you need access to — the sentence
+around one always states the rule it stands for, and that sentence is the
+part that has to hold. Keep an id when you move the code it annotates;
+never add one for a rule you have not written down in prose.
+
+`scripts/lint_designators.sh` (pre-commit and CI) guards the other
+direction: this repository is public, so it must not name the maintainers'
+private planning repository, production hostnames or cloud project ids.
+Describe the behaviour instead.
+
 ## Pull request expectations
 
 - Keep diffs focused: one logical change per PR.
@@ -85,5 +128,4 @@ declaring `unsupported` requires actually raising `NotImplementedError`.
   in the same PR.
 - Describe what changed and why in the PR description. Link any related
   issue.
-- Make sure the four quality gates above pass locally before requesting
-  review.
+- Make sure the quality gates above pass locally before requesting review.

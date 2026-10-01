@@ -12,8 +12,6 @@ import httpx
 import pytest
 from pydantic import HttpUrl, SecretStr
 
-pytestmark = pytest.mark.asyncio
-
 _HOST_URL = HttpUrl("http://notebook-host:8001")
 _ADMIN_SECRET = SecretStr("supersecret")
 _SLUG = "abc123"

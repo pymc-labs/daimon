@@ -1,0 +1,76 @@
+site_name: daimon
+site_description: The open source data science agent for Discord and Slack
+site_url: https://pymc-labs.github.io/daimon/
+repo_url: https://github.com/pymc-labs/daimon
+repo_name: pymc-labs/daimon
+edit_uri: edit/main/docs/
+
+# The pages are plain GitHub-readable markdown first: every one of them has to
+# make sense in the repository, because that is where a contributor finds them.
+# This file only arranges them.
+docs_dir: docs
+strict: true
+
+nav:
+  - Home: README.md
+  - Architecture: architecture.md
+  - Self-hosting: self-hosting.md
+  - Configuration: configuration.md
+  - MCP tools: mcp-tools.md
+  - Routines: routines.md
+  - Billing: billing.md
+  - Defaults: defaults.md
+  - Slack: slack.md
+  - Teams: teams.md
+  - Claude Code plugin: plugin.md
+  - mux: mux.md
+
+theme:
+  name: material
+  # The readme's sticker, downscaled, for the header and the sidebar; the
+  # favicon is a square crop of its face. Colours live in
+  # docs/assets/extra.css.
+  logo: assets/daimon-sticker.png
+  favicon: assets/favicon.png
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        # The architecture guide draws its diagrams in mermaid; without this
+        # fence they render as an unstyled code block.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

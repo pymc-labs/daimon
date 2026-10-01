@@ -70,3 +70,30 @@ async def test_build_session_factory_produces_usable_sessions_when_called() -> N
             assert result.scalar_one() == 42
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("allow", "event", "level"),
+    [
+        ("false", "agent_env.encryption_keys_missing", "error"),
+        ("true", "agent_env.encryption_disabled", "warning"),
+    ],
+    ids=["fail-closed", "dev-opt-in"],
+)
+async def test_keyless_factory_logs_once_at_startup(
+    monkeypatch: pytest.MonkeyPatch, allow: str, event: str, level: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", "[]")
+    monkeypatch.setenv("DAIMON_CRYPTO__ALLOW_PLAINTEXT", allow)
+    engine = build_engine(os.environ["DAIMON_DATABASE__TEST_URL"])
+    try:
+        with capture_logs() as logs:
+            factory = build_session_factory(engine)
+            async with factory() as first, factory() as second:
+                assert first.info["crypto_keys"] == second.info["crypto_keys"] == ()
+                assert first.info["crypto_allow_plaintext"] is (allow == "true")
+        assert [(log["event"], log["log_level"]) for log in logs] == [(event, level)]
+    finally:
+        await engine.dispose()

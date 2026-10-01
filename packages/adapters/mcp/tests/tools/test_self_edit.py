@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.self_edit import (
+    REDACTED_VALUE,
     AgentRepoBindingPublic,
     _clear_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
     _get_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
@@ -36,12 +37,11 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
-from factories import seed_tenant
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytestmark = pytest.mark.asyncio
+from ..harness import seed_tenant
 
 
 def _runtime(
@@ -54,6 +54,56 @@ def _runtime(
         settings=MagicMock(),  # type: ignore[arg-type]  # tests inject only what they exercise
         deployment_default=DeploymentDefault(),
     )
+
+
+def _runtime_with_agent(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    managed: bool = False,
+    default_name: str | None = None,
+    display_name: str = "project-agent",
+    routing_name: str | None = None,
+) -> tuple[McpRuntime, uuid.UUID]:
+    """A runtime whose MA lists one agent for the tenant; returns its derived id.
+
+    `self_delete_file` resolves the calling agent to decide whether a member
+    may remove its keys, so these tests need an agent that actually resolves.
+    `managed` makes it the built-in agent; `default_name` makes it reachable
+    tenant-wide as the deployment default.
+    """
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import DeploymentDefault as _DeploymentDefault
+    from daimon.testing.ma import build_fake_anthropic, list_response
+    from daimon.testing.ma_models import ma_agent
+
+    metadata: dict[str, str] = {}
+    if managed:
+        metadata[MA_METADATA_KEY_MANAGED] = "true"
+    if routing_name is not None:
+        metadata[MA_METADATA_KEY_NAME] = routing_name
+    agent = ma_agent(
+        id="ag_self",
+        name=display_name,
+        tenant_id=tenant_id,
+        metadata=metadata or None,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            return list_response([agent.model_dump(mode="json")])
+        raise AssertionError(f"unexpected MA request {request.method} {request.url.path}")
+
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=build_fake_anthropic(handler),
+        settings=MagicMock(),  # type: ignore[arg-type]  # tests inject only what they exercise
+        deployment_default=_DeploymentDefault(agent_name=default_name)
+        if default_name
+        else _DeploymentDefault(),
+    )
+    return runtime, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_self")
 
 
 async def _seed_tenant(
@@ -119,13 +169,14 @@ async def test_self_write_then_read_round_trip(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
 
-    written = await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello: world")
-    assert written.key == "config.yaml", "write must persist the requested key"
+    written = await _self_write_file_impl(runtime, auth, key="CONFIG_TOKEN", content="hello: world")
+    assert written.key == "CONFIG_TOKEN", "write must persist the requested key"
     assert written.content == "hello: world", "write must persist the requested content"
 
-    read = await _self_read_file_impl(runtime, auth, key="config.yaml")
+    read = await _self_read_file_impl(runtime, auth, key="CONFIG_TOKEN")
     assert read is not None, "read of just-written key must hit"
-    assert read.content == "hello: world", "read must return the same content that was written"
+    assert read.key == "CONFIG_TOKEN", "read must return the stored row"
+    assert read.content == REDACTED_VALUE, "values never come back as tool output"
 
 
 async def test_self_list_files_returns_only_caller_partition(
@@ -138,8 +189,8 @@ async def test_self_list_files_returns_only_caller_partition(
     runtime = _runtime(committing_sessionmaker)
 
     auth_a = _auth_identity(tenant_id=tenant_id, agent_id=agent_a)
-    await _self_write_file_impl(runtime, auth_a, key="config.yaml", content="a")
-    await _self_write_file_impl(runtime, auth_a, key="notes.md", content="b")
+    await _self_write_file_impl(runtime, auth_a, key="CONFIG_TOKEN", content="a")
+    await _self_write_file_impl(runtime, auth_a, key="NOTES_TOKEN", content="b")
 
     auth_b = _auth_identity(tenant_id=tenant_id, agent_id=agent_b)
     rows = await _self_list_files_impl(runtime, auth_b)
@@ -155,8 +206,8 @@ async def test_self_delete_file_idempotent(
 ) -> None:
     """Delete on a missing key returns success without raising."""
     tenant_id = await _seed_tenant(committing_sessionmaker)
-    runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant_id)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
 
     result = await _self_delete_file_impl(runtime, auth, key="never-written")
 
@@ -169,15 +220,15 @@ async def test_self_delete_file_after_write_removes_row(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _seed_tenant(committing_sessionmaker)
-    runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity(tenant_id=tenant_id)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
 
-    await _self_write_file_impl(runtime, auth, key="ephemeral.txt", content="bye")
+    await _self_write_file_impl(runtime, auth, key="EPHEMERAL_TOKEN", content="bye")
     rows_before = await _self_list_files_impl(runtime, auth)
     assert len(rows_before) == 1, "list must show the row that was just written"
 
-    result = await _self_delete_file_impl(runtime, auth, key="ephemeral.txt")
-    assert result == {"deleted": True, "key": "ephemeral.txt"}, (
+    result = await _self_delete_file_impl(runtime, auth, key="EPHEMERAL_TOKEN")
+    assert result == {"deleted": True, "key": "EPHEMERAL_TOKEN"}, (
         "delete must report success on a row that existed"
     )
 
@@ -798,7 +849,7 @@ async def test_set_repo_binding_no_github_credential_hint(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NoBindingError → ToolError with /agent-setup hint."""
+    """NoBindingError → ToolError naming the private repo-binding request."""
 
     async def _fake_mint(**_kwargs: object) -> str:
         raise NoBindingError("no github credential")
@@ -807,7 +858,7 @@ async def test_set_repo_binding_no_github_credential_hint(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
 
-    with pytest.raises(ToolError, match="/agent-setup"):
+    with pytest.raises(ToolError, match="request_repo_binding"):
         await _set_repo_binding_impl(
             runtime, auth, repo_url="https://github.com/o/r", default_branch="main"
         )
@@ -1149,3 +1200,382 @@ async def test_no_identity_args_in_self_edit_tool_schemas(
 
     missing = _SELF_EDIT_TOOL_NAMES - seen
     assert not missing, f"register_self_edit_tools did not register all 7 tools; missing: {missing}"
+
+
+async def test_self_read_and_list_withhold_values_a_person_entered(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """H3: a key submitted through a credential form never comes back as tool output.
+
+    The form path writes with the requester's account id, and the requester's
+    later turns read with that same id, so the reader and the writer match.
+    """
+    from daimon.core.stores.agent_files import put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="crm-secret-value",
+            # Same account the credential form records: the person who asked.
+            set_by_account_id=auth.account_id,
+        )
+    await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="my own note")
+
+    secret = await _self_read_file_impl(runtime, auth, key="CRM_TOKEN")
+    own = await _self_read_file_impl(runtime, auth, key="NOTES_TOKEN")
+    listed = await _self_list_files_impl(runtime, auth)
+
+    assert secret is not None and "crm-secret-value" not in secret.content
+    assert secret.content == REDACTED_VALUE
+    assert own is not None and own.content == REDACTED_VALUE
+    assert [r.key for r in listed] == ["CRM_TOKEN", "NOTES_TOKEN"]
+    assert all(
+        "crm-secret-value" not in r.content and "my own note" not in r.content for r in listed
+    )
+
+
+async def test_self_write_file_without_encryption_keys_names_the_operator_step(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """H6: on a deployment with no crypto keys, the agent is told why nothing saved."""
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    keyless = async_sessionmaker(
+        bind=committing_sessionmaker.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    runtime = _runtime(keyless)
+    auth = _auth_identity(tenant_id=tenant_id)
+
+    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+        await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="x")
+
+
+@pytest.mark.parametrize(
+    ("key", "match"),
+    [
+        ("TAR_OPTIONS", "reserved name"),
+        ("R_PROFILE_USER", "reserved name"),
+        ("LD_PRELOAD", "reserved name"),
+        ("SNOWFLAKE_USER", "not a secret name"),
+        ("DATABASE_URL", "not a secret name"),
+        ("NOTES", "not a secret name"),
+        ("notes.md", "must match"),
+    ],
+)
+async def test_self_write_file_refuses_every_non_secret_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], key: str, match: str
+) -> None:
+    """An agent key is always a member: only secret names, never tool controls."""
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity()
+    with pytest.raises(ToolError, match=match):
+        await _self_write_file_impl(runtime, auth, key=key, content="v")
+
+
+async def test_self_write_file_never_replaces_a_stored_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent key is a member: it adds keys, it never overwrites one a person set."""
+    from daimon.core.stores.agent_files import get_agent_file, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match="already set"):
+        await _self_write_file_impl(runtime, auth, key="CRM_TOKEN", content="attacker")
+
+    async with committing_sessionmaker() as session:
+        row = await get_agent_file(session, tenant_id=tenant_id, agent_id=agent_id, key="CRM_TOKEN")
+    assert row is not None and row.content == "the-value-in-use", "the stored value is untouched"
+
+
+@pytest.mark.parametrize(
+    ("held", "adding"),
+    [("GH_TOKEN", "GITHUB_TOKEN"), ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")],
+)
+async def test_self_write_file_never_adds_an_alias_of_a_held_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], held: str, adding: str
+) -> None:
+    from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key=held,
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match=f"Adding {adding} would replace {held}"):
+        await _self_write_file_impl(runtime, auth, key=adding, content="attacker")
+
+    async with committing_sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert [r.key for r in rows] == [held], "the alias must not be stored"
+
+
+@pytest.mark.parametrize(
+    ("managed", "default_name"),
+    [(True, None), (False, "project-agent")],
+    ids=["built-in", "reachable"],
+)
+async def test_self_delete_then_add_cannot_replace_a_key_on_a_shared_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    managed: bool,
+    default_name: str | None,
+) -> None:
+    """Delete-then-add was a replacement with no gate; on a shared agent the delete is refused."""
+    from daimon.core.stores.agent_files import get_agent_file, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(
+        committing_sessionmaker, tenant_id=tenant_id, managed=managed, default_name=default_name
+    )
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _self_delete_file_impl(runtime, auth, key="CRM_TOKEN")
+    with pytest.raises(ToolError, match="already set"):
+        await _self_write_file_impl(runtime, auth, key="CRM_TOKEN", content="attacker")
+
+    async with committing_sessionmaker() as session:
+        row = await get_agent_file(session, tenant_id=tenant_id, agent_id=agent_id, key="CRM_TOKEN")
+    assert row is not None and row.content == "the-value-in-use"
+
+
+async def test_self_delete_then_add_cannot_swap_an_alias_on_a_shared_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Delete GITHUB_TOKEN, add GH_TOKEN: the delete half is refused."""
+    from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(
+        committing_sessionmaker, tenant_id=tenant_id, managed=True
+    )
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="GITHUB_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _self_delete_file_impl(runtime, auth, key="GITHUB_TOKEN")
+    with pytest.raises(ToolError, match="would replace GITHUB_TOKEN"):
+        await _self_write_file_impl(runtime, auth, key="GH_TOKEN", content="attacker")
+
+    async with committing_sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert [r.key for r in rows] == ["GITHUB_TOKEN"]
+
+
+async def test_self_delete_file_fails_closed_when_the_agent_does_not_resolve(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, _agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=uuid.uuid4())
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _self_delete_file_impl(runtime, auth, key="CRM_TOKEN")
+
+
+async def test_concurrent_self_writes_of_two_alias_names_store_only_one(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two writers adding GH_TOKEN and GITHUB_TOKEN at once: the key-set lock lets one win.
+
+    The patched name read waits (briefly) for the other writer to read too, so
+    without the lock both read "neither held" and both insert.
+    """
+    import asyncio
+    import contextlib
+
+    import daimon.adapters.mcp.tools.self_edit as self_edit_mod
+    from daimon.core.stores.agent_files import list_agent_files
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+
+    real = self_edit_mod.list_turn_key_names
+    readers = 0
+    both_read = asyncio.Event()
+
+    async def read_then_wait(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal readers
+        names = await real(session, **kw)
+        readers += 1
+        if readers >= 2:
+            both_read.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both_read.wait(), timeout=1.0)
+        return names
+
+    monkeypatch.setattr(self_edit_mod, "list_turn_key_names", read_then_wait)
+
+    results = await asyncio.gather(
+        _self_write_file_impl(runtime, auth, key="GH_TOKEN", content="a"),
+        _self_write_file_impl(runtime, auth, key="GITHUB_TOKEN", content="b"),
+        return_exceptions=True,
+    )
+
+    async with committing_sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert len(rows) == 1, f"exactly one alias may land, got {[r.key for r in rows]}"
+    refused = [r for r in results if isinstance(r, ToolError)]
+    assert len(refused) == 1 and "would replace" in str(refused[0])
+
+
+async def _held(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    key: str,
+) -> None:
+    from daimon.core.stores.agent_files import put_agent_file
+
+    async with sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key=key,
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+
+async def _assert_delete_then_add_refused(
+    runtime: McpRuntime,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> None:
+    from daimon.core.stores.agent_files import list_agent_files
+
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    await _held(sessionmaker, tenant_id=tenant_id, agent_id=agent_id, key="GITHUB_TOKEN")
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _self_delete_file_impl(runtime, auth, key="GITHUB_TOKEN")
+    with pytest.raises(ToolError, match="would replace GITHUB_TOKEN"):
+        await _self_write_file_impl(runtime, auth, key="GH_TOKEN", content="attacker")
+    async with sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert [(r.key, r.content) for r in rows] == [("GITHUB_TOKEN", "the-value-in-use")]
+
+
+async def test_delete_then_add_refused_when_display_and_routing_names_differ(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Display 'Acme Display', daimon_name 'acme', a channel configured for 'acme'."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(
+        committing_sessionmaker,
+        tenant_id=tenant_id,
+        display_name="Acme Display",
+        routing_name="acme",
+    )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="chan-acme"),
+            tenant_id=tenant_id,
+            agent_name="acme",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )
+
+
+async def test_delete_then_add_refused_while_a_handoff_thread_is_bound_to_the_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    async with committing_sessionmaker.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id="chan-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_self",
+            responder_name="project-agent",
+            kind="handoff",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )
+
+
+async def test_delete_then_add_refused_when_the_agent_is_someones_personal_default(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.scope import UserScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        account = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=account.id),
+            tenant_id=tenant_id,
+            agent_name="project-agent",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )
