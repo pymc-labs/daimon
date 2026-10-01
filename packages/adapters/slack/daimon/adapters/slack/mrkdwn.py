@@ -51,14 +51,21 @@ _ESCAPED_MENTION = re.compile(r"&lt;([@#][A-Z0-9]+(?:\|[^&<>]*)?)&gt;")
 # anything that cannot continue a URL or the asterisk run — i.e. an emphasis
 # closer, not part of the URL. The URL must not itself end in an asterisk, so
 # a 4+ asterisk run (not a valid closer) never donates its head to the URL.
-# The URL charset excludes ()[]<> and whitespace so URLs already inside
-# [label](url) links (which end at the ')') never match.
-_EMPHASIZED_URL = re.compile(r"(https?://[^\s<>()\[\]]*?[^\s<>()\[\]*])(?=\*{1,3}(?:[^\w*]|$))")
+# Trailing sentence punctuation between the URL and the closer stays outside
+# the link, as GFM's autolinker leaves it: ``**see https://x/a.**`` links
+# ``https://x/a``, not ``https://x/a.``. The URL charset excludes ()[]<> and
+# whitespace so URLs already inside [label](url) links (which end at the ')')
+# never match.
+_EMPHASIZED_URL = re.compile(
+    r"(https?://[^\s<>()\[\]]*?[^\s<>()\[\]*.,:;!?'\"])"
+    r"(?=[.,:;!?'\"]*\*{1,3}(?:[^\w*]|$))"
+)
 
-# Code segments the linkifier must never touch: a fenced block (closed, or
-# open-to-end — Slack renders an unterminated fence as code), or an inline
-# single-backtick span.
-_CODE_SEGMENT = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
+# Segments the linkifier must never touch: a fenced block (closed, or
+# open-to-end — Slack renders an unterminated fence as code), an inline
+# single-backtick span, or an existing ``[label](url)`` link — its label may
+# itself be an emphasized URL, and rewriting it would nest a link in a link.
+_VERBATIM_SEGMENT = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`|\[[^\]\n]*\]\([^)\s]*\)")
 
 
 def linkify_emphasized_urls(text: str) -> str:
@@ -72,7 +79,8 @@ def linkify_emphasized_urls(text: str) -> str:
 
     Fenced code blocks and inline code spans are passed through verbatim —
     emphasis has no meaning there and the content must render exactly as
-    written.
+    written. So are existing ``[label](url)`` links, which are already
+    explicit.
     """
 
     def _rewrite(segment: str) -> str:
@@ -80,10 +88,10 @@ def linkify_emphasized_urls(text: str) -> str:
 
     parts: list[str] = []
     last = 0
-    for code in _CODE_SEGMENT.finditer(text):
-        parts.append(_rewrite(text[last : code.start()]))
-        parts.append(code.group(0))
-        last = code.end()
+    for verbatim in _VERBATIM_SEGMENT.finditer(text):
+        parts.append(_rewrite(text[last : verbatim.start()]))
+        parts.append(verbatim.group(0))
+        last = verbatim.end()
     parts.append(_rewrite(text[last:]))
     return "".join(parts)
 

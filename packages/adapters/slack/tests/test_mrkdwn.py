@@ -220,3 +220,26 @@ def test_linkify_treats_unterminated_fence_as_code() -> None:
     assert linkify_emphasized_urls(text) == text, (
         "an opened-but-unclosed fence renders as code in Slack; its content must not be rewritten"
     )
+
+
+def test_linkify_leaves_an_emphasized_url_link_label_alone() -> None:
+    text = "[**https://example.com/a**](https://example.com/a)"
+    assert linkify_emphasized_urls(text) == text, (
+        "an emphasized URL that is already a [label](url) link's label must not be "
+        "rewritten into a link nested inside that link"
+    )
+
+
+def test_linkify_keeps_trailing_sentence_punctuation_out_of_the_link() -> None:
+    assert linkify_emphasized_urls("**see https://example.com/a.**") == (
+        "**see [https://example.com/a](https://example.com/a).**"
+    ), "a period before the emphasis closer is sentence punctuation, not part of the URL"
+    assert linkify_emphasized_urls("**is it https://example.com/a?**") == (
+        "**is it [https://example.com/a](https://example.com/a)?**"
+    ), "a question mark before the emphasis closer must stay outside the link"
+
+
+def test_linkify_keeps_query_punctuation_inside_the_url() -> None:
+    assert linkify_emphasized_urls("**https://example.com/a?b=1&c=2**") == (
+        "**[https://example.com/a?b=1&c=2](https://example.com/a?b=1&c=2)**"
+    ), "punctuation inside the URL (before its last character) stays in the link"
