@@ -3349,6 +3349,42 @@ async def test_start_turn_opens_a_bound_keys_session_in_its_channel(
     assert kwargs["memory_read_only"] is bool(seal), "a sealed channel's memory is read-only"
 
 
+async def test_start_turn_seals_a_bound_keys_session_sealed_during_the_recheck(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The seal is read at the moment of the create, after the re-check, as
+    `reauthorize` reads one for a platform turn: a seal saved meanwhile is stamped."""
+    await _seal_tenant(db_session_factory, sealed=())
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+
+    async def seal_meanwhile() -> None:
+        async with db_session_factory() as session, session.begin():
+            await set_access_policy(
+                session,
+                tenant_id=_TENANT_ID,
+                policy=TenantAccessPolicy(sealed_channel_ids=("c-1",)),
+            )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _bound_auth("c-1"), "hi", recheck=seal_meanwhile)
+
+    assert create.await_args is not None
+    kwargs = create.await_args.kwargs
+    assert kwargs["origin_seal_ids"] == frozenset({"c-1"}), "a seal saved meanwhile is stamped"
+    assert kwargs["memory_read_only"] is True, "and the session's memory mounts read-only"
+
+
 async def test_start_turn_with_bundle_stamps_a_bound_keys_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

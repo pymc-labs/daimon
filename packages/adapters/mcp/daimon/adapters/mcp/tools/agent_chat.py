@@ -90,6 +90,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
+from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.scoped_config_read import resolve
@@ -237,6 +238,25 @@ async def _resolve_environment_name(
             default=runtime.deployment_default,
         )
     return resolved.environment_name
+
+
+_SEALED_SINCE_START_MSG = (
+    "this conversation started before its channel was sealed, so it can't take "
+    "messages under the seal. Start a new one with start_turn. Tell the caller."
+)
+
+
+async def _bound_seal(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:
+    """The seal a channel-bound key's turn runs under now: its channel, when sealed.
+
+    Read right before the session is created or continued, as `reauthorize`
+    reads a seal added since admission for a platform turn.
+    """
+    channel_id = token_channel_id(auth)
+    if channel_id is None:
+        return frozenset()
+    sealed = (await load_channel_policy(runtime, auth)).sealed_channel_ids
+    return frozenset({channel_id}) if channel_id in sealed else frozenset()
 
 
 async def _verify_agent_owns_session(
@@ -419,12 +439,6 @@ async def _start_turn_impl(
 
     is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
     channel_id = token_channel_id(auth)
-    seal: frozenset[str] = frozenset()
-    if (
-        channel_id is not None
-        and channel_id in (await load_channel_policy(runtime, auth)).sealed_channel_ids
-    ):
-        seal = frozenset({channel_id})
 
     if bundle is not None:
         if not is_isolated:
@@ -453,6 +467,7 @@ async def _start_turn_impl(
         ]
         if recheck is not None:
             await recheck()
+        seal = await _bound_seal(runtime, auth)
         session = await create_isolated_session(
             runtime.client,
             agent=ma_agent,
@@ -481,6 +496,7 @@ async def _start_turn_impl(
 
         if recheck is not None:
             await recheck()
+        seal = await _bound_seal(runtime, auth)
         session = await create_session(
             runtime.client,
             agent=ma_agent,
@@ -546,6 +562,10 @@ async def _continue_turn_impl(
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
     chat turn's own credential is refused (``_require_outside_chat_turn``).
     ``recheck`` runs the access decision again immediately before the send.
+
+    A channel-bound key's channel sealed since the session opened refuses the
+    follow-up: the session's memory is writable and its stamp lacks the seal,
+    so sealed messages would outlive an unseal (`_bound_seal`).
     """
     _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -554,6 +574,8 @@ async def _continue_turn_impl(
         observation.agent_id = str(session.agent.id)
     if recheck is not None:
         await recheck()
+    if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
+        raise ToolError(_SEALED_SINCE_START_MSG)
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         handle,

@@ -412,7 +412,9 @@ async def test_an_agent_key_minted_in_a_sealed_channel_reads_and_continues_it(
     world: _World,
 ) -> None:
     await world.seal(_SEALED)
-    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session(
+        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed=_SEALED
+    )
     world.add_session("ses_mine")
     runtime = world.runtime()
     auth = world.agent_key_auth(bound_channel_id=_SEALED)
@@ -420,10 +422,28 @@ async def test_an_agent_key_minted_in_a_sealed_channel_reads_and_continues_it(
     page = await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
     await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
 
-    assert _SEALED_TOPIC in _events_text(page)
-    assert world.sent == ["ses_acme"]
+    assert _SEALED_TOPIC in _events_text(page), "a key bound to the channel reads inside it"
+    assert world.sent == ["ses_acme"], "a key bound to the channel continues inside it"
     listed = sorted(s.id for s in await _list_my_sessions_impl(runtime, auth))
-    assert listed == ["ses_acme", "ses_mine"]
+    assert listed == ["ses_acme", "ses_mine"], "the sealed conversation is listed inside it"
+
+
+async def test_a_bound_key_cannot_continue_a_conversation_opened_before_the_seal(
+    world: _World,
+) -> None:
+    """Its memory is writable and its stamp lacks the seal, so a follow-up
+    under the seal would outlive an unseal: the key may read it, not add to it."""
+    await world.seal(_SEALED)
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    runtime = world.runtime()
+    auth = world.agent_key_auth(bound_channel_id=_SEALED)
+
+    page = await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
+    with pytest.raises(ToolError, match="before its channel was sealed"):
+        await _continue_turn_impl(runtime, auth, "ses_acme", "and now?")
+
+    assert _SEALED_TOPIC in _events_text(page), "reading it from inside stays allowed"
+    assert world.sent == [], "a refused follow-up must never reach the session"
 
 
 async def test_an_agent_key_minted_in_another_channel_stays_outside_the_seal(
