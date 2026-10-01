@@ -86,6 +86,24 @@ def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
     )
 
 
+async def lock_agent_keys(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """Hold this agent's key-set lock until the caller's transaction ends.
+
+    Writers that read the agent's key names and then add one (the alias rule:
+    `GITHUB_TOKEN` may not join a held `GH_TOKEN`) must take it before the
+    read. Under read-committed, two writers adding *different* names of one
+    alias group would otherwise both read "neither held" and both insert —
+    the primary key only serializes writers of the *same* name. Blocking and
+    transaction-scoped, hashed in Postgres, like `mcp_vault`'s lock.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"agent_keys:{tenant_id}:{agent_id}"},
+    )
+
+
 def _require_storable(key: str, content: str) -> None:
     """Refuse a key the sandbox would export unsafely, before anything is written.
 

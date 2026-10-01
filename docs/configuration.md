@@ -718,6 +718,15 @@ ceiling still applies as defense-in-depth).
 Per-upload byte budget signed into notebook upload tokens. 1 MiB mirrors the notebook
 host's own ceiling, which is enforced independently as a second layer of defense.
 
+### `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+
+`bool` · optional · default `False`
+
+Let `create_notebook_upload_url(editable=True)` publish the marimo code editor. Anyone
+holding an editor link can run arbitrary code on the notebook host, and any member or
+prompt-injected agent can ask for one, so this stays off unless every notebook on the
+host belongs to one client. Off: scratch notebooks are always read-only.
+
 ## Report Host
 
 Read from `daimon.core.config.ReportHostSettings`. Prefix `DAIMON_REPORT_HOST__`.
@@ -1021,9 +1030,10 @@ A standalone service in `apps/notebook-host`, deployed and configured separately
 the daimon processes. It is not part of `docker-compose.yml`.
 
 This service shares the `DAIMON_NOTEBOOK__` prefix with a block on daimon's own
-Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear
-twice on this page — once for the service and once for the daimon side that calls it.
-They are read by different processes; a single shared env file would set both.
+Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
+`DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear twice on this page — once for the service and
+once for the daimon side that calls it. They are read by different processes; a single
+shared env file would set both.
 
 No field in this model carries a `Field(description=...)`, so this section lists types
 and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
@@ -1108,6 +1118,22 @@ inline comments.
 ### `DAIMON_NOTEBOOK__ALLOW_UNJAILED_SPAWN`
 
 `bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ORIGIN_BASE`
+
+`str | None` · optional · default unset
+
+### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
+
+`'https' | 'http'` · optional · default `https`
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 

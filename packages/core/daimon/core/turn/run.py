@@ -431,7 +431,9 @@ async def _replace_dead_session(
             # dead-mark, the replacement row and the link together, instead of
             # leaving a live, unlinked replacement the next mention would continue
             # on without the lost-workspace framing.
-            created = await create_ma_session(deps, admission, tenant_id=tenant_id)
+            created = await create_ma_session(
+                deps, admission, tenant_id=tenant_id, predecessor_session_id=dead_session_id
+            )
             fresh = await insert_mapping(
                 db,
                 created,

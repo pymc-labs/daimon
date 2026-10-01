@@ -52,7 +52,7 @@ def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
 
 def test_key_replace_and_remove_need_admin_on_shared_agent() -> None:
     reachable_not_managed = _facts(managed=False, reachable=True)
-    for operation in ("key_replace", "key_remove", "mcp_remove", "repo_bind"):
+    for operation in ("key_replace", "key_remove", "mcp_replace", "mcp_remove", "repo_bind"):
         outcome = decide_operation(operation, is_admin=False, target=reachable_not_managed)
         assert outcome == "needs_admin", (
             f"{operation} is a destructive attachment write on a reachable "

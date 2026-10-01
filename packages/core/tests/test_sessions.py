@@ -573,6 +573,56 @@ async def test_create_session_stamps_billing_exempt_reason_only_when_given(
     )
 
 
+@pytest.mark.parametrize(
+    ("thread_id", "sealed", "expected"),
+    [
+        (None, None, {"daimon_channel": "chan-1"}),
+        ("thr-1", None, {"daimon_channel": "chan-1", "daimon_thread": "thr-1"}),
+        (
+            "thr-1",
+            "thr-1",
+            {"daimon_channel": "chan-1", "daimon_thread": "thr-1", "daimon_sealed": "thr-1"},
+        ),
+    ],
+    ids=["channel", "thread", "sealed-thread"],
+)
+async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
+    thread_id: str | None, sealed: str | None, expected: dict[str, str]
+) -> None:
+    """The transcript tools apply the channel seal from these stamps."""
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured_bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_origin",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=_make_agent(anthropic_id="ag_origin"),
+        environment=_make_env(anthropic_id="env_origin"),
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
+        origin_channel_id="chan-1",
+        origin_thread_id=thread_id,
+        origin_seal_ids=() if sealed is None else (sealed,),
+    )
+
+    metadata = captured_bodies[0]["metadata"]
+    stamped = {
+        k: v
+        for k, v in metadata.items()
+        if k in {"daimon_channel", "daimon_thread", "daimon_sealed"}
+    }
+    assert stamped == expected
+
+
 @pytest.mark.parametrize("channel_id", [None, "chan-1"], ids=["dm-unstamped", "channel-stamped"])
 async def test_create_session_stamps_the_channel_only_when_given(channel_id: str | None) -> None:
     """``channel_id`` becomes ``daimon_channel``, which the usage sweep attributes spend to."""

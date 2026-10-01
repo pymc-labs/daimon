@@ -86,6 +86,7 @@ def _make_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClie
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -94,7 +95,7 @@ def _make_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClie
         m.pid = 4242
         return m  # type: ignore[return-value]
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)

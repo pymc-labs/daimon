@@ -21,7 +21,8 @@ There are three rule families, each a fixed short-circuit order:
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`.
 
-- **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`):
+- **attachment** (`key_replace`, `key_remove`, `mcp_replace`, `mcp_remove`,
+  `repo_bind`):
   attachments never enter the agent spec, so the managed-agent absolutism
   above does not apply, and an admin attaching to a shared or managed agent
   is the first-run onboarding step this family exists to allow. Order: admin
@@ -35,7 +36,10 @@ There are three rule families, each a fixed short-circuit order:
   scoped to one value the requester alone holds, on one key, on one agent —
   a new contribution never overwrites or removes existing shared state, so
   it needs no admin and no reachability read. Only the destructive
-  attachment writes (replace, remove) need an admin.
+  attachment writes (replace, remove) need an admin. `mcp_connect` covers a
+  new server name or the same name at the same URL; repointing an existing
+  name at another URL, or overwriting the agent's shared token for a URL, is
+  `mcp_replace`.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ OperationKind = Literal[
     "key_remove",
     "keys_import",
     "mcp_connect",
+    "mcp_replace",
     "mcp_remove",
     "repo_bind",
     "skill_repo_connect",
@@ -62,7 +67,7 @@ PolicyOutcome = Literal["allow", "needs_admin", "managed_agent"]
 _SPEC_OPERATIONS: frozenset[OperationKind] = frozenset({"agent_spec_edit"})
 
 _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
-    {"key_replace", "key_remove", "mcp_remove", "repo_bind"}
+    {"key_replace", "key_remove", "mcp_replace", "mcp_remove", "repo_bind"}
 )
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset(

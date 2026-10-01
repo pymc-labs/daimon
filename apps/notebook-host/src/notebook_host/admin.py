@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import os
+import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,16 +28,23 @@ from notebook_host.jail import (
     JailUnavailableError,
     SlugPaths,
     UidPoolExhaustedError,
+    UidStillInUseError,
     ensure_slug_jail,
     get_slug_paths,
+    kill_uid_processes,
+    remove_path,
     remove_slug_tree,
+    remove_uid_files,
     resolve_jail_uid,
+    write_file_nofollow,
 )
 from notebook_host.lifecycle import (
     NotebookProcess,
     ValidationResult,
     allocate_port,
     kill,
+    new_access_token,
+    origin_label_for,
     safe_attachment_name,
     safe_slug,
     should_reap,
@@ -53,6 +60,7 @@ class Spawner(Protocol):
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str,
         mode: Literal["edit", "run"] = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]: ...
@@ -83,17 +91,46 @@ class AdminState:
         port: int,
         proc: subprocess.Popen[bytes],
         *,
+        access_token: str,
         mode: Literal["edit", "run"] = "edit",
+        permanent: bool = False,
     ) -> NotebookProcess:
+        public_url_base = self.settings.public_url_base
+        if self.settings.origin_base is not None:
+            label = origin_label_for(access_token)
+            public_url_base = f"{self.settings.origin_scheme}://{label}.{self.settings.origin_base}"
         return NotebookProcess(
             slug=slug,
             port=port,
             process=proc,
             public_host=self.settings.public_host,
             host_port=self.settings.host_port,
-            public_url_base=self.settings.public_url_base,
+            public_url_base=public_url_base,
             mode=mode,
+            permanent=permanent,
+            access_token=access_token,
         )
+
+    def access_token_for(self, slug: str, mode: Literal["edit", "run"]) -> str:
+        """The slug's existing token, so re-publishing keeps its link; else a new one.
+
+        A token is only reused in the mode it was issued for: switching a slug
+        between the read-only app and the editor mints a new one, so holders of
+        a read-only link never become editors and an editor link stops working
+        once the slug is read-only. A live process's token wins, then a
+        registered blog's persisted one (blogs are always read-only). Deleting
+        or reaping a slug drops both, so its next publish gets a fresh token and
+        every old link stops working.
+        """
+        existing = self.processes.get(slug)
+        if existing is not None:
+            if existing.access_token and existing.mode == mode:
+                return existing.access_token
+            return new_access_token()
+        record = load_blogs(self.settings.resolved_blogs_file).get(slug)
+        if record is not None and record.access_token and mode == "run":
+            return record.access_token
+        return new_access_token()
 
     def lock_for(self, slug: str) -> asyncio.Lock:
         lock = self.slug_locks.get(slug)
@@ -112,6 +149,78 @@ class AdminState:
 
 class WriteRequest(BaseModel):
     source: str
+    # The marimo code editor instead of the read-only app. Refused unless the
+    # host's ``allow_editable`` is on.
+    editable: bool = False
+
+
+def _require_editor_allowed(settings: Settings) -> None:
+    if not settings.allow_editable:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "the notebook editor is off on this host (DAIMON_NOTEBOOK__ALLOW_EDITABLE)",
+        )
+
+
+_TENANT_FILE = "tenant.json"
+
+
+def _admit_tenant(settings: Settings, tenant: str | None) -> None:
+    """On a shared-origin public host, accept uploads from one tenant only.
+
+    Without per-notebook origins (``origin_base``) every notebook shares one
+    browser origin, so one tenant's notebook JavaScript could reach another's.
+    The first tenant to upload claims the host (``tenant.json``, 0600); any
+    other tenant, or a token that names none, is refused. Local dev hosts and
+    per-origin hosts skip this.
+    """
+    if settings.origin_base is not None or settings.is_local_dev:
+        return
+    if tenant is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "upload token names no tenant; this host serves one"
+        )
+    path = settings.data_dir / _TENANT_FILE
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        owner = None
+    except OSError as err:
+        raise _tenant_claim_unusable() from err
+    else:
+        # A claim that exists but can't be read must never be re-claimed by
+        # whoever uploads next: refuse until an operator repairs it.
+        try:
+            owner = json.loads(raw)["tenant"]
+        except (ValueError, KeyError, TypeError) as err:
+            raise _tenant_claim_unusable() from err
+        if not isinstance(owner, str):
+            raise _tenant_claim_unusable()
+    if owner is None:
+        write_file_nofollow(path, json.dumps({"tenant": tenant}).encode(), owner_uid=None)
+        return
+    if not hmac.compare_digest(str(owner), tenant):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "this notebook host serves another tenant; notebooks share one browser origin "
+            "here (set DAIMON_NOTEBOOK__ORIGIN_BASE for per-notebook origins)",
+        )
+
+
+def _tenant_claim_unusable() -> HTTPException:
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"{_TENANT_FILE} is unreadable; refusing uploads until an operator repairs it",
+    )
+
+
+def _kill_uid_or_503(uid: int) -> None:
+    try:
+        kill_uid_processes(uid)
+    except UidStillInUseError as err:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"notebook isolation unavailable: {err}"
+        ) from err
 
 
 def _bearer_dep(settings: Settings) -> Callable[[str | None], None]:
@@ -136,20 +245,18 @@ def _atomic_write_bytes(path: Path, content: bytes, *, owner_uid: int | None = N
     owner_uid)`` before the replace, so the file is never visible at its final
     path with the wrong owner.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp.write_bytes(content)
-        if owner_uid is not None:
-            os.chown(tmp, owner_uid, owner_uid)
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    # The data dir is owned by the jail uid, so its code can plant a symlink
+    # at the tmp or final name; write_file_nofollow never writes through one.
+    write_file_nofollow(path, content, owner_uid=owner_uid)
 
 
 async def _spawn_tracked(
-    state: AdminState, slug: str, source_bytes: bytes, *, mode: Literal["edit", "run"]
+    state: AdminState,
+    slug: str,
+    source_bytes: bytes,
+    *,
+    mode: Literal["edit", "run"],
+    permanent: bool = False,
 ) -> NotebookProcess:
     """Write source, validate, replace any existing process, spawn, wait ready.
 
@@ -158,7 +265,16 @@ async def _spawn_tracked(
     pool exhausted, or notebook isolation unavailable), or 504 (spawn
     timeout). Shared by the notebook and blog PUT handlers so the two never
     drift.
+
+    Raises 409 for the editor on a registered blog: its readers hold a
+    read-only link, and delete-then-republish is the way to turn it back into
+    a scratch notebook.
     """
+    if mode == "edit" and slug in load_blogs(state.settings.resolved_blogs_file):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} is a published blog; delete it before publishing an editor there",
+        )
     # This is the request boundary — the one place admin.py is allowed to
     # catch JailUnavailableError/UidPoolExhaustedError. Both mean the host is
     # refusing to serve rather than failing transiently, mirroring
@@ -180,6 +296,23 @@ async def _spawn_tracked(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"uid pool exhausted: {err}"
         ) from err
     paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
+    access_token = state.access_token_for(slug, mode)
+    previous = state.processes.get(slug)
+    if previous is not None and previous.mode != mode:
+        # Switching between the editor and the read-only app: whatever the
+        # editor's holder planted as this uid (site-packages in HOME, a
+        # poisoned uv cache, files in the workspace or temp dirs) must not run
+        # under the new mode, including in the validator below. So the old
+        # process goes first, even though a failed validation then leaves
+        # nothing serving. Attachments in data/ are content and are kept.
+        state.processes.pop(slug, None)
+        kill(previous)
+        if uid is not None:
+            _kill_uid_or_503(uid)
+            remove_uid_files(uid)
+        for d in (paths.home, paths.workspace, paths.tmp):
+            remove_path(d)
+        paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
     _atomic_write_bytes(paths.notebook, source_bytes, owner_uid=uid)
 
     # Confirm the cells actually execute before we tear down any
@@ -200,16 +333,25 @@ async def _spawn_tracked(
     existing = state.processes.pop(slug, None)
     if existing is not None:
         kill(existing)
+    if uid is not None:
+        # Anything the previous run or the validator left behind as this
+        # uid (a cell's detached child escapes kill's process group) must not
+        # live alongside the new process and its token.
+        _kill_uid_or_503(uid)
 
     port = allocate_port(
         state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end
     )
-    proc = state.spawner(slug, paths, port, mode=mode, jail_uid=uid)
-    np = state.make_process(slug, port, proc, mode=mode)
+    proc = state.spawner(slug, paths, port, access_token=access_token, mode=mode, jail_uid=uid)
+    np = state.make_process(
+        slug, port, proc, access_token=access_token, mode=mode, permanent=permanent
+    )
     state.processes[slug] = np
 
     state.snapshot_pids()
-    ready = await wait_for_port(port, slug, state.settings.spawn_timeout_seconds)
+    ready = await wait_for_port(
+        port, slug, state.settings.spawn_timeout_seconds, access_token=access_token
+    )
     if not ready:
         kill(np)
         state.processes.pop(slug, None)
@@ -254,7 +396,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 f"{state.settings.max_source_bytes})",
             )
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, source_bytes, mode="edit")
+            if body.editable:
+                _require_editor_allowed(state.settings)
+            mode: Literal["edit", "run"] = "edit" if body.editable else "run"
+            np = await _spawn_tracked(state, slug, source_bytes, mode=mode)
             ttl = state.settings.subprocess_ttl_seconds
             # ttl <= 0 disables age-based reaping — the notebook never expires,
             # so there is no expiry timestamp to report.
@@ -314,7 +459,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
             return {
                 "slug": slug,
                 "name": name,
-                "size_bytes": final_path.stat().st_size,
+                "size_bytes": len(body),
                 "path": f"data/{name}",
             }
 
@@ -373,10 +518,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 f"{state.settings.max_source_bytes})",
             )
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, source_bytes, mode="run")
+            np = await _spawn_tracked(state, slug, source_bytes, mode="run", permanent=True)
             register_blog(
                 state.settings.resolved_blogs_file,
-                BlogRecord(slug=slug, created_at=np.started_at),
+                BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
             )
             return {
                 "slug": slug,
@@ -453,6 +598,11 @@ def create_admin_router(state: AdminState) -> APIRouter:
         # Public route — authed by the capability token, NOT the admin bearer.
         secrets_list = [s.get_secret_value() for s in state.settings.admin_secrets]
         claims: CapabilityClaims = verify_token(secrets_list, token, now=datetime.now(UTC))
+        if claims.op == "notebook_edit":
+            # The bot gates this too; the host refuses on its own so a
+            # capability minted elsewhere can't turn the editor on.
+            _require_editor_allowed(state.settings)
+        _admit_tenant(state.settings, claims.tenant)
         # Burn before reading the body: burn_jti's check-and-write is one call
         # with no await in between, so two concurrent replays of one token
         # cannot both observe it as unused. Burning here (rather than after a
@@ -513,18 +663,22 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 return {
                     "slug": slug,
                     "name": name,
-                    "size_bytes": final_path.stat().st_size,
+                    "size_bytes": len(body),
                     "path": f"data/{name}",
                 }
 
-        mode: Literal["edit", "run"] = "run" if claims.op == "blog" else "edit"
+        # Only an explicit ``notebook_edit`` token gets the editor. A plain
+        # scratch notebook is a read-only app like a blog, so a forwarded link
+        # runs the notebook without handing out a code-executing editor.
+        permanent = claims.op == "blog"
+        mode: Literal["edit", "run"] = "edit" if claims.op == "notebook_edit" else "run"
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, body, mode=mode)
+            np = await _spawn_tracked(state, slug, body, mode=mode, permanent=permanent)
             size_bytes = get_slug_paths(state.settings.data_dir, slug).notebook.stat().st_size
-            if claims.op == "blog":
+            if permanent:
                 register_blog(
                     state.settings.resolved_blogs_file,
-                    BlogRecord(slug=slug, created_at=np.started_at),
+                    BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
                 )
                 return {
                     "slug": slug,

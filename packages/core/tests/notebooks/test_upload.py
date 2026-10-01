@@ -21,10 +21,11 @@ from pydantic import HttpUrl, SecretStr
 _NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
 
-def _settings() -> NotebookSettings:
+def _settings(*, allow_editable: bool = False) -> NotebookSettings:
     return NotebookSettings(
         host_url=HttpUrl("http://notebook-host:8001"),
         admin_secret=SecretStr("test-secret"),
+        allow_editable=allow_editable,
     )
 
 
@@ -165,3 +166,63 @@ def test_create_notebook_upload_defaults_to_the_ephemeral_op() -> None:
     assert _payload(out["upload_url"])["op"] == "notebook", (
         "omitting permanent must not mint a blog nobody asked to keep forever"
     )
+
+
+def test_create_notebook_upload_editable_mints_the_editor_op() -> None:
+    out = create_notebook_upload(
+        slug="scratch",
+        editable=True,
+        notebook_settings=_settings(allow_editable=True),
+        principal_key="a",
+        now=_NOW,
+    )
+    assert _payload(out["upload_url"])["op"] == "notebook_edit", (
+        "only an explicit editable=True asks the host for the code editor"
+    )
+
+
+def test_create_notebook_upload_scratch_default_is_not_the_editor() -> None:
+    out = create_notebook_upload(
+        slug="scratch", notebook_settings=_settings(), principal_key="a", now=_NOW
+    )
+    assert _payload(out["upload_url"])["op"] == "notebook", "the default is the read-only app"
+
+
+def test_create_notebook_upload_rejects_an_editable_blog() -> None:
+    with pytest.raises(ValueError, match="editable"):
+        create_notebook_upload(
+            slug="b",
+            permanent=True,
+            editable=True,
+            notebook_settings=_settings(),
+            principal_key="a",
+            now=_NOW,
+        )
+
+
+def test_create_notebook_upload_editable_needs_the_operator_switch() -> None:
+    settings = NotebookSettings(
+        host_url=HttpUrl("http://notebook-host:8001"), admin_secret=SecretStr("s")
+    )
+    with pytest.raises(ValueError, match="allow_editable"):
+        create_notebook_upload(
+            slug="x", editable=True, notebook_settings=settings, principal_key="a", now=_NOW
+        )
+
+
+def test_upload_tokens_carry_the_tenant() -> None:
+    out = create_notebook_upload(
+        slug="x", notebook_settings=_settings(), principal_key="a", now=_NOW, tenant="t-1"
+    )
+    assert _payload(out["upload_url"])["tenant"] == "t-1", (
+        "a shared-origin notebook host admits one tenant, so it must know whose upload it is"
+    )
+    att = create_attachment_upload(
+        slug="x",
+        name="d.csv",
+        notebook_settings=_settings(),
+        principal_key="a",
+        now=_NOW,
+        tenant="t-1",
+    )
+    assert _payload(att["upload_url"])["tenant"] == "t-1"

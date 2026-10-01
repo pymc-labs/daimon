@@ -22,7 +22,7 @@ from anthropic.types.beta import FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
-from daimon.core.env_file import ENV_NAME_PATTERN, env_name_hard_denied, serialize_env_file
+from daimon.core.env_file import env_row_skip_reason, serialize_env_file
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
@@ -53,13 +53,7 @@ def assemble_env_bytes(rows: list[AgentFileRow]) -> bytes:
     """
     kept: list[tuple[str, str]] = []
     for row in rows:
-        problem: str | None = None
-        if ENV_NAME_PATTERN.fullmatch(row.key) is None:
-            problem = "bad_name"
-        elif env_name_hard_denied(row.key):
-            problem = "reserved_name"
-        elif "\0" in row.content:
-            problem = "nul_in_value"
+        problem = env_row_skip_reason(row.key, row.content)
         if problem is not None:
             _log.warning(
                 "credential_env.row_skipped",
