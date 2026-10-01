@@ -42,7 +42,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
 )
 from daimon.core.tool_safety import trusted_servers_for
-from daimon.core.turn.admission import Admission, reauthorize
+from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -668,6 +668,7 @@ async def run_prepared_turn_impl(
             tool_confirmation=tool_confirmation,
             image_blocks=image_blocks,
             system_blocks=prepared.continuity.system_blocks,
+            before_send=decide_before_send(deps, prepared.admission),
         )
 
         if not (_is_dead_session(state) and mapping_id is not None):
@@ -780,23 +781,6 @@ async def run_prepared_turn_impl(
             reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
-            recovered_admission = recovery.admission or prepared.admission
-
-            async def decide_before_send() -> None:
-                # Reseeding and opening the stream await platform and MA calls
-                # after recovery's last decision: decide again right before the
-                # message is sent. A pin refuses; a seal or read-only change the
-                # recovered session wasn't built with makes the turn wait.
-                current = await reauthorize(deps, recovered_admission)
-                if (
-                    current.origin_seal_ids != recovered_admission.origin_seal_ids
-                    or current.memory_read_only != recovered_admission.memory_read_only
-                ):
-                    raise SessionBusyError(
-                        pending_reasons=("seal",),
-                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
-                    )
-
             # D-07(b): mirror a LATE cancel on the ORIGINAL event into
             # `fresh_cancel` for the duration of the recovery turn -- see
             # `_mirror_cancel`'s docstring for the window this closes.
@@ -815,7 +799,9 @@ async def run_prepared_turn_impl(
                     tool_confirmation=tool_confirmation,
                     image_blocks=image_blocks,
                     system_blocks=loss_system_blocks,
-                    before_send=decide_before_send,
+                    # Reseeding and opening the stream await platform and MA
+                    # calls after recovery's last decision.
+                    before_send=decide_before_send(deps, recovery.admission or prepared.admission),
                 )
             finally:
                 if not mirror_task.done():

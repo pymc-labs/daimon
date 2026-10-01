@@ -81,7 +81,7 @@ from daimon.core.stores.thread_session_lineage import (
     mark_superseded,
 )
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
-from daimon.core.turn.admission import Admission, reauthorize
+from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenied,
@@ -322,6 +322,7 @@ async def _run_replacement(
                 destination_agent_name=admission.agent.name,
                 requested_work=None,
                 unsaved_work=row.pending_unsaved_work,
+                before_send=decide_before_send(deps, admission),
             )
             stage = "upload"
             await _advance(
