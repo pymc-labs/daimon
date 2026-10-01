@@ -106,7 +106,7 @@ the HTTP status and no content.
   passed to the agent. Files shared in a 1:1 chat reach the agent as short-lived
   download links. The manifest must set `supportsFiles: true`.
 - **Out.** Files the agent writes to its outputs are offered in the 1:1 chat
-  with Teams' file consent card; accepting uploads the file to the user's
+  with Teams' file consent card (the agent guidance describes this path); accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
 - **Channels.** Teams sends a channel message's pasted images and files only
@@ -114,7 +114,11 @@ the HTTP status and no content.
   images to the agent. Files shared in a channel live in SharePoint, which no
   team-scoped permission reaches, so the bot names them and tells the person
   it could not open them; without Graph access it says the same of images.
-  The bot names a file it made in a channel in a note and discards it.
+  Posting a file to a channel needs SharePoint access too. The agent guidance
+  tells the agent so, and to say it once in its reply. A file it writes to its
+  outputs anyway is logged (`teams.channel_output.skipped`, no name or
+  content) and dropped from the delivery listing; the agent's own copy stays
+  in its workspace.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and

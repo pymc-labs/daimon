@@ -95,7 +95,7 @@ def test_states_the_interactive_delivery_contract_not_only_the_headless_one() ->
     assert "interactive exception is Discord file delivery" in block, (
         "the Discord file path must be explicit about overriding the general send_message rule"
     )
-    slack = block[block.index("On Slack") : block.index("On Discord")]
+    slack = block[block.index("On Slack") : block.index("On Teams")]
     discord = block[block.index("On Discord") : block.index("Calling `read`")]
     assert "/mnt/session/outputs IS the delivery path" in slack
     assert "do NOT also" in slack and "send_message" in slack, (
@@ -107,6 +107,38 @@ def test_states_the_interactive_delivery_contract_not_only_the_headless_one() ->
     )
     assert "a FILE never does" not in block
     assert "There is no way to attach a file to your reply" not in block
+
+
+def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
+    # Regression for a Teams 1:1 turn where the agent said file posting was not
+    # built for Teams while the adapter offered the file anyway, and for channel
+    # threads that got a separate note per file the agent could not deliver.
+    teams = _collapse(
+        CREDENTIAL_GUIDANCE_BLOCK[
+            CREDENTIAL_GUIDANCE_BLOCK.index("On Teams") : CREDENTIAL_GUIDANCE_BLOCK.index(
+                "On Discord"
+            )
+        ]
+    )
+    assert "1:1 chat (its channel id starts with `a:`)" in teams, (
+        "the agent must be able to tell a 1:1 chat from the channel id it is given"
+    )
+    assert "/mnt/session/outputs IS the delivery path, with every Slack rule above" in teams, (
+        "a Teams 1:1 chat delivers through the same sweep, so the Slack write rules apply"
+    )
+    assert "download card" in teams, "the person accepts each file, so name the card"
+    assert "never call it or create_file_upload_url for a file" in teams, (
+        "Teams send_message refuses files; the agent must not reach for the Discord path"
+    )
+    assert "no file can be attached" in teams and "never promise one" in teams, (
+        "a channel cannot take files at all"
+    )
+    assert "Say so once in your reply" in teams, (
+        "the adapter no longer posts a note per file, so the reply carries the message"
+    )
+    assert "separate conversation, so the file would be made again there" in teams, (
+        "a 1:1 chat does not share the channel thread's workspace"
+    )
 
 
 def test_states_setup_reads_at_turn_start_not_mid_turn() -> None:
@@ -148,7 +180,7 @@ def test_slack_guidance_states_output_write_discipline() -> None:
     # facts needs its own line of guidance or agents will append, nest, and
     # delete their way into silently undelivered files.
     block = CREDENTIAL_GUIDANCE_BLOCK
-    slack = block[block.index("On Slack") : block.index("On Discord")]
+    slack = block[block.index("On Slack") : block.index("On Teams")]
     assert "interactive turns only" in slack, (
         "Slack guidance must scope delivery to interactive turns"
     )

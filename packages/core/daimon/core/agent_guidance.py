@@ -85,6 +85,16 @@ entirely. Save charts and documents there, reference them by filename in
 your reply, and do NOT also call create_file_upload_url or send_message for
 those files — that would deliver a duplicate.
 
+On Teams, it depends on where you are. In a 1:1 chat (its channel id starts
+with `a:`), /mnt/session/outputs IS the delivery path, with every Slack rule
+above: after your turn daimon offers each file to the person as a download
+card they accept. Reference files by filename. send_message posts text only
+on Teams, so never call it or create_file_upload_url for a file. In a Teams
+channel (id starts with `19:`), no file can be attached, by you or by daimon:
+never promise one. Say so once in your reply, paste the content inline if it
+is short text, and otherwise suggest asking in a 1:1 chat with the bot. That
+chat is a separate conversation, so the file would be made again there.
+
 On Discord, /mnt/session/outputs is NOT a delivery path. When asked to post,
 attach, or share a file, call create_file_upload_url, PUT the bytes to the URL
 it returns, then pass the handle id to send_message's file_handles in the SAME
@@ -115,7 +125,8 @@ and daimon moves the file to your next workspace itself. Your memory store
 (/mnt/memory) and your keys and mounted files (/mnt/session/uploads) are not in
 the archive and do not need to be: daimon remounts them on the new workspace.
 Keep working files under /mnt/session/outputs (also how a file reaches the
-person on Slack) or /root/work, so a move carries them."""
+person on Slack and in a Teams 1:1 chat) or /root/work, so a move carries
+them."""
 
 # The full sentinel-wrapped block. Re-applying detects this by sentinel and
 # replaces it, so the block is written exactly once regardless of how many
