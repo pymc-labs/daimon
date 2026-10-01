@@ -6,7 +6,8 @@ request tools with the turn origin they were called from, and the direct
 configuration tools (`update_agent`, `attach_mcp_server`, `detach_mcp_server`,
 `remove_agent_key`) with none, because they take no origin. With no origin a
 member is outside every pin, so a pinned agent's direct configuration is an
-admin's; a member inside its channels uses the request tools instead.
+admin's, or a channel admin's who runs every channel it is pinned to; a member
+inside its channels uses the request tools instead.
 """
 
 from __future__ import annotations
@@ -16,12 +17,15 @@ from collections.abc import Awaitable, Callable
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.reachability import channel_admin_caller
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
     agent_pin_names,
+    is_pin_administered,
     pin_write_refused,
 )
+from daimon.core.channel_admins import load_administered_channel_ids
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -50,13 +54,23 @@ async def require_pin_write_access(
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()
-    if pin_write_refused(
+    names = agent_pin_names(ma_agent.name, ma_agent.metadata)
+    if not pin_write_refused(
         policy,
         is_admin=False,
-        agent_names=agent_pin_names(ma_agent.name, ma_agent.metadata),
+        agent_names=names,
         parent_channel_id=origin.parent_channel_id if origin is not None else None,
         thread_id=origin.thread_id if origin is not None else None,
     ):
+        return
+    async with runtime.session_factory() as session:
+        administered = await load_administered_channel_ids(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform or "",
+            caller=channel_admin_caller(auth),
+        )
+    if not is_pin_administered(policy, agent_names=names, administered_channel_ids=administered):
         raise ToolError(
             f"'{ma_agent.name}': {PIN_WRITE_REFUSAL} No card was posted. Tell the caller to "
             "ask in one of that agent's channels, or ask an admin. Do not retry."
