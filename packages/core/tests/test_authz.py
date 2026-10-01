@@ -393,6 +393,62 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         },
         _deny("agent_pinned_elsewhere"),
     ),
+    # --- Session reads (G_seal_session_read, admin trust model) ---
+    (
+        "admin_trust admin reads another account's sealed channel session from the hub",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
+        },
+        ALLOW,
+    ),
+    (
+        "admin_trust admin never reads another member's private DM",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="D123", owned=False, private=True),
+        },
+        _deny("not_owner"),
+    ),
+    (
+        "admin_trust admin never continues a sealed channel session",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.CONTINUE_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"})),
+        },
+        _deny("sealed"),
+    ),
+    (
+        "G_seal_session_read member never reads another account's session",
+        TenantAccessPolicy(),
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_OPEN", owned=False),
+        },
+        _deny("not_owner"),
+    ),
+    (
+        "admin_trust an admin's agent key gets no hub read exemption",
+        SEALED,
+        {
+            "subject": AGENT_KEY_ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
+        },
+        _deny("not_owner"),
+    ),
 ]
 
 

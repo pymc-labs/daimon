@@ -27,8 +27,17 @@ from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
+    build_turn_place,
+)
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
@@ -199,10 +208,10 @@ async def admit_impl(
     # non-admin, never a stored role the user may have lost. An unreadable
     # policy raised `AccessPolicyUnreadable` above -- refused, never open.
     # Both gates are `authorize(START_TURN)`, protection first. ---
-    subject = Subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
-    turn_place = Place(
-        channel_id=thread_id or channel_id,
-        parent_channel_id=channel_id,
+    subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+    turn_place = build_turn_place(
+        channel_id=channel_id,
+        thread_id=thread_id,
         category_id=category_id,
         category_unresolved=category_unresolved,
     )
@@ -310,10 +319,10 @@ async def admit_impl(
         subject=subject,
         surface=Surface.DM if is_dm else Surface.CHANNEL,
         turn_place=turn_place,
-        agent=AgentRef.of(config.agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
         run_place=Place()
         if is_dm
-        else Place(channel_id=thread_id or channel_id, parent_channel_id=channel_id),
+        else build_turn_place(channel_id=channel_id, thread_id=thread_id),
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,

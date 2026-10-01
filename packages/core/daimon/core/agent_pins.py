@@ -14,11 +14,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
-from daimon.core.defaults.metadata import (
-    MA_METADATA_KEY_NAME,
-    MA_METADATA_KEY_READER_OF,
-    MA_METADATA_KEY_READER_SOURCE,
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Surface,
+    agent_names,
+    authorize,
+    build_agent_ref,
+    build_subject,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -36,31 +40,9 @@ POLICY_UNREADABLE_REFUSAL = (
 )
 
 
-_READER_SUFFIX = "-reader"
-
-
 def agent_pin_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | None, ...]:
-    """Every name a pin on an agent may be keyed by: its MA name and its config name.
-
-    A published report's reader variant answers as its source agent, so it
-    also carries the source's names (stamped as `daimon_reader_source`; a
-    reader written before that stamp falls back to its name without the
-    ``-reader`` suffix): a pin on the source holds for its reader. Admission
-    checks the same names, so a pin on any of them holds everywhere.
-    """
-    config_name = metadata.get(MA_METADATA_KEY_NAME)
-    names: list[str | None] = [name, config_name]
-    if MA_METADATA_KEY_READER_OF in metadata:
-        stamped = metadata.get(MA_METADATA_KEY_READER_SOURCE)
-        if stamped:
-            names.extend(stamped.split("\n"))
-        else:
-            names.extend(
-                candidate[: -len(_READER_SUFFIX)]
-                for candidate in (name, config_name)
-                if candidate and candidate.endswith(_READER_SUFFIX)
-            )
-    return tuple(names)
+    """Every name a pin on an agent may be keyed by (`daimon.core.authz.agent_names`)."""
+    return agent_names(name, metadata)
 
 
 async def request_pin_refusal(
@@ -83,13 +65,13 @@ async def request_pin_refusal(
     account = await get_account(session, row.account_id)
     decision = authorize(
         policy,
-        subject=Subject(is_admin=account is not None and account.role is Role.ADMIN),
+        subject=build_subject(
+            is_admin=account is not None and account.role is Role.ADMIN, platform_user_id=None
+        ),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
         agent=(
-            AgentRef.unresolved()
-            if agent is None
-            else AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+            AgentRef.unresolved() if agent is None else build_agent_ref(agent.name, agent.metadata)
         ),
         place=Place.from_origin(
             parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id

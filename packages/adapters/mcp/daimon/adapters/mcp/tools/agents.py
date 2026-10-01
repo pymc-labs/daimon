@@ -28,6 +28,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -37,8 +38,7 @@ from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Subject, authorize
+from daimon.core.authz import Action, authorize, build_agent_ref
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -842,9 +842,9 @@ async def _fork_agent_impl(
             ) from exc
     decision = authorize(
         policy,
-        subject=Subject(is_admin=auth.is_admin, platform_user_id=auth.platform_user_id),
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
         action=Action.FORK,
-        agent=AgentRef.of(*agent_pin_names(source.name, source.metadata)),
+        agent=build_agent_ref(source.name, source.metadata),
     )
     if decision.reason == "agent_pinned":
         raise ToolError(

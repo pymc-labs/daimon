@@ -1,10 +1,29 @@
 """One decision for who may run, configure, post as, or read through an agent.
 
-Every permission rule that depends on the tenant access policy lives here, in
-one pure function, `authorize`. The turn pipeline, the MCP gates, the channel
-tools, the routine and handoff tools and the fork paths gather the facts they
-already hold (who is acting, which agent, where, doing what) and ask this
-module; each keeps only its own I/O and its own refusal copy.
+The pin, seal, protection, invoker, admin-trust and fork rules are decided
+here, in one pure function, `authorize` (what is still decided elsewhere is
+listed under "Scope today" below). The turn pipeline, the MCP gates, the
+channel tools, the routine and handoff tools and the fork paths describe the
+action with the shared builders below (`build_subject`, `build_turn_place`,
+`build_agent_ref`) and ask this module; each keeps only its own I/O and its
+own refusal copy.
+
+**Adding a rule.** Add the fact it needs as a field on `Subject`, `Place` or
+`AgentRef` (with a default that keeps today's decisions), populate it in the
+matching ``build_*`` function, and decide it in `_decide`. Admission records
+the built values on the `Admission`, and every action-time re-check
+(`daimon.core.turn.admission.reauthorize`, the send, form-submit and OAuth
+checks) asks `authorize` with values from the same builders, so a new rule is
+applied at action time too without touching those call sites.
+
+**Example: channel admins reading their channels' sealed sessions.** Add
+``administered_channel_ids: frozenset[str] = frozenset()`` to `Subject`,
+populate it in `build_subject` (and `mcp_subject` on the MCP side), and in
+`_decide` allow `Action.READ_SESSION` when ``facts.seal_ids`` is non-empty,
+every seal id is in ``subject.administered_channel_ids`` and the session is
+not ``facts.private``. Never for `Action.CONTINUE_SESSION`. The hub's session
+reads already ask `authorize(READ_SESSION)` with the session's seal ids, so
+nothing else changes.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -39,15 +58,17 @@ submit and OAuth grant).
 Scope today: the pin decisions (turn admission, MCP and hub turns, routine
 save and fire, handoff, configuration writes, form submits and the OAuth
 callback), the caller gates of a platform turn and an MCP turn, pinned sends
-and direct messages, channel and session seal reads, and fork. Still decided
-outside this module, by the same `daimon.core.access_policy` predicates: the
-live protection and invoker checks in the scheduler, routine save and
-delivery and turn-reply protection; the admin sealed-read exemption on the
-hub; and the shared-agent replace/remove table (`daimon.core.operation_policy`).
+and direct messages, channel and session reads (including the hub's admin
+read and the refusal to continue a sealed conversation), and fork. Still
+decided outside this module, by the same `daimon.core.access_policy`
+predicates: the live protection and invoker checks in the scheduler, routine
+save and delivery and turn-reply protection; and the shared-agent
+replace/remove table (`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
@@ -58,6 +79,11 @@ from daimon.core.access_policy import (
     is_invoker_allowed,
     is_outside_agent_pin,
     is_write_protected,
+)
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
 )
 
 
@@ -86,6 +112,8 @@ class Action(StrEnum):
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
     READ_SESSION = "read_session"
+    # Add to a recorded session's transcript (continue_turn, ask(handle)).
+    CONTINUE_SESSION = "continue_session"
 
 
 class Surface(StrEnum):
@@ -181,6 +209,9 @@ class Place:
 class SessionFacts:
     """What a recorded session says about where it ran (READ_SESSION only).
 
+    ``owned`` is whether the session belongs to the caller's own account;
+    ``private`` marks a DM conversation (the private-DM stamp, a ``dm:``
+    scope, a Slack IM or a Teams personal chat), which no one else ever reads.
     ``channel`` / ``thread`` are the stamps it was created with,
     ``seal_ids`` every id that sealed it, and ``legacy_thread_id`` the thread
     an unstamped (pre-stamp) session ran on, if any.
@@ -190,6 +221,8 @@ class SessionFacts:
     thread: str | None = None
     seal_ids: frozenset[str] = frozenset()
     legacy_thread_id: str | None = None
+    owned: bool = True
+    private: bool = False
 
 
 DenyReason = Literal[
@@ -201,6 +234,7 @@ DenyReason = Literal[
     "admin_required",
     "agent_pinned",
     "sealed",
+    "not_owner",
 ]
 
 
@@ -386,11 +420,85 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         return _deny("sealed")
 
-    # Action.READ_SESSION
+    # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
+    # Admins are trusted to READ any channel conversation of the agent from
+    # their own hub session, sealed or not, anyone's -- never a private DM,
+    # and never to continue it (a follow-up would join the channel's session).
+    admin_hub_read = (
+        req.action is Action.READ_SESSION
+        and req.surface is Surface.HUB
+        and subject.is_admin
+        and subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and not facts.private
+        and (facts.channel is not None or facts.legacy_thread_id is not None)
+    )
+    if admin_hub_read:
+        return ALLOW
+    if not facts.owned:
+        return _deny("not_owner")
     if _session_readable(policy, req.origin_channel_ids, facts):
         return ALLOW
     return _deny("sealed")
+
+
+_READER_SUFFIX = "-reader"
+
+
+def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | None, ...]:
+    """Every name a pin on an agent may be keyed by: its MA name and its config name.
+
+    A published report's reader variant answers as its source agent, so it
+    also carries the source's names (stamped as `daimon_reader_source`; a
+    reader written before that stamp falls back to its name without the
+    ``-reader`` suffix): a pin on the source holds for its reader.
+    """
+    config_name = metadata.get(MA_METADATA_KEY_NAME)
+    names: list[str | None] = [name, config_name]
+    if MA_METADATA_KEY_READER_OF in metadata:
+        stamped = metadata.get(MA_METADATA_KEY_READER_SOURCE)
+        if stamped:
+            names.extend(stamped.split("\n"))
+        else:
+            names.extend(
+                candidate[: -len(_READER_SUFFIX)]
+                for candidate in (name, config_name)
+                if candidate and candidate.endswith(_READER_SUFFIX)
+            )
+    return tuple(names)
+
+
+def build_subject(
+    *, is_admin: bool, platform_user_id: str | None, via_agent_key: bool = False
+) -> Subject:
+    """Who is acting. The one place a caller's identity becomes a `Subject`."""
+    return Subject(
+        is_admin=is_admin, platform_user_id=platform_user_id, via_agent_key=via_agent_key
+    )
+
+
+def build_turn_place(
+    *,
+    channel_id: str,
+    thread_id: str | None,
+    category_id: str | None = None,
+    category_unresolved: bool = False,
+) -> Place:
+    """Where a platform turn's reply lands: its thread, under its channel."""
+    return Place(
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id,
+        category_id=category_id,
+        category_unresolved=category_unresolved,
+    )
+
+
+def build_agent_ref(
+    name: str | None, metadata: Mapping[str, str], *extra_names: str | None
+) -> AgentRef:
+    """The agent an action is about, from its MA record (plus any cascade name)."""
+    return AgentRef.of(*extra_names, *agent_names(name, metadata))
 
 
 def authorize(
@@ -432,6 +540,10 @@ __all__ = [
     "SessionFacts",
     "Subject",
     "Surface",
+    "agent_names",
     "authorize",
+    "build_agent_ref",
+    "build_subject",
+    "build_turn_place",
     "channel_readable",
 ]

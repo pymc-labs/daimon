@@ -30,8 +30,16 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
-from daimon.core.agent_pins import agent_pin_names, request_pin_refusal
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
+)
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
@@ -262,13 +270,16 @@ def build_oauth_mcp_routes(
             account = await get_account(session, flow.account_id)
             return not authorize(
                 policy,
-                subject=Subject(is_admin=account is not None and account.role is Role.ADMIN),
+                subject=build_subject(
+                    is_admin=account is not None and account.role is Role.ADMIN,
+                    platform_user_id=None,
+                ),
                 action=Action.CONFIGURE,
                 surface=Surface.CONFIG,
                 agent=(
                     AgentRef.unresolved()
                     if agent is None
-                    else AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+                    else build_agent_ref(agent.name, agent.metadata)
                 ),
                 place=Place(),
             )

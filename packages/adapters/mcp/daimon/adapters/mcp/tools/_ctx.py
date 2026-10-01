@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.authz import Action, AgentRef, Subject, Surface, authorize
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -121,7 +122,13 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         and not hub_admin
         and not authorize(
             policy,
-            subject=Subject(is_admin=pin_exempt, platform_user_id=auth.platform_user_id),
+            subject=(
+                # The hub mounts a person's own agent identity; `pin_exempt`
+                # is set only for a hub admin, so it is never an agent key.
+                build_subject(is_admin=True, platform_user_id=auth.platform_user_id)
+                if pin_exempt
+                else mcp_subject(auth)
+            ),
             action=Action.RUN_AGENT,
             surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
             agent=AgentRef.of(*await agent_names()),
@@ -146,7 +153,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
     if not authorize(
         policy,
-        subject=Subject(is_admin=is_admin, platform_user_id=auth.platform_user_id),
+        subject=mcp_subject(auth, is_admin=is_admin),
         action=Action.START_TURN,
     ):
         log.info(

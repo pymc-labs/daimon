@@ -525,9 +525,10 @@ The pin, seal, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
 where the result lands, which agent, which channel); the turn pipeline, the
 MCP gates, the channel tools, the routine and handoff tools and the fork
-paths gather their facts and ask it. The hub's admin read of a sealed
-conversation is still decided in `_session_access`, and the scheduler's
-protection and invoker checks in the scheduler itself.
+paths gather their facts and ask it, including the hub's admin read of a
+sealed conversation and the refusal to continue one. The scheduler's
+protection and invoker checks and the shared-agent replace/remove table are
+still decided where they are.
 
 **Decided again at the moment of action.** Admission is a decision about a
 turn that has not run yet, so it is asked again, on the policy as it is
