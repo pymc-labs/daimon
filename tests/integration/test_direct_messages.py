@@ -1517,3 +1517,34 @@ async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admi
     assert "sealed" not in stored.context
     assert stored.source_channel_id == "C1"
     assert stored.source_thread_keys == ["C1:1700000000.000300"]
+
+
+async def test_dm_source_sealed_during_recovery_is_quarantined(
+    db_session, db_session_factory, monkeypatch
+):
+    """A dead-session recovery that finds the source sealed closes the DM like admission does."""
+    from daimon.core import direct_messages as dm_module
+    from daimon.core.turn.errors import DmSourceSealedError
+
+    tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    assert await _reply(deps, route)
+
+    async def recovery_finds_seal(*args, **kwargs):
+        raise DmSourceSealedError("dm_source_sealed")
+
+    monkeypatch.setattr(dm_module, "run_prepared_turn", recovery_finds_seal)
+
+    events_before = len(sent)
+    with pytest.raises(
+        DaimonError, match=r"This DM was started from a channel that is now private"
+    ):
+        await _reply(deps, route, message_id="2")
+    assert len(sent) == events_before
+    async with db_session_factory() as session:
+        assert (
+            await get_conversation(
+                session, platform="discord", route_key=route.route_key, external_user_id="42"
+            )
+            is None
+        )

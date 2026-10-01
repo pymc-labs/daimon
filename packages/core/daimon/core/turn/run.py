@@ -15,7 +15,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import anthropic as _anthropic
 import structlog
@@ -42,11 +42,12 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
 )
 from daimon.core.tool_safety import trusted_servers_for
-from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.admission import Admission, reauthorize
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
+from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
     InterruptSource,
@@ -63,6 +64,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_ma_session,
     insert_mapping,
+    stamp_session_seal,
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
@@ -282,6 +284,8 @@ class _Replacement:
     previous_session: str | None
     adopted: bool
     """True when another turn had already replaced the dead session."""
+    admission: Admission | None = None
+    """The admission as decided again for the replacement (`reauthorize`)."""
 
 
 _ORPHAN_ARCHIVE_TIMEOUT_S = 5.0
@@ -399,7 +403,25 @@ async def _replace_dead_session(
             await mark_dead(db, id=dead_mapping_id)
 
             if live is not None and live.id != dead_mapping_id:
+                # The lock wait above can be long: decide again before adopting
+                # another turn's replacement. A pin raises `AdmissionDenied`; a
+                # seal added since, or a replacement built writable that the
+                # current decision makes read-only, makes this turn wait (rolls
+                # back the dead-mark) so the next turn rebuilds it read-only.
+                current = await reauthorize(deps, admission)
                 snapshot = live.effective_config
+                writable = snapshot is None or not snapshot.memory_read_only
+                if current.origin_seal_ids != admission.origin_seal_ids or (
+                    current.memory_read_only and writable
+                ):
+                    raise SessionBusyError(
+                        pending_reasons=("seal",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
+                admission = current
+                await stamp_session_seal(
+                    deps, live.ma_session_id, admission, now=lambda: datetime.now(UTC)
+                )
                 return _Replacement(
                     ma_session_id=live.ma_session_id,
                     mapping_id=live.id,
@@ -409,6 +431,7 @@ async def _replace_dead_session(
                     transfer_kind=live.transfer_kind or "history",
                     previous_session=None,
                     adopted=True,
+                    admission=admission,
                 )
 
             # Whose conversation it was, for the quoted block's `from` attribute:
@@ -469,6 +492,7 @@ async def _replace_dead_session(
         transfer_kind=loss_transfer_kind,
         previous_session=previous_session,
         adopted=False,
+        admission=created.admission or admission,
     )
 
 
@@ -734,7 +758,7 @@ async def run_prepared_turn_impl(
                 external_user_id=external_user_id,
                 ma_session_id=new_session_id,
                 model_id=recovery.model_id,
-                channel_id=prepared.admission.budget_channel_id,
+                channel_id=(recovery.admission or prepared.admission).budget_channel_id,
             )
 
             log.info(
@@ -756,6 +780,22 @@ async def run_prepared_turn_impl(
             reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
+            recovered_admission = recovery.admission or prepared.admission
+
+            async def decide_before_send() -> None:
+                # Reseeding and opening the stream await platform and MA calls
+                # after recovery's last decision: decide again right before the
+                # message is sent. A pin refuses; a seal or read-only change the
+                # recovered session wasn't built with makes the turn wait.
+                current = await reauthorize(deps, recovered_admission)
+                if (
+                    current.origin_seal_ids != recovered_admission.origin_seal_ids
+                    or current.memory_read_only != recovered_admission.memory_read_only
+                ):
+                    raise SessionBusyError(
+                        pending_reasons=("seal",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
 
             # D-07(b): mirror a LATE cancel on the ORIGINAL event into
             # `fresh_cancel` for the duration of the recovery turn -- see
@@ -775,6 +815,7 @@ async def run_prepared_turn_impl(
                     tool_confirmation=tool_confirmation,
                     image_blocks=image_blocks,
                     system_blocks=loss_system_blocks,
+                    before_send=decide_before_send,
                 )
             finally:
                 if not mirror_task.done():

@@ -22,6 +22,7 @@ the caller's check and the update is not silently replaced.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -230,8 +231,13 @@ async def attach_mcp_server_to_agent(
     url: str,
     replace_allowed: bool,
     shares_token: bool = False,
+    before_update: Callable[[], Awaitable[None]] | None = None,
 ) -> BetaManagedAgentsAgent:
     """Attach ``server_name`` at ``url`` to ``agent_id``, preserving the rest.
+
+    ``before_update`` is the caller's access decision, awaited after each
+    fresh retrieve and immediately before the update (retries included). It
+    raises to refuse, and nothing is written.
 
     Retrieves the agent, recomputes both lists from that fresh read, and
     updates. ``anthropic.ConflictError`` propagates after the single retry
@@ -258,6 +264,8 @@ async def attach_mcp_server_to_agent(
         ):
             raise McpServerReplaceRefusedError(server_name=server_name)
         servers, tools = build_attached_spec(fresh, server_name=server_name, url=url)
+        if before_update is not None:
+            await before_update()
         return await client.beta.agents.update(
             fresh.id, version=fresh.version, mcp_servers=servers, tools=tools
         )
