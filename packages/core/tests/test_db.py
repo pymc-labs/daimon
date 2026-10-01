@@ -97,3 +97,10 @@ async def test_keyless_factory_logs_once_at_startup(
         assert [(log["event"], log["log_level"]) for log in logs] == [(event, level)]
     finally:
         await engine.dispose()
+
+
+def test_build_engine_hides_bound_parameters_in_errors() -> None:
+    """SQL errors must not carry bound values (agent keys, tokens) into logs."""
+    engine = build_engine("postgresql+asyncpg://u:p@localhost:1/d")
+
+    assert engine.sync_engine.hide_parameters is True

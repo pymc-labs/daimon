@@ -75,6 +75,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
@@ -162,6 +163,10 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
+    # The JSON chain and stdlib redaction before the first log line (uvicorn
+    # has configured its loggers by the time it calls this factory); without
+    # it structlog's dev renderer prints rich tracebacks with frame locals.
+    configure_logging(effective_settings.log.level)
     sentry_dsn = (
         effective_settings.sentry.dsn.get_secret_value() if effective_settings.sentry.dsn else None
     )
