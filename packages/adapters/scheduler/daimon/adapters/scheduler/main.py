@@ -35,7 +35,13 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin, is_write_protected
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    is_invoker_allowed,
+    is_outside_agent_pin,
+    is_write_protected,
+)
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -210,6 +216,8 @@ async def _build_fire(
             # stored role is the only admin signal a fire has. Unreadable
             # policy fails closed.
             direct_post: DirectPost = "allowed"
+            fire_policy: TenantAccessPolicy | None = None
+            fire_channel_id: str | None = None
             try:
                 policy = await load_access_policy(s, tenant_id=row.tenant_id)
             except AccessPolicyUnreadable:
@@ -223,6 +231,8 @@ async def _build_fire(
                 # a channel's category, so when the policy protects either,
                 # the agent is not invited to post directly at all.
                 target = delivery_target(row, platform=platform)
+                fire_policy = policy
+                fire_channel_id = target.channel_id if target is not None else None
                 if target is not None:
                     if is_write_protected(policy, channel_id=target.channel_id):
                         direct_post = "protected"
@@ -310,6 +320,26 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
+        # The pin is checked again on the agent that will actually run, by
+        # every name a pin can be keyed by, after self-healing may have picked
+        # a replacement: the saved routine name alone can miss a pin on the
+        # display name or a rename.
+        if fire_policy is not None and fire_policy.agent_channel_pins:
+            ran = await client.beta.agents.retrieve(resolved_agent_id)
+            if is_outside_agent_pin(
+                fire_policy,
+                agent_names=(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
+                channel_id=fire_channel_id,
+            ):
+                log.info(
+                    "routine.skipped.invoker_policy",
+                    routine_id=str(row.id),
+                    tenant_id=str(row.tenant_id),
+                    reason="agent_pinned_elsewhere",
+                )
+                async with sm() as pin_s, pin_s.begin():
+                    await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
+                return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)

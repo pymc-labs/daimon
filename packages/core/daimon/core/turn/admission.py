@@ -28,7 +28,6 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     is_invoker_allowed,
     is_outside_agent_pin,
-    is_sealed_source,
     is_write_protected,
 )
 from daimon.core.billing import is_over_cap
@@ -68,6 +67,13 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
+    # The channel and thread the turn runs in, and every sealed id that seals
+    # them (the channel and a thread sealed on its own): stamped on the session
+    # so the transcript tools can apply the seal to it
+    # (`daimon.core.session_seal.origin_stamp`).
+    origin_channel_id: str | None = None
+    origin_thread_id: str | None = None
+    origin_seal_ids: frozenset[str] = frozenset()
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -263,7 +269,7 @@ async def admit_impl(
     # has no channel, so it is outside every pin. Admins get no exemption. ---
     if is_outside_agent_pin(
         policy,
-        agent_names=(config.agent_name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
         channel_id=None if is_dm else (thread_id or channel_id),
         parent_channel_id=None if is_dm else channel_id,
     ):
@@ -283,12 +289,27 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    source_sealed = is_sealed_source(policy, channel_id=channel_id, thread_id=thread_id)
+    # Every id that seals the turn: its channel, and the thread sealed on its
+    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
+    # them are recorded, so unsealing one later leaves the others holding.
+    seal_ids = frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
+    )
+    source_sealed = bool(seal_ids)
     memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
         memory_read_only=memory_read_only,
         source_sealed=source_sealed,
+        origin_channel_id=channel_id,
+        origin_thread_id=thread_id,
+        origin_seal_ids=seal_ids,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

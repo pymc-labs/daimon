@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
-from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
+from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_sealed_source
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.scope import ChannelScopeRef
@@ -160,7 +160,7 @@ async def start_dm(
     """
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
-    scope_id = f"dm:{uuid.uuid4()}"
+    scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
     conversation = DirectMessageRow(
         platform=platform,
         route_key=route_key,

@@ -117,6 +117,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -2486,6 +2487,9 @@ class SlackApp:
             thread_id=thread_id,
             role=role,
             now=datetime.now(UTC),
+            # A continuation owed to a private DM conversation is a DM turn:
+            # outside every pin, with the DM memory rule.
+            is_dm=thread_id.startswith(DM_SCOPE_PREFIX),
         )
         # A timer runs only as the agent it was set with; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.

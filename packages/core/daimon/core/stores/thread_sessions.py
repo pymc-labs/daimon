@@ -409,3 +409,26 @@ async def update_mutable_fingerprint(
         )
     )
     await session.flush()
+
+
+async def thread_ids_for_sessions(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    ma_session_ids: list[str],
+) -> dict[str, str]:
+    """Map each of `ma_session_ids` that some thread ran on to that thread's id.
+
+    Any status, any account: the transcript tools use it to tell a channel
+    conversation from a headless one when a session predates the channel stamp
+    (`daimon.core.defaults.metadata.MA_METADATA_KEY_CHANNEL`).
+    """
+    if not ma_session_ids:
+        return {}
+    rows = await session.execute(
+        select(ThreadSession.ma_session_id, ThreadSession.thread_id).where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.ma_session_id.in_(ma_session_ids),
+        )
+    )
+    return {ma_session_id: thread_id for ma_session_id, thread_id in rows.all()}

@@ -26,6 +26,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
@@ -130,7 +131,13 @@ def _build_roster_entry(
         )
     except ValidationError as err:
         raise DaimonError(f"Cannot rebuild AgentSpec for {agent.name!r}: {err}") from err
-    return RosterEntry(name=agent.name, model=agent.model.id, spec=spec, ma_agent_id=str(agent.id))
+    return RosterEntry(
+        name=agent.name,
+        model=agent.model.id,
+        spec=spec,
+        ma_agent_id=str(agent.id),
+        routing_name=str((agent.metadata or {}).get(MA_METADATA_KEY_NAME) or ""),
+    )
 
 
 async def _build_custom_skill_title_map(

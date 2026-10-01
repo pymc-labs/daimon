@@ -39,6 +39,7 @@ async def edit_posted_card(
     outcome: ConfigurationChange | None = None,
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
+    replaces: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -54,7 +55,12 @@ async def edit_posted_card(
         return
     view = build_card_view(
         card_for_request(
-            row, state=state, outcome=outcome, refusal=refusal, refusal_lines=refusal_lines
+            row,
+            state=state,
+            outcome=outcome,
+            refusal=refusal,
+            refusal_lines=refusal_lines,
+            replaces=replaces,
         )
     )
     message = client.get_partial_messageable(int(row.origin_thread_id)).get_partial_message(

@@ -22,6 +22,7 @@ from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma import (
@@ -934,6 +935,57 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
+    assert (admission.origin_channel_id, admission.origin_thread_id) == (channel_id, thread_id)
+    # The seal stamp names every id that seals the turn, and follows the
+    # channel seal only.
+    expected_seals = (
+        frozenset()
+        if not expected or is_dm
+        else frozenset(
+            c
+            for c in (channel_id, thread_id, f"{channel_id}:{thread_id}")
+            if policy is not None and c in policy.sealed_channel_ids
+        )
+    )
+    assert admission.origin_seal_ids == expected_seals
+
+
+@pytest.mark.parametrize(
+    ("sealed", "thread_id", "expected"),
+    [
+        (("vault", "thr-1"), "thr-1", {"vault", "thr-1"}),
+        (("C1", "C1:1700000000.000100"), "1700000000.000100", {"C1", "C1:1700000000.000100"}),
+    ],
+    ids=["discord-parent-and-thread", "slack-parent-and-thread"],
+)
+async def test_admit_records_every_seal_on_a_thread_sealed_twice(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    sealed: tuple[str, ...],
+    thread_id: str,
+    expected: set[str],
+) -> None:
+    """Unsealing the parent later must not drop the thread's own seal."""
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(sealed_channel_ids=sealed)
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=sealed[0],
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+    )
+
+    assert admission.origin_seal_ids == frozenset(expected)
 
 
 @pytest.mark.parametrize(
@@ -1234,3 +1286,76 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         )
     deps.sessionmaker.assert_not_called()
     assert "sealed" in SEALED_SOURCE_MESSAGE
+
+
+async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_differently(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The binding recorded the agent under an older name; the pin is on the name
+    the agent carries now. The metadata name must still catch it."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    await upsert_responder_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="general",
+        thread_id="thr-handed",
+        responder_ma_agent_id="ag_1",
+        responder_name="renamed-bot",
+        created_by_account_id=None,
+        now=_NOW,
+    )
+    await db_session.commit()
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id="general",
+            thread_id="thr-handed",
+            now=_NOW,
+            role=Role.USER,
+        )
+
+    assert exc_info.value.reason == "agent_pinned_elsewhere"
+
+
+async def test_admit_refuses_an_agent_pinned_by_its_display_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The CLI and the write guard accept a pin on the MA display name; admission
+    must honour the same name."""
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(agent_channel_pins={"Daimon Display": ("rx",)})
+    )
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="Daimon Display",
+            tenant_id=tenant.id,
+            metadata={"daimon_name": "daimon"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id="general",
+            now=_NOW,
+            role=Role.USER,
+        )
+    assert exc_info.value.reason == "agent_pinned_elsewhere"

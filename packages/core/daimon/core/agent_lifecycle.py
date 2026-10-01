@@ -22,6 +22,7 @@ from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import DaimonError
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
@@ -95,13 +96,13 @@ async def strip_credentialed_mcp_servers(
         credentials = await mcp_credentials_store.list_credentials(
             session, tenant_id=tenant_id, agent_id=source_agent_uuid
         )
-    credentialed_urls = {row.mcp_server_url.rstrip("/") for row in credentials}
+    credentialed_urls = {canonical_mcp_url(row.mcp_server_url) for row in credentials}
     if not credentialed_urls or mcp_servers is None:
         return mcp_servers, tools
     dropped = {
         str(server.get("name"))
         for server in mcp_servers
-        if str(server.get("url") or "").rstrip("/") in credentialed_urls
+        if canonical_mcp_url(str(server.get("url") or "")) in credentialed_urls
     }
     if not dropped:
         return mcp_servers, tools

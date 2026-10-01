@@ -106,9 +106,17 @@ OPEN_READ_POLICY = ChannelReadPolicy(policy=OPEN_ACCESS_POLICY)
 
 
 async def load_read_policy(
-    runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    origin_context_id: str | None,
+    resolve_without_seals: bool = False,
 ) -> ChannelReadPolicy:
     """Load the tenant policy and, if one was named, the caller's active turn origin.
+
+    With nothing sealed the origin is skipped, since no channel read needs it;
+    ``resolve_without_seals`` resolves it anyway, for a check against a seal a
+    session recorded rather than the current policy.
 
     The origin must belong to the caller's account and to the agent the token
     executes as: ``agent_id`` for agent-session tokens, ``chat_agent_id`` for
@@ -120,7 +128,7 @@ async def load_read_policy(
     outside = ChannelReadPolicy(policy=policy)
     executing_agent = auth.agent_id or auth.chat_agent_id
     if (
-        not policy.sealed_channel_ids
+        not (policy.sealed_channel_ids or resolve_without_seals)
         or not origin_context_id
         or auth.platform is None
         or executing_agent is None

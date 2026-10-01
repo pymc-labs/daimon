@@ -51,7 +51,10 @@ from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import ADMIN_NOUN, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import (
+    is_agent_reachable_in_tenant,
+    is_agent_shared_for_key_changes,
+)
 
 import discord
 
@@ -174,11 +177,13 @@ async def refuse_if_shared_and_not_admin(
     ):
         tenant_id = await resolve_tenant_for_panel(runtime, interaction)
         async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=tenant_id,
-                agent_name=entry.name,
+                agent_names=(entry.name, entry.routing_name),
+                ma_agent_id=entry.ma_agent_id,
                 default=runtime.deployment_default,
+                caller_platform_user_id=str(interaction.user.id),
             )
     outcome = decide_operation(
         "key_replace",

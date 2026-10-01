@@ -102,6 +102,24 @@ _ENV_NAME = "production"
 _ACCOUNT_ID = uuid.uuid4()
 
 
+@pytest.fixture(autouse=True)
+def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests built on a MagicMock session factory have no policy to load: they
+    read as an open tenant. Tests with a real database go through the real
+    seal gate (see test_session_seals.py)."""
+    from daimon.adapters.mcp.tools import _session_access
+    from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY
+
+    real = _session_access.load_read_policy
+
+    async def load(runtime: Any, auth: Any, **kwargs: Any) -> Any:
+        if isinstance(runtime.session_factory, MagicMock):
+            return OPEN_READ_POLICY
+        return await real(runtime, auth, **kwargs)
+
+    monkeypatch.setattr(_session_access, "load_read_policy", load)
+
+
 def _runtime(
     client: AsyncAnthropic,
     session_factory: Any = None,

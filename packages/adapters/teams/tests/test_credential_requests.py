@@ -20,6 +20,8 @@ from cryptography.fernet import Fernet
 from daimon.adapters.teams import credential_requests as module
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet
@@ -31,6 +33,7 @@ from daimon.core.posted_controls import (
     WRONG_REQUESTER_MESSAGE,
 )
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -43,7 +46,7 @@ from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -318,7 +321,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     probe = AsyncMock(return_value=McpProbe(status_code=401, resource_metadata_url=None))
     runtime = dataclasses.replace(_runtime(db_session_factory, mcp=True), mcp_token_probe=probe)
     fake, store = TeamsApiFake(), AsyncMock()
-    with patch.object(module, "add_external_mcp_credential", store):
+    with patch.object(module, "connect_mcp_server_with_token", store):
         async with _running(fake, runtime) as (service, dispatch):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
@@ -332,17 +335,15 @@ async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     row = await _request(db_session_factory, account_id, kind="mcp")
-    fake, store, attach = TeamsApiFake(), AsyncMock(), AsyncMock()
-    with (
-        patch.object(module, "add_external_mcp_credential", store),
-        patch.object(module, "attach_mcp_server_to_agent", attach),
-    ):
+    fake, connect = TeamsApiFake(), AsyncMock()
+    with patch.object(module, "connect_mcp_server_with_token", connect):
         async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
-    assert store.await_args is not None and store.await_args.kwargs["token"] == SECRET
-    assert attach.await_args is not None and attach.await_args.kwargs["url"] == MCP_URL
+    assert connect.await_args is not None
+    assert connect.await_args.kwargs["token"] == SECRET
+    assert connect.await_args.kwargs["mcp_server_url"] == MCP_URL
     assert "✅" in _edits(fake)[-1]
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
 
@@ -362,3 +363,305 @@ async def test_an_oauth_click_hands_the_requester_a_private_sign_in_link(
     assert button["url"].startswith("https://daimon.example.com/")
     assert again["task"]["value"] != link["task"]["value"], "the link is handed out once"
     assert _edits(fake), "the card stops offering the button"
+
+
+async def test_a_member_cannot_replace_an_mcp_server_on_a_shared_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """H2 on Teams: an `mcp_replace` refusal spends the request and publishes nothing."""
+    from daimon.core.mcp_attach import McpConnectDecision
+
+    row = await _request(db_session_factory, account_id, kind="mcp")
+    fake, connect = TeamsApiFake(), AsyncMock()
+    refused = AsyncMock(return_value=McpConnectDecision(replaces=True, replace_allowed=False))
+    with (
+        patch.object(module, "decide_mcp_connect", refused),
+        patch.object(module, "connect_mcp_server_with_token", connect),
+    ):
+        async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+
+    connect.assert_not_awaited()
+    dispatch.assert_not_awaited()
+    assert refused.await_args is not None and refused.await_args.kwargs["is_admin"] is False
+    assert "was not replaced" in _edits(fake)[-1]
+
+
+async def _hold(db: async_sessionmaker[AsyncSession], key: str, account_id: uuid.UUID) -> None:
+    async with db.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID),
+            key=key,
+            content="the-value-in-use",
+            set_by_account_id=account_id,
+        )
+
+
+async def test_a_member_cannot_add_an_alias_of_a_held_key_on_a_managed_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Minted with no key held (no replacement promised); GH_TOKEN is held by submit time."""
+    row = await _request(db_session_factory, account_id, target="GITHUB_TOKEN")
+    await _hold(db_session_factory, "GH_TOKEN", account_id)
+    fake = TeamsApiFake()
+    async with _running(fake, _runtime(db_session_factory, managed=True)) as (service, dispatch):
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        alias = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="GITHUB_TOKEN"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert alias is None, "an alias that retargets a held key is refused like an overwrite"
+    assert spent is not None and spent.outcome == "write_failed"
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in _edits(fake)[-1], "names both keys"
+    dispatch.assert_not_awaited()
+
+
+async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    row = await _request(db_session_factory, account_id, target="GITHUB_TOKEN")
+    real = module.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ()
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    with patch.object(module, "list_turn_key_names", first_read_misses_the_alias):
+        async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+
+    assert calls == 2, "the alias must be re-read under the write"
+    async with db_session_factory() as session:
+        alias = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="GITHUB_TOKEN"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert alias is None and spent is not None and spent.outcome == "stale_replacement"
+
+
+async def test_concurrent_submits_of_two_alias_names_store_only_one(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    """GH_TOKEN and GITHUB_TOKEN submitted at once: the key-set lock lets one win.
+
+    Separate connections, so the two writes really are concurrent. The patched
+    insert dawdles, so without the lock the second writer reads "neither held"
+    while the first is still mid-write, and both land.
+    """
+    import asyncio
+
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_files import list_agent_files
+
+    committing = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    await provision_tenant(committing, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with committing.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        assert tenant is not None
+        account = (await make_account(session, tenant=tenant)).id
+    first = await _request(committing, account, target="GH_TOKEN")
+    second = await _request(committing, account, target="GITHUB_TOKEN")
+    real = module.put_agent_file_if_unchanged
+
+    async def slow_insert(session: AsyncSession, **kw: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await real(session, **kw)
+
+    with patch.object(module, "put_agent_file_if_unchanged", slow_insert):
+        async with _running(TeamsApiFake(), _runtime(committing)) as (service, _):
+            await asyncio.gather(
+                post_activity(service, _submit(first.token)),
+                post_activity(service, _submit(second.token)),
+            )
+            await service.turns.drain(5)
+
+    async with committing() as session:
+        rows = await list_agent_files(session, tenant_id=TENANT, agent_id=first.agent_id)
+        outcomes = []
+        for token in (first.token, second.token):
+            spent = await peek_credential_request(session, token=token)
+            assert spent is not None
+            outcomes.append(spent.outcome)
+    assert len(rows) == 1, f"exactly one alias may land, got {[r.key for r in rows]}"
+    assert sorted(o or "" for o in outcomes) == ["applied", "stale_replacement"]
+
+
+async def test_a_teams_submit_waits_for_another_adapters_alias_write(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    """Cross-writer: another adapter holds the key-set lock while adding GH_TOKEN.
+
+    The Teams submit for GITHUB_TOKEN must wait for that write and then see it,
+    not read "neither held" from under an uncommitted insert.
+    """
+    import asyncio
+
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_files import list_agent_files, lock_agent_keys
+
+    committing = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    await provision_tenant(committing, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with committing.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        assert tenant is not None
+        account = (await make_account(session, tenant=tenant)).id
+    row = await _request(committing, account, target="GITHUB_TOKEN")
+    holding = asyncio.Event()
+
+    async def other_adapter_adds_gh_token() -> None:
+        async with committing.begin() as session:
+            await lock_agent_keys(session, tenant_id=TENANT, agent_id=row.agent_id)
+            await put_agent_file(
+                session,
+                tenant_id=TENANT,
+                agent_id=row.agent_id,
+                key="GH_TOKEN",
+                content="the-value-in-use",
+                set_by_account_id=account,
+            )
+            holding.set()
+            await asyncio.sleep(0.5)
+
+    async with _running(TeamsApiFake(), _runtime(committing)) as (service, _):
+        other = asyncio.create_task(other_adapter_adds_gh_token())
+        await holding.wait()
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+        await other
+
+    async with committing() as session:
+        rows = await list_agent_files(session, tenant_id=TENANT, agent_id=row.agent_id)
+        spent = await peek_credential_request(session, token=row.token)
+    assert [r.key for r in rows] == ["GH_TOKEN"], "the Teams alias must not land beside it"
+    assert spent is not None and spent.outcome == "stale_replacement"
+
+
+async def _aws_pair(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID) -> datetime:
+    """Store an AWS access key and secret; return the secret's `updated_at`."""
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
+    async with db.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            key="AWS_ACCESS_KEY_ID",
+            content="AKIAEXAMPLE",
+            set_by_account_id=account_id,
+        )
+        secret = await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            key="AWS_SECRET_ACCESS_KEY",
+            content="old-secret",
+            set_by_account_id=account_id,
+        )
+    return secret.updated_at
+
+
+def _admin_runtime(db: async_sessionmaker[AsyncSession]) -> TeamsRuntime:
+    from .conftest import teams_settings
+
+    runtime = _runtime(db)
+    runtime.settings.teams = teams_settings(admins=(AAD_OBJECT_ID,))
+    return runtime
+
+
+async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """The stored AWS_ACCESS_KEY_ID is a family member, not a newly appeared conflict."""
+    stamp = await _aws_pair(db_session_factory, account_id)
+    row = await _request(
+        db_session_factory, account_id, target="AWS_SECRET_ACCESS_KEY", replaces=stamp
+    )
+    async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+        await post_activity(service, _submit(row.token, secret="new-secret"))
+        await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        file = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="AWS_SECRET_ACCESS_KEY"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert file is not None and file.content == "new-secret", "the rotation lands"
+    assert spent is not None and spent.outcome == "applied"
+
+
+async def test_a_family_change_during_an_admin_rotation_is_still_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A session token grafted on between the gate and the write: the rotation is stale."""
+    stamp = await _aws_pair(db_session_factory, account_id)
+    row = await _request(
+        db_session_factory, account_id, target="AWS_SECRET_ACCESS_KEY", replaces=stamp
+    )
+    real = module.list_turn_key_names
+    calls = 0
+
+    async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await put_agent_file(
+                session,
+                tenant_id=TENANT,
+                agent_id=row.agent_id,
+                key="AWS_SESSION_TOKEN",
+                content="grafted",
+                set_by_account_id=None,
+            )
+        return await real(session, **kw)
+
+    with patch.object(module, "list_turn_key_names", family_changes_after_the_gate):
+        async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+            await post_activity(service, _submit(row.token, secret="new-secret"))
+            await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        file = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="AWS_SECRET_ACCESS_KEY"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert file is not None and file.content == "old-secret"
+    assert spent is not None and spent.outcome == "stale_replacement"
+
+
+async def test_a_pinned_agents_form_from_outside_its_channels_is_refused_at_submit(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A pin added after the card was posted still holds when the value is submitted."""
+    row = await _request(db_session_factory, account_id)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("19:other-channel",)}),
+        )
+    async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, dispatch):
+        refused = await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+    assert refused["task"]["value"] == PIN_WRITE_REFUSAL
+    async with db_session_factory() as session:
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
+    assert file is None, "nothing is saved"
+    dispatch.assert_not_awaited()

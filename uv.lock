@@ -2739,7 +2739,7 @@ requires-dist = [
     { name = "arviz", marker = "extra == 'pymc'", specifier = ">=0.20,<1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "marimo", specifier = ">=0.23,<0.30" },
+    { name = "marimo", specifier = "==0.23.8" },
     { name = "matplotlib", marker = "extra == 'ds'", specifier = ">=3.8" },
     { name = "numpy", marker = "extra == 'ds'", specifier = ">=2" },
     { name = "pandas", marker = "extra == 'ds'", specifier = ">=2" },

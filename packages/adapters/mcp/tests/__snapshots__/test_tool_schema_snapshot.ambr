@@ -173,7 +173,8 @@
           Sessions you started with this daimon, for resuming with ``handle``.
           
           Other people's conversations with the same daimon are not listed and
-          their handles are not accepted.
+          their handles are not accepted; nor are conversations from a sealed
+          channel, which can only be read from inside it.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -1431,11 +1432,16 @@
         returned upload_url — the source never goes through a tool argument (which
         truncates large notebooks).
         
-        permanent=False (default) publishes a scratch notebook: the editor is
-        visible, and the host reaps it after its TTL. permanent=True publishes it
-        as a read-only blog — code hidden, interactive widgets live, survives host
-        restarts, never reaped. Prefer the default; re-upload the same slug with
-        permanent=True once the notebook is worth keeping.
+        permanent=False (default) publishes a scratch notebook that the host reaps
+        after its TTL. permanent=True publishes it as a blog that survives host
+        restarts and is never reaped. Prefer the default; re-upload the same slug
+        with permanent=True once the notebook is worth keeping.
+        
+        Both are read-only apps by default: code hidden, interactive widgets live.
+        editable=True (scratch only, and only where the operator has turned it on)
+        serves the marimo code editor instead. Anyone holding that link can run
+        arbitrary code on the notebook host, so pass it only when the person you
+        are sharing with asked to edit the notebook.
         
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL
@@ -1443,11 +1449,17 @@
         
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
         curl response JSON carries the live url (and expires_at for scratch
-        notebooks); share that. Never paste large file contents into a tool argument.
+        notebooks); share that whole url. Its access_token is the notebook's only
+        key, so share it only where the notebook belongs. Never paste large file
+        contents into a tool argument.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'editable': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'permanent': dict({
             'default': False,
             'type': 'boolean',
@@ -2106,10 +2118,26 @@
       }),
     }),
     'get_session': dict({
-      'description': 'Look up a session by id (tenant-scoped).',
+      'description': '''
+        Look up one of your sessions by id (tenant-scoped).
+        
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'session_id': dict({
             'type': 'string',
           }),
@@ -2506,7 +2534,12 @@
       }),
     }),
     'list_session_events': dict({
-      'description': 'List events for a session (SDK pass-through, single page).',
+      'description': '''
+        List events for one of your sessions (SDK pass-through, single page).
+        
+        A conversation from a sealed channel is refused unless
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2528,6 +2561,17 @@
                   'asc',
                   'desc',
                 ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
                 'type': 'string',
               }),
               dict({
@@ -2558,11 +2602,27 @@
       }),
     }),
     'list_sessions': dict({
-      'description': 'List sessions in the tenant pool. ``agent_name`` narrows to one agent.',
+      'description': '''
+        List your sessions in the tenant pool. ``agent_name`` narrows to one agent.
+        
+        Conversations from a sealed channel are listed only when
+        ``origin_context_id`` is this turn's origin inside that channel.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -3297,8 +3357,8 @@
         
         Use ``request_mcp_token`` for servers that take a pasted bearer token and
         ``attach_mcp_server`` for public servers. Members can use this on shared
-        agents and built-in Daimon; the admin and fork gates for direct spec edits
-        do not apply.
+        agents and built-in Daimon; repointing an existing server name at another
+        URL needs an admin there.
         
         Posts a requester-only card; its button opens a private sign-in link that
         expires in ten minutes. Finishing sign-in stores the grant for that person
@@ -3335,7 +3395,7 @@
             'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
           }),
           'server_name': dict({
-            'description': 'Connection name; reusing a name replaces that server entry.',
+            'description': 'Connection name; reuse at a new URL replaces it (admin if shared).',
             'type': 'string',
           }),
           'url': dict({
@@ -3364,7 +3424,8 @@
         
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
         credentials in chat. Members can use this form on shared agents and built-in
-        Daimon; the admin and fork gates for direct spec edits do not apply.
+        Daimon to add a server; replacing one the agent already has (same name at
+        another URL, or a new token for a connected URL) needs an admin there.
         
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
@@ -3402,7 +3463,7 @@
             'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
           }),
           'server_name': dict({
-            'description': 'Connection name; reusing a name replaces that server entry.',
+            'description': 'Connection name; reuse at a new URL replaces it (admin if shared).',
             'type': 'string',
           }),
           'url': dict({
@@ -3680,7 +3741,13 @@
       }),
     }),
     'self_delete_file': dict({
-      'description': 'Delete a per-agent file by `key`. Idempotent — succeeds whether or not a file existed.',
+      'description': '''
+        Delete a per-agent key by `key`. Idempotent — succeeds whether or not it existed.
+        
+        Refused on the built-in agent and on any agent that answers somewhere in
+        the workspace: removing a key there takes it from everyone, so a person
+        with admin rights removes it with `remove_agent_key`.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3725,9 +3792,12 @@
     }),
     'self_write_file': dict({
       'description': '''
-        Write or overwrite a per-agent file under `key`.
+        Add a per-agent key under `key`. Add-only: never replaces a stored key.
         
         Stored in your private agent_files namespace; isolated from other agents.
+        A key that is already set, or a name your tools read as the same
+        credential as one already set (`GITHUB_TOKEN` beside `GH_TOKEN`), is
+        refused; a person replaces those through a form.
         Every entry is exported into your sandbox's `.env`, so `key` must be a
         credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
         `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and

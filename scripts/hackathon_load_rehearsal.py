@@ -164,6 +164,13 @@ def plan(args: argparse.Namespace) -> str:
     )
 
 
+def expected_agent_model(model: str) -> str:
+    """The model the seeded `daimon` agent runs on for this rehearsal mode."""
+    from daimon.core.constants import DEFAULT_AGENT_MODEL
+
+    return "claude-haiku-4-5" if model == "haiku" else DEFAULT_AGENT_MODEL
+
+
 def _defaults_root(settings: Settings, model: str, temp: Path) -> Path:
     if model == "event":
         return settings.defaults_root
@@ -171,10 +178,10 @@ def _defaults_root(settings: Settings, model: str, temp: Path) -> Path:
     shutil.copytree(settings.defaults_root, root)
     spec = root / "agents" / "daimon.yaml"
     source = spec.read_text()
-    old = "model: claude-sonnet-5\n"
+    old = f"model: {expected_agent_model('event')}\n"
     if source.count(old) != 1:
         raise RuntimeError("default agent model changed; inspect the rehearsal model override")
-    spec.write_text(source.replace(old, "model: claude-haiku-4-5\n", 1))
+    spec.write_text(source.replace(old, f"model: {expected_agent_model(model)}\n", 1))
     return root
 
 
@@ -512,7 +519,7 @@ async def _phases(
             if agent is None or environment is None:
                 print(f"skip {name}: defaults missing")
                 continue
-            expected_model = "claude-haiku-4-5" if args.model == "haiku" else "claude-sonnet-5"
+            expected_model = expected_agent_model(args.model)
             if agent.model.id != expected_model:
                 print(f"skip {name}: agent model {agent.model.id} != {expected_model}")
                 continue

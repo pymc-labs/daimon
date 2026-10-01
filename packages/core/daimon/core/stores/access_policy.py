@@ -62,6 +62,10 @@ async def set_access_policy(
     session: AsyncSession, *, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> None:
     payload = policy.model_dump(mode="json")
+    if not payload.get("agent_channel_pins"):
+        # Leave the key out when nothing is pinned, so a process built before
+        # pins existed still reads the row.
+        payload.pop("agent_channel_pins", None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
         .values(tenant_id=tenant_id, policy=payload)
