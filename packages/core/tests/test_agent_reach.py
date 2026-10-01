@@ -36,6 +36,8 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_routine,
     make_tenant,
+    make_thread_session,
+    make_usage_event,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -246,10 +248,14 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
     await _member(db_session, tenant, "u5")
     for creator in ("u1", "u5", "u-unknown"):
         await make_routine(
-            db_session, tenant=tenant, created_by_user_id=creator, agent_name="helper"
+            db_session,
+            tenant=tenant,
+            created_by_user_id=creator,
+            agent_name="helper",
+            channel_id="c1",
         )
     assert await _is_local(db_session, tenant.id), (
-        "the caller's own and plain members' routines keep it local"
+        "the caller's own and plain members' routines in c1 keep it local"
     )
 
     await _member(db_session, tenant, "u7")
@@ -263,7 +269,12 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
         actor_account_id=None,
     )
     await make_routine(
-        db_session, tenant=tenant, created_by_user_id="u7", agent_name="helper", enabled=False
+        db_session,
+        tenant=tenant,
+        created_by_user_id="u7",
+        agent_name="helper",
+        enabled=False,
+        channel_id="c1",
     )
     assert not await _is_local(db_session, tenant.id), (
         "a paused routine by the admin of another channel counts"
@@ -531,6 +542,147 @@ async def test_bindings_and_routines_count_by_the_agents_stable_id(
     assert not facts.is_local_to_caller_channels and facts.runs_unattended_beyond_caller, (
         "a server admin's routine on the same agent under an old name holds it back"
     )
+
+
+async def _grant(db_session: AsyncSession, tenant_id, channel_id: str, user_id: str) -> None:
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=channel_id,
+        role_ids=[],
+        user_ids=[user_id],
+        actor_account_id=None,
+    )
+
+
+async def _unrouted_key_facts(db_session: AsyncSession, tenant_id, user_id: str, account_id=None):
+    """A key change on `unrouted` (no default, no bound thread) by `user_id`."""
+    return await load_target_facts(
+        db_session,
+        "key_replace",
+        tenant_id=tenant_id,
+        platform="discord",
+        agent_names=("unrouted",),
+        ma_agent_id="agent_x",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id=user_id),
+        is_daimon_managed=False,
+        caller_account_id=account_id,
+        caller_platform_user_id=user_id,
+    )
+
+
+async def test_another_accounts_live_session_counts_by_its_channel(
+    db_session: AsyncSession,
+) -> None:
+    """An agent answering nowhere can still run in a rerouted thread's live session."""
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "c2", "u2")
+    await _grant(db_session, tenant.id, "c9", "u9")
+    member = await make_account(db_session, tenant=tenant)
+    live = await make_thread_session(
+        db_session, tenant=tenant, account=member, thread_id="t1", ma_agent_id="agent_x"
+    )
+
+    unknown = await _unrouted_key_facts(db_session, tenant.id, "u2")
+    assert unknown.is_reachable_in_tenant and not unknown.is_local_to_caller_channels, (
+        "a session whose channel is unknown could run anywhere"
+    )
+    await make_usage_event(
+        db_session, tenant=tenant, managed_session_id=live.ma_session_id, channel_id="c2"
+    )
+    elsewhere = await _unrouted_key_facts(db_session, tenant.id, "u9")
+    assert elsewhere.is_reachable_in_tenant and not elsewhere.is_local_to_caller_channels, (
+        "the admin of an unrelated channel never takes over a session running in c2"
+    )
+    assert (await _unrouted_key_facts(db_session, tenant.id, "u2")).is_local_to_caller_channels, (
+        "c2's admin holds the agent whose only run is in c2"
+    )
+    plain = await _unrouted_key_facts(db_session, tenant.id, "u5")
+    assert plain.is_reachable_in_tenant and not plain.is_local_to_caller_channels, (
+        "a plain member stays refused"
+    )
+    own = await _unrouted_key_facts(db_session, tenant.id, "u5", account_id=member.id)
+    assert not own.is_reachable_in_tenant, "the session's own member reaches nobody else"
+
+
+async def test_other_peoples_routines_count_by_their_channel(db_session: AsyncSession) -> None:
+    """A plain member's routine running an agent into c2 keeps it from c9's admin."""
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "c2", "u2")
+    await _grant(db_session, tenant.id, "c9", "u9")
+    await _member(db_session, tenant, "u5")
+    await make_routine(
+        db_session,
+        tenant=tenant,
+        created_by_user_id="u5",
+        agent_id="agent_x",
+        agent_name="unrouted",
+        channel_id="c2",
+    )
+
+    elsewhere = await _unrouted_key_facts(db_session, tenant.id, "u9")
+    assert elsewhere.is_reachable_in_tenant and not elsewhere.is_local_to_caller_channels, (
+        "a routine into c2 is outside c9's admin's channels"
+    )
+    assert (await _unrouted_key_facts(db_session, tenant.id, "u2")).is_local_to_caller_channels, (
+        "a plain member's routine into c2 leaves the agent with c2's admin"
+    )
+    plain = await _unrouted_key_facts(db_session, tenant.id, "u5")
+    assert not plain.is_reachable_in_tenant, "the creator's own routine is nobody else's reach"
+
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u5", agent_id="agent_x", agent_name="x"
+    )
+    unknown = await _unrouted_key_facts(db_session, tenant.id, "u2")
+    assert not unknown.is_local_to_caller_channels, "a routine with no channel could run anywhere"
+
+
+async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
+    db_session: AsyncSession,
+) -> None:
+    """Locality never widens the sharing read; binding such an agent stays open."""
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "c9", "u9")
+    facts = await _unrouted_key_facts(db_session, tenant.id, "u9")
+    assert not facts.is_reachable_in_tenant, "an agent no one reaches is open to anyone"
+    assert not facts.is_local_to_caller_channels, "and local to no channel admin"
+    assert not await is_agent_local_to_caller(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        agent_names=("unrouted",),
+        ma_agent_id="agent_x",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u9"),
+    ), "answering nowhere is not local"
+    assert await may_bind_as_channel_default(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c9",
+        agent_names=("unrouted",),
+        ma_agent_id="agent_x",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u9"),
+        is_daimon_managed=False,
+        policy=TenantAccessPolicy(),
+    ), "a channel admin still binds an agent answering nowhere yet"
+
+
+async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
+    db_session: AsyncSession,
+) -> None:
+    """With no id to find sessions by, the sharing read fails closed and so does locality."""
+    tenant = await make_tenant(db_session)
+    await _admin_of_c1(db_session, tenant.id)
+    facts = await _key_facts(db_session, tenant.id, ma_agent_id=None)
+    assert facts.is_reachable_in_tenant and not facts.is_local_to_caller_channels, (
+        "a key change that cannot see live sessions is never a channel admin's"
+    )
+    spec = await _key_facts(db_session, tenant.id, operation="agent_spec_edit", ma_agent_id=None)
+    assert spec.is_local_to_caller_channels, "a spec edit reads the cascade and stays local"
 
 
 async def test_nobody_binds_a_pinned_agent_outside_its_pin(db_session: AsyncSession) -> None:

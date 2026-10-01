@@ -162,6 +162,30 @@ async def list_routine_creators(
     ]
 
 
+async def list_routine_channel_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    agent_names: Collection[str],
+    agent_id: str | None = None,
+    caller_platform_user_id: str | None = None,
+) -> list[str | None]:
+    """The channels of the routines that run the agent, paused ones included.
+
+    None stands for a routine with no channel. The caller's own routines are
+    left out; None for `caller_platform_user_id` counts them all.
+    """
+    statement = select(Routine.channel_id).where(
+        Routine.tenant_id == tenant_id,
+        or_(Routine.agent_name.in_(agent_names), Routine.agent_id == agent_id),
+    )
+    if caller_platform_user_id is not None:
+        statement = statement.where(
+            Routine.created_by_user_id.is_distinct_from(caller_platform_user_id)
+        )
+    return list((await session.execute(statement.distinct())).scalars())
+
+
 async def update_routine(
     session: AsyncSession,
     routine_id: _uuid.UUID,

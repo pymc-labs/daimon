@@ -26,10 +26,10 @@ import uuid as _uuid
 from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import ThreadSession
+from daimon.core._models import ThreadSession, UsageEvent
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,43 @@ async def get_live_thread_session(
     if orm is None:
         return None
     return ThreadSessionRow.model_validate(orm)
+
+
+async def list_live_session_channel_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    ma_agent_id: str,
+    caller_account_id: _uuid.UUID | None = None,
+) -> list[str | None]:
+    """The channels the live sessions with `ma_agent_id` run in; None for an unknown one.
+
+    A session's channel is the one its spend was attributed to
+    (`usage_events.channel_id`: a thread's parent channel, or the channel a DM
+    was moved from); a session with none attributed yet has no known channel.
+    The caller's own sessions are left out; None for `caller_account_id`
+    counts them all, as `is_agent_shared_for_key_changes` does.
+    """
+    statement = (
+        select(UsageEvent.channel_id)
+        .select_from(ThreadSession)
+        .outerjoin(
+            UsageEvent,
+            and_(
+                UsageEvent.tenant_id == ThreadSession.tenant_id,
+                UsageEvent.managed_session_id == ThreadSession.ma_session_id,
+                UsageEvent.channel_id.is_not(None),
+            ),
+        )
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.ma_agent_id == ma_agent_id,
+            ThreadSession.status == "live",
+        )
+    )
+    if caller_account_id is not None:
+        statement = statement.where(ThreadSession.account_id.is_distinct_from(caller_account_id))
+    return list((await session.execute(statement.distinct())).scalars())
 
 
 async def get_latest_thread_session(

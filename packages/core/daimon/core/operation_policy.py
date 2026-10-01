@@ -42,7 +42,7 @@ There are three rule families, each a fixed short-circuit order:
   `mcp_replace`.
 
 Where either of the first two families would answer `needs_admin`, a channel
-admin whose channels hold every place the agent answers
+admin whose channels hold every place the agent answers or runs
 (`is_local_to_caller_channels`, see `daimon.core.agent_reach`) is allowed
 instead. The managed check still refuses them: only a server admin passes it.
 """

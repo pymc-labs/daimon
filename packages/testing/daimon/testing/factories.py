@@ -188,6 +188,7 @@ async def make_routine(
     trigger_message: str = "hello",
     enabled: bool = True,
     next_fire_at: datetime | None = None,
+    channel_id: str | None = None,
 ) -> RoutineRow:
     """Create a Routine row via the real routines store, returning RoutineRow."""
     tenant = tenant or await make_tenant(session)
@@ -202,6 +203,7 @@ async def make_routine(
         trigger_message=trigger_message,
         enabled=enabled,
         next_fire_at=next_fire_at,
+        channel_id=channel_id,
     )
 
 
@@ -249,6 +251,7 @@ async def make_usage_event(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     event_id: str | None = None,
+    channel_id: str | None = None,
 ) -> UsageEventRow:
     """Record a usage event via `usage_events.record`, wrapping raw token ints into
     the SDK-typed `BetaManagedAgentsSpanModelUsage` (constructed inline, no
@@ -275,6 +278,7 @@ async def make_usage_event(
         model=model,
         model_usage=model_usage,
         event_id=event_id,
+        channel_id=channel_id,
     )
     orm = (
         await session.execute(

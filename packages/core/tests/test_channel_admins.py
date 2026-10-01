@@ -174,3 +174,24 @@ def test_agent_reach_counts_a_dm_as_the_channel_it_started_from() -> None:
         "and a replaced or moved-away DM scope not at all"
     )
     assert not reach.is_local_to({"c1"}, platform_user_id="u1"), "dm2's source is unknown"
+
+
+def test_runs_count_by_their_channel_and_an_unrouted_agent_is_local_to_nobody() -> None:
+    default = DeploymentDefault(agent_name="daimon")
+
+    def reach(*runs: str | None):
+        return build_agent_reach(
+            ("helper",), tenant=None, channels=[], default=default, run_channel_ids=runs
+        )
+
+    nowhere = reach()
+    assert not nowhere.is_local_to({"c1"}, platform_user_id="u1"), "answering nowhere is not local"
+    assert nowhere.may_move_into({"c1"}, platform_user_id="u1"), "but it may be bound there"
+    assert reach("c1").is_local_to({"c1"}, platform_user_id="u1"), "a run in c1 is c1's"
+    assert not reach("c2").is_local_to({"c1"}, platform_user_id="u1"), "a run in c2 is not"
+    unplaced = reach("c1", None)
+    assert unplaced.has_unplaced_run and unplaced.channel_ids == {"c1"}, (
+        "an unknown channel is recorded apart from the known ones"
+    )
+    assert not unplaced.is_local_to({"c1"}, platform_user_id="u1"), "it could be anywhere"
+    assert not unplaced.may_move_into({"c1"}, platform_user_id="u1"), "nor bound from c1"
