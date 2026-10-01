@@ -43,7 +43,7 @@ from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -383,3 +383,120 @@ async def test_a_member_cannot_replace_an_mcp_server_on_a_shared_agent(
     dispatch.assert_not_awaited()
     assert refused.await_args is not None and refused.await_args.kwargs["is_admin"] is False
     assert "was not replaced" in _edits(fake)[-1]
+
+
+async def _hold(db: async_sessionmaker[AsyncSession], key: str, account_id: uuid.UUID) -> None:
+    async with db.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID),
+            key=key,
+            content="the-value-in-use",
+            set_by_account_id=account_id,
+        )
+
+
+async def test_a_member_cannot_add_an_alias_of_a_held_key_on_a_managed_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Minted with no key held (no replacement promised); GH_TOKEN is held by submit time."""
+    row = await _request(db_session_factory, account_id, target="GITHUB_TOKEN")
+    await _hold(db_session_factory, "GH_TOKEN", account_id)
+    fake = TeamsApiFake()
+    async with _running(fake, _runtime(db_session_factory, managed=True)) as (service, dispatch):
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+
+    async with db_session_factory() as session:
+        alias = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="GITHUB_TOKEN"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert alias is None, "an alias that retargets a held key is refused like an overwrite"
+    assert spent is not None and spent.outcome == "write_failed"
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in _edits(fake)[-1], "names both keys"
+    dispatch.assert_not_awaited()
+
+
+async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    row = await _request(db_session_factory, account_id, target="GITHUB_TOKEN")
+    real = module.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ()
+        await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    with patch.object(module, "list_turn_key_names", first_read_misses_the_alias):
+        async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+
+    assert calls == 2, "the alias must be re-read under the write"
+    async with db_session_factory() as session:
+        alias = await get_agent_file(
+            session, tenant_id=TENANT, agent_id=row.agent_id, key="GITHUB_TOKEN"
+        )
+        spent = await peek_credential_request(session, token=row.token)
+    assert alias is None and spent is not None and spent.outcome == "stale_replacement"
+
+
+async def test_concurrent_submits_of_two_alias_names_store_only_one(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    """GH_TOKEN and GITHUB_TOKEN submitted at once: the key-set lock lets one win.
+
+    Separate connections, so the two writes really are concurrent. The patched
+    insert dawdles, so without the lock the second writer reads "neither held"
+    while the first is still mid-write, and both land.
+    """
+    import asyncio
+
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_files import list_agent_files
+
+    committing = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    await provision_tenant(committing, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with committing.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        assert tenant is not None
+        account = (await make_account(session, tenant=tenant)).id
+    first = await _request(committing, account, target="GH_TOKEN")
+    second = await _request(committing, account, target="GITHUB_TOKEN")
+    real = module.put_agent_file_if_unchanged
+
+    async def slow_insert(session: AsyncSession, **kw: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await real(session, **kw)
+
+    with patch.object(module, "put_agent_file_if_unchanged", slow_insert):
+        async with _running(TeamsApiFake(), _runtime(committing)) as (service, _):
+            await asyncio.gather(
+                post_activity(service, _submit(first.token)),
+                post_activity(service, _submit(second.token)),
+            )
+            await service.turns.drain(5)
+
+    async with committing() as session:
+        rows = await list_agent_files(session, tenant_id=TENANT, agent_id=first.agent_id)
+        outcomes = []
+        for token in (first.token, second.token):
+            spent = await peek_credential_request(session, token=token)
+            assert spent is not None
+            outcomes.append(spent.outcome)
+    assert len(rows) == 1, f"exactly one alias may land, got {[r.key for r in rows]}"
+    assert sorted(o or "" for o in outcomes) == ["applied", "stale_replacement"]

@@ -38,7 +38,7 @@ from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import availability_for_request
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
 from daimon.core.mcp_attach import (
     McpConnectDecision,
     McpServerReplaceRefusedError,
@@ -70,11 +70,13 @@ from daimon.core.stores import credential_requests as store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     agent_env_writes_allowed,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.teams_threads import conversation_of
+from daimon.core.turn_keys import list_turn_key_names
 from microsoft_teams.api import (
     Attachment,
     InvokeActivity,
@@ -328,11 +330,14 @@ class TeamsCredentialRequests:
         *,
         outcome: ConfigurationChange | None = None,
         reason: RefusalReason | None = None,
+        replaces: str | None = None,
     ) -> None:
         """Edit the posted card. Best effort: the outcome is already recorded."""
         if row.posted_message_id is None:
             return
-        card = card_for_request(row, state=state, outcome=outcome, refusal=reason)
+        card = card_for_request(
+            row, state=state, outcome=outcome, refusal=reason, replaces=replaces
+        )
         attachment = Attachment(content_type=ADAPTIVE_CARD_TYPE, content=build_adaptive_card(card))
         edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
         try:
@@ -373,8 +378,18 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """Consume, write and queue the continuation in one transaction, as Slack does."""
-        refuse = row.replaces_updated_at is not None and await self._replacement_refused(
-            row, agent, is_admin=is_admin
+        # A new name a tool reads as a key already held (GH_TOKEN beside
+        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
+        # gate, decided for this submitter.
+        shadowed: str | None = None
+        if row.replaces_updated_at is None:
+            async with self._runtime.sessionmaker() as session:
+                held = await list_turn_key_names(
+                    session, tenant_id=row.tenant_id, agent_id=row.agent_id
+                )
+            shadowed = env_alias_shadowed(row.target, held)
+        refuse = (row.replaces_updated_at is not None or shadowed is not None) and (
+            await self._replacement_refused(row, agent, is_admin=is_admin)
         )
         state: CardState = "applied"
         queued = False
@@ -382,11 +397,34 @@ class TeamsCredentialRequests:
             consumed = await store.consume_credential_request(
                 session, token=row.token, now=datetime.now(UTC)
             )
+            # Re-read under the write, holding the agent's key-set lock: an
+            # alias that appeared after the gate above was decided was never
+            # put to it, and one a concurrent writer is adding waits.
+            appeared = False
+            if consumed is not None:
+                await lock_agent_keys(
+                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                )
+                appeared = (
+                    shadowed is None
+                    and env_alias_shadowed(
+                        consumed.target,
+                        await list_turn_key_names(
+                            session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                        ),
+                    )
+                    is not None
+                )
             if consumed is not None and refuse:
                 await store.set_credential_request_outcome(
                     session, token=row.token, outcome="write_failed"
                 )
                 state = "refused"
+            elif consumed is not None and appeared:
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="stale_replacement"
+                )
+                state = "superseded"
             elif consumed is not None:
                 written = await put_agent_file_if_unchanged(
                     session,
@@ -424,6 +462,7 @@ class TeamsCredentialRequests:
             service_url,
             outcome=change if state == "applied" else None,
             reason="replacement_admin_required" if state == "refused" else None,
+            replaces=shadowed if state == "refused" else None,
         )
         if queued:
             await self._resume(consumed, service_url)
