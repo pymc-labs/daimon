@@ -17,6 +17,7 @@ from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.direct_messages import (
     DirectMessageRow,
     delete_conversations_for_account,
@@ -360,6 +361,72 @@ async def test_a_stronger_requesters_claimed_wake_counts_until_it_settles(
     assert not await _is_local(db_session, tenant.id), f"a claimed {reason} still runs"
     await settle_continuation(db_session, idempotency_key=key, status="delivered", now=now)
     assert await _is_local(db_session, tenant.id), f"a delivered {reason} no longer runs"
+
+
+async def test_a_stronger_requesters_private_input_counts_against_the_agent_that_asked(
+    db_session: AsyncSession,
+) -> None:
+    """An applied input may resume the agent that asked for it, not only the key's agent."""
+    tenant = await make_tenant(db_session)
+    await _admin_of_c1(db_session, tenant.id)
+    boss = await _member(db_session, tenant, "u9", admin=True)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=boss,
+        thread_id="t1",
+        ma_agent_id="agent_1",
+        channel_id="c1",
+        created_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    async def local() -> bool:
+        return await is_agent_local_to_caller(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=("helper",),
+            ma_agent_id="agent_1",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u1"),
+        )
+
+    assert await local(), "a session in c1 alone keeps helper with c1's admin"
+    key = uuid.uuid4()
+    await create_credential_request(
+        db_session,
+        token=f"tok_{uuid.uuid4()}",
+        kind="env",
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        account_id=boss.id,
+        target="API_KEY",
+        mcp_server_url=None,
+        requester_platform_user_id="u9",
+        channel_id="t1",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        idempotency_key=key,
+        target_ma_agent_id="agent_key_owner",
+        target_name="key-owner",
+        requested_work="finish wiring the key",
+        platform="discord",
+        parent_channel_id="c1",
+        origin_thread_id="t1",
+    )
+    await record_continuation(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="c1",
+        thread_id="t1",
+        requester_account_id=boss.id,
+        requester_external_user_id="u9",
+        target_ma_agent_id="agent_key_owner",
+        target_name="key-owner",
+        reason="private_input_applied",
+        idempotency_key=key,
+    )
+    assert not await local(), "a server admin's input asked by helper would resume it as them"
 
 
 async def _dm_from(
