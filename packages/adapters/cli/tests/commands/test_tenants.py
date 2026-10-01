@@ -858,7 +858,7 @@ async def test_access_policy_seals_a_single_slack_thread(
 
 @pytest.mark.asyncio
 async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], capsys: pytest.CaptureFixture[str]
 ) -> None:
     from daimon.core.scope import ChannelScopeRef
     from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
@@ -912,6 +912,12 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
     )
     policy = await _policy(db_session_factory, workspace_id="iso")
     assert policy.isolated_channel_ids == (local,), "its own agent answers only there"
+    assert "Isolation ended" not in capsys.readouterr().err
+
+    await tenants_access_policy_set(
+        rt=rt, console=_make_console(), platform="discord", external_id="iso", clear=True
+    )
+    assert f"Isolation ended for {local}" in capsys.readouterr().err, "ending it warns"
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, cast
 
@@ -14,12 +15,13 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
-from daimon.core.channel_isolation_setup import isolation_refusal
+from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING, isolation_refusal
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
     clear_access_policy,
     load_access_policy,
     lock_access_policy,
@@ -36,6 +38,7 @@ from daimon.core.stores.tenants import (
 )
 from rich.console import Console
 from rich.markup import escape
+from sqlalchemy.ext.asyncio import AsyncSession
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
@@ -399,31 +402,46 @@ def _print_policy(
 
 
 async def _require_isolatable(
-    rt: CliRuntime, console: Console, *, tenant_id: uuid.UUID, isolated: tuple[str, ...]
+    rt: CliRuntime,
+    console: Console,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    current: TenantAccessPolicy,
+    isolated: tuple[str, ...],
 ) -> None:
-    """Exit unless every newly isolated channel already has an agent of its own."""
-    async with rt.sessionmaker() as session:
-        current = await load_access_policy(session, tenant_id=tenant_id)
-        for channel_id in (c for c in isolated if c not in current.isolated_channel_ids):
-            refused = await isolation_refusal(
-                rt.anthropic,
-                session,
-                tenant_id=tenant_id,
-                channel_id=channel_id,
-                isolated_ids=isolated,
-                default=rt.deployment_default,
+    """Exit unless every newly isolated channel has an agent of its own and nothing
+    crossing its line. Run under the policy lock, in the transaction that writes."""
+    for channel_id in (c for c in isolated if c not in current.isolated_channel_ids):
+        refused = await isolation_refusal(
+            rt.anthropic,
+            session,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            isolated_ids=isolated,
+            default=rt.deployment_default,
+        )
+        if refused is not None:
+            hint = (
+                ""
+                if refused.reason == "work_crosses_line"
+                else " The setup panel's Isolate with a copy, or set_channel_isolation "
+                "with fork_from, makes one."
             )
-            if refused is not None:
-                hint = (
-                    ""
-                    if refused.reason == "work_crosses_line"
-                    else " The setup panel's Isolate with a copy, or set_channel_isolation "
-                    "with fork_from, makes one."
-                )
-                console.print(
-                    f"[red]{channel_id}: {escape(str(refused))}{hint} Nothing was changed.[/red]"
-                )
-                raise typer.Exit(1)
+            console.print(
+                f"[red]{channel_id}: {escape(str(refused))}{hint} Nothing was changed.[/red]"
+            )
+            raise typer.Exit(1)
+
+
+def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAccessPolicy) -> None:
+    ended = sorted(
+        set(previous.isolated_channel_ids if previous else ()) - set(policy.isolated_channel_ids)
+    )
+    if ended:
+        Console(stderr=True, highlight=False).print(
+            f"[yellow]Isolation ended for {', '.join(ended)}. {END_ISOLATION_WARNING}[/yellow]"
+        )
 
 
 @access_policy_app.command("get")
@@ -714,17 +732,22 @@ async def tenants_access_policy_set(
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
     isolated = cast("tuple[str, ...] | None", changes.get("isolated_channel_ids"))
-    if isolated:
-        await _require_isolatable(rt, console, tenant_id=tenant_id, isolated=isolated)
+    previous: TenantAccessPolicy | None = None
     async with rt.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
+            with suppress(AccessPolicyUnreadable):
+                previous = await load_access_policy(session, tenant_id=tenant_id)
             await clear_access_policy(session, tenant_id=tenant_id)
             policy = OPEN_ACCESS_POLICY
         else:
             # An unreadable stored row raises here rather than being overwritten
             # blind; --clear is the way out of that state.
-            current = await load_access_policy(session, tenant_id=tenant_id)
+            current = previous = await load_access_policy(session, tenant_id=tenant_id)
+            if isolated:
+                await _require_isolatable(
+                    rt, console, session, tenant_id=tenant_id, current=current, isolated=isolated
+                )
             if edits_pins:
                 changes["agent_channel_pins"] = _merge_pins(
                     current.agent_channel_pins, add=pins_to_add, remove=pins_to_remove
@@ -742,4 +765,5 @@ async def tenants_access_policy_set(
                     )
             policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
+    _warn_ended_isolation(previous, policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)
