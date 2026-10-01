@@ -1135,11 +1135,12 @@ shared env file would set both.
 
 `tuple[UUID, ...]` · optional · default unset
 
-Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads from, as
-a JSON array of strings. Their notebooks share one browser origin and can reach each
-other, so list only tenants one operator controls. Empty refuses every upload. Ignored
-with ORIGIN_BASE (every notebook gets its own origin) and on localhost. An unlisted
-tenant's 403 names its id; `daimon tenants list --json` shows every tenant's id.
+Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads from,
+comma-separated or as a JSON array of strings. Their notebooks share one browser origin
+and can reach each other, so list only tenants one operator controls. Empty refuses
+every upload. Ignored with ORIGIN_BASE (every notebook gets its own origin) and on
+localhost. An unlisted tenant's 403 names its id; `daimon tenants list --json` shows
+every tenant's id.
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 
