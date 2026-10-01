@@ -30,8 +30,9 @@ __all__ = ["format_seal_ids", "inherited_seal_ids", "origin_stamp", "seal_ids"]
 log = structlog.get_logger(__name__)
 
 _SEPARATOR = ","
-# #337 stamped a bare "true" for a session sealed at creation; it means the
-# channel the session is stamped with.
+# #337 stamped a bare "true" for a session sealed at creation without saying
+# which id sealed it; it is read as the strictest: the stamped channel and
+# thread both.
 _LEGACY_SEALED = "true"
 # Stands in for a seal nobody can be inside: a legacy "true" with no channel.
 _UNMATCHABLE = "\x00unknown-seal"
@@ -49,6 +50,9 @@ def seal_ids(metadata: Mapping[str, str | None] | None) -> frozenset[str]:
             continue
         if part == _LEGACY_SEALED:
             ids.add(metadata.get(MA_METADATA_KEY_CHANNEL) or _UNMATCHABLE)
+            thread = metadata.get(MA_METADATA_KEY_THREAD)
+            if thread:
+                ids.add(thread)
         else:
             ids.add(part)
     return frozenset(ids) if ids else frozenset({_UNMATCHABLE})
