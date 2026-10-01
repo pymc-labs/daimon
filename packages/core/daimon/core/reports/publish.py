@@ -19,13 +19,16 @@ from __future__ import annotations
 import re
 import secrets
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from decimal import Decimal
 
 import httpx
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import ma_identity
 from daimon.core.config import ReportHostSettings
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.notebooks.capability import mint_token
@@ -130,6 +133,7 @@ async def publish_report(
     cap_usd: Decimal,
     agent: str | None,
     now: datetime,
+    authorize_source: Callable[[BetaManagedAgentsAgent], Awaitable[None]] | None = None,
 ) -> PublishResult:
     """Resolve the source agent, derive its reader variant, mint the report its
     own token, register it with the host, and return a one-time upload URL.
@@ -185,6 +189,18 @@ async def publish_report(
                 f"no agent configured for tenant {tenant_id} and no --agent was given"
             )
         resolved_agent = resolved_config.agent_name
+
+    # The reader variant answers as the source agent, so publishing one is a
+    # configuration change to that agent: the caller's access rule decides it
+    # (a pinned source can only be published from inside its channels, or by
+    # an admin) before any variant, token or host record exists.
+    if authorize_source is not None:
+        source_ma = await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=resolved_agent
+        )
+        if source_ma is None:
+            raise DaimonError(f"agent '{resolved_agent}' not found")
+        await authorize_source(source_ma)
 
     variant = await ensure_reader_variant(
         anthropic, tenant_id=tenant_id, account_id=account_id, source_name=resolved_agent

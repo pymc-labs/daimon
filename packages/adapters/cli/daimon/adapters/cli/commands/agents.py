@@ -20,7 +20,7 @@ from daimon.adapters.cli.tenant import (
 )
 from daimon.core import agent_lifecycle
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
-from daimon.core.authz import Action, AgentRef, Subject, authorize
+from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -32,6 +32,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
     MA_METADATA_KEY_SPEC_HASH,
     build_metadata,
 )
@@ -488,7 +490,7 @@ async def agents_fork(
         # The CLI is the deployment operator.
         subject=Subject(is_admin=True),
         action=Action.FORK,
-        agent=AgentRef.of(source.name, source.metadata.get(MA_METADATA_KEY_NAME)),
+        agent=build_agent_ref(source.name, source.metadata),
     ):
         raise StoreError(
             f"agent {src!r} is pinned to channels in the access policy, so it can't be copied."
@@ -813,6 +815,11 @@ async def agents_rekey(
             managed=(agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"),
             spec_hash=agent.metadata.get(MA_METADATA_KEY_SPEC_HASH),
         )
+        # A report reader's link to its source agent is what holds it to the
+        # source's pins; a re-key must not drop it.
+        for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
+            if key in agent.metadata:
+                new_meta[key] = agent.metadata[key]
         await rt.anthropic.beta.agents.update(
             agent.id,
             version=agent.version,

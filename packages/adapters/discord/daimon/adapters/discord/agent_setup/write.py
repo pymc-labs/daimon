@@ -16,7 +16,6 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core import agent_lifecycle
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -35,12 +34,10 @@ from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import (
     build_multifernet,
-    get_github_login,
     get_pat,
     upsert_credential_encrypted,
 )
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import SyncReport, sync_agent_skills
 from daimon.core.specs import (
     AgentSpec,
@@ -49,7 +46,6 @@ from daimon.core.specs import (
     dump_agent_spec,
 )
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
 
 from .state import PanelState, RosterEntry
@@ -201,26 +197,6 @@ async def load_tenant_roster(
         is_system = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
         out.append(dataclasses.replace(entry, is_system=is_system))
     return out
-
-
-async def load_selected_github_login(
-    runtime: DiscordRuntime, *, tenant_id: uuid.UUID, entry: RosterEntry | None
-) -> str | None:
-    """Return the GitHub login linked to ``entry``'s agent, or None.
-
-    Reads the per-agent overlay (overlay-only — no principal-default
-    bleed). Display only: the token is never read or decrypted. None when
-    nothing is selected, the agent isn't created yet (New/Fork), or no
-    credential is linked for that agent.
-    """
-    if entry is None or not entry.ma_agent_id:
-        return None
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=entry.ma_agent_id)
-    return await get_github_login(
-        principal_id=agent_uuid,
-        agent_id=agent_uuid,
-        sessionmaker=runtime.sessionmaker,
-    )
 
 
 async def load_agent_inline_pat(runtime: DiscordRuntime, *, agent_id: uuid.UUID) -> str | None:
@@ -389,41 +365,6 @@ async def create_blank_agent(
         # call_reconcile_for_panel's managed=False.
         managed=False,
     )
-
-
-async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
-    """Archive the MA agent matching `name` under the given tenant.
-
-    Channel and server scope rows naming the agent are cleared as part of the
-    delete, so turn resolution falls through the cascade instead of resolving to
-    a deleted agent.
-    """
-    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
-    if agent is None:
-        raise DaimonError(f"No agent named **{name}** found.")
-    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-        # Server-side refusal. The panel disables Delete for a seeded agent
-        # (is_system on the roster entry), but a stale or re-fired view
-        # interaction reaches this function anyway — and archiving here would
-        # take the deployment's built-in agent and its memory store with it.
-        raise DaimonError(
-            f"**{name}** is a built-in agent and cannot be deleted. "
-            "Fork it first, then delete the fork."
-        )
-    await runtime.anthropic.beta.agents.archive(agent.id)
-    await agent_lifecycle.archive_memory_store_best_effort(
-        anthropic=runtime.anthropic,
-        sessionmaker=runtime.sessionmaker,
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-        log_context={"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id},
-    )
-    # After the MA archive, never before: a failure here leaves an archived
-    # agent with stale scope rows rather than a live agent with cleared ones.
-    # Deliberately unguarded — a failure must reach the callback's error
-    # boundary rather than degrade silently.
-    async with runtime.sessionmaker.begin() as session:
-        await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
 
 
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:

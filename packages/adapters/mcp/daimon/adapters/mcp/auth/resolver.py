@@ -49,10 +49,14 @@ class AuthIdentity:
     is_admin: bool = False
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
-    # Role ids the account held on its last chat turn, and whether any channel
-    # admin grant names it; both read by the verifier from the database.
+    # Role ids the account held on its last chat turn, and the channels its
+    # channel admin grants name; both read by the verifier from the database.
     platform_role_ids: tuple[str, ...] = ()
-    is_channel_admin: bool = False
+    administered_channel_ids: frozenset[str] = frozenset()
+
+    @property
+    def is_channel_admin(self) -> bool:
+        return bool(self.administered_channel_ids)
 
 
 def resolve_role(role_str: str | None) -> Role:

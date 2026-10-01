@@ -23,9 +23,10 @@ from typing import Final
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
-from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -125,7 +126,7 @@ async def require_bindable_as_channel_default(
         # Nobody, server admins included: the agent would refuse every turn here.
         if not authorize(
             policy,
-            subject=Subject(is_admin=auth.is_admin, platform_user_id=auth.platform_user_id),
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
             action=Action.BIND_CHANNEL_DEFAULT,
             agent=AgentRef.of(*names),
             place=Place(channel_id=channel_id),

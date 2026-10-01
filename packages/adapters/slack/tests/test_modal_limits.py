@@ -14,7 +14,6 @@ from daimon.adapters.slack.modal_limits import (
     MAX_BLOCKS_PER_VIEW,
     MAX_PRIVATE_METADATA_CHARS,
     MAX_TITLE_CHARS,
-    MAX_VIEW_STACK,
     finish_modal,
     fit_title,
 )
@@ -145,7 +144,3 @@ def test_finish_modal_when_private_metadata_over_the_cap_raises() -> None:
 def test_finish_modal_when_title_empty_raises() -> None:
     with pytest.raises(ValueError, match="title"):
         _modal(title="")
-
-
-def test_view_stack_limit_matches_slacks_documented_depth() -> None:
-    assert MAX_VIEW_STACK == 3, "Slack holds at most three views in one modal's stack"

@@ -57,13 +57,6 @@ class ApplyReport:
             for o in (*self.agents, *self.environments, *self.skills, *self.system_config)
         )
 
-    def has_changes(self) -> bool:
-        """Whether any outcome is not a no-op skip, across all four resource kinds."""
-        return any(
-            o.action is not Action.SKIPPED
-            for o in (*self.agents, *self.environments, *self.skills, *self.system_config)
-        )
-
 
 def compose_failure_reason(report: ApplyReport) -> str | None:
     """Compose a persisted reason from a report's failed outcomes only, one

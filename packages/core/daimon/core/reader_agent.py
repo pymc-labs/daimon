@@ -28,6 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillP
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
     MA_METADATA_KEY_SPEC_HASH,
     build_metadata,
     compute_spec_fingerprint,
@@ -200,6 +201,9 @@ async def ensure_reader_variant(
         isolated=True,
     )
     metadata[MA_METADATA_KEY_READER_OF] = reader_of
+    metadata[MA_METADATA_KEY_READER_SOURCE] = "\n".join(
+        dict.fromkeys(name for name in (source_name, source_ma.name) if name)
+    )
 
     matches = await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=reader_spec.name)
     match = matches[0] if matches else None
@@ -214,6 +218,8 @@ async def ensure_reader_variant(
     if (
         match.metadata.get(MA_METADATA_KEY_READER_OF) == reader_of
         and match.metadata.get(MA_METADATA_KEY_SPEC_HASH) == reader_spec_hash
+        and match.metadata.get(MA_METADATA_KEY_READER_SOURCE)
+        == metadata[MA_METADATA_KEY_READER_SOURCE]
     ):
         # Reuse across publishes: neither the source nor the derived shape
         # changed since the variant was last written. No MA write.

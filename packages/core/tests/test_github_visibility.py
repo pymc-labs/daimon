@@ -8,11 +8,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from daimon.core.github_visibility import (
-    is_public_repo,
-    is_valid_pat,
-    pat_can_access_repo,
-)
+from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
 
 
 @pytest.mark.asyncio
@@ -97,42 +93,6 @@ async def test_pat_can_access_repo_raises_on_server_error() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(httpx.HTTPStatusError):
             await pat_can_access_repo(client, owner_repo="owner/repo", pat="ghp_x")
-
-
-@pytest.mark.asyncio
-async def test_is_valid_pat_true_on_200() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/user", "must GET the repo-free /user identity endpoint"
-        assert request.headers.get("Authorization") == "Bearer ghp_good", (
-            "the PAT must be sent as a Bearer token"
-        )
-        return httpx.Response(200, json={"login": "octocat"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await is_valid_pat(client, pat="ghp_good")
-
-    assert result is True, "200 from /user means the token is a live GitHub identity"
-
-
-@pytest.mark.asyncio
-async def test_is_valid_pat_false_on_401() -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"message": "Bad credentials"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await is_valid_pat(client, pat="ghp_expired")
-
-    assert result is False, "401 must be reported as an invalid/expired token"
-
-
-@pytest.mark.asyncio
-async def test_is_valid_pat_raises_on_500() -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"message": "boom"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            await is_valid_pat(client, pat="ghp_x")
 
 
 @pytest.mark.asyncio

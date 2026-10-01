@@ -85,7 +85,3 @@ class AgentSetupCog(commands.Cog):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
             await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)
-
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(AgentSetupCog(bot))

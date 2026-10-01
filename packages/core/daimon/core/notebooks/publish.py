@@ -18,10 +18,7 @@ from daimon.core.notebooks.host_client import (
     list_blogs_from_host,
     list_notebooks_from_host,
 )
-from daimon.core.notebooks.slug import AGENT_SLUG_PATTERN, sanitize_slug
-
-# Re-export under the historical private name; slug.py is the canonical owner.
-_AGENT_SLUG_PATTERN = AGENT_SLUG_PATTERN
+from daimon.core.notebooks.slug import sanitize_slug
 
 
 class HostNotConfiguredError(DaimonError):

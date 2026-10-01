@@ -318,11 +318,11 @@ class IdentityMiddleware(Middleware):
             else ()
         )
         # Only a chat identity administers channels; an agent credential never does.
-        is_channel_admin = (
-            not is_admin
-            and agent_id is None
-            and _token is not None
-            and _token.claims.get("channel_admin") is True
+        raw_administered = _token.claims.get("administered_channel_ids") if _token else None
+        administered_channel_ids = (
+            frozenset(str(value) for value in cast(list[object], raw_administered))
+            if isinstance(raw_administered, list) and not is_admin and agent_id is None
+            else frozenset[str]()
         )
         identity = AuthIdentity(
             account_id=account_id,
@@ -336,12 +336,12 @@ class IdentityMiddleware(Middleware):
             platform_user_id=platform_user_id,
             is_admin=is_admin,
             platform_role_ids=platform_role_ids,
-            is_channel_admin=is_channel_admin,
+            administered_channel_ids=administered_channel_ids,
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
         if is_admin:
             await enable_components(fastmcp_ctx, tags={"admin"})
-        elif is_channel_admin:
+        elif identity.is_channel_admin:
             # The admin tools a channel admin may call for their own channels.
             await enable_components(fastmcp_ctx, tags={"channel-admin"})
         # Enable the caller's platform tag (deny-by-default baselines live in

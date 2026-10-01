@@ -25,8 +25,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -191,9 +190,7 @@ async def _hand_off_task_impl(
             subject=Subject(),
             action=Action.RUN_AGENT,
             surface=Surface.HANDOFF,
-            agent=AgentRef.of(
-                destination_name, *agent_pin_names(destination.name, destination.metadata)
-            ),
+            agent=build_agent_ref(destination.name, destination.metadata, destination_name),
             place=Place.from_origin(
                 parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
             ),

@@ -682,3 +682,45 @@ async def test_rekey_updates_slack_tenant_agent(
     assert cast(dict[str, object], raw_meta).get("daimon_account") == str(guild_account), (
         "daimon_account must be re-keyed to the derived guild account"
     )
+
+
+async def test_rekey_keeps_a_report_readers_link_to_its_source(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A re-keyed reader keeps `daimon_reader_*`, which holds it to its source's pins."""
+    tenant_id, _guild_account = _tenant_and_account()
+    await provision_tenant(db_session_factory, platform="discord", workspace_id=_WORKSPACE_ID)
+    agent_id = "agent_reader1"
+    agent_data = _agent_json(
+        agent_id=agent_id,
+        name="acme-reader",
+        version=2,
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "acme-reader",
+            "daimon_account": str(_user_account_id()),
+            "daimon_reader_of": "agent_acme",
+            "daimon_reader_source": "Acme\nacme-config",
+        },
+    )
+    update_bodies: list[dict[str, object]] = []
+
+    def on_update(req: httpx.Request, _m: object) -> httpx.Response:
+        update_bodies.append(json.loads(req.content))
+        return httpx.Response(200, json=agent_data)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+    router.add(
+        "GET", rf"/v1/agents/{agent_id}", lambda req, m: httpx.Response(200, json=agent_data)
+    )
+    router.add("POST", rf"/v1/agents/{agent_id}", on_update)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_rekey(rt=rt, console=console, yes=True, dry_run=False)
+
+    assert len(update_bodies) == 1
+    sent_meta = cast(dict[str, object], update_bodies[0]["metadata"])
+    assert sent_meta.get("daimon_reader_of") == "agent_acme"
+    assert sent_meta.get("daimon_reader_source") == "Acme\nacme-config"

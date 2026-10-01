@@ -21,17 +21,14 @@ from daimon.core.skill_sync.orchestrator import (
     sync_agent_skills,
     sync_report_failures,
 )
-from daimon.core.skill_sync.remove import RemoveReport, remove_agent_skill_repo
 
 __all__ = [
     "GitHubAuthError",
     "GitHubTarballFetcher",
     "GitHubUnreachable",
     "PATMissingError",
-    "RemoveReport",
     "SyncReport",
     "SyncRepoFailure",
-    "remove_agent_skill_repo",
     "sync_agent_skills",
     "sync_report_failures",
 ]

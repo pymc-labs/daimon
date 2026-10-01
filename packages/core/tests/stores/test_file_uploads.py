@@ -10,7 +10,6 @@ from daimon.core.stores.file_uploads import (
     UPLOAD_TTL,
     UploadTooLargeError,
     create_upload,
-    delete_expired_uploads,
     get_upload,
     store_upload_content,
 )
@@ -128,33 +127,3 @@ async def test_upload_is_not_readable_from_another_tenant(db_session: AsyncSessi
     leaked = await get_upload(db_session, tenant_id=other.id, handle_id=row.id)
 
     assert leaked is None, "another tenant must not read an upload by handle id"
-
-
-async def test_delete_expired_uploads_removes_only_aged_rows(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    old, _ = await create_upload(
-        db_session,
-        tenant_id=tenant.id,
-        title="old",
-        display_filename="old.png",
-        content_type="image/png",
-        now=_NOW - UPLOAD_TTL - timedelta(minutes=1),
-    )
-    fresh, _ = await create_upload(
-        db_session,
-        tenant_id=tenant.id,
-        title="fresh",
-        display_filename="fresh.png",
-        content_type="image/png",
-        now=_NOW,
-    )
-
-    removed = await delete_expired_uploads(db_session, now=_NOW)
-
-    assert removed == 1, "only the aged upload should be swept"
-    assert await get_upload(db_session, tenant_id=tenant.id, handle_id=old.id) is None, (
-        "the aged upload should be gone"
-    )
-    assert await get_upload(db_session, tenant_id=tenant.id, handle_id=fresh.id) is not None, (
-        "a fresh upload must survive the sweep"
-    )

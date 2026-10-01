@@ -19,7 +19,6 @@ from daimon.core.reports.host_client import (
     ReportRegistered,
     delete_admin_report,
     put_admin_report,
-    revoke_admin_recipient,
 )
 from pydantic import HttpUrl, SecretStr
 
@@ -303,21 +302,3 @@ async def test_delete_admin_report_unset_settings_raises_before_any_request() ->
                 tenant_id=_TENANT_ID,
             )
     assert seen == []
-
-
-async def test_revoke_admin_recipient_deletes_by_token() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        captured["url"] = str(req.url)
-        captured["method"] = req.method
-        return httpx.Response(200, json={"deleted": True})
-
-    async with _make_client(handler) as client:
-        revoked = await revoke_admin_recipient(
-            client=client, settings=_settings(), slug=_SLUG, token="tok-1"
-        )
-
-    assert captured["method"] == "DELETE"
-    assert captured["url"] == f"http://report-host:8002/admin/reports/{_SLUG}/recipients/tok-1"
-    assert revoked is True

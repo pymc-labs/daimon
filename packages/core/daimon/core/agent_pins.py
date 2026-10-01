@@ -15,9 +15,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.authz import Action, AgentRef, Place, Surface, authorize
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Surface,
+    agent_names,
+    authorize,
+    build_agent_ref,
+)
 from daimon.core.channel_admins import load_stored_subject
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,11 +41,8 @@ POLICY_UNREADABLE_REFUSAL = (
 
 
 def agent_pin_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | None, ...]:
-    """Every name a pin on an agent may be keyed by: its MA name and its config name.
-
-    Admission checks the same pair, so a pin on either holds everywhere.
-    """
-    return (name, metadata.get(MA_METADATA_KEY_NAME))
+    """Every name a pin on an agent may be keyed by (`daimon.core.authz.agent_names`)."""
+    return agent_names(name, metadata)
 
 
 async def request_pin_refusal(
@@ -71,9 +75,7 @@ async def request_pin_refusal(
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
         agent=(
-            AgentRef.unresolved()
-            if agent is None
-            else AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+            AgentRef.unresolved() if agent is None else build_agent_ref(agent.name, agent.metadata)
         ),
         place=Place.from_origin(
             parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id
