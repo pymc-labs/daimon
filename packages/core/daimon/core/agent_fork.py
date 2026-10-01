@@ -5,7 +5,7 @@ from its live MA state, with the default daimon MCP server and base toolset
 guaranteed and the credential guidance applied. It starts with no credentials
 (`agent_lifecycle.strip_credentialed_mcp_servers`) and no skills scoped to
 another agent, which are left off and named. An agent pinned to channels is
-not copied. The chat `fork_agent` tool and channel isolation both use it.
+not copied. The chat `fork_agent` tool, the CLI and channel isolation use it.
 """
 
 from __future__ import annotations
