@@ -13,6 +13,7 @@ and its names can't drift.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.authz import (
@@ -26,6 +27,7 @@ from daimon.core.authz import (
 )
 from daimon.core.channel_admins import load_stored_subject
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.credential_requests import consume_credential_request
 from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,3 +84,32 @@ async def request_pin_refusal(
         ),
     )
     return None if decision else PIN_WRITE_REFUSAL
+
+
+class FormPinRefused(Exception):
+    """A private form may not be applied to its pinned target; nothing was consumed."""
+
+    def __init__(self, refusal: str) -> None:
+        super().__init__(refusal)
+        self.refusal = refusal
+
+
+async def consume_form_unless_pinned(
+    session: AsyncSession,
+    *,
+    row: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent | None,
+    now: datetime,
+) -> CredentialRequestRow | None:
+    """Decide the pin rule and spend the form in the caller's consume transaction.
+
+    The policy is read in the same transaction as the single-use UPDATE, so no
+    other write sits between the decision and the consume. A refusal raises
+    `FormPinRefused` before anything is written; the caller renders
+    ``refusal`` and its transaction rolls back. Otherwise this is
+    `consume_credential_request`: None when the form is no longer consumable.
+    """
+    refusal = await request_pin_refusal(session, row=row, agent=agent)
+    if refusal is not None:
+        raise FormPinRefused(refusal)
+    return await consume_credential_request(session, token=row.token, now=now)

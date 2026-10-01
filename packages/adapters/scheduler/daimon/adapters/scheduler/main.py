@@ -35,12 +35,17 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import (
-    TenantAccessPolicy,
-    is_invoker_allowed,
-    is_write_protected,
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
@@ -235,7 +240,13 @@ async def _build_fire(
                 fire_policy = policy
                 fire_channel_id = target.channel_id if target is not None else None
                 if target is not None:
-                    if is_write_protected(policy, channel_id=target.channel_id):
+                    if not authorize(
+                        policy,
+                        subject=Subject(),
+                        action=Action.POST,
+                        surface=Surface.ROUTINE,
+                        place=Place(channel_id=target.channel_id),
+                    ):
                         direct_post = "protected"
                     elif placement_unknown_is_unsafe(
                         policy, platform=platform, kind=row.destination_kind
@@ -243,8 +254,13 @@ async def _build_fire(
                         direct_post = "unverified"
                 account = await get_account(s, account_id)
                 is_admin = account is not None and account.role is Role.ADMIN
-                allowed = is_invoker_allowed(
-                    policy, external_user_id=row.created_by_user_id, is_admin=is_admin
+                allowed = authorize(
+                    policy,
+                    subject=build_subject(
+                        is_admin=is_admin, platform_user_id=row.created_by_user_id
+                    ),
+                    action=Action.ACT_FOR_CREATOR,
+                    surface=Surface.ROUTINE,
                 )
                 policy_error = None if allowed else "invoker_not_allowed"
                 # A pinned agent fires only when it posts straight into one of

@@ -2459,3 +2459,61 @@ async def test_env_file_submission_that_fails_to_save_replies_instead_of_raising
     async with db_session_factory() as s:
         row = await peek_credential_request(s, token=token)
     assert row is not None and row.used_at is None, "the request stays live for a retry"
+
+
+@pytest.mark.asyncio
+async def test_env_submission_decides_a_late_pin_inside_the_consume(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pin landing after the early check is decided in the consume transaction."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.agent_pins import PIN_WRITE_REFUSAL
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+
+    def ma_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            return list_response([live_agent.model_dump(mode="json")])
+        raise AssertionError(f"Unexpected MA request: {request.method} {request.url.path}")
+
+    token = await _seed_request(
+        db_session,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        tenant_id=tenant_id,
+        kind="env",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"specialist": ("C_ELSEWHERE",)}),
+    )
+    await db_session.commit()
+
+    async def early_check_passes(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(credential_submissions_mod, "request_pin_refusal", early_check_passes)
+    runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=ma_handler)
+
+    await run_env_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="s3cr3t-value",
+        dispatch_continuations=_noop_dispatch,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], "nothing is saved"
+    assert row is not None and row.used_at is None, "the refused form was not spent"
+    assert PIN_WRITE_REFUSAL in _ephemeral_texts(fake_slack_web_client)
