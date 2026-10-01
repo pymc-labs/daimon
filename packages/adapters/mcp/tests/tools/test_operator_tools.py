@@ -77,11 +77,11 @@ async def _operator(
             created_at=datetime.now(UTC),
             max_issued_usd=max_issued_usd,
         )
-    return tenant, _identity(tenant, account.id, jti=jti, scopes=frozenset(scopes))
+    return tenant, _identity(tenant.id, account.id, jti=jti, scopes=frozenset(scopes))
 
 
 def _identity(
-    tenant: TenantRow,
+    tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     *,
     jti: uuid.UUID | None = None,
@@ -89,7 +89,7 @@ def _identity(
 ) -> AuthIdentity:
     return AuthIdentity(
         account_id=account_id,
-        tenant_id=tenant.id,
+        tenant_id=tenant_id,
         role=Role.ADMIN,
         platform="discord",
         platform_user_id="u-admin",
@@ -145,7 +145,7 @@ async def test_server_admin_cannot_create_promo_codes(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, operator = await _operator(committing_sessionmaker, "promo:create")
-    admin = _identity(tenant, operator.account_id)
+    admin = _identity(tenant.id, operator.account_id)
     with pytest.raises(ToolError, match="Only an operator token with the promo:create scope"):
         await _create_promo_code_impl(
             _runtime(committing_sessionmaker), admin, amount_usd="5", kind="credit"
@@ -214,8 +214,7 @@ async def test_list_and_revoke_promo_codes(
 
 
 def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operator() -> None:
-    tenant = MagicMock(id=uuid.uuid4())
-    operator = _identity(tenant, uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
+    operator = _identity(uuid.uuid4(), uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
     assert _trusted_admin(operator) is False, (
         "an operator token carries a platform user, so it is not the unbilled operator path"
     )
@@ -224,8 +223,7 @@ def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operator() -
 async def test_admit_bills_an_operator_token(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant = MagicMock(id=uuid.uuid4())
-    operator = _identity(tenant, uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
+    operator = _identity(uuid.uuid4(), uuid.uuid4(), jti=uuid.uuid4(), scopes=frozenset({"x"}))
     with (
         patch("daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=True)),
         pytest.raises(ToolError, match="credit is depleted"),

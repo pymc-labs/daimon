@@ -12,14 +12,13 @@ import uuid
 import jwt as pyjwt
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.adapters.mcp.server import create_mcp_app
-from daimon.core._models import McpToken
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy import update
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 
@@ -111,7 +110,10 @@ async def test_narrowing_a_tokens_scopes_applies_to_the_next_request(
     app = _make_app(sessionmaker)
     assert "redeem_promo_code" in await _tool_names(app, token)
     async with sessionmaker() as s, s.begin():
-        await s.execute(update(McpToken).where(McpToken.jti == jti).values(scopes=["tenant:read"]))
+        await s.execute(
+            text("UPDATE mcp_tokens SET scopes = :scopes WHERE jti = :jti"),
+            {"scopes": ["tenant:read"], "jti": jti},
+        )
 
     assert "redeem_promo_code" not in await _tool_names(app, token), "scopes are read live"
 

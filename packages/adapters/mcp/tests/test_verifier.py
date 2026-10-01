@@ -23,13 +23,12 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_KIND_CLAIM,
     DaimonJWTVerifier,
 )
-from daimon.core._models import McpToken
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token, mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
-from sqlalchemy import update
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import seed_server_admin, seed_tenant_and_account
@@ -254,6 +253,9 @@ async def _mint_operator(
     return account_id, token
 
 
+_SET_SCOPES = text("UPDATE mcp_tokens SET scopes = :scopes WHERE jti = :jti")
+
+
 def _jti(token: str) -> uuid.UUID:
     return uuid.UUID(pyjwt.decode(token, options={"verify_signature": False})["jti"])
 
@@ -280,9 +282,7 @@ async def test_verifier_reads_operator_scopes_live_from_the_row(
         sessionmaker, scopes=frozenset({"tenant:read", "channels:write"})
     )
     async with sessionmaker() as s, s.begin():
-        await s.execute(
-            update(McpToken).where(McpToken.jti == _jti(token)).values(scopes=["tenant:read"])
-        )
+        await s.execute(_SET_SCOPES, {"scopes": ["tenant:read"], "jti": _jti(token)})
     verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
 
     result = await verifier.verify_token(token)
@@ -320,9 +320,8 @@ async def test_verifier_refuses_operator_token_whose_row_expired(
     _account_id, token = await _mint_operator(sessionmaker)
     async with sessionmaker() as s, s.begin():
         await s.execute(
-            update(McpToken)
-            .where(McpToken.jti == _jti(token))
-            .values(expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1))
+            text("UPDATE mcp_tokens SET expires_at = :at WHERE jti = :jti"),
+            {"at": dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1), "jti": _jti(token)},
         )
     verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
 
@@ -365,7 +364,7 @@ async def test_verifier_refuses_operator_token_with_no_scopes_left(
 ) -> None:
     _account_id, token = await _mint_operator(sessionmaker)
     async with sessionmaker() as s, s.begin():
-        await s.execute(update(McpToken).where(McpToken.jti == _jti(token)).values(scopes=[]))
+        await s.execute(_SET_SCOPES, {"scopes": [], "jti": _jti(token)})
     verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
 
     assert await verifier.verify_token(token) is None, "an emptied token grants nothing"
