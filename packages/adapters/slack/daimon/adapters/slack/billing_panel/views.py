@@ -1,74 +1,56 @@
 """Pure Block Kit view builders for the Slack /billing panel.
 
 Raw dicts only — no slack_sdk model types, no stripe, no I/O. All user-derived
-strings are escaped with escape_mrkdwn (S5). Imports only stdlib + sibling
-modules (mrkdwn, state).
-
-Ported from daimon.adapters.discord.billing_panel.panel:52-229 — pure
-formatters and container builder adapted from Discord UI to Slack Block Kit.
+strings are escaped with escape_mrkdwn (S5). The figures and formatters are
+the chat-neutral ones in daimon.core.billing_panel.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from decimal import Decimal
+import json
+from datetime import UTC, datetime
 from typing import Any
 
-from daimon.adapters.slack.billing_panel.state import BillingPanelState
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.billing_panel import (
+    TOPUP_AMOUNTS,
+    BillingPanelState,
+    caller_line,
+    estimate_turns,
+    fmt_usd,
+    period_label,
+    spend_over_cap,
+)
+from daimon.core.channel_budget import describe_budget
 
-# Fallback cost per turn used when workspace has no usage history yet.
-_FALLBACK_TURN_COST_USD = 0.10
-
-
-# ---------------------------------------------------------------------------
-# Pure formatters (ported verbatim from billing_panel/panel.py:52-90)
-# ---------------------------------------------------------------------------
-
-
-def _fmt_usd(value: float | Decimal) -> str:
-    return f"${value:,.2f}"
-
-
-def _period_label(since: datetime) -> str:
-    return f"Period: {since.strftime('%B %Y')} (UTC)"
-
-
-def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
-    return cap is not None and spend > float(cap)
-
-
-def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
-    """Regular-view caller spend line."""
-    if cap is None:
-        return f"💸 {_fmt_usd(spend)} spent · {turns} turns"
-    cap_f = float(cap)
-    pct = int(spend / cap_f * 100) if cap_f > 0 else 0
-    return f"💸 {_fmt_usd(spend)} / {_fmt_usd(cap_f)} cap ({pct}%) · {turns} turns"
-
-
-def estimate_turns(
-    amount_usd: float,
-    *,
-    guild_spend: float,
-    guild_turns: int,
-) -> int:
-    """Estimate turns purchasable for amount_usd given workspace usage history.
-
-    Uses the workspace's average cost per turn when history is available
-    (guild_spend > 0 and guild_turns > 0); falls back to
-    _FALLBACK_TURN_COST_USD = $0.10/turn when there is no usage history yet.
-    """
-    if guild_spend > 0 and guild_turns > 0:
-        cost_per_turn = guild_spend / guild_turns
-    else:
-        cost_per_turn = _FALLBACK_TURN_COST_USD
-    return int(amount_usd / cost_per_turn)
-
+REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
 
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
 # ---------------------------------------------------------------------------
+
+
+def slack_time(moment: datetime) -> str:
+    """A moment every reader sees in their own timezone, with a UTC fallback."""
+    fallback = f"{moment.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+    return f"<!date^{int(moment.timestamp())}^{{date_short_pretty}} {{time}}|{fallback}>"
+
+
+def _timed_credit_lines(state: BillingPanelState) -> str:
+    """One line per live timed promo credit, prefixed with a newline; empty when none."""
+    lines = [
+        f"\n⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {slack_time(c.ends_at)}"
+        for c in state.timed_credit[:3]
+    ]
+    if len(state.timed_credit) > 3:
+        lines.append(f"\n⏳ {len(state.timed_credit) - 3} more timed credits")
+    return "".join(lines)
+
+
+def _channel_budget_suffix(state: BillingPanelState) -> str:
+    if state.channel_budget is None:
+        return ""
+    return f"\nthis channel: {describe_budget(state.channel_budget)}"
 
 
 def build_loading_view() -> dict[str, Any]:
@@ -115,8 +97,8 @@ def build_billing_container(
 
     if state.is_admin:
         subtext = (
-            f"{_period_label(since)} · "
-            f"workspace total {_fmt_usd(state.guild_spend)} · "
+            f"{period_label(since)} · "
+            f"workspace total {fmt_usd(state.guild_spend)} · "
             f"{state.guild_turns} turns · "
             f"{state.guild_distinct_members} active members"
         )
@@ -129,7 +111,11 @@ def build_billing_container(
         blocks.append({"type": "divider"})
 
         # Server credit
-        credit_line = f"🏦 *Server credit*\n{_fmt_usd(state.guild_balance_usd)} balance"
+        credit_line = (
+            f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
+            f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
+        )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
         # Top spenders
@@ -139,7 +125,7 @@ def build_billing_container(
             for i, row in enumerate(top5):
                 rank = i + 1
                 you = " _(you)_" if row.is_caller else ""
-                spend_str = _fmt_usd(row.cost_usd)
+                spend_str = fmt_usd(row.cost_usd)
                 name = escape_mrkdwn(row.display_name)
                 spenders_lines.append(f"{rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
         else:
@@ -158,7 +144,7 @@ def build_billing_container(
 
         # Top-up static_select — admin only
         topup_options: list[dict[str, Any]] = []
-        for amount in (10, 25, 50, 100):
+        for amount in TOPUP_AMOUNTS:
             turns = estimate_turns(
                 float(amount),
                 guild_spend=state.guild_spend,
@@ -172,23 +158,24 @@ def build_billing_container(
                     "description": {"type": "plain_text", "text": description_text},
                 }
             )
-        blocks.append({"type": "divider"})
-        blocks.append(
+        elements: list[dict[str, Any]] = [
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "static_select",
-                        "action_id": "billing_topup",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "💳 Top up server credit…",
-                        },
-                        "options": topup_options,
-                    }
-                ],
+                "type": "static_select",
+                "action_id": "billing_topup",
+                "placeholder": {"type": "plain_text", "text": "💳 Top up server credit…"},
+                "options": topup_options,
             }
-        )
+        ]
+        if state.has_redeemable_promo_code:
+            elements.append(
+                {
+                    "type": "button",
+                    "action_id": REDEEM_OPEN_ACTION_ID,
+                    "text": {"type": "plain_text", "text": "🎟️ Redeem code"},
+                }
+            )
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "actions", "elements": elements})
 
     else:
         # Member (non-admin) branch
@@ -197,7 +184,7 @@ def build_billing_container(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*💸 Billing*\n{_period_label(since)}",
+                    "text": f"*💸 Billing*\n{period_label(since)}",
                 },
             }
         )
@@ -207,10 +194,8 @@ def build_billing_container(
         if state.caller_spend == 0.0 and state.caller_turns == 0:
             caller_body = "no usage yet this period"
         else:
-            caller_body = _format_caller_line(
-                state.caller_spend, state.caller_cap, state.caller_turns
-            )
-        over_cap = _is_over_cap(state.caller_spend, state.caller_cap)
+            caller_body = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        over_cap = spend_over_cap(state.caller_spend, state.caller_cap)
         caller_header = "*You* ⚠️ over cap" if over_cap else "*You*"
         blocks.append(
             {
@@ -222,8 +207,27 @@ def build_billing_container(
         # Server credit (top-ups are admin-only)
         credit_line = (
             f"🏦 *Server credit*\n"
-            f"{_fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
+            f"{fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
+            f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
     return blocks
+
+
+def build_billing_view(
+    state: BillingPanelState, *, now: datetime, since: datetime, channel_id: str | None = None
+) -> dict[str, Any]:
+    """The /billing modal around ``build_billing_container``.
+
+    ``channel_id`` is the channel /billing ran in, kept in the view so a
+    refresh from the redeem form still shows that channel's budget.
+    """
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Billing"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "private_metadata": json.dumps({"channel_id": channel_id or ""}),
+        "blocks": build_billing_container(state, now=now, since=since),
+    }

@@ -77,6 +77,7 @@ class TerminationReason(StrEnum):
     # The turn was refused before a driver ran.
     ADMISSION_BALANCE_DEPLETED = "admission_balance_depleted"
     ADMISSION_CAP_EXCEEDED = "admission_cap_exceeded"
+    ADMISSION_CHANNEL_BUDGET_EXCEEDED = "admission_channel_budget_exceeded"
     ADMISSION_DENIED = "admission_denied"
     """Any other admission refusal (an access policy, a future gate)."""
     ADMISSION_CONCURRENCY_SHED = "admission_concurrency_shed"
@@ -105,6 +106,7 @@ _BY_VALUE: dict[str, TerminationReason] = {m.value: m for m in TerminationReason
 _BY_DENIAL: dict[str, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
     "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
+    "channel_budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
 }
 
 

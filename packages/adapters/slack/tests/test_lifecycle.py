@@ -57,11 +57,14 @@ from typing import Any, NoReturn
 
 import aiohttp
 import daimon.adapters.slack.lifecycle as lifecycle_module
+import httpx
 import pytest
 import structlog
 import yarl
+from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
@@ -242,6 +245,51 @@ def _make_lifecycle(
         tenant_id=tenant_id,
     )
     return lc, cancel, registered, deregistered
+
+
+@pytest.mark.parametrize("status", [400, 429])
+async def test_spend_limit_posts_notice_and_error_log(
+    fake_slack_web_client: Any, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
+    lc, *_ = _make_lifecycle(fake_slack_web_client, tenant_id=tenant_id)
+    await lc.post_initial()
+    body = (
+        {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+        if status == 429
+        else {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified workspace API usage limits",
+        }
+    )
+    response = httpx.Response(
+        status,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    error = (
+        RateLimitError("limit", response=response, body=body)
+        if status == 429
+        else BadRequestError("limit", response=response, body=body)
+    )
+    turn_error = TurnError(kind="upstream", cause=error)
+    with structlog.testing.capture_logs() as logs:
+        await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
+    assert (
+        "Daimon has reached its model usage limit for now. The operators have been notified."
+        in _block_text(_last_update_blocks(fake_slack_web_client))
+    )
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap" if status == 429 else "user_limit",
+    } in logs
 
 
 # ---------------------------------------------------------------------------
@@ -1558,3 +1606,23 @@ async def test_rejected_native_table_retries_plain_chunks_without_duplicate_pros
         sum(block.get("type") == "actions" for body in delivered for block in body["blocks"]) == 1
     )
     assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
+
+
+async def test_terminal_success_linkifies_emphasized_urls(fake_slack_web_client: Any) -> None:
+    """A final answer wrapping a bare URL in ** must be normalized to an explicit
+    markdown link before posting, so Slack's autolinker cannot absorb the closing
+    asterisks into the URL (reported: notebook URL rendered with a trailing '*')."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[TextBlock(kind="text", text="Here: **🔗 https://x.up.railway.app/n/abc**")]
+    )
+    await lc.on_terminal_success(state)
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert blocks[0]["type"] == "markdown"
+    assert (
+        "[https://x.up.railway.app/n/abc](https://x.up.railway.app/n/abc)" in blocks[0]["text"]
+    ), "the emphasized bare URL must be rewritten to an explicit [url](url) link"

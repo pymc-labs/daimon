@@ -29,6 +29,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.self_edit import (
+    REDACTED_VALUE,
     _self_delete_file_impl,  # pyright: ignore[reportPrivateUsage]
     _self_read_file_impl,  # pyright: ignore[reportPrivateUsage]
     _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
@@ -112,7 +113,7 @@ async def test_self_edit_live_round_trip(
 
         read = await _self_read_file_impl(runtime, auth, key="live-test")
         assert read is not None, "just-written key must be readable"
-        assert read.content == "hello live MA", "read must echo the written content"
+        assert read.content == REDACTED_VALUE, "values never come back as tool output"
 
         updated = await _self_write_file_impl(
             runtime,
@@ -123,8 +124,8 @@ async def test_self_edit_live_round_trip(
         assert updated.content == "updated", "update must overwrite the prior content"
 
         read_after = await _self_read_file_impl(runtime, auth, key="live-test")
-        assert read_after is not None and read_after.content == "updated", (
-            "read after update must return the new content (read-modify-write)"
+        assert read_after is not None and read_after.updated_at >= read.updated_at, (
+            "read after update must see the new row"
         )
     finally:
         with contextlib.suppress(Exception):

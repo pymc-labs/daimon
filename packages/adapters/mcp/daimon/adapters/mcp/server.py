@@ -11,7 +11,7 @@ any collaborator the caller supplied.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 import httpx
@@ -49,17 +49,20 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
+from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
+from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
+from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
@@ -74,8 +77,10 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
@@ -161,6 +166,10 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
+    # The JSON chain and stdlib redaction before the first log line (uvicorn
+    # has configured its loggers by the time it calls this factory); without
+    # it structlog's dev renderer prints rich tracebacks with frame locals.
+    configure_logging(effective_settings.log.level)
     sentry_dsn = (
         effective_settings.sentry.dsn.get_secret_value() if effective_settings.sentry.dsn else None
     )
@@ -175,10 +184,13 @@ def create_mcp_app(
     _validate_settings(effective_settings, skip_auth=auth is not None)
 
     effective_sessionmaker = sessionmaker
+    engine = None
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
         effective_sessionmaker = build_session_factory(
-            engine, crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys)
+            engine,
+            crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys),
+            allow_plaintext=effective_settings.crypto.allow_plaintext,
         )
 
     effective_auth = auth
@@ -235,7 +247,17 @@ def create_mcp_app(
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
         try:
-            yield
+            async with (
+                runtime_health(
+                    "mcp",
+                    engine,
+                    effective_settings.observability.health_interval_s,
+                    current_turn_counts,
+                )
+                if engine is not None
+                else nullcontext()
+            ):
+                yield
         finally:
             await identity_middleware.drain_audit()
 
@@ -249,6 +271,7 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
+    mcp.add_transform(Visibility(False, tags={"teams"}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
@@ -295,6 +318,11 @@ def create_mcp_app(
         bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
+        teams_client=(
+            build_teams_client(effective_settings.teams)
+            if effective_settings.teams is not None
+            else None
+        ),
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -313,15 +341,17 @@ def create_mcp_app(
     routines.register_routines_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
-    if effective_settings.discord is not None or effective_settings.slack is not None:
+    if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
     else:
-        log.info("channel tools disabled", reason="no discord or slack settings")
+        log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
+    register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
+    register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
 
     register_upload_tool(mcp, runtime=runtime)
 
@@ -365,6 +395,7 @@ def create_mcp_app(
             build_stripe_webhook(
                 sessionmaker=effective_sessionmaker,
                 billing_config=effective_billing_config,
+                alert_webhook_url=effective_settings.ops.alert_webhook_url,
             ),
             methods=["POST"],
         )

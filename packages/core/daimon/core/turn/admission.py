@@ -2,13 +2,14 @@
 
 A single core call performs identity resolution, the channel -> tenant ->
 deployment config cascade, MA resolve + SDK retrieve, the per-tenant balance
-gate, and the per-user monthly cap gate -- returning a frozen `Admission` or
-raising a typed error. No boolean gate result crosses this boundary.
+gate, the per-user monthly cap gate and the channel budget gate -- returning a
+frozen `Admission` or raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> balance -> cap. A tenant that is both over-balance and mis-configured must
-see the config error (matches both adapters' inline sequences today). The
+-> agent pin -> balance -> cap -> channel budget. A tenant that is both
+over-balance and mis-configured must see the config error (matches both
+adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
 about the tenant's configuration and never reaches an MA call.
 
@@ -25,8 +26,10 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import is_over_cap
+from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -56,9 +59,23 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # The channel or thread itself is sealed (DM memory policy aside). Callers
+    # that copy content out of the channel, such as /dm, must refuse.
+    source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
+    # The channel and thread the turn runs in, and every sealed id that seals
+    # them (the channel and a thread sealed on its own): stamped on the session
+    # so the transcript tools can apply the seal to it
+    # (`daimon.core.session_seal.origin_stamp`).
+    origin_channel_id: str | None = None
+    origin_thread_id: str | None = None
+    origin_seal_ids: frozenset[str] = frozenset()
+    # Parent channel the turn's spend is attributed to; in a DM, the channel it
+    # was moved from, or None. Apart from `origin_channel_id`, which drives the
+    # seal: a DM is budgeted to its source channel but never runs there.
+    budget_channel_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -73,6 +90,7 @@ async def admit(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -93,6 +111,7 @@ async def admit(
                 thread_id=thread_id,
                 role=role,
                 is_dm=is_dm,
+                dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )
@@ -115,6 +134,7 @@ async def admit_impl(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -140,22 +160,26 @@ async def admit_impl(
     # Admins get no exemption. `category_id` is the Discord category the
     # channel sits in; `category_unresolved` says the adapter couldn't look it
     # up, which fails closed when any category is protected. ---
-    if is_write_protected(
-        policy,
-        channel_id=thread_id or channel_id,
-        parent_channel_id=channel_id,
-        category_id=category_id,
-        category_unresolved=category_unresolved,
-    ):
-        raise AdmissionDenied(reason="channel_protected")
-
     # --- Invoker policy: a tenant may restrict who can start a turn. Only a
     # live ADMIN role passed by the adapter exempts the caller; no role means
     # non-admin, never a stored role the user may have lost. An unreadable
-    # policy raised `AccessPolicyUnreadable` above -- refused, never open. ---
-    if not is_invoker_allowed(
-        policy, external_user_id=external_user_id, is_admin=role is Role.ADMIN
-    ):
+    # policy raised `AccessPolicyUnreadable` above -- refused, never open.
+    # Both gates are `authorize(START_TURN)`, protection first. ---
+    subject = Subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+    caller_gate = authorize(
+        policy,
+        subject=subject,
+        action=Action.START_TURN,
+        place=Place(
+            channel_id=thread_id or channel_id,
+            parent_channel_id=channel_id,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        ),
+    )
+    if caller_gate.reason == "channel_protected":
+        raise AdmissionDenied(reason="channel_protected")
+    if caller_gate.reason == "invoker_not_allowed":
         raise AdmissionDenied(reason="invoker_not_allowed")
 
     if (observation := current_outcome.get()) is not None:
@@ -247,6 +271,26 @@ async def admit_impl(
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
 
+    # --- Agent pin: an operator can tie an agent to named channels because of
+    # what its credentials reach. It runs after the cascade because it depends
+    # on which agent answers, and it checks both the cascade's name and the
+    # agent's own, so a handed-off thread (resolved by id) is covered too. A DM
+    # has no channel, so it is outside every pin. Admins are trusted and exempt
+    # only in a DM, where the reply reaches no one else; in a channel or
+    # thread other members would see it, so the pin holds for them too. The
+    # role is the adapter's live one, never a stored role. ---
+    if not authorize(
+        policy,
+        subject=subject,
+        action=Action.RUN_AGENT,
+        surface=Surface.DM if is_dm else Surface.CHANNEL,
+        agent=AgentRef.of(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        place=Place()
+        if is_dm
+        else Place(channel_id=thread_id or channel_id, parent_channel_id=channel_id),
+    ):
+        raise AdmissionDenied(reason="agent_pinned_elsewhere")
+
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
         raise AdmissionDenied(reason="balance_depleted")
@@ -261,17 +305,45 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    memory_read_only = (
-        is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
-        # A Slack thread is sealed on its own as channel_id:thread_ts.
-        or (thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids)
-        or (is_dm and policy.dm_memory_read_only)
+    # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
+    budget_channel_id = dm_source_channel_id if is_dm else channel_id
+    if await is_over_channel_budget(
+        sessionmaker=deps.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=budget_channel_id,
+        now=now,
+    ):
+        raise AdmissionDenied(reason="channel_budget_exceeded")
+
+    # Every id that seals the turn: its channel, and the thread sealed on its
+    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
+    # them are recorded, so unsealing one later leaves the others holding.
+    seal_ids = frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
     )
+    source_sealed = bool(seal_ids)
+    memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
         memory_read_only=memory_read_only,
+        source_sealed=source_sealed,
+        origin_channel_id=channel_id,
+        origin_thread_id=thread_id,
+        origin_seal_ids=seal_ids,
+        # Every DM-admitted session is private: the transcript tools never open
+        # it to anyone but its own execution grant, admins included. /dm
+        # replaces this with its execution-specific grant.
+        private_dm_id=(thread_id or channel_id) if is_dm else None,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
+        budget_channel_id=budget_channel_id,
     )

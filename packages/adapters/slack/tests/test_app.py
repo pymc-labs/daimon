@@ -27,7 +27,7 @@ import aiohttp
 import httpx
 import pytest
 import structlog.testing
-from aioresponses import CallbackResult
+from aioresponses import CallbackResult, aioresponses
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
@@ -518,6 +518,7 @@ async def test_drain_started_during_ack_keeps_pre_drain_mention_admitted(
     await db_session.commit()
 
     app = _make_app(db_session_factory, crypto_key=crypto_key)
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
     fake_client = _FakeSocketClient()
     ack_started = asyncio.Event()
     release_ack = asyncio.Event()
@@ -606,6 +607,8 @@ async def test_handle_app_mention_dedup_when_same_event_ts_drops_second_invocati
     await db_session.flush()
 
     app = _make_app(db_session_factory, crypto_key=fernet_key)
+    # Pre-seed the bot-user-id cache so the mention gate needs no auth.test call.
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
 
     orchestrate_calls: list[dict[str, Any]] = []
 
@@ -3172,6 +3175,66 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
     assert rows == [], "over-cap turn must write zero usage_events rows"
+
+
+async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_create(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A channel over its budget: the gate runs on the Slack channel and the
+    mention gets the budget notice in-thread instead of a turn."""
+    team_id = "T_ORCH_OVER_BUDGET"
+    channel = "C_TEST"
+    thread_ts = "9000000031.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": channel,
+        "user": "U_TEST_OVER_BUDGET",
+        "text": "<@U_BOT> hello",
+    }
+
+    with (
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
+        patch(
+            "daimon.core.turn.admission.is_over_channel_budget", new_callable=AsyncMock
+        ) as budget,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+    ):
+        agent.return_value = "agent_test_id"
+        env.return_value = "env_test_id"
+        balance.return_value = False
+        cap.return_value = False
+        budget.return_value = True
+
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=thread_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        assert budget.call_args.kwargs["platform"] == "slack"
+        assert budget.call_args.kwargs["channel_id"] == channel
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    post_url = URL("https://slack.com/api/chat.postMessage")
+    texts = [
+        str((req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")).get("text"))
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == post_url
+        for req in reqs
+    ]
+    assert any("spending budget" in text for text in texts), texts
 
 
 async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debit(
@@ -6189,4 +6252,238 @@ async def test_an_unprotected_channel_still_gets_the_error_post(
     post = URL("https://slack.com/api/chat.postMessage")
     assert any(url == post for (_, url) in fake_slack_web_client.mock.requests), (
         "an unprotected channel still hears about the failure"
+    )
+
+
+async def test_handle_app_mention_without_explicit_mention_drops(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An app_mention event whose text does NOT contain <@bot_user_id> must be
+    dropped before the orchestration seam (Discord parity: explicit-mention gate).
+
+    Slack has been observed delivering app_mention for un-mentioned thread
+    replies; without this gate every such reply runs a full billed turn.
+    """
+    team_id = "T_APP_MENTION_GATE"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-gate-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+    # Pre-seed the bot-user-id cache so no auth.test call is needed.
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
+
+    orchestrate_calls: list[dict[str, Any]] = []
+
+    async def _spy_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        orchestrate_calls.append({"event_ts": event_ts})
+
+    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000010.000001",
+        "ts": "1000000010.000001",
+        "user": "U_TEST",
+        "text": "make a marimo notebook about our most recent fails",
+    }
+
+    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(orchestrate_calls) == 0, (
+        "an event without an explicit <@bot> mention token must be dropped by the "
+        "mention gate and never reach orchestration"
+    )
+
+
+async def test_handle_app_mention_resolves_bot_user_id_via_auth_test(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """On a cold cache the handler resolves its bot user id via auth.test,
+    caches it per team, and admits an explicitly mentioned event."""
+    team_id = "T_APP_AUTH_RESOLVE"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-auth-resolve-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    orchestrate_calls: list[dict[str, Any]] = []
+
+    async def _spy_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        orchestrate_calls.append({"event_ts": event_ts})
+
+    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000011.000001",
+        "ts": "1000000011.000001",
+        "user": "U_TEST",
+        "text": "<@U_BOT> what's our rejection rate?",
+    }
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://slack.com/api/auth.test",
+            payload={"ok": True, "user_id": "U_BOT", "team_id": team_id},
+            repeat=True,
+        )
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(orchestrate_calls) == 1, (
+        "an explicitly mentioned event must pass the gate after auth.test resolution"
+    )
+    assert app._bot_user_ids[team_id] == "U_BOT", (  # pyright: ignore[reportPrivateUsage]
+        "the resolved bot user id must be cached per team to avoid repeated auth.test calls"
+    )
+
+
+async def test_handle_app_mention_external_without_mention_gets_no_ephemeral(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An un-mentioned event from an external (Slack Connect) sender is dropped
+    silently: the mention gate runs BEFORE the Connect rejection, so external
+    users are not spammed with rejection ephemerals for messages that never
+    addressed the bot."""
+    team_id = "T_APP_GATE_BEFORE_CONNECT"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-gate-order-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000012.000001",
+        "ts": "1000000012.000001",
+        "user": "U_EXTERNAL",
+        "user_team": "T_EXTERNAL",
+        "text": "just chatting in the thread",
+    }
+
+    with aioresponses() as mock:
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+        ephemeral_calls = [
+            req
+            for (_, url), reqs in mock.requests.items()
+            if url == URL("https://slack.com/api/chat.postEphemeral")
+            for req in reqs
+        ]
+
+    assert ephemeral_calls == [], (
+        "an external sender who never mentioned the bot must not receive the "
+        "Slack Connect rejection ephemeral"
+    )
+
+
+async def test_handle_app_mention_auth_test_failure_drops_without_raising(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failing auth.test on cold-cache resolution drops the event: nothing
+    raises, no turn runs, and no error reply is posted, since whether the event
+    addressed the bot is unknown. (Dedup has already recorded the event, so a
+    Slack retry will not re-deliver it — the mention is lost for this process;
+    acceptable once per workspace lifetime.)"""
+    team_id = "T_APP_AUTH_FAIL"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-auth-fail-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    orchestrate_calls: list[dict[str, Any]] = []
+
+    async def _spy_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        orchestrate_calls.append({"event_ts": event_ts})
+
+    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000013.000001",
+        "ts": "1000000013.000001",
+        "user": "U_TEST",
+        "text": "<@U_BOT> hello",
+    }
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://slack.com/api/auth.test",
+            payload={"ok": False, "error": "invalid_auth"},
+            repeat=True,
+        )
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    assert orchestrate_calls == [], (
+        "a failed auth.test must drop the event at the listener boundary, not run a turn"
+    )
+    assert team_id not in app._bot_user_ids, (  # pyright: ignore[reportPrivateUsage]
+        "a failed resolution must not poison the bot-user-id cache"
+    )
+    posted = [url for (method, url) in mock.requests if str(url).endswith("chat.postMessage")]
+    assert posted == [], (
+        "a failed auth.test must not post an error reply into a thread that may "
+        "never have mentioned the bot"
     )

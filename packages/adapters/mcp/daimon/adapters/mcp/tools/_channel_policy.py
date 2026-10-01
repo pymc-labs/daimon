@@ -21,11 +21,10 @@ from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.access_policy import (
-    OPEN_ACCESS_POLICY,
-    TenantAccessPolicy,
-    is_write_protected,
-)
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.turn_origins import get_active_origin
@@ -34,6 +33,11 @@ from fastmcp.exceptions import ToolError
 _PROTECTED_MSG = (
     "this channel is protected: the workspace does not let daimon post there. "
     "Tell the caller and offer to post somewhere else. Do not retry."
+)
+_PINNED_SEND_MSG = (
+    "this agent is pinned to its own channels, so it can only post in them (and "
+    "threads under them). Tell the caller and offer to post in one of its channels. "
+    "Do not retry."
 )
 _UNREADABLE_MSG = (
     "this workspace's access policy could not be read, so daimon won't read or post channels"
@@ -62,15 +66,91 @@ async def require_channel_writable(
     parent_channel_id: str | None = None,
     category_id: str | None = None,
 ) -> None:
-    """Raise ToolError when the tenant policy protects the target from agent writes."""
+    """Raise ToolError when the tenant policy forbids this post (`authorize(POST)`).
+
+    Every channel send path (messages, replies, thread and post creation, file
+    and card posts) calls this. Besides channel protection it holds a pinned
+    agent to its pin: wherever the turn was admitted -- including an admin's DM
+    or hub turn, which a pin exempts -- the agent may post only into its pinned
+    channels and threads under them, so its context never reaches another
+    channel. The requester's own 1:1 DM with daimon is allowed: only they see it.
+    """
     policy = await load_channel_policy(runtime, auth)
-    if is_write_protected(
-        policy,
+    place = Place(
         channel_id=channel_id,
         parent_channel_id=parent_channel_id,
         category_id=category_id,
-    ):
+        own_dm=_is_requesters_own_dm(channel_id),
+    )
+    subject = Subject(platform_user_id=auth.platform_user_id)
+    # Protection, the own-DM allowance and an unpinned tenant need no agent
+    # lookup; settle those first.
+    first = authorize(policy, subject=subject, action=Action.POST, place=place)
+    if first.reason == "channel_protected":
         raise ToolError(_PROTECTED_MSG)
+    if place.own_dm or not policy.agent_channel_pins:
+        return
+    agent = await _executing_agent(runtime, auth, policy)
+    if not authorize(policy, subject=subject, action=Action.POST, agent=agent, place=place):
+        raise ToolError(_PINNED_SEND_MSG)
+
+
+def _is_requesters_own_dm(channel_id: str) -> bool:
+    """A 1:1 conversation with the bot: a Slack ``D…`` IM or a Teams ``a:…`` chat.
+
+    Every send path checks the requester is in the target before the write
+    guard runs, so such a conversation is the requester's own DM with daimon
+    -- the place an admin's exempt turn answers.
+    """
+    return channel_id.startswith("D") or channel_id.startswith("a:")
+
+
+async def _executing_agent(
+    runtime: McpRuntime, auth: AuthIdentity, policy: TenantAccessPolicy
+) -> AgentRef:
+    """The agent this call executes as, for the pin rules.
+
+    The executing agent is the turn's (``chat_agent_id``) or the agent key's
+    (``agent_id``); an identity with neither is the operator, which no pin
+    binds. An agent that can't be resolved is `AgentRef.unresolved`, which
+    fails closed while pins exist.
+    """
+    executing = auth.chat_agent_id or auth.agent_id
+    if executing is None or not policy.agent_channel_pins:
+        return AgentRef.none()
+    agent = await find_agent_by_derived_uuid(
+        runtime.client, tenant_id=auth.tenant_id, agent_id=executing
+    )
+    if agent is None:
+        return AgentRef.unresolved()
+    return AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+
+
+async def require_dm_recipient_allowed(
+    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str
+) -> None:
+    """A pinned agent may DM only the person it is answering (`authorize(DIRECT_MESSAGE)`).
+
+    Keeps a pinned agent admitted in an admin's DM or hub turn from carrying
+    its context to any other workspace member through a direct message.
+    """
+    if auth.chat_agent_id is None and auth.agent_id is None:
+        return
+    policy = await load_channel_policy(runtime, auth)
+    decision = authorize(
+        policy,
+        subject=Subject(platform_user_id=auth.platform_user_id),
+        action=Action.DIRECT_MESSAGE,
+        agent=await _executing_agent(runtime, auth, policy),
+        recipient_id=recipient_id,
+    )
+    if decision.reason == "agent_unresolved":
+        raise ToolError(_PINNED_SEND_MSG)
+    if not decision:
+        raise ToolError(
+            "this agent is pinned to its own channels, so it can only send a direct "
+            "message to the person it is answering. Tell the caller. Do not retry."
+        )
 
 
 class SealedChannelError(ToolError):
@@ -86,12 +166,15 @@ class ChannelReadPolicy:
     origin_channel_ids: frozenset[str] = frozenset()
 
     def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
-        sealed = self.policy.sealed_channel_ids
-        if channel_id in sealed:
-            return channel_id in self.origin_channel_ids
-        if parent_channel_id is not None and parent_channel_id in sealed:
-            return parent_channel_id in self.origin_channel_ids
-        return True
+        return bool(
+            authorize(
+                self.policy,
+                subject=Subject(),
+                action=Action.READ_CHANNEL,
+                place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
+                origin_channel_ids=self.origin_channel_ids,
+            )
+        )
 
     def require(self, channel_id: str, parent_channel_id: str | None = None) -> None:
         """Raise ToolError for a sealed target outside the calling turn.
@@ -106,9 +189,17 @@ OPEN_READ_POLICY = ChannelReadPolicy(policy=OPEN_ACCESS_POLICY)
 
 
 async def load_read_policy(
-    runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    origin_context_id: str | None,
+    resolve_without_seals: bool = False,
 ) -> ChannelReadPolicy:
     """Load the tenant policy and, if one was named, the caller's active turn origin.
+
+    With nothing sealed the origin is skipped, since no channel read needs it;
+    ``resolve_without_seals`` resolves it anyway, for a check against a seal a
+    session recorded rather than the current policy.
 
     The origin must belong to the caller's account and to the agent the token
     executes as: ``agent_id`` for agent-session tokens, ``chat_agent_id`` for
@@ -120,7 +211,7 @@ async def load_read_policy(
     outside = ChannelReadPolicy(policy=policy)
     executing_agent = auth.agent_id or auth.chat_agent_id
     if (
-        not policy.sealed_channel_ids
+        not (policy.sealed_channel_ids or resolve_without_seals)
         or not origin_context_id
         or auth.platform is None
         or executing_agent is None

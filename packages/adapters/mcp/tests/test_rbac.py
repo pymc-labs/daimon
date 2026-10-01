@@ -322,6 +322,10 @@ STILL_ADMIN_TOOL_NAMES = (
     "sync_skills",
     "update_environment",
     "archive_environment",
+    "redeem_promo_code",
+    "list_channel_budgets",
+    "set_channel_budget",
+    "clear_channel_budget",
 )
 """Tools whose blast radius is the whole tenant, and stay admin-only.
 

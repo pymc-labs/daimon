@@ -13,7 +13,14 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
+from daimon.core.direct_messages import (
+    is_sealed_slack_message,
+    reply_to_dm,
+    require_dm_enabled,
+    require_unsealed_source,
+    sealed_channel_ids,
+    start_dm,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -21,6 +28,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -54,6 +62,28 @@ _REAUTHORIZE = (
 )
 
 
+_DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
+    "agent_pinned_elsewhere": (
+        "This channel's agent only runs in the channels an operator pinned it to, "
+        "so it can't continue in a DM."
+    ),
+    "invoker_not_allowed": (
+        "You aren't on this workspace's list of people who can start a turn. An admin can add you."
+    ),
+    "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
+    "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
+    "channel_budget_exceeded": (
+        "This channel has used its spending budget. A workspace admin can raise or clear it."
+    ),
+}
+
+
+def _dm_denial_message(exc: AdmissionDenied) -> str:
+    """Person-facing copy for a /dm refused at admission (the raw reason is a code)."""
+    return _DM_DENIAL_COPY.get(exc.reason, "This conversation can't be moved to a DM.")
+
+
 def _error_message(exc: Exception, fallback: str) -> str:
     if isinstance(exc, SlackApiError) and exc.response.get("error") in {  # pyright: ignore[reportUnknownMemberType]  # SlackApiError.response is untyped
         "missing_scope",
@@ -64,6 +94,8 @@ def _error_message(exc: Exception, fallback: str) -> str:
         "account_inactive",
     }:
         return _REAUTHORIZE
+    if isinstance(exc, AdmissionDenied):
+        return _dm_denial_message(exc)
     return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
@@ -129,10 +161,20 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=channel_id,
                 role=role,
                 is_dm=True,
+                dm_source_channel_id=channel_id,
                 now=datetime.now(UTC),
             )
+            require_unsealed_source(admission)
             response = await client.conversations_history(channel=channel_id, limit=12)  # pyright: ignore[reportUnknownMemberType]
             messages = cast(list[dict[str, Any]], response.get("messages", []))
+            # /dm carries no thread_ts, so admission cannot see a thread sealed
+            # on its own: drop such threads' roots and broadcast replies here.
+            sealed = await sealed_channel_ids(runtime.turn_deps, tenant_id=tenant_id)
+            messages = [
+                item
+                for item in messages
+                if not is_sealed_slack_message(sealed, channel_id=channel_id, message=item)
+            ]
             context = [
                 TranscriptTurn(
                     role="user", text=f"{item.get('user', 'agent')}: {item.get('text', '')}"
@@ -153,7 +195,14 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=dm_channel,
                 external_user_id=user_id,
                 source_url=source_url,
+                source_channel_id=channel_id,
+                source_thread_id=None,
                 context=context,
+                # Each copied message's thread, so a later thread-only seal ends
+                # this DM too.
+                source_thread_keys=[
+                    f"{channel_id}:{item.get('thread_ts') or item.get('ts')}" for item in messages
+                ],
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,

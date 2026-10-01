@@ -31,7 +31,7 @@ from daimon.core.thread_participation import (
     ParticipationScope,
     ResolvedParticipation,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 BOT_ID = 999
@@ -349,3 +349,31 @@ async def test_the_classifier_call_is_metered_to_the_caller(
     assert len(debits) == 1 and debits[0].delta_usd < 0, (
         "the tenant, not the operator, carries the classifier's cost"
     )
+    assert row.channel_id == debits[0].channel_id == str(PARENT_ID), (
+        "the classifier's spend counts toward the thread's parent channel"
+    )
+
+
+async def test_a_channel_over_its_budget_never_pays_for_the_classifier(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    classifier: _FakeClassifier,
+) -> None:
+    tenant = await _funded_tenant(db_session)
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id=str(PARENT_ID), limit_usd=Decimal("0")
+    )
+    await db_session.commit()
+    candidates = _candidates("anyone?")
+
+    assert (
+        await _responder(db_session_factory, mode="on").should_respond(
+            _thread(candidates),
+            candidates,
+            trigger=candidates[-1],
+            tenant_id=tenant.id,
+            resolved=ON_THREAD,
+        )
+        is False
+    ), "an exhausted channel budget skips an unprompted turn silently"
+    assert classifier.calls == [], "the budget gate must run before the model call"

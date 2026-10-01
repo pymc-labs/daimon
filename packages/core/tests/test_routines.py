@@ -1,16 +1,17 @@
-"""Pure unit tests for daimon.adapters.slack.routines_panel.state.
-
-Covers derive_glyph (all 4 precedence states) and picker_label (empty +
-non-empty trigger_message). No I/O, no DB, no Slack SDK — these are
-functional-core tests over a stdlib-only module.
-"""
+"""Pure unit tests for daimon.core.routines: glyph, label, panel order and ownership."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
 
-from daimon.adapters.slack.routines_panel.state import derive_glyph, picker_label
+from daimon.core.routines import (
+    PANEL_CAP,
+    can_manage_routine,
+    derive_glyph,
+    panel_rows,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 
 # ---------------------------------------------------------------------------
@@ -85,31 +86,49 @@ def test_derive_glyph_success_when_enabled_fired_and_no_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# picker_label tests
+# routine_label tests
 # ---------------------------------------------------------------------------
 
 
-def test_picker_label_returns_hex_id_fallback_for_blank_trigger_message() -> None:
+def test_routine_label_returns_hex_id_fallback_for_blank_trigger_message() -> None:
     """Blank trigger_message (whitespace-only) produces 'routine {id.hex[:8]}'."""
     row_id = uuid.UUID("12345678-1234-1234-1234-123456781234")
     row = _make_row(id=row_id, trigger_message="   ")
-    assert picker_label(row) == "routine 12345678", (
+    assert routine_label(row) == "routine 12345678", (
         "blank trigger_message should produce the hex-id fallback label"
     )
 
 
-def test_picker_label_returns_stripped_trigger_message() -> None:
+def test_routine_label_returns_stripped_trigger_message() -> None:
     """Non-empty trigger_message is stripped and returned as the label."""
     row = _make_row(trigger_message="  Schedule a daily stand-up  ")
-    assert picker_label(row) == "Schedule a daily stand-up", (
-        "picker_label should strip whitespace from the trigger_message"
+    assert routine_label(row) == "Schedule a daily stand-up", (
+        "routine_label should strip whitespace from the trigger_message"
     )
 
 
-def test_picker_label_truncates_long_trigger_message_at_60_chars() -> None:
+def test_routine_label_truncates_long_trigger_message_at_60_chars() -> None:
     """trigger_message longer than 60 chars is truncated to exactly 60."""
     long_message = "A" * 100
     row = _make_row(trigger_message=long_message)
-    result = picker_label(row)
-    assert result == "A" * 60, "picker_label should truncate trigger_message to 60 characters"
+    result = routine_label(row)
+    assert result == "A" * 60, "routine_label should truncate trigger_message to 60 characters"
     assert len(result) == 60, "truncated label must be exactly 60 characters long"
+
+
+def test_panel_rows_sorts_case_insensitively_and_counts_what_the_cap_hides() -> None:
+    rows = [_make_row(trigger_message=f"Task {i:02d}") for i in range(PANEL_CAP + 2)]
+    rows.append(_make_row(trigger_message="alpha"))
+    shown, hidden = panel_rows(list(reversed(rows)))
+    assert routine_label(shown[0]) == "alpha", "lowercase labels sort among the rest"
+    assert len(shown) == PANEL_CAP, "the panel shows at most PANEL_CAP routines"
+    assert hidden == 3, "the overflow count is what the cap dropped"
+
+
+def test_can_manage_routine_is_admin_or_creator_and_fails_closed_on_nulls() -> None:
+    owned = _make_row(created_by_user_id="user-a")
+    ownerless = _make_row(created_by_user_id=None)
+    assert can_manage_routine(owned, user_id="user-a", is_admin=False), "the creator may act"
+    assert not can_manage_routine(owned, user_id="user-b", is_admin=False), "others may not"
+    assert not can_manage_routine(ownerless, user_id=None, is_admin=False), "None never matches"
+    assert can_manage_routine(ownerless, user_id=None, is_admin=True), "admins manage any routine"

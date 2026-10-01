@@ -11,7 +11,6 @@ from daimon.core._models import AgentRepoBinding
 from daimon.core.errors import StoreError
 from daimon.core.stores.agent_repo_binding import (
     clear_binding,
-    copy_binding,
     get_binding,
     get_bindings_for_repo,
     list_bindings_without_proof,
@@ -517,7 +516,7 @@ async def test_update_repo_and_branch_keep_secret_raises_when_no_binding(
 
 
 # ---------------------------------------------------------------------------
-# Proof-of-access: set_binding, copy_binding, keep-secret repo edit,
+# Proof-of-access: set_binding, keep-secret repo edit,
 # list_bindings_without_proof, record_proof
 # ---------------------------------------------------------------------------
 
@@ -587,96 +586,6 @@ async def test_set_binding_without_proof_on_existing_proven_row_clears_proof(
     assert rebound.proof_account_id is None, (
         "a re-bind with no proof must clear a stale proof_account_id"
     )
-
-
-@pytest.mark.asyncio
-async def test_copy_binding_carries_proof_forward_verbatim(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    source_agent_id = uuid.uuid4()
-    target_agent_id = uuid.uuid4()
-    proof = RepoAccessProof(
-        kind="pat", at=datetime(2026, 7, 31, 9, 0, 0, tzinfo=UTC), account_id=account.id
-    )
-    await set_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=source_agent_id,
-        repo_url="owner/repo",
-        default_branch="main",
-        ma_secret_ref="source-secret",
-        proof=proof,
-    )
-
-    target = await copy_binding(
-        db_session,
-        tenant_id=tenant.id,
-        source_agent_id=source_agent_id,
-        target_agent_id=target_agent_id,
-        ma_secret_ref="target-secret",
-    )
-
-    assert target is not None, "copy_binding should return the newly-written target row"
-    assert target.repo_url == "owner/repo", "copy_binding must carry repo_url forward"
-    assert target.default_branch == "main", "copy_binding must carry default_branch forward"
-    assert target.ma_secret_ref == "target-secret", (
-        "copy_binding must use the caller-supplied ma_secret_ref, not the source's"
-    )
-    assert target.proof_kind == "pat", "copy_binding must carry proof_kind forward verbatim"
-    assert target.proof_at == proof.at, "copy_binding must carry proof_at forward verbatim"
-    assert target.proof_account_id == account.id, (
-        "copy_binding must carry proof_account_id forward verbatim"
-    )
-
-
-@pytest.mark.asyncio
-async def test_copy_binding_on_proofless_source_yields_proofless_target(
-    db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session)
-    source_agent_id = uuid.uuid4()
-    target_agent_id = uuid.uuid4()
-    await set_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=source_agent_id,
-        repo_url="owner/repo",
-        default_branch="main",
-        ma_secret_ref="source-secret",
-        proof=None,
-    )
-
-    target = await copy_binding(
-        db_session,
-        tenant_id=tenant.id,
-        source_agent_id=source_agent_id,
-        target_agent_id=target_agent_id,
-        ma_secret_ref="target-secret",
-    )
-
-    assert target is not None
-    assert target.proof_kind is None, (
-        "copy_binding cannot invent proof: a proofless source yields a proofless target"
-    )
-    assert target.proof_at is None
-    assert target.proof_account_id is None
-
-
-@pytest.mark.asyncio
-async def test_copy_binding_returns_none_when_source_has_no_binding(
-    db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session)
-
-    target = await copy_binding(
-        db_session,
-        tenant_id=tenant.id,
-        source_agent_id=uuid.uuid4(),
-        target_agent_id=uuid.uuid4(),
-        ma_secret_ref="target-secret",
-    )
-
-    assert target is None, "copy_binding should return None when there is nothing to copy"
 
 
 @pytest.mark.asyncio

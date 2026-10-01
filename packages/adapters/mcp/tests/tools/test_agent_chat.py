@@ -102,6 +102,24 @@ _ENV_NAME = "production"
 _ACCOUNT_ID = uuid.uuid4()
 
 
+@pytest.fixture(autouse=True)
+def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests built on a MagicMock session factory have no policy to load: they
+    read as an open tenant. Tests with a real database go through the real
+    seal gate (see test_session_seals.py)."""
+    from daimon.adapters.mcp.tools import _session_access
+    from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY
+
+    real = _session_access.load_read_policy
+
+    async def load(runtime: Any, auth: Any, **kwargs: Any) -> Any:
+        if isinstance(runtime.session_factory, MagicMock):
+            return OPEN_READ_POLICY
+        return await real(runtime, auth, **kwargs)
+
+    monkeypatch.setattr(_session_access, "load_read_policy", load)
+
+
 def _runtime(
     client: AsyncAnthropic,
     session_factory: Any = None,
@@ -3171,3 +3189,100 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
     content = str(payload.get("content"))
     assert "TERMINAL ERROR" in content and "list of people" in content, content
     mock_create_session.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "handle"),
+    [
+        ("start_turn", None),
+        ("ask", None),
+        ("ask", "ses_existing"),
+        ("continue_turn", "ses_existing"),
+    ],
+    ids=["start_turn", "ask-new", "ask-resume", "continue_turn"],
+)
+async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tool_name: str,
+    handle: str | None,
+) -> None:
+    """An operator pinned the agent to its client's channels; an agent key must not
+    drive it from outside them (an MCP turn runs in no channel), on a new session
+    or on one it already had: the policy is read afresh on every call."""
+    tenant_id = uuid.uuid4()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(
+            session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
+        )
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"acme-project": ("c-acme",)}),
+        )
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="acme-project",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "acme-project"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    sends: list[str] = []
+
+    def on_send(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        sends.append(m.group(1))
+        return send_events_response(data=[])
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events$", on_send)
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID)
+    token = "member-agent-token"
+    claims: dict[str, str] = {
+        "sub": str(account.id),
+        "tenant_id": str(tenant_id),
+        "role": "user",
+        "agent_id": str(agent_uuid),
+        "platform_user_id": "member",
+        "client_id": "test",
+    }
+    mcp = FastMCP(name="admission-pin", auth=StaticTokenVerifier(tokens={token: claims}))
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=db_session_factory,
+        )
+    )
+    mcp.add_transform(Visibility(False, tags={"agent-chat"}))
+    runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory)
+    register_agent_chat_tools(mcp, runtime, billing_config=None)
+
+    arguments: dict[str, str] = {"message": "list the repos you can push to"}
+    if handle is not None:
+        arguments["handle"] = handle
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.create_session", new=AsyncMock()
+    ) as mock_create_session:
+        result = await call_mcp_tool(
+            mcp.http_app(), token=token, name=tool_name, arguments=arguments
+        )
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict) and payload.get("isError"), (
+        f"{tool_name} must refuse a pinned agent; got {result!r}"
+    )
+    assert "pinned this agent" in str(payload.get("content"))
+    mock_create_session.assert_not_awaited()
+    assert sends == []

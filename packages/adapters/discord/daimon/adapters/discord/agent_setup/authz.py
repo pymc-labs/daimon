@@ -51,14 +51,18 @@ from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import ADMIN_NOUN, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import (
+    is_agent_reachable_in_tenant,
+    is_agent_shared_for_key_changes,
+)
 
 import discord
 
 log = structlog.get_logger()
 
 _SYSTEM_AGENT_MESSAGE = (
-    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 _REACHABLE_AGENT_MESSAGE = (
     f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
@@ -67,7 +71,7 @@ _REACHABLE_AGENT_MESSAGE = (
 _SHARED_AGENT_MESSAGE = (
     "This agent answers for other people here, so changing its repo or its keys "
     f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to fork it; the fork starts with no keys of its own."
+    "to make you a new agent of your own."
 )
 
 
@@ -173,11 +177,13 @@ async def refuse_if_shared_and_not_admin(
     ):
         tenant_id = await resolve_tenant_for_panel(runtime, interaction)
         async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=tenant_id,
-                agent_name=entry.name,
+                agent_names=(entry.name, entry.routing_name),
+                ma_agent_id=entry.ma_agent_id,
                 default=runtime.deployment_default,
+                caller_platform_user_id=str(interaction.user.id),
             )
     outcome = decide_operation(
         "key_replace",

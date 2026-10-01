@@ -1,0 +1,51 @@
+{
+  "type": "installationUpdate",
+  "id": "f:00000000-0000-4000-8000-000000000010",
+  "timestamp": "2021-11-09T04:47:30.91Z",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/",
+  "channelId": "msteams",
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "locale": "en-US",
+  "entities": [
+    {
+      "type": "clientInfo",
+      "locale": "en-US"
+    }
+  ],
+  "conversation": {
+    "isGroup": true,
+    "id": "19:channel-1@thread.tacv2",
+    "name": "2021 Test Channel",
+    "conversationType": "channel",
+    "tenantId": "00000000-0000-0000-0000-000000000001"
+  },
+  "channelData": {
+    "settings": {
+      "selectedChannel": {
+        "id": "19:channel-1@thread.tacv2"
+      }
+    },
+    "channel": {
+      "id": "19:channel-1@thread.tacv2"
+    },
+    "team": {
+      "aadGroupId": "00000000-0000-0000-0000-000000000004",
+      "name": "TestTeam2022",
+      "id": "19:team@thread.tacv2"
+    },
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    },
+    "source": {
+      "name": "message"
+    }
+  },
+  "action": "add"
+}

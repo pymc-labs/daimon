@@ -117,7 +117,7 @@ _CHECK_FAILED = "Something went wrong checking this request — please try again
 _CALLBACK_FAILED = "Something went wrong opening this form — please try again."
 
 #: Fallbacks for the two display names a row may not carry, matching
-#: `posted_controls.edit`: a row minted before its agent was resolved names no
+#: `card_for_request`: a row minted before its agent was resolved names no
 #: target, and one minted outside a turn names no responder.
 _UNNAMED_AGENT: Final[str] = "the agent"
 _UNNAMED_RESPONDER: Final[str] = "Daimon"
@@ -202,7 +202,7 @@ class CredentialRequestButton(
             async with bot.runtime.sessionmaker() as session:
                 request_row = await peek_credential_request(session, token=token)
         except SQLAlchemyError:
-            _log.exception("credential_button.lookup_failed", token_tail=token[-4:])
+            _log.exception("credential_button.lookup_failed")
             request_row = None
         if request_row is None:
             return cls(token=token, label=_FALLBACK_LABEL, request_row=None)

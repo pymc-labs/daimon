@@ -27,6 +27,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _build_agent_info,  # pyright: ignore[reportPrivateUsage]
@@ -35,7 +36,7 @@ from daimon.adapters.mcp.tools.agents import (
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
@@ -44,7 +45,9 @@ from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
     delete_credential as delete_agent_mcp_credential,
 )
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import (
+    is_agent_shared_for_key_changes,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +63,12 @@ class RemoveEnvCredentialResult(BaseModel):
     removed: bool
     """True if the key was present and deleted; False if it was already absent
     (the delete is idempotent, so the call still succeeds either way)."""
+
+
+def _agent_names(agent: BetaManagedAgentsAgent, requested: str) -> tuple[str, ...]:
+    """Every name `agent` may be configured under: the one asked for, its MA
+    display name and its ``daimon_name`` routing name."""
+    return (requested, agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""))
 
 
 async def _detach_mcp_server_impl(
@@ -79,6 +88,7 @@ async def _detach_mcp_server_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     # `mcp_remove` sits in `decide_operation`'s attachment family, not the spec
     # family `_reject_system_agent` enforces: the token form attaches a server
     # to the seeded agent for any member, and the defaults reconciler unions
@@ -94,11 +104,14 @@ async def _detach_mcp_server_impl(
         "mcp_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=auth.tenant_id,
-                agent_name=agent_name,
+                agent_names=_agent_names(agent, agent_name),
+                ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
             )
     outcome = decide_operation(
         "mcp_remove",
@@ -173,6 +186,7 @@ async def _remove_skill_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
 
     titles, _truncated = await resolve_custom_skill_titles(
@@ -263,17 +277,24 @@ async def _remove_agent_key_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     reachable = False
     if needs_reachability_read(
         "key_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            # Every name the agent answers to, live thread bindings and
+            # personal defaults: a removal followed by a fresh add is a
+            # replacement, so it needs the same wide check `key_replace` uses.
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=auth.tenant_id,
-                agent_name=agent_name,
+                agent_names=_agent_names(agent, agent_name),
+                ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
             )
     outcome = decide_operation(
         "key_remove",

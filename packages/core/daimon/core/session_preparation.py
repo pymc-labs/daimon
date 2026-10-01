@@ -159,6 +159,7 @@ class RecorderFactory(Protocol):
         external_user_id: str,
         ma_session_id: str,
         model_id: str,
+        channel_id: str | None = None,
     ) -> UsageRecorder: ...
 
 
@@ -457,6 +458,7 @@ async def prepare_session_for_turn(
                 external_user_id=external_user_id,
                 ma_session_id=ma_session_id,
                 model_id=model_id,
+                channel_id=admission.budget_channel_id,
             ),
             continuity=continuity,
         )

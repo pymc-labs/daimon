@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.access_policy import is_invoker_allowed
+from daimon.core.authz import Action, AgentRef, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -54,6 +55,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
+    pin_exempt: bool = False,
 ) -> AuthIdentity:
     """Balance and cap gate for an already-resolved identity.
 
@@ -65,12 +68,23 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       CLI-only/internal operator tokens run with no balance/cap checks, no
       usage row, no debit. This is intentional, not an oversight — never add
       a fallback that bills this path.
-      The tenant access policy does not apply to it either: it is the
-      operator, not a platform member.
+      It skips billing only: when ``agent_names`` is given its turn is still
+      held to an agent pin (below), with no admin exemption.
     - Otherwise checks the tenant's invoker allowlist first, exempting an
       account whose stored role is admin (the hub pins ``is_admin=False``, so
       the stored role is the only admin signal every caller has). A refusal,
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
+    - Then, when ``agent_names`` is given and the tenant pins any agent,
+      refuses a turn on a pinned agent. An MCP turn has no channel, so it is
+      outside every pin, exactly as a DM is in ``admit()``. The pin is a
+      security gate, not a billing one: it is enforced for no-platform bearer
+      and agent-key identities too, before the unbilled return below, with no
+      admin exemption. Only the hub passes ``pin_exempt``, for a caller
+      whose stored role is admin (`_session_access.hub_caller_is_admin`;
+      refreshed by the person's next platform turn); its reply reaches only
+      them.
+      ``agent_names`` is called only when a pin exists, so the agent lookup it
+      may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``; either denial
       raises a ``TERMINAL ERROR:`` ``ToolError`` naming ``/billing`` and logs
       a deny event carrying only ids (tenant/user/tool/gate) — never prompt
@@ -87,7 +101,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
                 agent_id=str(auth.agent_id) if auth.agent_id is not None else None,
             ).finish(reason=reason)
 
-    if auth.platform_user_id is None:
+    if auth.platform_user_id is None and agent_names is None:
         return auth
 
     try:
@@ -97,8 +111,44 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     except AccessPolicyUnreadable as exc:
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
+
+    # The hub admin exemption needs no agent lookup (`authorize` allows it
+    # before reading names), so skip the lookup for it.
+    hub_admin = pin_exempt and auth.platform_user_id is not None
+    if (
+        agent_names is not None
+        and policy.agent_channel_pins
+        and not hub_admin
+        and not authorize(
+            policy,
+            subject=Subject(is_admin=pin_exempt, platform_user_id=auth.platform_user_id),
+            action=Action.RUN_AGENT,
+            surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
+            agent=AgentRef.of(*await agent_names()),
+        )
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="agent_pin",
+        )
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(
+            "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
+            "only runs in a conversation inside them, not from here. Talk to it in its "
+            "channel."
+        )
+
+    if auth.platform_user_id is None:
+        return auth
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not is_invoker_allowed(policy, external_user_id=auth.platform_user_id, is_admin=is_admin):
+    if not authorize(
+        policy,
+        subject=Subject(is_admin=is_admin, platform_user_id=auth.platform_user_id),
+        action=Action.START_TURN,
+    ):
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),
@@ -155,11 +205,19 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    agent_names: Callable[[AuthIdentity], Awaitable[tuple[str | None, ...]]] | None = None,
 ) -> AuthIdentity:
     """Shared admission gate for the billed media and agent-chat turn tools. See ``_admit``."""
+    auth = await _auth(ctx)
+
+    async def names() -> tuple[str | None, ...]:
+        assert agent_names is not None
+        return await agent_names(auth)
+
     return await _admit(
-        await _auth(ctx),
+        auth,
         sessionmaker=sessionmaker,
         billing_config=billing_config,
         tool_name=tool_name,
+        agent_names=None if agent_names is None else names,
     )

@@ -51,6 +51,7 @@ def _make_blog_app(
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -60,7 +61,7 @@ def _make_blog_app(
         proc.pid = 4321
         return proc  # type: ignore[return-value]
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)

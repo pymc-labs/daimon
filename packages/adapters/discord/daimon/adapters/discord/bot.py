@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -45,6 +48,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
 from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
 from daimon.core.continuity.messages import (
@@ -62,8 +66,10 @@ from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
+from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
     get_turn_cap,
@@ -96,8 +102,10 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -107,8 +115,12 @@ from discord.ext import commands
 log = structlog.get_logger()
 
 
-def log_anthropic_overload(exc: object, *, tenant_id: uuid.UUID, path: str) -> None:
+def log_anthropic_overload(
+    exc: object, *, tenant_id: uuid.UUID, path: str, alert_webhook_url: SecretStr | None = None
+) -> None:
     """Surface provider throttling that the SDK eventually gives up retrying."""
+    if spend_limit_error(exc) is not None:
+        return
     if isinstance(exc, TurnError):
         exc = exc.cause
     if isinstance(exc, _anthropic.APIStatusError) and exc.status_code in (429, 529):
@@ -117,6 +129,11 @@ def log_anthropic_overload(exc: object, *, tenant_id: uuid.UUID, path: str) -> N
             tenant_id=str(tenant_id),
             path=path,
             status_code=exc.status_code,
+        )
+        alert_ops(
+            alert_webhook_url,
+            key="overloaded",
+            message=f"Anthropic overloaded: HTTP {exc.status_code} (tenant {tenant_id})",
         )
 
 
@@ -218,6 +235,14 @@ INVOKER_NOT_ALLOWED_NOTICE = (
     "you aren't on this server's list of people who can start a turn. A server admin can add you."
 )
 
+CHANNEL_BUDGET_NOTICE = (
+    "this channel has used its spending budget. A server admin can raise or clear it."
+)
+
+AGENT_PINNED_ELSEWHERE_NOTICE = (
+    "this agent only runs in the channels an operator pinned it to, so it can't answer here."
+)
+
 
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
@@ -314,13 +339,15 @@ def _build_welcome_embed(bot_display_name: str) -> discord.Embed:
     return embed
 
 
-def _build_ready_embed() -> discord.Embed:
-    """Terminal success follow-up. Pure — no I/O."""
-    return discord.Embed(
-        title="✅ Ready",
-        description="Mention me anywhere, or run `/agent-setup`.",
-        color=theme.COLOR_GREEN,
-    )
+def _build_ready_embed(*, promo_codes: bool = False) -> discord.Embed:
+    """Terminal success follow-up. Pure — no I/O.
+
+    ``promo_codes``: some code is redeemable now, so point admins at /billing.
+    """
+    description = "Mention me anywhere, or run `/agent-setup`."
+    if promo_codes:
+        description += "\nHave a promo code? Admins can redeem it in `/billing`."
+    return discord.Embed(title="✅ Ready", description=description, color=theme.COLOR_GREEN)
 
 
 def _build_snag_embed() -> discord.Embed:
@@ -426,6 +453,8 @@ class DaimonBot(commands.Bot):
         self._guild_lifecycle_locks: dict[int, asyncio.Lock] = {}
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._output_sweeps: dict[str, asyncio.Task[None]] = {}
+        self._delivery_notice_thread_ids: set[int] = set()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
@@ -453,6 +482,48 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
+        if self._output_sweeps.get(session_id) is task:
+            del self._output_sweeps[session_id]
+
+    async def _sweep_session_outputs(
+        self,
+        previous: asyncio.Task[None] | None,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        session_id: str,
+    ) -> None:
+        # A previous sweep owns post-then-delete for this MA session until it finishes.
+        if previous is not None:
+            with contextlib.suppress(Exception):
+                await previous
+        try:
+            await deliver_session_outputs(
+                self.runtime.turn_deps.anthropic,
+                thread,
+                session_id=session_id,
+                may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+                notice_thread_ids=self._delivery_notice_thread_ids,
+            )
+        except Exception as exc:  # detached sweep must not fail the completed turn
+            log.warning(
+                "discord.output_delivery.unhandled_error",
+                session_id=session_id,
+                thread_id=thread.id,
+                error=str(exc)[:300],
+            )
+
+    def _schedule_output_sweep(
+        self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
+    ) -> None:
+        if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            return
+        session_id = outcome.ma_session_id
+        previous = self._output_sweeps.get(session_id)
+        task = self._spawn(self._sweep_session_outputs(previous, thread, tenant_id, session_id))
+        self._output_sweeps[session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
@@ -680,7 +751,20 @@ class DaimonBot(commands.Bot):
                     clear_reason=True,
                 )
                 if not was_ready:
-                    await self._post_to_guild(guild, _build_ready_embed())
+                    try:
+                        async with self.runtime.sessionmaker() as session:
+                            promo_codes = await has_redeemable_promo_code(
+                                session, now=datetime.now(UTC)
+                            )
+                    except SQLAlchemyError as exc:
+                        # The guild is ready; a failed lookup only drops the promo line.
+                        log.warning(
+                            "guild_seed_promo_lookup_failed",
+                            tenant_id=str(tenant_id),
+                            error=str(exc),
+                        )
+                        promo_codes = False
+                    await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
                 if was_ready:
@@ -1050,6 +1134,11 @@ class DaimonBot(commands.Bot):
             tenant_id = await self._provision_joined_guild(guild)
             if tenant_id is None:
                 return
+            alert_ops(
+                self.runtime.settings.ops.alert_webhook_url,
+                key=f"install:discord:{guild_id}",
+                message=f"New install: Discord {guild.name} ({guild_id})",
+            )
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
@@ -1657,7 +1746,12 @@ class DaimonBot(commands.Bot):
                 unprompted=unprompted,
             )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            log_anthropic_overload(exc, tenant_id=tenant_id, path="mention")
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="mention",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         except Exception as exc:  # mention-turn adapter boundary
@@ -1847,7 +1941,12 @@ class DaimonBot(commands.Bot):
                     row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
                 )
         except _anthropic.APIError as exc:
-            log_anthropic_overload(exc, tenant_id=tenant_id, path="continuation")
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="continuation",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
             raise
 
     async def _run_continuation_turn_observed(
@@ -1948,6 +2047,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2061,6 +2161,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2147,6 +2248,7 @@ class DaimonBot(commands.Bot):
             outcome.state.error.cause if outcome.state.error is not None else None,
             tenant_id=tenant_id,
             path="continuation",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
         final_lifecycle = lifecycle_holder[0]
         if outcome.state.error is None and prepared.mapping_id is not None:
@@ -2160,6 +2262,7 @@ class DaimonBot(commands.Bot):
                     await session.commit()
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
@@ -2352,11 +2455,26 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
                 await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
                     _credit_depleted_message(_resolve_bot_display_name(self.runtime.settings))
                 )
+            elif err.reason == "channel_budget_exceeded":
+                log.info(
+                    "turn.skipped.over_channel_budget",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                )
+                await target.send("Sorry, " + CHANNEL_BUDGET_NOTICE)
             else:
                 log.info(
                     "turn.skipped.over_cap",
@@ -2408,6 +2526,7 @@ class DaimonBot(commands.Bot):
                         markup=self.runtime.settings.billing.markup,
                         max_input_chars=naming.max_input_chars,
                         timeout_seconds=naming.timeout_seconds,
+                        channel_id=admission.budget_channel_id,
                     )
             thread = await message.create_thread(
                 name=thread_name,
@@ -2444,6 +2563,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2811,6 +2931,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2921,6 +3042,7 @@ class DaimonBot(commands.Bot):
             outcome.state.error.cause if outcome.state.error is not None else None,
             tenant_id=tenant_id,
             path="mention",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
         state = outcome.state
         mapping_id = outcome.mapping_id
@@ -2987,3 +3109,4 @@ class DaimonBot(commands.Bot):
             await self._dispatch_continuations(
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)

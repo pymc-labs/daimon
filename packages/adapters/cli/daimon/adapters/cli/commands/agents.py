@@ -18,7 +18,9 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core import agent_lifecycle
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
+from daimon.core.authz import Action, AgentRef, Subject, authorize
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -38,6 +40,7 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -476,6 +479,20 @@ async def agents_fork(
     source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
+    # Same rules as the chat fork_agent tool: a pinned agent can't be copied
+    # (the copy would carry no pin), and a copy starts credential-less.
+    async with rt.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    if not authorize(
+        policy,
+        # The CLI is the deployment operator.
+        subject=Subject(is_admin=True),
+        action=Action.FORK,
+        agent=AgentRef.of(source.name, source.metadata.get(MA_METADATA_KEY_NAME)),
+    ):
+        raise StoreError(
+            f"agent {src!r} is pinned to channels in the access policy, so it can't be copied."
+        )
     source_ma = await rt.anthropic.beta.agents.retrieve(source.id)
     params = source_ma.model_dump(mode="json")
     fork_params = {k: params[k] for k in _CREATE_FIELDS if k in params}
@@ -502,6 +519,15 @@ async def agents_fork(
     fork_params["tools"] = merge_default_agent_toolset(
         fork_params.get("tools"),  # type: ignore[arg-type]
     )
+    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
+        sessionmaker=rt.sessionmaker,
+        tenant_id=tenant_id,
+        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
+        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
+        tools=fork_params.get("tools"),  # type: ignore[arg-type]
+    )
+    fork_params["mcp_servers"] = servers
+    fork_params["tools"] = tools
     await rt.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
 

@@ -19,6 +19,7 @@ from decimal import Decimal
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores.thread_participation import (
@@ -98,7 +99,7 @@ class ThreadParticipant:
     ) -> bool:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
 
-        The balance and cap gates run here, before the classifier, on the
+        The balance, cap and channel budget gates run here, before the classifier, on the
         caller the turn would run as: a tenant that could not be admitted
         must not pay for the question of whether to admit it. The call that
         does run is metered to the tenant like any other model spend.
@@ -145,6 +146,20 @@ class ThreadParticipant:
         ):
             log.info("thread_participation.skipped", reason="over_cap", thread_id=str(thread.id))
             return False
+        parent_channel_id = str(thread.parent_id)
+        if await is_over_channel_budget(
+            sessionmaker=self._sessionmaker,
+            tenant_id=tenant_id,
+            platform=PLATFORM,
+            channel_id=parent_channel_id,
+            now=datetime.now(UTC),
+        ):
+            log.info(
+                "thread_participation.skipped",
+                reason="over_channel_budget",
+                thread_id=str(thread.id),
+            )
+            return False
         recent = await self._recent_window(thread, exclude_ids={m.id for m in candidates})
         outcome = await classify(
             self._anthropic,
@@ -169,6 +184,7 @@ class ThreadParticipant:
                 cache_read_input_tokens=outcome.usage.cache_read_input_tokens,
                 markup=self._markup,
                 pricing=MODEL_PRICING.get(self._settings.classifier_model),
+                channel_id=parent_channel_id,
             )
         verdict = outcome.verdict
         post = decide_post_classifier(verdict)

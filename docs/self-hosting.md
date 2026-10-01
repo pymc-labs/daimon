@@ -23,11 +23,24 @@ Open `.env`, then uncomment and fill in:
 - `DAIMON_MCP__JWT_SECRET`: any random string, e.g. `openssl rand -hex 32`.
 - `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
+- `DAIMON_CRYPTO__KEYS`: a Fernet key, from
+  `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  Paste the key as is. During rotation, list several keys newest first,
+  comma-separated (`NEWKEY,OLDKEY`) or as a JSON list (`["NEWKEY","OLDKEY"]`).
+  Agent keys, workspace tokens and MCP tokens are encrypted with it. Without
+  it every agent key write is refused (see
+  [Agent environment encryption](#agent-environment-encryption)). Back it up
+  separately from the database.
 
-All four must be set before the first `docker compose` command:
+The first four must be set before the first `docker compose` command:
 `docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. `.env` is gitignored, so secrets never get committed.
+`${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
+stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
+is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
+Set `DAIMON_OPS__ALERT_WEBHOOK_URL` to a private Discord channel webhook to
+receive short alerts for installs, Stripe top-ups, and Anthropic limits.
+Leave it unset to disable operator alerts.
 
 ## 2. Create the Discord application
 
@@ -315,11 +328,26 @@ external stores, keys and MA mappings are complete.
 
 ### Agent environment encryption
 
-Agent environment values in `agent_files.content` are encrypted when
-`DAIMON_CRYPTO__KEYS` is configured, using the same MultiFernet key ring as other
-credentials. Names and attribution remain readable. Keyless deployments keep
-plaintext storage and log `agent_env.encryption_disabled` when the session
-factory starts; initialization and environment writes continue to work.
+Agent environment values in `agent_files.content` are encrypted with
+`DAIMON_CRYPTO__KEYS`, using the same MultiFernet key ring as other
+credentials. Names and attribution remain readable. A deployment without keys
+still starts and serves existing values, logs `agent_env.encryption_keys_missing`
+at error level when the session factory starts, and refuses every agent key
+write (the credential form and `request_agent_key` say so; nothing is saved).
+For local development only, `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true` restores
+plaintext storage and logs `agent_env.encryption_disabled` instead.
+
+`daimon crypto verify` exits non-zero when keys are missing, any agent key is
+stored in plaintext, or an encrypted key can't be decrypted with the current
+keys (a key retired too early), listing the count per tenant (never names or
+values).
+`daimon crypto encrypt-plaintext` encrypts every plaintext row in place with the
+first key, in one transaction, leaving timestamps and attribution unchanged.
+Run it after enabling keys on a deployment that stored keys without them, and
+only once **every** process (MCP, Discord, Slack, scheduler) has restarted with
+the keys: a process still running without keys can't read the rows it encrypts,
+and turns for those agents fail. Then run `verify` again. Add `verify` to your
+onboarding checklist.
 
 Stop old application readers and writers before upgrading through
 `0028_agent_env_encryption`, since old readers cannot decode encrypted values.
@@ -352,7 +380,8 @@ The migration logs `agent_env.migration_keyless_noop` when keys are absent; keye
 rewrites log their action and row count. Do not remove keys while
 encrypted values remain. When enabling keys after a keyless migration, rewrite
 existing values through the application or re-run this migration's data upgrade
-under maintenance; setting keys alone does not rewrite existing rows.
+under maintenance, or run `daimon crypto encrypt-plaintext`; setting keys alone
+does not rewrite existing rows.
 
 For rollback, stop application readers and writers and run the migration's
 Alembic downgrade with the original keys available before starting old code.

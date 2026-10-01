@@ -51,6 +51,9 @@ from anthropic.types.beta.beta_managed_agents_mcp_server_url_definition import (
 )
 from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
 
+# A dependency-free leaf, so it does not close the import cycle described above.
+from daimon.core.mcp_server_url import canonical_mcp_url
+
 if TYPE_CHECKING:
     from daimon.core.stores.domain import McpOAuthGrantRow
 
@@ -77,12 +80,14 @@ def hidden_mcp_server_names(
     signed_in: set[str] = set()
     mine: set[str] = set()
     for grant in grants:
-        grant_url = grant.mcp_server_url.rstrip("/")
+        grant_url = canonical_mcp_url(grant.mcp_server_url)
         signed_in.add(grant_url)
         if grant.agent_id == agent_id and grant.account_id == account_id:
             mine.add(grant_url)
-    hidden_urls = signed_in - mine - {url.rstrip("/") for url in shared_server_urls}
-    return frozenset(name for name, url in server_urls.items() if url.rstrip("/") in hidden_urls)
+    hidden_urls = signed_in - mine - {canonical_mcp_url(url) for url in shared_server_urls}
+    return frozenset(
+        name for name, url in server_urls.items() if canonical_mcp_url(url) in hidden_urls
+    )
 
 
 def visible_mcp_servers(

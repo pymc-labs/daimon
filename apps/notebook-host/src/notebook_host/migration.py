@@ -71,7 +71,7 @@ def migrate_flat_layout(
     predating the jail. They are locked in the same first step as ``data_dir``,
     because the boot that makes ``data_dir`` traversable is exactly the boot
     that must stop relying on an unlistable parent to hide them. Files this
-    host writes itself are already locked by their store before the rename.
+    host writes itself are created 0600 by their store (``files.write_private_file``).
 
     ``UidPoolExhaustedError`` and ``JailUnavailableError`` (from
     ``resolve_jail_uid``) are allowed to propagate uncaught: a migration that

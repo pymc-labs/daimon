@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
+from daimon.adapters.discord.credential_origin import refuse_if_credential_target_unavailable
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
@@ -51,6 +52,8 @@ async def start_mcp_oauth_from_click(
     # this also needs jwt_secret): never hand out a link the routes cannot serve.
     if app_root_url is None or mcp.jwt_secret is None or runtime.turn_deps.fernet is None:
         await interaction.followup.send(_UNCONFIGURED, ephemeral=True)
+        return
+    if await refuse_if_credential_target_unavailable(interaction, runtime=runtime, row=row):
         return
     now = datetime.now(UTC)
     async with runtime.sessionmaker() as session, session.begin():

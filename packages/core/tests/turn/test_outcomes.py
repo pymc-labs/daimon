@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import asdict
+from types import ModuleType
 
 import pytest
 from daimon.core._models import TurnOutcome
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack", "scheduler", "headless"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams", "scheduler", "headless"])
 async def test_refusal_written_once_and_no_content_columns(
     db_session: AsyncSession, db_engine: AsyncEngine, platform: str
 ) -> None:
@@ -147,4 +148,19 @@ def test_model_and_migration_reason_constraints_match_the_enum() -> None:
         )
     ]
     assert len(checks) == 1
-    assert set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0]))) == expected
+    created = set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0])))
+    latest = _migration("0034_channel_budgets.py").OUTCOME_REASONS
+    assert created < expected, "0029 created the constraint with a subset of today's reasons"
+    assert set(latest) == expected, "the latest migration that widens the constraint matches"
+
+
+def _migration(name: str) -> ModuleType:
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parents[2] / "alembic/versions" / name
+    spec = importlib.util.spec_from_file_location(f"migration_{path.stem}", path)
+    assert spec and spec.loader, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

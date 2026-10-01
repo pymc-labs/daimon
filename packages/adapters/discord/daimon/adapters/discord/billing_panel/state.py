@@ -10,6 +10,8 @@ import dataclasses
 from decimal import Decimal
 
 from daimon.adapters.discord import theme
+from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.promo_credit import ActiveTimedCredit
 
 COLOR_OVER_CAP = theme.COLOR_RED  # caller is over their effective cap
 
@@ -41,3 +43,10 @@ class BillingPanelState:
     guild_distinct_members: int  # "K members" — distinct spending users only
     member_rows: tuple[MemberRow, ...]  # already sorted + top-25-capped
     over_cap_count: int  # number of additional spending members beyond top 25
+
+    # Live timed promo credit (both views), soonest-ending first; empty without promo codes
+    timed_credit: tuple[ActiveTimedCredit, ...] = ()
+    # The invoking channel's budget (both views); None when it has none.
+    channel_budget: ChannelBudgetStatus | None = None
+    # Some promo code is redeemable now (admin view only); gates the redeem button
+    has_redeemable_promo_code: bool = False

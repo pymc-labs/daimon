@@ -11,6 +11,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord.billing_panel.panel import BillingPanelView
 from daimon.adapters.discord.billing_panel.read import (
+    invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
 )
@@ -64,6 +65,8 @@ class BillingCog(commands.Cog):
                     caller_user_id=str(interaction.user.id),
                     is_admin=is_admin,
                     since=since,
+                    channel_id=invoking_channel_id(interaction),
+                    now=now,
                 )
                 # Tenant ids are derived deterministically from (platform, guild) —
                 # the same uuid the turn pipeline bills against.

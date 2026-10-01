@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, cast
+from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class DatabaseSettings(BaseModel):
@@ -76,6 +78,27 @@ class LogSettings(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         description="Minimum log level emitted by the structured logger.",
+    )
+
+
+class ObservabilitySettings(BaseModel):
+    health_interval_s: float = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Seconds between runtime.health structured log lines from each long-running process. "
+            "Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable."
+        ),
+    )
+
+
+class OpsSettings(BaseModel):
+    alert_webhook_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Discord webhook URL for short operator alerts about new installs, Stripe top-ups, "
+            "and Anthropic limits. Unset disables alerts. Keep the URL secret."
+        ),
     )
 
 
@@ -437,6 +460,103 @@ class SlackSettings(BaseModel):
     )
 
 
+class TeamsSettings(BaseModel):
+    """Microsoft Teams adapter config.
+
+    Optional so non-Teams deployments boot unchanged — the block is ``None``
+    when no ``DAIMON_TEAMS__*`` env vars are present. Mirrors ``SlackSettings``.
+
+    ``client_id`` / ``client_secret`` / ``tenant_id`` are the Entra app
+    registration the Bot Framework posts activities to; ``port`` is the HTTP
+    ingress the SDK's FastAPI adapter binds (``/api/messages`` plus the
+    ``/healthz`` / ``/readyz`` endpoints served by the same listener);
+    ``enabled`` gates ``/api/messages`` without taking the process down.
+    """
+
+    client_id: str = Field(
+        description=(
+            "Entra (Azure AD) app registration client ID the Teams bot "
+            "authenticates as — also the audience inbound Bot Framework JWTs "
+            "are validated against."
+        ),
+    )
+    client_secret: SecretStr = Field(
+        description=(
+            "Entra app registration client secret, used to mint Bot Framework "
+            "tokens for outbound sends."
+        ),
+    )
+    tenant_id: str = Field(
+        description=(
+            "Entra tenant ID the app registration lives in. A single-tenant "
+            "bot only answers activities whose conversation and channel-data "
+            "tenant both equal this value."
+        ),
+    )
+    max_concurrent_turns_per_tenant: int = Field(
+        default=3,
+        description=(
+            "Maximum number of agent turns a single Teams tenant may have "
+            "in flight at once. Caps one noisy tenant from starving others "
+            "on the shared Anthropic key."
+        ),
+    )
+    port: int = Field(
+        default=3978,
+        description=(
+            "Port for the Teams process's HTTP ingress and health endpoints "
+            "(/api/messages, /healthz, /readyz). The Bot Framework messaging "
+            "endpoint must be configured to reach this listener."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When False, /api/messages answers 503 while the health endpoints "
+            "stay live — the process keeps running so ingress can be "
+            "re-enabled without a redeploy."
+        ),
+    )
+    admin_user_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Entra object IDs of the people who administer this deployment "
+            "from Teams. Teams exposes no admin role to bots, so this list is "
+            "the admin check: admins get the admin role in turns, create "
+            "routines, replace shared keys, top up and see everyone's usage. "
+            "Everyone else is a regular user."
+        ),
+    )
+
+    @field_validator("admin_user_ids")
+    @classmethod
+    def _canonicalize_admin_user_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Compare against the canonical lowercase form inbound ids arrive in."""
+        try:
+            return tuple(str(UUID(item)) for item in value)
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
+            ) from None
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonicalize_tenant_id(cls, value: str) -> str:
+        """Normalize to the canonical lowercase UUID form and reject non-UUIDs.
+
+        The resolver canonicalizes activity tenant ids and compares them to
+        this value, and ``provision_tenant`` hashes ``workspace_id`` into the
+        deterministic tenant uuid — an uppercase portal paste must not yield
+        a provisioned row the resolver cannot match.
+        """
+        try:
+            return str(UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__TENANT_ID must be the Entra directory tenant's UUID"
+            ) from None
+
+
 class GithubSettings(BaseModel):
     """GitHub repository access config (App-or-PAT; no OAuth flow). All fields are
     optional so deployments without GitHub App or PAT config keep working.
@@ -570,18 +690,59 @@ class CryptoSettings(BaseModel):
 
     A single deployment ships one key; rotation means prepending a new key.
     Each key must be a Fernet.generate_key()-style base64-urlsafe 32-byte
-    string. Empty default lets deployments without any encrypted credentials
-    boot without crypto config.
+    string. A deployment without keys still boots, but refuses to save agent
+    keys unless `allow_plaintext` opts into plaintext storage for local
+    development.
     """
 
-    keys: tuple[SecretStr, ...] = Field(
+    keys: Annotated[tuple[SecretStr, ...], NoDecode] = Field(
         default=(),
         description=(
-            "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. Agent environment values encrypt when keys are configured; "
-            "without keys they remain plaintext. The first key encrypts "
-            "new values; older keys "
-            "remain valid for decrypting existing ciphertext during rotation."
+            "Ordered Fernet keys used to encrypt/decrypt stored credentials: a "
+            "single key, a comma-separated list, or a JSON list. Required to save "
+            "agent keys: without keys, saving an agent environment value is "
+            "refused unless `allow_plaintext` is set. The first key encrypts new "
+            "values; older keys remain valid for decrypting existing ciphertext "
+            "during rotation. Run `daimon crypto verify` to confirm no plaintext "
+            "rows remain."
+        ),
+    )
+
+    @field_validator("keys", mode="before")
+    @classmethod
+    def _split_keys(cls, value: object) -> object:
+        """Accept a bare key or a comma-separated list as well as a JSON list.
+
+        The environment hands this field a raw string. Fernet keys are
+        base64-urlsafe, so they never contain a comma, a quote or a bracket.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return ()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Fixed message: the decoder's error quotes the input, i.e. key text.
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS starts with '[' but is not a valid JSON list"
+                ) from None
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS must be a key, a comma-separated list or a JSON list"
+                )
+            items = [str(item).strip() for item in cast("list[object]", parsed)]
+            return tuple(item for item in items if item)
+        return tuple(part.strip() for part in text.split(",") if part.strip())
+
+    allow_plaintext: bool = Field(
+        default=False,
+        description=(
+            "Store agent environment values (agent keys) in plaintext when no "
+            "`keys` are configured. For local development only: with this off "
+            "and no keys, every agent key write is refused."
         ),
     )
 
@@ -656,6 +817,16 @@ class NotebookSettings(BaseModel):
             "Per-upload byte budget signed into notebook upload tokens. 1 "
             "MiB mirrors the notebook host's own ceiling, which is enforced "
             "independently as a second layer of defense."
+        ),
+    )
+    allow_editable: bool = Field(
+        default=False,
+        description=(
+            "Let `create_notebook_upload_url(editable=True)` publish the marimo "
+            "code editor. Anyone holding an editor link can run arbitrary code "
+            "on the notebook host, and any member or prompt-injected agent can "
+            "ask for one, so this stays off unless every notebook on the host "
+            "belongs to one client. Off: scratch notebooks are always read-only."
         ),
     )
 
@@ -896,12 +1067,14 @@ class Settings(BaseSettings):
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL rendered on the Discord and Slack privacy panels' Policy button. "
+            "URL rendered on the privacy panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
         ),
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
@@ -910,6 +1083,7 @@ class Settings(BaseSettings):
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
     )
     slack: SlackSettings | None = None
+    teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
@@ -954,6 +1128,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Validation errors must never echo a raw value (crypto keys, API keys).
+        hide_input_in_errors=True,
     )
 
 
@@ -971,7 +1147,11 @@ class _CryptoSettingsSource(BaseSettings):
 
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     model_config = SettingsConfigDict(
-        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
 

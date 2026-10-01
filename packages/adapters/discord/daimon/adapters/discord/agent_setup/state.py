@@ -35,6 +35,9 @@ class RosterEntry:
     # before reconcile); used to derive the per-agent uuid for credential reads.
     ma_agent_id: str = ""
     is_system: bool = False
+    # The `daimon_name` routing name channel and personal defaults are stored
+    # under; it can differ from the MA display name after a rename.
+    routing_name: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,12 +69,10 @@ class PanelState:
     # derive_guild_account_uuid(tenant_id) — ownership STAMP for create/fork/edit
     guild_account_id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
     platform_principal_id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
-    pat_last4: str | None = None
     # Persisted GitHub linkage for the selected agent, hydrated from the DB at
     # panel-open and on agent-switch (per-agent overlay scope). Display
     # only — never the token. "(inline-pat)" for token-pasted creds.
     github_login: str | None = None
-    mcp_token_last4: str | None = None
     # Number of secrets (agent_files) pinned to the selected agent. Loaded by the
     # shell at panel-open and refreshed whenever the selection changes (picker /
     # delete); rendering-only — never participates in reconcile.
@@ -136,13 +137,11 @@ class PanelState:
         if url not in self.pending_skill_repo_urls:
             self.pending_skill_repo_urls.append(url)
 
-    def apply_repo_modal(self, *, url: str, branch: str, pat_last4: str | None) -> None:
+    def apply_repo_modal(self, *, url: str, branch: str) -> None:
         """Mutate rendering-only fields. Per LD-04-01, repo binding lives in the
         agent_repo_binding store; AgentSpec carries no repo_url field."""
         self.bound_repo_url = url
         self.bound_branch = branch
-        if pat_last4 is not None:
-            self.pat_last4 = pat_last4
 
     def hydrate_repo_binding(self, row: AgentRepoBindingRow | None) -> None:
         """Set the display-only repo fields from a persisted binding (or clear
@@ -174,9 +173,8 @@ class PanelState:
         self,
         *,
         server_entry: BetaManagedAgentsURLMCPServerParams,
-        token_last4: str,
     ) -> None:
-        """Append an MCP server to the selected agent's spec; record token last-4.
+        """Append an MCP server to the selected agent's spec.
 
         MA rejects an agent whose ``mcp_servers`` names are not each referenced
         by a matching ``{type: mcp_toolset, mcp_server_name: <name>, ...}`` entry
@@ -209,7 +207,6 @@ class PanelState:
             if entry.name == self.selected.name:
                 self.roster[idx] = self.selected
                 break
-        self.mcp_token_last4 = token_last4
 
     def remove_skill_at(self, index: int) -> None:
         """Remove the skill at `index` from the selected agent's spec."""

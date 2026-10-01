@@ -4,13 +4,16 @@ Tests cover:
   - init_sentry no-ops when dsn is None
   - _scrub_event redacts secret-keyed tag values
   - _scrub_event drops request.data and extra fields
+  - the event scrubber redacts secrets nested in frame locals
   - capture_exception_with_scope tags from contextvars, omits unbound, never raises
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 import sentry_sdk
@@ -191,3 +194,107 @@ def test_scrub_event_drops_message_body_when_request_data_present() -> None:
     assert "extra" not in result, (
         "extra field must be removed to prevent arbitrary payload from leaving the process"
     )
+
+
+def test_event_scrubber_redacts_a_token_nested_in_a_frame_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bearer token inside a dict local (e.g. request headers) is redacted, not only top-level keys."""
+    init = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "init", init)
+    monkeypatch.setattr(sentry_sdk, "set_tag", MagicMock())
+    init_sentry(
+        dsn="https://k@sentry.invalid/1",
+        environment="test",
+        process="teams",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+    frame_vars: dict[str, object] = {"request": {"headers": {"authorization": "Bearer abc"}}}
+    event: dict[str, object] = {
+        "exception": {"values": [{"stacktrace": {"frames": [{"vars": frame_vars}]}}]}
+    }
+
+    init.call_args.kwargs["event_scrubber"].scrub_event(event)
+
+    headers = frame_vars["request"]["headers"]  # type: ignore[index]
+    assert headers["authorization"] != "Bearer abc", "a nested secret must not ship to Sentry"
+
+
+def test_scrub_event_drops_frame_locals_holding_a_decrypted_value(
+    recording_sentry: _RecordingTransport,
+) -> None:
+    """A secret held in a local variable never ships, even with locals capture on."""
+    # Built at runtime so the value is not also in the captured source lines.
+    canary = "canary-" + uuid.uuid4().hex
+
+    def _fails_holding_a_secret() -> None:
+        value = canary  # noqa: F841 - the local under test
+        raise RuntimeError("upload failed")
+
+    try:
+        _fails_holding_a_secret()
+    except RuntimeError as exc:
+        sentry_sdk.capture_exception(exc)
+    sentry_sdk.flush()
+
+    assert len(recording_sentry.events) == 1
+    assert canary not in repr(recording_sentry.events[0])
+    assert "'vars'" not in repr(recording_sentry.events[0])
+
+
+def test_init_sentry_turns_off_local_variable_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frame locals can hold decrypted keys under any name, so none are captured."""
+    seen: dict[str, object] = {}
+
+    def _recording_init(*args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(sentry_sdk, "init", _recording_init)
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a, **k: None)
+
+    init_sentry(
+        dsn="https://public@o0.ingest.sentry.io/0",
+        environment="production",
+        process="mcp",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+
+    assert seen.get("include_local_variables") is False
+
+
+def test_scrub_event_drops_breadcrumbs_and_redacts_contexts_and_exception_text() -> None:
+    event: Event = {
+        "breadcrumbs": {"values": [{"message": "GET /n/s/?access_token=leaky-crumb"}]},
+        "contexts": {"request": {"api_key": "leaky-ctx", "url": "https://x/?token=leaky-url"}},
+        "exception": {
+            "values": [{"type": "HTTPError", "value": "GET https://h/p?access_token=leaky-exc"}]
+        },
+    }
+
+    scrubbed = _scrub_event(event, {})
+
+    rendered = repr(scrubbed)
+    for canary in ("leaky-crumb", "leaky-ctx", "leaky-url", "leaky-exc"):
+        assert canary not in rendered, canary
+    assert scrubbed is not None and "HTTPError" in rendered
+
+
+def test_init_sentry_records_no_breadcrumbs(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sentry_sdk, "init", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a, **k: None)
+
+    init_sentry(
+        dsn="https://public@o0.ingest.sentry.io/0",
+        environment="production",
+        process="mcp",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+
+    assert seen.get("max_breadcrumbs") == 0

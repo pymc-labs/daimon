@@ -14,12 +14,15 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
 # ValidationError on read — keep in sync.
-Platform = Literal["discord", "cli", "slack"]
+Platform = Literal["discord", "cli", "slack", "teams"]
+# Platforms whose turns run in a conversation and carry a turn origin.
+ChatPlatform = Literal["discord", "slack", "teams"]
+CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
 
 # Session-continuity vocabularies. Same contract as `Platform` above: the
 # columns are untyped Text, so a value outside the Literal raises on read.
@@ -194,6 +197,7 @@ class RoutineRow(BaseModel):
     delivery_note: str | None = None
     delivery_payload: str | None = None
     delivered_at: datetime | None = None
+    channel_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -400,6 +404,28 @@ class UsageEventRow(BaseModel):
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     event_id: str
+    channel_id: str | None = None
+
+
+BudgetWindow = Literal["monthly", "total", "fixed"]
+
+
+class ChannelBudgetRow(BaseModel):
+    """One channel's spend limit. `window` bounds which debits count (see `ChannelBudget`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    limit_usd: Decimal
+    window: BudgetWindow
+    starts_at: datetime | None
+    ends_at: datetime | None
+    set_by_account_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class TenantUserCapRow(BaseModel):
@@ -452,6 +478,64 @@ class TenantLedgerRow(BaseModel):
     payment_event_id: str | None
     payment_intent: str | None
     occurred_at: datetime
+    channel_id: str | None = None
+
+
+# `credit` codes add credit that never expires; `timed` codes add credit that
+# exists only inside their credit window. Column is Text + CHECK.
+PromoCodeKind = Literal["credit", "timed"]
+
+
+class PromoCodeRow(BaseModel):
+    """A promo code as operators see it. The code hash never leaves the store."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    note: str | None
+    amount_usd: Decimal
+    kind: PromoCodeKind
+    credit_starts_at: datetime | None
+    credit_ends_at: datetime | None
+    redeem_starts_at: datetime | None
+    redeem_ends_at: datetime | None
+    max_redemptions: int | None
+    redeemed_count: int
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class PromoRedemptionRow(BaseModel):
+    """One tenant's redemption of a promo code, with the tenant's platform identity."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    promo_code_id: uuid.UUID
+    tenant_id: uuid.UUID
+    tenant_platform: Platform
+    tenant_external_id: str
+    redeemed_by_account_id: uuid.UUID | None
+    redeemed_at: datetime
+    granted_at: datetime | None
+    expired_at: datetime | None
+    expired_usd: Decimal | None
+
+
+class TimedPromoGrantRow(BaseModel):
+    """A timed code's redemption joined with the code's amount and credit window."""
+
+    model_config = ConfigDict(frozen=True)
+
+    redemption_id: uuid.UUID
+    promo_code_id: uuid.UUID
+    tenant_id: uuid.UUID
+    amount_usd: Decimal
+    credit_starts_at: datetime
+    credit_ends_at: datetime
+    granted_at: datetime | None
+    expired_at: datetime | None
+    expired_usd: Decimal | None
 
 
 class SeededSkillRow(BaseModel):
@@ -488,7 +572,9 @@ class AgentFileRow(BaseModel):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     key: str
-    content: str
+    # repr=False: the value is a decrypted agent key; keep it out of reprs,
+    # logs and error-tracker frame dumps.
+    content: str = Field(repr=False)
     created_by_account_id: uuid.UUID | None = None
     last_set_by_account_id: uuid.UUID | None = None
     created_at: datetime
@@ -635,7 +721,7 @@ class CredentialRequestRow(BaseModel):
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
-    token: str
+    token: str = Field(repr=False)
     kind: str
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -665,15 +751,15 @@ class McpOAuthFlowRow(BaseModel):
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
-    state: str
-    request_token: str
+    state: str = Field(repr=False)
+    request_token: str = Field(repr=False)
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     agent_id: uuid.UUID
     server_name: str
     mcp_server_url: str
     redirect_uri: str
-    code_verifier: str
+    code_verifier: str = Field(repr=False)
     client_id: str | None
     client_secret_encrypted: str | None
     token_endpoint_auth_method: str | None

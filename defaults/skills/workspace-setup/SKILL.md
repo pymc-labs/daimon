@@ -110,7 +110,8 @@ their snapshots. Selecting a target does not change who answers or routing.
 
 Use `list_agents` and `get_agent` to find and inspect agents. `create_agent`
 creates one; `fork_agent` makes an editable copy, including a copy of Daimon.
-Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
+Forking is admin-only, the copy starts with no repo access, keys or connector
+tokens, and an agent pinned to channels can't be copied. Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
 and `detach_mcp_server` for removal, rather than replacing lists through
 `update_agent`. Removing a skill from one agent is different from
 `delete_skill`, which deletes it from the workspace library. `archive_agent`
@@ -134,7 +135,8 @@ the replacement on a member's behalf.
 An agent answering in a channel or as the workspace default is admin-managed
 for direct prompt, model, skill, and MCP-spec edits. Direct edits to the built-in
 Daimon's spec require an editable copy even for admins. Offer `fork_agent` for
-those direct edits. The posted forms `request_agent_key`, `request_mcp_token`,
+those direct edits; a member asks an admin to make the copy, or uses
+`create_agent` for a fresh one. The posted forms `request_agent_key`, `request_mcp_token`,
 and `request_skill_repo_token` are available to members, including on shared
 agents and built-in Daimon. They do not inherit the direct-edit admin or fork
 gates: `request_mcp_token` can collect a bearer token and attach its server

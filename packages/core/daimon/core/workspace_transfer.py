@@ -246,6 +246,7 @@ def _bind_checkpoint_recorder(
     ma_session_id: str,
     model_id: str,
     markup: Decimal,
+    channel_id: str | None,
 ) -> UsageRecorder:
     """Meter the checkpoint turn to the tenant, at the OLD session's model.
 
@@ -270,6 +271,7 @@ def _bind_checkpoint_recorder(
         markup=markup,
         pricing=pricing,
         reason="checkpoint_debit",
+        channel_id=channel_id,
     )
 
 
@@ -371,6 +373,7 @@ async def transfer_workspace(
     max_bundle_bytes: int = HANDOFF_MAX_BYTES,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = _utc_now,
+    channel_id: str | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -449,6 +452,7 @@ async def transfer_workspace(
                 ma_session_id=old_session_id,
                 model_id=old_snapshot.model_id,
                 markup=markup,
+                channel_id=channel_id,
             )
         ),
         # Nobody is watching this turn, so a tool call waiting for approval
@@ -644,6 +648,8 @@ class WorkspaceTransferRunner:
     tenant_id: uuid.UUID
     external_user_id: str
     markup: Decimal
+    channel_id: str | None = None
+    """The channel the checkpoint turn's spend is attributed to."""
     from_agent_name: str | None = None
     """Override for the source agent's display name; defaults to the snapshot's."""
 
@@ -678,6 +684,7 @@ class WorkspaceTransferRunner:
                 destination_agent_name=destination_agent_name,
             ),
             unsaved_work=unsaved_work,
+            channel_id=self.channel_id,
         )
         return as_prepared_replacement(
             outcome,

@@ -35,8 +35,15 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import is_invoker_allowed, is_write_protected
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    is_invoker_allowed,
+    is_write_protected,
+)
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -49,7 +56,7 @@ from daimon.core.github_installation_reconcile import (
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
-from daimon.core.logging_setup import configure_log_level
+from daimon.core.logging_setup import configure_logging
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
@@ -60,6 +67,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -67,6 +75,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     render_routine_controls,
 )
+from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -84,7 +93,7 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
-from daimon.core.usage_sweep import sweep_headless_usage
+from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
@@ -209,6 +218,8 @@ async def _build_fire(
             # stored role is the only admin signal a fire has. Unreadable
             # policy fails closed.
             direct_post: DirectPost = "allowed"
+            fire_policy: TenantAccessPolicy | None = None
+            fire_channel_id: str | None = None
             try:
                 policy = await load_access_policy(s, tenant_id=row.tenant_id)
             except AccessPolicyUnreadable:
@@ -222,6 +233,8 @@ async def _build_fire(
                 # a channel's category, so when the policy protects either,
                 # the agent is not invited to post directly at all.
                 target = delivery_target(row, platform=platform)
+                fire_policy = policy
+                fire_channel_id = target.channel_id if target is not None else None
                 if target is not None:
                     if is_write_protected(policy, channel_id=target.channel_id):
                         direct_post = "protected"
@@ -235,6 +248,18 @@ async def _build_fire(
                     policy, external_user_id=row.created_by_user_id, is_admin=is_admin
                 )
                 policy_error = None if allowed else "invoker_not_allowed"
+                # A pinned agent fires only when it posts straight into one of
+                # its pinned channels; `_check_agent_pin` refuses anything else
+                # at save time, and this holds for a pin added since.
+                if policy_error is None and not authorize(
+                    policy,
+                    subject=Subject(),
+                    action=Action.RUN_AGENT,
+                    surface=Surface.ROUTINE,
+                    agent=AgentRef.of(row.agent_name),
+                    place=Place(channel_id=target.channel_id if target is not None else None),
+                ):
+                    policy_error = "agent_pinned_elsewhere"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
@@ -273,6 +298,7 @@ async def _build_fire(
                 tenant_id=row.tenant_id,
                 markup=settings.billing.markup,
                 pricing=MODEL_PRICING.get(model_id),
+                channel_id=row.channel_id,
             )
 
         # Resolve agent + environment by daimon-tag at fire time,
@@ -300,6 +326,50 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
+        # The pin is checked again on the agent that will actually run, by
+        # every name a pin can be keyed by, after self-healing may have picked
+        # a replacement: the saved routine name alone can miss a pin on the
+        # display name or a rename.
+        if fire_policy is not None and fire_policy.agent_channel_pins:
+            ran = await client.beta.agents.retrieve(resolved_agent_id)
+            if not authorize(
+                fire_policy,
+                subject=Subject(),
+                action=Action.RUN_AGENT,
+                surface=Surface.ROUTINE,
+                agent=AgentRef.of(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
+                place=Place(channel_id=fire_channel_id),
+            ):
+                log.info(
+                    "routine.skipped.invoker_policy",
+                    routine_id=str(row.id),
+                    tenant_id=str(row.tenant_id),
+                    reason="agent_pinned_elsewhere",
+                )
+                async with sm() as pin_s, pin_s.begin():
+                    await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
+                return
+        # Admission gate: the routine's channel budget, after the cap (run_one_tick),
+        # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
+        # billed to (the destination's parent, else where the routine was made).
+        if await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+            log.info(
+                "routine.skipped.over_channel_budget",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                channel_id=row.channel_id,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+            return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
@@ -354,6 +424,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
+            budget_channel_id=row.channel_id,
         )
 
         if row.destination_kind is None:
@@ -392,14 +463,18 @@ async def _sweep_pending_files(
 
 
 async def _sweep_headless_usage(
-    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], *, markup: Decimal
+    client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    markup: Decimal,
+    watermark: UsageSweepWatermark,
 ) -> None:
     """Backfill usage for headless MCP turns once. Boundary catch: a sweep
     failure must not kill the scheduler loop — idempotent recording means the
     next tick re-reads and records anything missed.
     """
     try:
-        await sweep_headless_usage(client, sm, markup=markup)
+        await sweep_headless_usage(client, sm, markup=markup, watermark=watermark)
     except (anthropic.APIError, SQLAlchemyError):
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
@@ -451,6 +526,18 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Grant opened timed promo windows, expire closed ones, credit back late spend.
+
+    Runs after the usage sweep, so late debits are on the ledger first.
+    Idempotent; boundary catch so a DB failure retries on the next tick.
+    """
+    try:
+        await settle_promo_credit(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.promo_credit_settle.failed")
+
+
 def _validate_mcp_settings(settings: Settings) -> None:
     """Single-tenant deployments require both ``settings.mcp.jwt_secret`` and
     ``settings.mcp.public_url`` so each routine fire can bind the daimon-mcp
@@ -494,7 +581,7 @@ async def run(
     # Configure the JSON log chain BEFORE the first log line so structured output
     # takes effect for the whole process (OB-1; this entrypoint owns the call site
     # since 61 is unexecuted).
-    configure_log_level(settings.log.level)
+    configure_logging(settings.log.level)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,
@@ -508,7 +595,9 @@ async def run(
 
     engine = _engine_override or build_engine(str(settings.database.url))
     sm = build_session_factory(
-        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
     )
 
     client = (
@@ -554,6 +643,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    usage_watermark = UsageSweepWatermark()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -577,11 +667,14 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
+            await _sweep_headless_usage(
+                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
                 sm=sm,
@@ -592,35 +685,41 @@ async def run(
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             return 0
 
-        while not stop_event.is_set():
-            await run_one_tick(
-                now=datetime.now(UTC),
-                sm=sm,
-                caps=caps,
-                fire=fire,
-                max_age=timedelta(seconds=scheduler_settings.max_age_s),
-                max_concurrent_fires=scheduler_settings.max_concurrent_fires,
-                dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
-                dispatcher=dispatcher,
-            )
-            await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
-            await _sweep_wizard_sessions(sm)
-            await _sweep_slack_event_dedup(sm)
-            await _sweep_retired_turn_card_intents(sm)
-            await _sweep_hub_oauth_kv(sm)
-            await _drain_github_push_resync(
-                engine=engine,
-                sm=sm,
-                client=client,
-                settings=settings,
-                fernet=push_resync_fernet,
-            )
-            await _drain_github_installation_reconciliations(sm=sm, settings=settings)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=scheduler_settings.tick_interval_s
+        async with runtime_health(
+            "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
+        ):
+            while not stop_event.is_set():
+                await run_one_tick(
+                    now=datetime.now(UTC),
+                    sm=sm,
+                    caps=caps,
+                    fire=fire,
+                    max_age=timedelta(seconds=scheduler_settings.max_age_s),
+                    max_concurrent_fires=scheduler_settings.max_concurrent_fires,
+                    dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                    dispatcher=dispatcher,
                 )
+                await _sweep_pending_files(client, sm)
+                await _sweep_headless_usage(
+                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
+                )
+                await _sweep_wizard_sessions(sm)
+                await _sweep_slack_event_dedup(sm)
+                await _sweep_retired_turn_card_intents(sm)
+                await _sweep_hub_oauth_kv(sm)
+                await _settle_promo_credit(sm)
+                await _drain_github_push_resync(
+                    engine=engine,
+                    sm=sm,
+                    client=client,
+                    settings=settings,
+                    fernet=push_resync_fernet,
+                )
+                await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=scheduler_settings.tick_interval_s
+                    )
 
         return 0
     finally:

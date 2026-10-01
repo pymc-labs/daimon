@@ -423,7 +423,12 @@ async def test_app_mint_rate_limits_retry_the_bound_queue_job(
         "the first rate-limited App mint stops the batch; a permanent permission error does not"
     )
     if minimum_wait:
-        assert row.available_at >= started_at + timedelta(seconds=minimum_wait), (
+        deadline = (
+            datetime.fromtimestamp(int(headers["x-ratelimit-reset"]), UTC)
+            if "x-ratelimit-reset" in headers
+            else started_at + timedelta(seconds=minimum_wait)
+        )
+        assert row.available_at >= deadline, (
             "queue availability must include the App-mint provider deadline"
         )
         async with db_session_factory.begin() as session:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from cryptography.fernet import Fernet
@@ -14,6 +15,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
     SlackSettings,
+    TeamsSettings,
     load_settings,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
@@ -36,6 +38,18 @@ def test_load_settings_parses_nested_delimiter_when_env_provided(
     assert settings.anthropic.api_key.get_secret_value() == "sk-test"
     assert settings.cli.local_user == "alice"
     assert settings.log.level == "DEBUG"
+
+
+def test_ops_webhook_is_optional_and_reads_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_OPS__ALERT_WEBHOOK_URL", raising=False)
+    assert load_settings(_env_file=None).ops.alert_webhook_url is None
+
+    monkeypatch.setenv("DAIMON_OPS__ALERT_WEBHOOK_URL", "https://discord.com/api/webhooks/test")
+    webhook = load_settings(_env_file=None).ops.alert_webhook_url
+    assert webhook is not None
+    assert webhook.get_secret_value() == "https://discord.com/api/webhooks/test"
 
 
 def test_load_settings_defaults_cli_local_user_to_env_user_when_unset(
@@ -709,6 +723,34 @@ def test_slack_display_name_rejects_invalid_names(name: str) -> None:
         )
 
 
+def test_teams_tenant_id_canonicalizes_uuid_case() -> None:
+    """An uppercase Entra portal paste normalizes to the canonical UUID form
+    the resolver and provision_tenant both compare against."""
+    settings = TeamsSettings(
+        client_id=str(UUID(int=1)),
+        client_secret=SecretStr("test"),
+        tenant_id=str(UUID(int=0xABCDEF)).upper(),
+    )
+    assert settings.tenant_id == str(UUID(int=0xABCDEF))
+
+
+def test_teams_tenant_id_rejects_non_uuid() -> None:
+    with pytest.raises(ValidationError):
+        TeamsSettings(
+            client_id=str(UUID(int=1)),
+            client_secret=SecretStr("test"),
+            tenant_id="not-a-tenant-uuid",
+        )
+
+
+def test_teams_admin_user_ids_canonicalize_and_reject_non_uuids() -> None:
+    base = {"client_id": "id", "client_secret": SecretStr("s"), "tenant_id": str(UUID(int=1))}
+    admin = str(UUID(int=7))
+    assert TeamsSettings(**base, admin_user_ids=(admin.upper(),)).admin_user_ids == (admin,)
+    with pytest.raises(ValidationError):
+        TeamsSettings(**base, admin_user_ids=("alice",))
+
+
 def test_completion_policy_validates_and_normalizes_uuid_keys(monkeypatch):
     import uuid
 
@@ -751,3 +793,50 @@ def test_security_audit_retention_default_and_negative_rejection(monkeypatch):
     monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "-1")
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
         load_settings(_env_file=None)
+
+
+@pytest.mark.parametrize("form", ["bare", "comma", "json", "padded-comma"])
+def test_crypto_keys_accept_a_bare_key_a_comma_list_or_a_json_list(
+    monkeypatch: pytest.MonkeyPatch, form: str
+) -> None:
+    """The documented raw `Fernet.generate_key()` value must boot, not raise SettingsError."""
+    first, second = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    raw = {
+        "bare": first,
+        "comma": f"{first},{second}",
+        "json": f'["{first}", "{second}"]',
+        "padded-comma": f" {first} , {second} ",
+    }[form]
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", raw)
+
+    keys = [k.get_secret_value() for k in load_settings(_env_file=None).crypto.keys]
+
+    assert keys == ([first] if form == "bare" else [first, second])
+
+
+def test_crypto_keys_empty_env_means_no_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", "")
+
+    assert load_settings(_env_file=None).crypto.keys == ()
+
+
+def test_malformed_crypto_keys_json_never_echoes_key_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo in the JSON form must not print fragments of the keys in the boot error."""
+    from daimon.core.config import load_crypto_settings
+
+    first, second = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", f'["{first}", "{second}]')
+
+    for load in (lambda: load_settings(_env_file=None), load_crypto_settings):
+        with pytest.raises(Exception) as exc_info:
+            load()
+        rendered = f"{exc_info.value}\n{exc_info.value!r}"
+        for key in (first, second):
+            assert key[:12] not in rendered, "a key fragment leaked into the error"
+            assert key[-12:] not in rendered, "a key fragment leaked into the error"

@@ -88,13 +88,22 @@ async def _is_user_in_channel(client: AsyncWebClient, *, channel_id: str, user_i
 
 
 async def check_channel_access(
-    client: AsyncWebClient, *, channel: dict[str, Any], user_id: str
+    client: AsyncWebClient,
+    *,
+    channel: dict[str, Any],
+    user_id: str,
+    allow_own_im: bool = False,
 ) -> None:
     """Raise ToolError(MISSING_ACCESS) unless ``user_id`` may view ``channel``.
 
     ``channel`` is a ``conversations.info`` channel object. Public channels
     skip the membership scan for full members (one users.info call decides).
+    ``allow_own_im`` (send paths only) admits the 1:1 IM between daimon and
+    ``user_id`` -- the IM's ``user`` is that person -- so a turn can answer
+    its requester in their own DM; every other im/mpim stays refused.
     """
+    if allow_own_im and channel.get("is_im") and str(channel.get("user") or "") == user_id:
+        return
     is_im_or_mpim = bool(channel.get("is_im") or channel.get("is_mpim"))
     if is_im_or_mpim:
         raise ToolError(MISSING_ACCESS)

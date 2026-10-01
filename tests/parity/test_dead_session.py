@@ -12,13 +12,16 @@ rather than only at the core unit-test level
 Both platforms: Discord landed with the 06-06 cutover; the Slack scenario
 below was added once Slack's own cutover (06-07) closed its dead-session gap.
 The router fixture is platform-agnostic (it only fakes the `/v1/...` MA
-endpoints), so both scenarios share `_build_dead_session_router`.
+endpoints), so both scenarios share `_build_dead_session_router`. Teams runs
+the Discord half: both address a turn by its thread id alone.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
+import pytest
 from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -33,7 +36,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, build_turn_router
 from .drivers.discord_driver import DiscordDriver
+from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver
 
 # The Discord driver's `create_session` stub always returns this fixed session
 # id for the recreate call (see the `ma_session(...)` stub in
@@ -70,15 +75,17 @@ def _build_dead_session_router(tenant_id_str: str) -> MARouter:
     return router
 
 
+@pytest.mark.parametrize("platform", ["discord", "teams"])
 async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
+    platform: Literal["discord", "teams"],
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id = "900002001"
-    user_id = "555000222"
-    thread_id = "200000"
+    workspace_id, user_id, _parent, thread_id = thread_ids(
+        platform, workspace=900002001, user=555000222, thread=200000
+    )
 
-    tenant = await make_tenant(db_session, platform="discord", workspace_id=workspace_id)
+    tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     await tenant_ledger.insert_entry(
         db_session,
         tenant_id=tenant.id,
@@ -89,12 +96,12 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     # Identity resolution inside admit() is idempotent get-or-create -- pre-creating
     # here just lets the test learn the account_id up front to seed the live row.
     principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="discord", external_id=user_id
+        db_session, tenant_id=tenant.id, platform=platform, external_id=user_id
     )
     old_row = await create_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=principal.account_id,
         ma_session_id=_DEAD_SESSION_ID,
@@ -104,7 +111,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     await db_session.commit()
 
     router = _build_dead_session_router(str(tenant.id))
-    driver = DiscordDriver()
+    driver = DiscordDriver() if platform == "discord" else TeamsDriver()
     posted = await driver.dispatch_turn(
         sessionmaker=db_session_factory,
         router=router,
@@ -144,7 +151,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     live_row = await get_live_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=principal.account_id,
     )

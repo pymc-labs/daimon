@@ -8,7 +8,7 @@ own prompt and calls the same hook, so it gets the same card on every
 platform for free.
 
 The safe default is `no_confirmation_surface`: an adapter that has no way to
-show a card (Teams today, the CLI) answers `denied`, so a gated write is
+show a card (the CLI today) answers `denied`, so a gated write is
 refused with a plain message rather than run unseen.
 
 `PendingConfirmations` is the in-process rendezvous an adapter uses between

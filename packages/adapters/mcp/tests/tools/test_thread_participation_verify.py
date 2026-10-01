@@ -17,7 +17,7 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.discord import verify_participation_scope
+from daimon.adapters.mcp.tools.discord import resolve_visible_channel, verify_participation_scope
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
@@ -208,3 +208,15 @@ async def test_workspace_scope_needs_no_lookup() -> None:
         await verify_participation_scope(_runtime(), _auth(), ParticipationScope.WORKSPACE, None)
         is None
     )
+
+
+async def test_a_budget_on_a_thread_resolves_to_its_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_discord_http(monkeypatch, _handler())
+    assert await resolve_visible_channel(_runtime(), _auth(), THREAD) == PARENT
+    assert await resolve_visible_channel(_runtime(), _auth(), PARENT) == PARENT
+
+
+async def test_a_budget_on_a_hidden_thread_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_discord_http(monkeypatch, _handler(thread_type=12, member_of_thread=False))
+    with pytest.raises(ToolError, match="missing view_channel permission"):
+        await resolve_visible_channel(_runtime(), _auth(), THREAD)

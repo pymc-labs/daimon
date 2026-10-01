@@ -1,5 +1,5 @@
-"""PlatformDriver -- the typed entry-point surface shared by DiscordDriver
-and SlackDriver.
+"""PlatformDriver -- the typed entry-point surface shared by DiscordDriver,
+SlackDriver and TeamsDriver.
 
 Every method builds its own platform Runtime from the given `sessionmaker`
 + `router` (an MA transport fake); callers never construct a
@@ -29,6 +29,8 @@ from __future__ import annotations
 import uuid
 from typing import Literal, Protocol
 
+from anthropic import AsyncAnthropic
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.posted_controls import CardKind
 from daimon.core.purge import AccountPurgeResult
 from daimon.testing.ma import MARouter
@@ -67,6 +69,45 @@ action id or button label.
 def parity_account_id(tenant_id: uuid.UUID, user_id: str) -> uuid.UUID:
     """The account id both drivers act as for this (tenant, platform user)."""
     return uuid.uuid5(_PARITY_ACCOUNT_NAMESPACE, f"{tenant_id}:{user_id}")
+
+
+def platform_ids(platform: str, *, workspace: int, user: int, channel: int) -> tuple[str, str, str]:
+    """(workspace, user, channel) in the shape `platform` issues them.
+
+    Discord needs snowflakes and Slack takes any string; Teams tenants and users
+    are Entra UUIDs and its channels `19:…@thread.tacv2`.
+    """
+    if platform != "teams":
+        return str(workspace), str(user), str(channel)
+    return str(uuid.UUID(int=workspace)), str(uuid.UUID(int=user)), f"19:{channel}@thread.tacv2"
+
+
+def thread_ids(
+    platform: str, *, workspace: int, user: int, thread: int
+) -> tuple[str, str, str, str]:
+    """(workspace, user, parent channel, thread) of a thread-addressed platform.
+
+    `DiscordDriver` hangs a thread off channel `thread - 1`; a Teams thread is a
+    root post in its channel.
+    """
+    workspace_id, user_id, channel = platform_ids(
+        platform, workspace=workspace, user=user, channel=thread
+    )
+    if platform == "teams":
+        return workspace_id, user_id, channel, f"{channel};messageid=1"
+    return workspace_id, user_id, str(thread - 1), channel
+
+
+async def pin_agent(client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> str:
+    """The MA id a tool must be handed to act on `name`, read the way a real turn does.
+
+    `resolve_setup_agent` refuses an unpinned name, so a namesake recreated
+    since the caller last looked is never adopted silently.
+    """
+    agents = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    if not agents:
+        raise AssertionError(f"the router serves no agent named {name!r}")
+    return agents[0].id
 
 
 class PlatformDriver(Protocol):
@@ -127,8 +168,8 @@ class PlatformDriver(Protocol):
         new_name: str,
         account_id: uuid.UUID,
     ) -> None:
-        """Fork `source_name` into a new agent `new_name`, copying its
-        credential + repo binding."""
+        """Fork `source_name` into a new agent `new_name` (which starts with no
+        credential or repo binding)."""
         ...
 
     async def purge_account(

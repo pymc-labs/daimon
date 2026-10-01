@@ -9,15 +9,16 @@ sessions, folds each session's `span.model_request_end` events, and replays
 them through `record_turn_usage`.
 
 `record_turn_usage` is idempotent on (managed_session_id, event_id) — the same
-grain the live paths write — so the sweep can run every tick over the whole
-workspace and already-recorded sessions (Discord, scheduler, and previously
-swept headless ones) are pure no-ops. No need to distinguish "headless-only"
-sessions.
+grain the live paths write. A process-local watermark skips event reads for
+sessions unchanged since the previous successful pass (with a 15-minute
+overlap); startup and hourly passes read all stamped sessions. Already-recorded
+events are no-ops. No need to distinguish "headless-only" sessions.
 
 Attribution comes off the metadata `create_session` stamps on every session:
 `daimon_tenant` is the billed tenant (the tenant_ledger debit keys on it) and
 `daimon_account` resolves to the owning human's platform_user_id for per-member
-usage reporting.
+usage reporting. `daimon_budget_channel`, when present, is the channel whose
+budget the replayed spend counts toward.
 
 A session stamped `daimon_billing_exempt` was created for a `BillingExempt`
 caller (a headless run with no recorder, an MCP caller with no platform user).
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import structlog
@@ -46,6 +48,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -56,6 +59,17 @@ from daimon.core.usage_recording import record_turn_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+
+_OVERLAP = timedelta(minutes=15)
+_FULL_PASS_INTERVAL = timedelta(hours=1)
+
+
+@dataclass
+class UsageSweepWatermark:
+    """Successful pass starts retained for the scheduler process lifetime."""
+
+    last_successful_start: datetime | None = None
+    last_full_start: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +86,8 @@ async def sweep_headless_usage(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     markup: Decimal,
+    watermark: UsageSweepWatermark | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Fold span.model_request_end events from all tagged MA sessions into usage.
 
@@ -81,10 +97,21 @@ async def sweep_headless_usage(
     stamped `daimon_billing_exempt` are skipped too, after logging their
     would-be cost (see the module docstring).
 
-    ponytail: full workspace scan every call; bounded only by record_turn_usage's
-    idempotency. Add a `created_at_gte` watermark to sessions.list when session
-    volume makes re-reading every session's events too costly.
+    Session listing remains complete. After a successful pass, event reads skip
+    sessions last updated before its start minus 15 minutes. Startup and hourly
+    passes read all stamped sessions; failed passes do not advance the watermark.
     """
+    started_at = now or datetime.now(UTC)
+    full = (
+        watermark is None
+        or watermark.last_full_start is None
+        or started_at - watermark.last_full_start >= _FULL_PASS_INTERVAL
+    )
+    cutoff = (
+        None
+        if full or watermark is None or watermark.last_successful_start is None
+        else watermark.last_successful_start - _OVERLAP
+    )
     recorded = 0
     exempt_sessions = 0
     exempt_model_calls = 0
@@ -113,6 +140,8 @@ async def sweep_headless_usage(
             # are absent from this DB; recording them violates usage_events' FK and
             # is meaningless (not our tenant to bill). Skip.
             continue
+        if cutoff is not None and session.updated_at < cutoff:
+            continue
         exempt_reason = session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT)
         if exempt_reason is not None:
             absorbed = await _log_absorbed_usage(
@@ -131,6 +160,7 @@ async def sweep_headless_usage(
         )
         model_id = session.agent.model.id
         pricing = MODEL_PRICING.get(model_id)
+        channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
 
         async for event in client.beta.sessions.events.list(session.id, order="asc"):
             if event.type != "span.model_request_end":
@@ -144,8 +174,13 @@ async def sweep_headless_usage(
                 event=event,
                 markup=markup,
                 pricing=pricing,
+                channel_id=channel_id,
             )
             recorded += 1
+    if watermark is not None:
+        watermark.last_successful_start = started_at
+        if full:
+            watermark.last_full_start = started_at
     log.info(
         "usage_sweep.completed",
         recorded=recorded,
@@ -171,8 +206,8 @@ async def _log_absorbed_usage(
     model, then `debit_amount` with the deployment markup), so `cost_usd` and
     `would_be_debit_usd` are the figures the tenant would have been debited.
     An unknown model prices at zero, as the recorder does; `priced` says so.
-    The log is emitted on every pass that lists the session: sum it per
-    session id, not per line.
+    The log is emitted on every pass that reads the session's events: sum it
+    per session id, not per line.
     """
     model_id = session.agent.model.id
     pricing = MODEL_PRICING.get(model_id)

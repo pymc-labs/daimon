@@ -40,6 +40,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
 | `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>` |
+| `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
 | `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
@@ -90,6 +91,11 @@ The platform surfaces differ, and the difference is deliberate:
   directly rather than going through the MCP tool, because the Slack
   interaction carries the real user id while an agent's token does not
   (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`).
+- **Teams** `routines` (1:1 chat) matches Slack: admins create through a
+  dialog, and the panel writes the row the same way
+  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
+  shared rules (glyph, label, ordering, admin-or-creator) live in
+  `daimon.core.routines`.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -119,7 +125,8 @@ Each tick, 30 seconds apart by default:
    a persistent `RoutineDispatcher`. The tick returns without awaiting those
    turns. Its semaphore and in-flight registry span ticks, so a slow routine
    cannot hold up a later tick or overlap another run of itself.
-4. Housekeeping runs, then the loop sleeps interruptibly. Claimed work keeps its
+4. Housekeeping runs, including [promo credit](billing.md#promo-codes)
+   settlement, then the loop sleeps interruptibly. Claimed work keeps its
    eligibility while waiting for a dispatch slot, preserving the previous batch
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
@@ -295,10 +302,10 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 ## Who may do what
 
-| Action | MCP | Discord | Slack |
+| Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
-| create | any caller with a platform user identity | via the agent calling the tool | workspace admin only |
-| list / read last output | any caller in the tenant | `Manage Server`, and only the command's invoker | admin or the routine's creator |
+| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
+| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
@@ -309,9 +316,11 @@ routine is indistinguishable from one that does not exist. The Slack panel
 holds reading `last_result_tail` to the same bar as pausing, on the grounds
 that a scheduled run's output routinely carries business data.
 
-One asymmetry worth knowing: the MCP `list_routines` and `get_routine` tools
-are tenant-wide and ungated, so any authenticated caller in the tenant can
-read every routine, including other people's last output.
+The MCP `list_routines` and `get_routine` tools show a non-admin only the
+routines they created, so another member's trigger and last output (often a
+client's work) stay private. A routine runs with its agent's repo, keys,
+connectors and memory, which is why a member may only schedule the agent they
+are talking to or the one the destination channel answers with.
 
 ## When a run fails
 
@@ -319,7 +328,7 @@ There is no retry, no backoff, no failure counter and no disable-after-N. A
 failed run writes `last_error` and clears `last_result_tail`; a successful one
 does the reverse. Both columns are overwritten every run, so `last_error is
 not null` means exactly "the most recent run failed" — which is what the
-Discord and Slack panels render.
+Discord, Slack and Teams panels render.
 
 The next slot was already stamped at claim time, before the outcome was known,
 so a failing routine simply waits for its next slot and tries again, forever,
@@ -330,7 +339,7 @@ discovery is pull-only, through the `/routines` panel. The strings that land
 in `last_error` come from a small, closed set: `invoker_not_allowed` (the
 creator is no longer on the allowlist and not a stored admin),
 `access_policy_unreadable`, `balance_depleted`,
-`cap_exceeded`, `routine has no created_by_user_id`, `routine tenant not
+`cap_exceeded`, `channel_budget_exceeded`, `routine has no created_by_user_id`, `routine tenant not
 found`, `scheduler_shutdown`, `timeout: exceeded <n>s` from the outer guard, and otherwise
 `<ExceptionType>: <message>` truncated to 500 characters — a ceiling breach
 arrives as `TurnError: ceiling: …`.
@@ -345,9 +354,15 @@ the per-account MCP vault credential with them. Everything else is tuning:
 the six `DAIMON_SCHEDULER__*` settings in
 [configuration.md](configuration.md#scheduler).
 
-Per run, three gates still apply — the tenant's invoker allowlist, checked
-against the creator, the tenant's credit balance and the per-person monthly
-cap. See [billing.md](billing.md). Taking someone off the allowlist stops
+Per run, four gates still apply — the tenant's invoker allowlist, checked
+against the creator, the tenant's credit balance, the per-person monthly cap
+and, for a routine with a `channel_id`, that channel's budget, checked last,
+after the agent's channel pin. See [billing.md](billing.md#channel-budgets).
+A run refused by a budget records
+`channel_budget_exceeded` and the routine fires again at its next slot. A
+Discord thread destination saved before channel budgets existed has no
+`channel_id` until its destination is set again. Taking someone off the
+allowlist stops
 their routines at the next fire; the routine stays enabled and records
 `invoker_not_allowed`. A fire has no live platform role, so only the stored
 admin role exempts the creator.

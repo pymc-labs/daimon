@@ -41,6 +41,14 @@ from daimon.adapters.slack.attachments import (
     build_skipped_image_prefix,
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
+from daimon.adapters.slack.billing_panel.redeem import (
+    REDEEM_CALLBACK_ID,
+    RedeemDecision,
+    evaluate_redeem_submission,
+    handle_redeem_open,
+    run_redeem_submission,
+)
+from daimon.adapters.slack.billing_panel.views import REDEEM_OPEN_ACTION_ID
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -69,7 +77,11 @@ from daimon.adapters.slack.feedback import (
     handle_feedback_vote,
     run_feedback_text_submission,
 )
-from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
+from daimon.adapters.slack.gating import (
+    is_external_interactive,
+    is_slack_connect_external,
+    mentions_bot,
+)
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
@@ -109,6 +121,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -161,12 +174,16 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
-from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    build_handoff_notice,
+    render_turn_origin,
+    turn_origin,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -258,24 +275,6 @@ def _collect_files(events: list[dict[str, Any]]) -> list[SlackFile]:
     return [cast(SlackFile, f) for event in events for f in event.get("files", [])]
 
 
-def _build_session_state(continuity: ContinuityOutcome) -> SessionState:
-    """Turn a bind's `ContinuityOutcome` into the `<turn_controls>` fact block.
-
-    `lost` is derived from `transfer_kind` rather than carried on
-    `ContinuityOutcome` directly: a replacement's own transfer degrade ladder
-    (full/transcript/history) already says exactly what did not survive, and
-    repeating that vocabulary here is what keeps `render_turn_origin`'s
-    honesty instruction ("say what is missing before continuing") accurate.
-    """
-    if continuity.transfer_kind == "transcript":
-        lost: tuple[str, ...] = ("working files",)
-    elif continuity.transfer_kind == "history":
-        lost = ("working files", "earlier conversation")
-    else:
-        lost = ()
-    return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
-
-
 class SlackApp:
     """Socket Mode listener skeleton.
 
@@ -305,6 +304,9 @@ class SlackApp:
         self._mention_acks_pending: int = 0
         # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # Bot user id per workspace, resolved lazily via auth.test. The id is
+        # immutable for a given app+workspace, so the cache never invalidates.
+        self._bot_user_ids: dict[str, str] = {}
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
@@ -732,6 +734,34 @@ class SlackApp:
                             log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
 
                     self._spawn(_run_credential_submission())
+            elif cb_id == REDEEM_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _pr_decision = evaluate_redeem_submission(payload)
+                await (
+                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
+                        SocketModeResponse(
+                            envelope_id=req.envelope_id,
+                            payload=_pr_decision.response_payload,
+                        )
+                    )
+                )
+                if _pr_decision.proceed:
+                    _pr_team_info: dict[str, Any] = payload.get("team") or {}
+                    _pr_user_info: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_redeem(
+                        *,
+                        _t: str = str(_pr_team_info.get("id") or ""),
+                        _u: str = str(_pr_user_info.get("id") or ""),
+                        _d: RedeemDecision = _pr_decision,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_redeem_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
+                            )
+
+                    self._spawn(_run_redeem())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -870,6 +900,8 @@ class SlackApp:
                     self._spawn(handle_routine_action(self.runtime, payload))
                 elif action_id == "billing_topup":
                     self._spawn(handle_topup_select(self.runtime, payload))
+                elif action_id == REDEEM_OPEN_ACTION_ID:
+                    self._spawn(handle_redeem_open(self.runtime, payload))
                 elif action_id in (
                     "privacy_delete_open",
                     "privacy_export",
@@ -998,9 +1030,12 @@ class SlackApp:
         2. DEDUP: insert_if_new before any other work.
         3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
-        5. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
-        6. TENANT RESOLVE: derive_tenant_uuid.
-        7. Handoff to _orchestrate.
+        5. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
+           runs before the Connect gate so un-mentioned external senders are
+           dropped silently rather than sent a rejection ephemeral.
+        6. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
+        7. TENANT RESOLVE: derive_tenant_uuid.
+        8. Handoff to _orchestrate.
 
         The full handler body is wrapped in the listener-boundary catch
         (DaimonError | anthropic.APIError | SlackApiError).  Core helpers
@@ -1064,7 +1099,44 @@ class SlackApp:
                 token=token, retry_handlers=build_retry_handlers()
             )
 
-            # (4) SLACK CONNECT GATE — reject external-workspace senders.
+            # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
+            # app_mention events for un-mentioned thread replies; require the
+            # <@bot_user_id> token in the text (Discord parity). Runs BEFORE the
+            # Slack Connect gate so external senders who never addressed the bot
+            # are dropped silently instead of receiving a rejection ephemeral.
+            # The bot user id is resolved once per workspace via auth.test and
+            # cached. A failed resolution drops the event without the boundary's
+            # error reply: whether the event addressed the bot is unknown, so
+            # nothing is posted into a thread that may never have mentioned it.
+            # Dedup already recorded the event, so a Slack retry will not
+            # re-deliver it — accepted for this once-per-process call.
+            bot_user_id = self._bot_user_ids.get(team_id)
+            if bot_user_id is None:
+                try:
+                    auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+                except SlackApiError as exc:
+                    log.error(
+                        "slack.event_dropped.bot_user_id_unresolved",
+                        team_id=team_id,
+                        channel=channel,
+                        event_ts=event_ts,
+                        exc_info=exc,
+                    )
+                    capture_exception_with_scope(exc)
+                    return
+                bot_user_id = str(auth_resp.get("user_id") or "")
+                if bot_user_id:
+                    self._bot_user_ids[team_id] = bot_user_id
+            if not mentions_bot(event, bot_user_id=bot_user_id):
+                log.info(
+                    "slack.event_dropped.no_explicit_mention",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                )
+                return
+
+            # (5) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
@@ -1081,9 +1153,9 @@ class SlackApp:
                 )
                 return
 
-            # (5) TENANT RESOLVE — derived above, before the may-post check.
+            # (6) TENANT RESOLVE — derived above, before the may-post check.
 
-            # (6) Orchestration seam — turn body is delegated here.
+            # (7) Orchestration seam — turn body is delegated here.
             await self._orchestrate(
                 event,
                 team_id=team_id,
@@ -1624,6 +1696,22 @@ class SlackApp:
                         "A workspace admin can add you."
                     ),
                 )
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This agent only runs in the channels an operator pinned it to, "
+                        "so it can't answer here."
+                    ),
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1640,6 +1728,22 @@ class SlackApp:
                         f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
                         "credit is depleted. "
                         "An admin can top up with `/billing`."
+                    ),
+                )
+            elif err.reason == "channel_budget_exceeded":
+                log.info(
+                    "turn.skipped.over_channel_budget",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This channel has used its spending budget. "
+                        "A workspace admin can raise or clear it."
                     ),
                 )
             else:
@@ -1686,6 +1790,7 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -1894,7 +1999,7 @@ class SlackApp:
             # path so a plain turn's controls are byte-identical to before
             # this existed.
             session_state = (
-                _build_session_state(prepared.continuity)
+                prepared.continuity.session_state()
                 if prepared.continuity.state != "continued"
                 else None
             )
@@ -2110,6 +2215,7 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
+                    alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     tenant_id=tenant_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
@@ -2444,6 +2550,9 @@ class SlackApp:
             thread_id=thread_id,
             role=role,
             now=datetime.now(UTC),
+            # A continuation owed to a private DM conversation is a DM turn:
+            # outside every pin, with the DM memory rule.
+            is_dm=thread_id.startswith(DM_SCOPE_PREFIX),
         )
         # A timer runs only as the agent it was set with; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
@@ -2479,6 +2588,7 @@ class SlackApp:
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2523,26 +2633,13 @@ class SlackApp:
                 )
                 await _at_session.commit()
 
-        transfer_kind = follow_prepared.continuity.transfer_kind
-        workspace: Literal["transferred", "transcript_only", "history_only"]
-        not_carried: tuple[str, ...]
-        if transfer_kind == "full":
-            workspace, not_carried = "transferred", ()
-        elif transfer_kind == "transcript":
-            workspace, not_carried = "transcript_only", ("working files",)
-        else:
-            workspace, not_carried = (
-                "history_only",
-                ("working files", "earlier conversation"),
-            )
         handoff_notice = (
-            HandoffNotice(
-                from_name=from_name or "the previous agent",
-                from_ma_agent_id=from_ma_agent_id or "",
+            build_handoff_notice(
+                from_name=from_name,
+                from_ma_agent_id=from_ma_agent_id,
                 requested_by=f"<@{row.requester_external_user_id}>",
                 requested_work=seed_user_message,
-                workspace=workspace,
-                not_carried=not_carried,
+                transfer_kind=follow_prepared.continuity.transfer_kind,
             )
             if row.reason == "task_handoff"
             else None
@@ -2573,6 +2670,7 @@ class SlackApp:
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,

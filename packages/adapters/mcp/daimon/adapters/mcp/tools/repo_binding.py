@@ -23,6 +23,7 @@ import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 
 # The URL-shape rule and the agent resolution are the ones `request_repo_binding`
 # already applies; imported rather than re-spelled so the two chat entry points
@@ -123,6 +124,7 @@ async def _bind_public_repo_impl(
     agent_uuid, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
 
     is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     reachable = False
@@ -230,7 +232,7 @@ async def _bind_public_repo_impl(
 
 
 def register_repo_binding_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def bind_public_repo(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

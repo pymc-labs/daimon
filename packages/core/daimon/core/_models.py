@@ -349,6 +349,9 @@ class Routine(Base):
     # that only knows `last_result_tail` cannot change what gets posted.
     delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Channel the routine's spend is attributed to and budget-gated by: its
+    # destination's parent channel, resolved when the destination is set.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -752,6 +755,8 @@ class UsageEvent(Base):
         Integer, nullable=False, server_default=text("0")
     )
     event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Parent channel of the turn or tool call that spent it; NULL when unknown.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TenantUserCap(Base):
@@ -849,6 +854,13 @@ class TenantLedger(Base):
     __table_args__ = (
         Index("tenant_ledger_tenant_idx", "tenant_id"),
         Index("tenant_ledger_idem_idx", "idempotency_key", unique=True),
+        Index(
+            "tenant_ledger_tenant_channel_idx",
+            "tenant_id",
+            "channel_id",
+            "occurred_at",
+            postgresql_where=text("channel_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -860,9 +872,9 @@ class TenantLedger(Base):
         nullable=False,
     )
     delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reason: Mapped[str] = mapped_column(
-        Text, nullable=False
-    )  # topup|manual_credit|trial|turn_debit|charge.refunded|charge.dispute.created
+    # topup|manual_credit|trial|promo_credit|promo_expiry|promo_expiry_refund|*_debit|charge.*;
+    # see billing.md
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
@@ -871,6 +883,170 @@ class TenantLedger(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Set on debits only: the parent channel whose budget the spend counts against.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ChannelBudget(Base):
+    """A spend limit on one channel. No row = no limit.
+
+    Spend is the channel's ledger debits inside the window: `monthly` is the
+    current UTC calendar month, `total` everything since `starts_at` (or ever),
+    `fixed` the `[starts_at, ends_at)` range, outside which it does not gate.
+    """
+
+    __tablename__ = "channel_budgets"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "platform", "channel_id", name="uq_channel_budgets_tenant_channel"
+        ),
+        CheckConstraint("limit_usd >= 0", name="ck_channel_budgets_limit"),
+        CheckConstraint(
+            "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_channel_budgets_window"
+        ),
+        CheckConstraint(
+            "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
+            "AND starts_at < ends_at) "
+            "OR (\"window\" = 'total' AND ends_at IS NULL) "
+            "OR (\"window\" = 'monthly' AND starts_at IS NULL AND ends_at IS NULL)",
+            name="ck_channel_budgets_bounds",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PromoCode(Base):
+    """Deployment-level promo code an admin redeems for tenant credit.
+
+    Only the sha256 of the normalized code is stored: the operator sees the
+    code once, at creation. A `timed` code's credit exists only inside its
+    credit window; a `credit` code's does not expire.
+    """
+
+    __tablename__ = "promo_codes"
+    __table_args__ = (
+        Index("promo_codes_code_hash_idx", "code_hash", unique=True),
+        CheckConstraint(
+            "amount_usd > 0 AND amount_usd <= 999999.99", name="ck_promo_codes_amount_range"
+        ),
+        CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
+        CheckConstraint(
+            "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
+            " OR (kind = 'timed' AND credit_starts_at < credit_ends_at)",
+            name="ck_promo_codes_credit_window",
+        ),
+        CheckConstraint(
+            "redeem_starts_at IS NULL OR redeem_ends_at IS NULL"
+            " OR redeem_starts_at < redeem_ends_at",
+            name="ck_promo_codes_redeem_window",
+        ),
+        CheckConstraint(
+            "max_redemptions IS NULL OR max_redemptions > 0",
+            name="ck_promo_codes_max_redemptions",
+        ),
+        CheckConstraint(
+            "redeemed_count >= 0"
+            " AND (max_redemptions IS NULL OR redeemed_count <= max_redemptions)",
+            name="ck_promo_codes_redeemed_count",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    credit_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    credit_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    redeem_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    redeem_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_redemptions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    redeemed_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PromoRedemption(Base):
+    """One tenant's redemption of one promo code, and its grant/expiry state.
+
+    `granted_at` is when the credit reached the ledger (a timed code redeemed
+    before its window waits for the scheduler); `expired_at`/`expired_usd`
+    record the unspent remainder a timed code removed at its window's end,
+    and `reconciled_at` when late-recorded spend inside the window was
+    credited back out of that remainder.
+    The redeeming account is attribution only, severed by account erasure.
+    """
+
+    __tablename__ = "promo_redemptions"
+    __table_args__ = (
+        UniqueConstraint("promo_code_id", "tenant_id", name="uq_promo_redemptions_code_tenant"),
+        Index("promo_redemptions_tenant_idx", "tenant_id"),
+        CheckConstraint(
+            "expired_usd IS NULL OR expired_usd >= 0", name="ck_promo_redemptions_expired_usd"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    promo_code_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PromoRedeemFailure(Base):
+    """One refused redemption attempt, counted to throttle guessing per tenant."""
+
+    __tablename__ = "promo_redeem_failures"
+    __table_args__ = (Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AgentFile(Base):
@@ -1964,7 +2140,8 @@ class TurnOutcome(Base):
             "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
-            "'admission_balance_depleted', 'admission_cap_exceeded', 'admission_denied', "
+            "'admission_balance_depleted', 'admission_cap_exceeded', "
+            "'admission_channel_budget_exceeded', 'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
             "'unknown')",
@@ -2060,6 +2237,12 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The parent channel (and thread) /dm was run in; re-checked against seals
+    # each turn, and the DM's spend counts toward that channel's budget.
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Slack: channel:thread_ts of every copied message, so later thread seals match.
+    source_thread_keys: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     context: Mapped[str] = mapped_column(Text, nullable=False)
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

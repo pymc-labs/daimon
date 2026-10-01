@@ -21,7 +21,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import Message, TextBlock, Usage
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -31,6 +31,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -98,10 +99,12 @@ async def test_generate_thread_name_returns_title_and_meters_haiku_call_to_autho
         markup=Decimal("1.0"),
         max_input_chars=2000,
         timeout_seconds=5.0,
+        channel_id="chan-1",
     )
 
     assert name == "PyMC Divergences on M2 Mac", "the model's title is what the thread opens under"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [r.channel_id for r in rows] == ["chan-1"], "the title counts toward the channel"
     assert [(r.model, r.platform_user_id, r.input_tokens, r.managed_session_id) for r in rows] == [
         (THREAD_NAMING_MODEL, "555", 120, "thread-naming:4242")
     ], "the naming call must be metered to the tenant under the author, keyed on the message"

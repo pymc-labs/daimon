@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import anthropic
 from daimon.adapters.slack.credential_forms import (
     CRED_CALLBACK_PREFIX,
     CredentialSubmissionDecision,
@@ -47,9 +48,11 @@ from daimon.adapters.slack.credential_submissions import (
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.credential_requests import (
     CredentialRequestKind,
 )
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
 from daimon.core.posted_controls import (
@@ -111,6 +114,26 @@ async def start_mcp_oauth_from_click(
             user_id=user_id,
             text=_UNCONFIGURED_OAUTH,
             thread_ts=thread_ts,
+        )
+        return
+    try:
+        agent = await find_agent_by_derived_uuid(
+            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        )
+    except anthropic.APIError:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="I couldn't verify this agent. Nothing was saved; please try again.",
+            thread_ts=thread_ts,
+        )
+        return
+    async with runtime.sessionmaker() as session:
+        pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+    if pin_refusal is not None:
+        await post_ephemeral(
+            client, channel_id=channel_id, user_id=user_id, text=pin_refusal, thread_ts=thread_ts
         )
         return
     now = datetime.now(UTC)

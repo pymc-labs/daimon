@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import types
 import uuid
@@ -17,7 +18,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_resolver import ResolverCache
@@ -32,13 +33,14 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.tenants import set_provision_status
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.testing import (
     DEFAULT_MODEL_ID,
     ma_agent,
     ma_environment,
     ma_session,
 )
+from daimon.testing.factories import make_channel_budget
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -246,6 +248,66 @@ async def _setup_workspace_and_config(
 
 class TestNewThreadCreation:
     """Channel mentions create threads and run turns."""
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_tool_turn_starts_output_sweep_in_its_thread(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-output")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.send = AsyncMock(return_value=types.SimpleNamespace(id=1000, edit=AsyncMock()))
+        message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(
+                content=[
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id="tu_output",
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                    TextBlock(kind="text", text="Done"),
+                ]
+            )
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        with patch(
+            "daimon.adapters.discord.bot.deliver_session_outputs", new_callable=AsyncMock
+        ) as deliver:
+            await bot.on_message(message)
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+        deliver.assert_awaited_once()
+        assert deliver.await_args.args[1] is thread
+        assert deliver.await_args.kwargs["session_id"] == "sess-output"
 
     # TODO: migrate to MARouter transport-level fake
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -2271,3 +2333,39 @@ class TestUnpromptedAdmission:
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_exhausted_channel_budget_is_silent_when_unprompted_but_not_for_a_mention(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await tenant_ledger.insert_entry(
+            db_session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("10"),
+            reason="trial",
+            idempotency_key=f"trial:{tenant.id}",
+        )
+        await make_channel_budget(db_session, tenant=tenant, channel_id="789", limit_usd=Decimal(0))
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+
+        unprompted = _make_thread_message(content="and the priors?")
+        await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+        unprompted.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+        mention = _make_thread_message()
+        await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "spending budget" in sent, "a mention gets the channel budget notice"

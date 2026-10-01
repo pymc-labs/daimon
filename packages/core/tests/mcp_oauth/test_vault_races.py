@@ -44,6 +44,7 @@ from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
 from daimon.core.mcp_vault import ensure_agent_mcp_vault as real_ensure_agent_mcp_vault
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import McpOAuthFlowRow
@@ -408,6 +409,7 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
                     public_url=_PUBLIC_URL,
                     now=_NOW,
                     session_factory=factories[0],
+                    default=DeploymentDefault(agent_name="daimon", environment_name="default"),
                 )
             finally:
                 grant_done.set()

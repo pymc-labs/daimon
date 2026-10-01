@@ -5,13 +5,13 @@ turn chokepoint and the MCP channel tools evaluate it with the predicates
 below. Every field defaults to "open", so a tenant without a policy row
 behaves exactly as before the policy existed.
 
-Ids are platform-native strings (Discord snowflakes, Slack channel/user ids)
-for the tenant's own platform. Channels are named by id, never by name.
+Ids are platform-native strings (Discord snowflakes, Slack ids, Teams Entra
+object and conversation ids) for the tenant's own platform. Channels are named by id, never by name.
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TenantAccessPolicy(BaseModel):
@@ -29,6 +29,9 @@ class TenantAccessPolicy(BaseModel):
     sealed_channel_ids: tuple[str, ...] = ()
     # Whether turns started from a DM get read-only memory mounts.
     dm_memory_read_only: bool = False
+    # Agent name -> the only channels (and threads under them) it may run in.
+    # An agent not named here runs wherever the cascade sends it.
+    agent_channel_pins: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
@@ -74,3 +77,45 @@ def is_sealed(
     if channel_id in policy.sealed_channel_ids:
         return True
     return parent_channel_id is not None and parent_channel_id in policy.sealed_channel_ids
+
+
+def is_sealed_source(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:
+    """Whether a turn from `channel_id` (optionally `thread_id` under it) is inside a seal.
+
+    Covers a sealed channel, a thread under one, a sealed Discord thread by its
+    own id, and a Slack thread sealed on its own as ``channel_id:thread_ts``.
+    """
+    return is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id) or (
+        thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids
+    )
+
+
+def is_outside_agent_pin(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+) -> bool:
+    """Whether a pinned agent is being asked to run outside its channels.
+
+    Pass every name the responder answers to (the cascade's name and the
+    agent's own metadata name); a pin on any of them applies. A turn with no
+    channel (a DM, a headless run) is outside every pin. This predicate has no
+    admin exemption; callers grant one only where the output reaches the admin
+    alone (an admin's DM or hub turn -- see "Trust model" in
+    docs/architecture.md), and channel sends stay confined to the pin.
+    """
+    for name in agent_names:
+        if name is None or name not in policy.agent_channel_pins:
+            continue
+        pinned = policy.agent_channel_pins[name]
+        if channel_id is not None and channel_id in pinned:
+            continue
+        if parent_channel_id is not None and parent_channel_id in pinned:
+            continue
+        return True
+    return False
+
+
+DM_SCOPE_PREFIX = "dm:"

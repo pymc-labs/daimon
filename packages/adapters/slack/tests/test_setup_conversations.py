@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.admin import ADMIN_NOUN
 from daimon.adapters.slack.agent_setup.actions import handle_agent_setup_action
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.setup_conversations import (
     create_setup_conversation,
     handle_setup_lifecycle,
@@ -32,6 +32,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import build_setup_opener, setup_thread_name
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
