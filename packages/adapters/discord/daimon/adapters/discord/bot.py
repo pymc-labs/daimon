@@ -2526,7 +2526,7 @@ class DaimonBot(commands.Bot):
                         markup=self.runtime.settings.billing.markup,
                         max_input_chars=naming.max_input_chars,
                         timeout_seconds=naming.timeout_seconds,
-                        channel_id=admission.channel_id,
+                        channel_id=admission.budget_channel_id,
                     )
             thread = await message.create_thread(
                 name=thread_name,

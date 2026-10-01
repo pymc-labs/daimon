@@ -276,16 +276,17 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     args = {"tenant_id": tenant.id, "platform": "discord", "external_user_id": "user-1"}
 
     unbudgeted = await admit(deps, **args, channel_id="chan-1", now=_NOW)
-    assert unbudgeted.channel_id == "chan-1", "no budget row admits, and still attributes"
+    assert unbudgeted.budget_channel_id == "chan-1", "no budget row admits, and still attributes"
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
     dm = await admit(deps, **args, channel_id="dm-chan", is_dm=True, now=_NOW)
-    assert dm.channel_id is None, "a DM with no source channel is unattributed"
+    assert dm.budget_channel_id is None, "a DM with no source channel is unattributed"
     moved = await admit(
         deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-2", now=_NOW
     )
-    assert moved.channel_id == "chan-2", "a moved DM counts toward the channel it came from"
+    assert moved.budget_channel_id == "chan-2", "a moved DM counts toward the channel it came from"
+    assert moved.origin_channel_id == "dm-chan", "the seal still sees the DM, not its source"
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
             deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-1", now=_NOW

@@ -232,7 +232,7 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
-        budget_channel_id=admission.channel_id,
+        budget_channel_id=admission.budget_channel_id,
         origin_channel_id=admission.origin_channel_id,
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
@@ -379,7 +379,7 @@ def bind_recorder(
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
 
-    `channel_id` is `Admission.channel_id`: the channel whose budget the
+    `channel_id` is `Admission.budget_channel_id`: the channel whose budget the
     turn's spend counts toward.
     """
     if (observation := current_outcome.get()) is not None:
@@ -579,7 +579,7 @@ async def bind_session_impl(
             tenant_id=tenant_id,
             external_user_id=external_user_id,
             markup=deps.markup,
-            channel_id=admission.channel_id,
+            channel_id=admission.budget_channel_id,
         )
 
         # `SessionOps` is built here rather than at import time so that

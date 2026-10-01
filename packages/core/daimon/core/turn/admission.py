@@ -77,8 +77,9 @@ class Admission:
     origin_thread_id: str | None = None
     origin_seal_ids: frozenset[str] = frozenset()
     # Parent channel the turn's spend is attributed to; in a DM, the channel it
-    # was moved from, or None.
-    channel_id: str | None = None
+    # was moved from, or None. Apart from `origin_channel_id`, which drives the
+    # seal: a DM is budgeted to its source channel but never runs there.
+    budget_channel_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -333,5 +334,5 @@ async def admit_impl(
         agent=agent,
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
-        channel_id=budget_channel_id,
+        budget_channel_id=budget_channel_id,
     )

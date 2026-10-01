@@ -458,7 +458,7 @@ async def prepare_session_for_turn(
                 external_user_id=external_user_id,
                 ma_session_id=ma_session_id,
                 model_id=model_id,
-                channel_id=admission.channel_id,
+                channel_id=admission.budget_channel_id,
             ),
             continuity=continuity,
         )
