@@ -269,8 +269,12 @@ minted with "Use from your coding tools" in a sealed channel, or in a channel
 its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
 records that channel (`coding_token_channel`), and its calls run as a turn
 there -- under the channel's pin, seal, environment and budget, with its
-sessions stamped to the channel (`token_channel_id`). Keys minted anywhere
-else are unchanged. Operators edit the policy with the CLI:
+sessions stamped to the channel (`token_channel_id`). `authorize` sees it as
+the place of the key's turns (`mcp_place`) and as the read origin, nowhere
+else, and re-decides both at the moment of action; the seal is read right
+before a session is created, and a conversation opened before its channel was
+sealed can be read but not continued. Keys minted anywhere else are
+unchanged. Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -610,7 +614,8 @@ then, where it matters:
   publishing a pinned agent's reader needs an admin or an `origin_context_id`
   from inside its channels.
 - An agent-scoped key is never exempt as an admin inside `authorize`,
-  whoever minted it.
+  whoever minted it, and never holds its minter's channel admin grants
+  (`build_subject`), so a channel-bound key reaches no channel but its own.
 
 A demoted admin keeps their stored role until their next platform turn
 refreshes it; that is accepted.

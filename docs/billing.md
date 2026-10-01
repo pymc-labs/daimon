@@ -150,7 +150,8 @@ the MCP tools that start a turn (`_admit` in
 `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`), followed by the
 budget of the channel an agent key was minted in; the billed media
 tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
-channel, found from its `origin_context_id`. Each scheduled
+channel, found from its `origin_context_id` (or the key's own channel). A
+routine such a key saves without a destination records that channel. Each scheduled
 routine fire runs all three, the budget last against the routine's channel
 (after the agent pin check), and records the reason as that run's error
 instead of raising. Wakes pass through
