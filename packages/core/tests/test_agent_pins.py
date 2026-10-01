@@ -10,10 +10,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
-    is_pin_administered,
     request_pin_refusal,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -151,33 +149,6 @@ async def test_an_unreadable_policy_refuses(db_session: AsyncSession) -> None:
     agent = ma_agent(id="ag_acme", name="acme-project", tenant_id=tenant_id)
     row = _row(tenant_id=tenant_id, account_id=account_id, channel=_ACME, target_name=None)
     assert await request_pin_refusal(db_session, row=row, agent=agent) == POLICY_UNREADABLE_REFUSAL
-
-
-def test_only_an_admin_of_every_pinned_channel_writes_from_outside_the_pin() -> None:
-    policy = TenantAccessPolicy(
-        agent_channel_pins={"acme": (_ACME, "C_OPS"), "nowhere": (), "solo": (_ACME,)}
-    )
-
-    def refused(name: str, administered: set[str]) -> bool:
-        return not is_pin_administered(
-            policy, agent_names=(name, None), administered_channel_ids=administered
-        ) and not authorize(
-            policy,
-            subject=Subject(),
-            action=Action.CONFIGURE,
-            surface=Surface.CONFIG,
-            agent=AgentRef.of(name, None),
-            place=Place(channel_id=_CLIENT_B, parent_channel_id=_CLIENT_B),
-        )
-
-    assert refused("acme", {_ACME}), "the admin of one pinned channel of two is refused"
-    assert not refused("acme", {_ACME, "C_OPS", _CLIENT_B}), "the admin of both is let through"
-    assert not refused("solo", {_ACME}), "a single-channel pin needs only that channel"
-    assert refused("nowhere", {_ACME}), "a pin to no channel stays with server admins"
-    assert refused("solo", set()), "no grant, no exemption"
-    assert not is_pin_administered(
-        policy, agent_names=("unpinned",), administered_channel_ids={_ACME}
-    ), "an unpinned agent is not administered through a pin"
 
 
 async def test_a_channel_admins_request_from_outside_a_pin_they_run_is_applied(

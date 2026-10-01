@@ -12,16 +12,14 @@ and its names can't drift.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
-from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize
+from daimon.core.channel_admins import load_stored_subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import CredentialRequestRow, Role
+from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PIN_WRITE_REFUSAL = (
@@ -43,26 +41,6 @@ def agent_pin_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str 
     return (name, metadata.get(MA_METADATA_KEY_NAME))
 
 
-def is_pin_administered(
-    policy: TenantAccessPolicy,
-    *,
-    agent_names: tuple[str | None, ...],
-    administered_channel_ids: Collection[str],
-) -> bool:
-    """Whether the agent is pinned and every channel of every pin on it is administered.
-
-    A pin to no channel at all is nobody's: only a server admin edits that agent.
-    """
-    pins = [
-        policy.agent_channel_pins[name]
-        for name in agent_names
-        if name is not None and name in policy.agent_channel_pins
-    ]
-    return bool(pins) and all(
-        pin and frozenset(pin) <= frozenset(administered_channel_ids) for pin in pins
-    )
-
-
 async def request_pin_refusal(
     session: AsyncSession, *, row: CredentialRequestRow, agent: BetaManagedAgentsAgent | None
 ) -> str | None:
@@ -81,30 +59,22 @@ async def request_pin_refusal(
         return POLICY_UNREADABLE_REFUSAL
     if not policy.agent_channel_pins:
         return None
-    account = await get_account(session, row.account_id)
-    is_admin = account is not None and account.role is Role.ADMIN
-    names = None if agent is None else agent_pin_names(agent.name, agent.metadata)
-    administered: frozenset[str] = frozenset()
-    if account is not None and not is_admin and names is not None:
-        administered = await load_administered_channel_ids(
-            session,
-            tenant_id=row.tenant_id,
-            platform=row.platform or "",
-            caller=ChannelAdminCaller(
-                platform_user_id=row.requester_platform_user_id,
-                role_ids=frozenset(account.platform_role_ids),
-            ),
-        )
-    if names is not None and is_pin_administered(
-        policy, agent_names=names, administered_channel_ids=administered
-    ):
-        return None
     decision = authorize(
         policy,
-        subject=Subject(is_admin=is_admin),
+        subject=await load_stored_subject(
+            session,
+            tenant_id=row.tenant_id,
+            platform=row.platform,
+            account_id=row.account_id,
+            platform_user_id=row.requester_platform_user_id,
+        ),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
-        agent=AgentRef.unresolved() if names is None else AgentRef.of(*names),
+        agent=(
+            AgentRef.unresolved()
+            if agent is None
+            else AgentRef.of(*agent_pin_names(agent.name, agent.metadata))
+        ),
         place=Place.from_origin(
             parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id
         ),

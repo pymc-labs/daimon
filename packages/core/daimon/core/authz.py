@@ -24,10 +24,17 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   admin is the caller's trusted signal (`Subject.is_admin`): the live platform
   role for a platform turn, the stored role for a hub or form caller. Agent
   keys and tokens with no person behind them are never exempt.
+- **Channel admins** hold a server admin's rights, limited to the channels
+  they administer (`Subject.administered_channel_ids`, from stored grants;
+  never `is_admin`). Configuring a pinned agent is theirs when they
+  administer every channel of every pin on it; a pin to no channel stays
+  with server admins.
 - **Pinned sends**: wherever a pinned agent was admitted, it posts only into
   its pinned channels (and threads under them) or the requester's own DM,
   and sends direct messages only to the requester.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
+- **Channel default**: nobody makes a pinned agent the default of a channel
+  outside its pin, since it would refuse every turn there.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 
@@ -36,12 +43,12 @@ Nothing here does I/O; the callers load the policy and resolve the agent.
 Scope today: the pin decisions (turn admission, MCP and hub turns, routine
 save and fire, handoff, configuration writes and form submits), the caller
 gates of a platform turn and an MCP turn, pinned sends and direct messages,
-channel and session seal reads, and fork. Still decided outside this module,
-by the same `daimon.core.access_policy` predicates, and moving here next: the
-live protection and invoker checks in the scheduler, routine save and
-delivery and turn-reply protection; the admin sealed-read exemption on the
-hub; the OAuth no-request rule; and the shared-agent replace/remove table
-(`daimon.core.operation_policy`).
+channel and session seal reads, fork, and channel default binds. Still
+decided outside this module, by the same `daimon.core.access_policy`
+predicates, and moving here next: the live protection and invoker checks in
+the scheduler, routine save and delivery and turn-reply protection; the admin
+and channel admin sealed-read exemption on the hub; the OAuth no-request
+rule; and the shared-agent replace/remove table (`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
@@ -80,6 +87,8 @@ class Action(StrEnum):
     DIRECT_MESSAGE = "direct_message"
     # Copy an agent.
     FORK = "fork"
+    # Make an agent the default of one channel (`Place.channel_id`).
+    BIND_CHANNEL_DEFAULT = "bind_channel_default"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -109,11 +118,13 @@ class Subject:
     ``is_admin`` is the caller's trusted admin signal for this surface (see the
     module docstring); a caller that never trusts an admin -- an agent key, a
     bearer token -- passes False. ``platform_user_id`` is None for a token with
-    no person behind it.
+    no person behind it. ``administered_channel_ids`` are the channels a stored
+    channel admin grant gives the subject; a server admin needs none.
     """
 
     is_admin: bool = False
     platform_user_id: str | None = None
+    administered_channel_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -244,6 +255,21 @@ def _outside_pin(policy: TenantAccessPolicy, agent: AgentRef, place: Place) -> b
     )
 
 
+def _pin_administered(
+    policy: TenantAccessPolicy, agent: AgentRef, administered_channel_ids: frozenset[str]
+) -> bool:
+    """Whether every channel of every pin on any of the agent's names is administered.
+
+    False for an unpinned agent and for a pin to no channel, which is nobody's.
+    """
+    pins = [
+        policy.agent_channel_pins[name]
+        for name in agent.names
+        if name is not None and name in policy.agent_channel_pins
+    ]
+    return bool(pins) and all(pin and frozenset(pin) <= administered_channel_ids for pin in pins)
+
+
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
     if place.channel_id is None:
         return False
@@ -334,6 +360,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
+        if _pin_administered(policy, agent, subject.administered_channel_ids):
+            return ALLOW
+        if _outside_pin(policy, agent, place):
+            return _deny("agent_pinned_elsewhere")
+        return ALLOW
+
+    if req.action is Action.BIND_CHANNEL_DEFAULT:
         if _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
         return ALLOW

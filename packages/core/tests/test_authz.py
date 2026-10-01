@@ -3,7 +3,8 @@
 Each row names the guard it pins from `formal/access_control/AccessControl.tla`
 (`G_*`), so a rule that drifts from the model fails here by name. Rows record
 the rules as they stand on main; the model's still-open gaps (action-time
-re-checks, the report-reader variant) are not encoded here.
+re-checks, the report-reader variant) are not encoded here. The channel admin
+and channel default rows have no guard in the model yet.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ INVOKERS = TenantAccessPolicy(invoker_user_ids=("U_OK",))
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
 BEARER = Subject(is_admin=True, platform_user_id=None)
+ACME_CHANNEL_ADMIN = Subject(
+    platform_user_id="U_CA", administered_channel_ids=frozenset({"C_ACME"})
+)
+TWO_CHANNELS = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME", "C_OPS")})
 ACME = AgentRef.of("acme", "acme")
 ACME_DISPLAY = AgentRef.of("acme-config", "Acme Display", "acme-config")
 INSIDE = Place(channel_id="C_ACME", parent_channel_id="C_ACME")
@@ -196,6 +201,136 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "G_pin_write unpinned tenant",
         TenantAccessPolicy(),
         {"subject": MEMBER, "action": Action.CONFIGURE, "agent": AgentRef.unresolved()},
+        ALLOW,
+    ),
+    # --- channel admins: a server admin's rights, limited to their channels ---
+    (
+        "channel admin of every pinned channel configures from anywhere",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.CONFIGURE,
+            "agent": ACME,
+            "place": OUTSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin of one pinned channel of two",
+        TWO_CHANNELS,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.CONFIGURE,
+            "agent": ACME,
+            "place": OUTSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin needs every pinned name's channels",
+        TenantAccessPolicy(
+            agent_channel_pins={"acme-config": ("C_ACME",), "Acme Display": ("C_OPS",)}
+        ),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.CONFIGURE,
+            "agent": ACME_DISPLAY,
+            "place": OUTSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin and a pin to no channel fails closed",
+        NOWHERE,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.CONFIGURE,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin and a vanished target fails closed",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.CONFIGURE,
+            "agent": AgentRef.unresolved(),
+        },
+        _deny("agent_unresolved"),
+    ),
+    (
+        "channel admin gets no server admin turn exemption",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.RUN_AGENT,
+            "surface": Surface.HUB,
+            "agent": ACME,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin never forks",
+        TenantAccessPolicy(),
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.FORK, "agent": ACME},
+        _deny("admin_required"),
+    ),
+    # --- channel default: nobody binds a pinned agent outside its pin ---
+    (
+        "bind default outside the pin, even an admin",
+        PINNED,
+        {
+            "subject": ADMIN,
+            "action": Action.BIND_CHANNEL_DEFAULT,
+            "agent": ACME,
+            "place": Place(channel_id="C_OTHER"),
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "bind default under a display-name pin",
+        DISPLAY_PINNED,
+        {
+            "subject": ADMIN,
+            "action": Action.BIND_CHANNEL_DEFAULT,
+            "agent": ACME_DISPLAY,
+            "place": Place(channel_id="C_OTHER"),
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "bind default of an agent pinned nowhere",
+        NOWHERE,
+        {
+            "subject": ADMIN,
+            "action": Action.BIND_CHANNEL_DEFAULT,
+            "agent": ACME,
+            "place": Place(channel_id="C_ACME"),
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "bind default inside the pin",
+        PINNED,
+        {
+            "subject": MEMBER,
+            "action": Action.BIND_CHANNEL_DEFAULT,
+            "agent": ACME,
+            "place": Place(channel_id="C_ACME"),
+        },
+        ALLOW,
+    ),
+    (
+        "bind default of an unpinned agent",
+        TenantAccessPolicy(),
+        {
+            "subject": MEMBER,
+            "action": Action.BIND_CHANNEL_DEFAULT,
+            "agent": ACME,
+            "place": Place(channel_id="C_OTHER"),
+        },
         ALLOW,
     ),
     # --- pinned sends: a pinned agent posts only inside its pin ---

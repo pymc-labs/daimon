@@ -22,7 +22,6 @@ from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
     agent_pin_names,
-    is_pin_administered,
 )
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_admins import load_administered_channel_ids
@@ -82,7 +81,6 @@ async def require_pin_write_access(
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()
-    names = agent_pin_names(ma_agent.name, ma_agent.metadata)
     administered: frozenset[str] = frozenset()
     if trusted:
         async with runtime.session_factory() as session:
@@ -92,14 +90,14 @@ async def require_pin_write_access(
                 platform=auth.platform or "",
                 caller=channel_admin_caller(auth),
             )
-    if not is_pin_administered(
-        policy, agent_names=names, administered_channel_ids=administered
-    ) and not authorize(
+    if not authorize(
         policy,
-        subject=Subject(is_admin=False, platform_user_id=auth.platform_user_id),
+        subject=Subject(
+            platform_user_id=auth.platform_user_id, administered_channel_ids=administered
+        ),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
-        agent=AgentRef.of(*names),
+        agent=AgentRef.of(*agent_pin_names(ma_agent.name, ma_agent.metadata)),
         place=(
             Place.from_origin(
                 parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
