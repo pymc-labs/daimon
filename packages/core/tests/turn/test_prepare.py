@@ -445,6 +445,46 @@ async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     )
 
 
+async def test_bind_session_stamps_the_budget_channel_apart_from_the_origin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A DM turn runs in the DM but bills the channel it was opened from."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    session_bodies: list[dict[str, object]] = []
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        router=_router_with_session_create(session_bodies=session_bodies),
+    )
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="dm-chan",
+        budget_channel_id="chan-2",
+    )
+
+    await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="dm:1",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    metadata = session_bodies[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata.get("daimon_channel") == "dm-chan"
+    assert metadata.get("daimon_budget_channel") == "chan-2"
+
+
 async def test_bind_session_always_creates_fresh_session_when_reuse_existing_false(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

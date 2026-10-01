@@ -151,7 +151,8 @@ the MCP tools that start a turn (`_admit` in
 tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
 channel, found from its `origin_context_id`. Each scheduled
 routine fire runs all three, the budget last against the routine's channel
-(after the agent pin check), and records the reason as that run's error instead of raising. Wakes pass through
+(after the agent pin check), and records the reason as that run's error
+instead of raising. Wakes pass through
 chat admission, so all three apply. Discord's unprompted thread participation
 checks all three too, and skips silently, on the grounds that a billing
 notice is owed to someone who actually asked.
