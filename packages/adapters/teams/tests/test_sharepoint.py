@@ -256,6 +256,35 @@ async def test_a_refused_upload_marks_the_team_unavailable_until_the_recheck() -
     assert len(seen) == calls + 1, "the recheck probes the folder again"
 
 
+@pytest.mark.parametrize("private_first", [False, True])
+async def test_a_private_channel_is_unavailable_while_the_teams_standard_channel_works(
+    private_first: bool,
+) -> None:
+    """Access is per channel: a private channel has no folder in the team site, whatever ran first."""
+    private = "19:private@thread.tacv2"
+    routes = {
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/sites/{SITE_ID}/drive/root:/Planning"): _ok(
+            {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}
+        ),
+        ("GET", FILES_FOLDER): _denied,
+        ("GET", f"/v1.0/teams/{GROUP}/channels/{private}/filesFolder"): _denied,
+    }
+
+    async def standard_only(_: str) -> dict[str, str | None]:
+        return {CHANNEL: "Planning"}  # what Bot Framework lists once private ones are dropped
+
+    files = ChannelFiles(_sharepoint(routes, []), TeamGroups(_no_group), standard_only)
+    order = [_channel(channel_id=private), _channel()] if private_first else [_channel()]
+    results = [await files.is_available(inbound) for inbound in order]
+
+    assert results[-1], "the standard channel's folder is found"
+    assert not await files.is_available(_channel(channel_id=private)), (
+        "the private channel never inherits the standard channel's answer"
+    )
+    assert await files.is_available(_channel()), "nor does it mark the whole team unavailable"
+
+
 async def test_the_general_channel_folder_is_named_without_a_channel_lookup() -> None:
     """The General channel's id is the team's; its folder is `General`, no Bot Framework call."""
     seen: list[httpx.Request] = []

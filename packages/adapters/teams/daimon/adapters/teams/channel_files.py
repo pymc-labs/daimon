@@ -1,10 +1,12 @@
-"""Channel files for one deployment: whether they work per team, uploads, shared-file links.
+"""Channel files for one deployment: whether they work per channel, uploads, shared-file links.
 
 The shell around `sharepoint.SharePoint`. Each channel's folder is found once.
-What it learns per team is kept: a folder lookup or upload that succeeds marks
-the team's files available; a failed lookup, or an upload refused (401/403),
-marks them unavailable for `RECHECK_S`, so a grant an admin adds later is
-picked up without a restart. The turn context shows the agent that answer.
+What it learns per channel is kept: a folder lookup or upload that succeeds
+marks the channel's files available; a failed lookup, or an upload refused
+(401/403), marks them unavailable for `RECHECK_S`, so a grant an admin adds
+later is picked up without a restart. Per channel, not per team: a private or
+shared channel's folder is never found, though the team's is.
+The turn context shows the agent that answer.
 """
 
 from __future__ import annotations
@@ -52,18 +54,19 @@ class ChannelFiles:
         self._channel_names = channel_names
         self._clock = clock
         self._folders: dict[tuple[str, str], DriveFolder] = {}
-        self._access: dict[str, _Access] = {}
+        # (group, channel id) -> what the last folder lookup or upload there learned.
+        self._access: dict[tuple[str, str], _Access] = {}
 
-    def _known(self, group: str) -> bool | None:
-        access = self._access.get(group)
+    def _known(self, group: str, inbound: TeamsInbound) -> bool | None:
+        access = self._access.get((group, inbound.channel_id))
         if access is None or (
             not access.is_available and self._clock() - access.checked_at >= RECHECK_S
         ):
             return None
         return access.is_available
 
-    def _record(self, group: str, *, is_available: bool) -> None:
-        self._access[group] = _Access(is_available, self._clock())
+    def _record(self, group: str, inbound: TeamsInbound, *, is_available: bool) -> None:
+        self._access[group, inbound.channel_id] = _Access(is_available, self._clock())
 
     async def _group(self, inbound: TeamsInbound) -> str:
         return await self._teams.group_id(inbound.team_id, known=inbound.team_group_id)
@@ -76,30 +79,30 @@ class ChannelFiles:
             group = await self._group(inbound)
         except GraphUnavailable:
             return False
-        if (known := self._known(group)) is not None:
+        if (known := self._known(group, inbound)) is not None:
             return known
         try:
             await self._folder(inbound, group)
         except GraphUnavailable as err:
             log.info("teams.channel_files.unavailable", status=err.status, reason=err.reason)
-            self._record(group, is_available=False)
+            self._record(group, inbound, is_available=False)
             return False
-        self._record(group, is_available=True)
+        self._record(group, inbound, is_available=True)
         return True
 
     async def upload(self, inbound: TeamsInbound, name: str, content: bytes) -> DriveItem:
         """Save `content` in the channel's folder; `GraphUnavailable` if it cannot go there."""
         group = await self._group(inbound)
-        if self._known(group) is False:
+        if self._known(group, inbound) is False:
             raise GraphUnavailable("no SharePoint access", status=403)
         try:
             item = await self._sharepoint.upload(await self._folder(inbound, group), name, content)
         except GraphUnavailable as err:
             if err.status in (401, 403):
-                self._record(group, is_available=False)
+                self._record(group, inbound, is_available=False)
                 self._folders.pop((group, inbound.channel_id), None)
             raise
-        self._record(group, is_available=True)
+        self._record(group, inbound, is_available=True)
         return item
 
     async def resolve(self, media: ChannelMedia) -> ChannelMedia:
