@@ -123,4 +123,6 @@ class ThreadReader:
             log.warning("teams.media.unavailable", status=err.status, reason=err.reason)
             return None
         media = channel_media(message)
-        return await self._files.resolve(media) if self._files and media.files else media
+        if self._files is None or not media.files:
+            return media
+        return await self._files.resolve(media, group_id=group)

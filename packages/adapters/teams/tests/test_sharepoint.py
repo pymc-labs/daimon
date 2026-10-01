@@ -184,6 +184,7 @@ async def test_download_url_finds_a_shared_file_through_its_site_library() -> No
     }
     routes = {
         ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
         ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(drives),
         ("GET", "/v1.0/drives/b!drive-1/root:/Planning/q3 plan.xlsx"): _ok(
             {"id": "01Q3", "name": "q3 plan.xlsx", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
@@ -191,11 +192,54 @@ async def test_download_url_finds_a_shared_file_through_its_site_library() -> No
     }
     sharepoint = _sharepoint(routes, seen)
 
-    url = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx")
-    again = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx")
+    url = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx", group_id=GROUP)
+    again = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx", group_id=GROUP)
 
     assert url == again == DOWNLOAD_URL
-    assert len(seen) == 4, "the site's libraries are looked up once"
+    assert len(seen) == 5, "the sites and their libraries are looked up once"
+
+
+async def test_download_url_refuses_a_file_on_another_granted_site() -> None:
+    """App permissions reach every granted site; a link to one not the team's is not opened."""
+    seen: list[httpx.Request] = []
+    routes = {
+        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/finance"): _ok({"id": "other-site"}),
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
+    }
+    url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/payroll.xlsx"
+
+    with pytest.raises(GraphUnavailable, match="not the team's site"):
+        await _sharepoint(routes, seen).download_url(url, group_id=GROUP)
+    assert not any("drives" in r.url.path for r in seen), "nothing in that site is read"
+
+
+async def test_download_url_lists_the_libraries_again_when_none_holds_the_file() -> None:
+    """A library made after the first lookup is found by one fresh listing, not cached away."""
+    listings = [
+        {"value": [{"id": "b!drive-1", "webUrl": LIBRARY}]},
+        {"value": [{"id": "b!drive-2", "webUrl": "https://example.sharepoint.com/sites/team/New"}]},
+    ]
+    routes = {
+        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): lambda _: httpx.Response(
+            200, json=listings.pop(0)
+        ),
+        ("GET", "/v1.0/drives/b!drive-1/root:/a.csv"): _ok(
+            {"id": "01A", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
+        ),
+        ("GET", "/v1.0/drives/b!drive-2/root:/b.csv"): _ok(
+            {"id": "01B", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
+        ),
+    }
+    sharepoint = _sharepoint(routes, [])
+
+    await sharepoint.download_url(f"{LIBRARY}/a.csv", group_id=GROUP)
+    url = await sharepoint.download_url(
+        "https://example.sharepoint.com/sites/team/New/b.csv", group_id=GROUP
+    )
+
+    assert url == DOWNLOAD_URL, "the new library is found on the second listing"
 
 
 @pytest.mark.parametrize(
@@ -213,7 +257,7 @@ async def test_download_url_refuses_a_link_off_a_sharepoint_site_without_a_reque
     """Only a team site's file on a SharePoint host is looked up; the URL is untrusted input."""
     seen: list[httpx.Request] = []
     with pytest.raises(GraphUnavailable):
-        await _sharepoint({}, seen).download_url(content_url)
+        await _sharepoint({}, seen).download_url(content_url, group_id=GROUP)
     assert seen == [], "a refused link costs no call"
 
 
@@ -221,6 +265,7 @@ async def test_download_url_refuses_a_download_url_off_sharepoint() -> None:
     """The pre-authorised URL is fetched later, so it too must be on SharePoint."""
     routes = {
         ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
         ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(
             {"value": [{"id": "b!drive-1", "webUrl": LIBRARY}]}
         ),
@@ -229,7 +274,7 @@ async def test_download_url_refuses_a_download_url_off_sharepoint() -> None:
         ),
     }
     with pytest.raises(GraphUnavailable, match="no SharePoint download URL"):
-        await _sharepoint(routes, []).download_url(f"{LIBRARY}/q3.xlsx")
+        await _sharepoint(routes, []).download_url(f"{LIBRARY}/q3.xlsx", group_id=GROUP)
 
 
 async def test_a_refused_upload_marks_the_team_unavailable_until_the_recheck() -> None:
@@ -306,7 +351,7 @@ async def test_resolve_leaves_an_unreachable_shared_file_without_a_link() -> Non
     routes = {("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _denied}
     files = ChannelFiles(_sharepoint(routes, []), TeamGroups(_no_group), _no_names)
 
-    media = await files.resolve(ChannelMedia(files=(shared,)))
+    media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP)
 
     assert media.files == (shared,), "a refusal leaves the file as it was"
 

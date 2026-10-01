@@ -105,13 +105,13 @@ class ChannelFiles:
         self._record(group, inbound, is_available=True)
         return item
 
-    async def resolve(self, media: ChannelMedia) -> ChannelMedia:
-        """`media` with a download URL on each shared file Graph can reach."""
+    async def resolve(self, media: ChannelMedia, *, group_id: str) -> ChannelMedia:
+        """`media` with a download URL on each shared file Graph can reach in the team's site."""
         files: list[SharedFile] = []
         for file in media.files:
             if file.content_url and not file.download_url:
                 try:
-                    url = await self._sharepoint.download_url(file.content_url)
+                    url = await self._sharepoint.download_url(file.content_url, group_id=group_id)
                     file = dataclasses.replace(file, download_url=url)
                 except GraphUnavailable as err:
                     log.warning(

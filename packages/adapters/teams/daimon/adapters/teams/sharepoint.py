@@ -5,8 +5,9 @@ only through `/sites/...` and `/drives/...` paths; neither the Teams
 `filesFolder` call nor `/shares` lists it, so each has a site-path fallback.
 A channel's folder is `filesFolder` when Graph allows it, else the folder
 named after the channel in the team site's default library. A shared file is
-found by its URL: the site, then the library whose URL prefixes it, then the
-item, whose short-lived `downloadUrl` is pre-authorised. Uploads never
+found by its URL: the site, which must be the team's own, then the library
+whose URL prefixes it, then the item, whose short-lived `downloadUrl` is
+pre-authorised. Uploads never
 overwrite (`conflictBehavior=rename`); one over `SIMPLE_UPLOAD_MAX` goes
 through an upload session, whose URL must be on SharePoint and gets no token.
 Any failure raises `GraphUnavailable`.
@@ -95,8 +96,18 @@ class SharePoint:
     def __init__(self, graph: GraphClient, http: httpx.AsyncClient) -> None:
         self._graph = graph
         self._http = http
-        # Site path (`host/sites/x`) -> its libraries, for shared-file lookups.
+        # Group id -> its team site id; site path (`host/sites/x`) -> site id; site id -> libraries.
+        self._team_sites: dict[str, str] = {}
+        self._sites: dict[str, str] = {}
         self._drives: dict[str, list[_Drive]] = {}
+
+    async def _team_site(self, group_id: str) -> str:
+        if (site := self._team_sites.get(group_id)) is None:
+            data = await self._graph.send(
+                "GET", f"{GRAPH_ROOT}/groups/{path_segment(group_id)}/sites/root"
+            )
+            site = self._team_sites[group_id] = _parse(_Site, data).id
+        return site
 
     async def channel_folder(
         self, group_id: str, channel_id: str, *, channel_name: ChannelName
@@ -108,11 +119,9 @@ class SharePoint:
         except GraphUnavailable as err:
             if not _is_refusal(err):
                 raise
-            site = await self._graph.send(
-                "GET", f"{GRAPH_ROOT}/groups/{path_segment(group_id)}/sites/root"
-            )
+            site = await self._team_site(group_id)
             name = path_segment(await channel_name())
-            drive = f"{GRAPH_ROOT}/sites/{path_segment(_parse(_Site, site).id)}/drive"
+            drive = f"{GRAPH_ROOT}/sites/{path_segment(site)}/drive"
             item = _parse(DriveItem, await self._graph.send("GET", f"{drive}/root:/{name}"))
         if item.parent_reference is None or item.parent_reference.drive_id is None:
             raise GraphUnavailable("folder without a drive", status=200)
@@ -164,15 +173,19 @@ class SharePoint:
             raise GraphUnavailable("upload failed", status=response.status_code)
         raise GraphUnavailable("empty upload")
 
-    async def download_url(self, content_url: str) -> str:
-        """The pre-authorised download URL of the shared file at `content_url`."""
+    async def download_url(self, content_url: str, *, group_id: str) -> str:
+        """The pre-authorised download URL of the shared file at `content_url` in the team site."""
         url = httpx.URL(content_url)
         parts = url.path.strip("/").split("/")
         if not is_sharepoint_host(url) or len(parts) < 3 or parts[0] not in ("sites", "teams"):
             raise GraphUnavailable("not a SharePoint site file")
         if {".", ".."} & set(parts):
             raise GraphUnavailable("a relative path segment")
-        drive, relative = await self._library(url.host, "/".join(parts[:2]), url.path)
+        site = await self._site(url.host, "/".join(parts[:2]))
+        # The app may be granted other sites: only the team's own is this channel's.
+        if site.casefold() != (await self._team_site(group_id)).casefold():
+            raise GraphUnavailable("not the team's site", status=200)
+        drive, relative = await self._library(site, url.path)
         path = "/".join(path_segment(part) for part in relative.split("/"))
         data = await self._graph.send(
             "GET", f"{GRAPH_ROOT}/drives/{path_segment(drive)}/root:/{path}"
@@ -182,20 +195,34 @@ class SharePoint:
             raise GraphUnavailable("no SharePoint download URL", status=200)
         return download
 
-    async def _library(self, host: str, site_path: str, file_path: str) -> tuple[str, str]:
-        """`(drive id, path inside it)` for the library holding `file_path`."""
+    async def _site(self, host: str, site_path: str) -> str:
         key = f"{host}/{site_path}"
-        if (drives := self._drives.get(key)) is None:
+        if (site := self._sites.get(key)) is None:
             segments = "/".join(path_segment(part) for part in site_path.split("/"))
-            site = _parse(
-                _Site, await self._graph.send("GET", f"{GRAPH_ROOT}/sites/{host}:/{segments}")
-            )
-            listed = await self._graph.send(
-                "GET", f"{GRAPH_ROOT}/sites/{path_segment(site.id)}/drives"
-            )
-            drives = self._drives[key] = _parse(_Drives, listed).value
-        for drive in drives:
-            root = httpx.URL(drive.web_url).path.rstrip("/") + "/"
-            if file_path.casefold().startswith(root.casefold()):
-                return drive.id, file_path[len(root) :]
-        raise GraphUnavailable("no library holds the file", status=200)
+            data = await self._graph.send("GET", f"{GRAPH_ROOT}/sites/{host}:/{segments}")
+            site = self._sites[key] = _parse(_Site, data).id
+        return site
+
+    async def _list_drives(self, site: str) -> list[_Drive]:
+        listed = await self._graph.send("GET", f"{GRAPH_ROOT}/sites/{path_segment(site)}/drives")
+        drives = self._drives[site] = _parse(_Drives, listed).value
+        return drives
+
+    async def _library(self, site: str, file_path: str) -> tuple[str, str]:
+        """`(drive id, path inside it)` for the library holding `file_path`."""
+        cached = self._drives.get(site)
+        drives = cached if cached is not None else await self._list_drives(site)
+        found = _library_path(drives, file_path)
+        if found is None and cached is not None:
+            found = _library_path(await self._list_drives(site), file_path)  # a newer library
+        if found is None:
+            raise GraphUnavailable("no library holds the file", status=200)
+        return found
+
+
+def _library_path(drives: list[_Drive], file_path: str) -> tuple[str, str] | None:
+    for drive in drives:
+        root = httpx.URL(drive.web_url).path.rstrip("/") + "/"
+        if file_path.casefold().startswith(root.casefold()):
+            return drive.id, file_path[len(root) :]
+    return None

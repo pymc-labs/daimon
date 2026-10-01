@@ -105,6 +105,7 @@ GRANTED_SITE = {
         "parentReference": {"driveId": "b!drive-1"},
     },
     "/v1.0/sites/example.sharepoint.com:/sites/team": {"id": SITE_ID},
+    f"/v1.0/groups/{TEAM_GROUP_ID}/sites/root": {"id": SITE_ID},
     f"/v1.0/sites/{SITE_ID}/drives": {
         "value": [
             {
