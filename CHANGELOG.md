@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   members) and `/memory`; inside it only they show. Its messages are readable
   only from inside it, posts and routines don't cross its line, and a turn
   there answers only with its own agent. `/dm` there is refused. Ending
-  isolation warns that memory built meanwhile becomes visible. Nothing changes
+  isolation warns that its agents keep the memory they built there. Nothing changes
   until a channel is isolated. Clear isolation before rolling back: an older
   release rejects the new policy field.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess

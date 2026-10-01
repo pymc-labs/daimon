@@ -58,8 +58,8 @@ IsolationRefusal = Literal[
 ]
 
 END_ISOLATION_WARNING = (
-    "Memory its agents built while it was isolated becomes visible to the agents that "
-    "answer there next."
+    "Each of its agents keeps its own memory: once the channel is open they can answer "
+    "elsewhere and bring what they remembered here, and /memory shows it outside the channel."
 )
 
 
