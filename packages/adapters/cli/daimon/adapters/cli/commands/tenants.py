@@ -38,6 +38,7 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
+from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -412,29 +413,30 @@ async def _require_isolatable(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    platform: str,
     current: TenantAccessPolicy,
-    isolated: tuple[str, ...],
+    policy: TenantAccessPolicy,
 ) -> None:
-    """Exit unless every newly isolated channel has an agent of its own and nothing
-    crossing its line. Run under the policy lock, in the transaction that writes."""
-    for channel_id in (c for c in isolated if c not in current.isolated_channel_ids):
+    """Exit unless every newly isolated channel's default agent is its own in `policy`.
+
+    Run under the policy lock, in the transaction that writes.
+    """
+    added = [c for c in policy.isolated_channel_ids if c not in current.isolated_channel_ids]
+    for channel_id in added:
         refused = await isolation_refusal(
             rt.anthropic,
             session,
             tenant_id=tenant_id,
+            platform=platform,
             channel_id=channel_id,
-            isolated_ids=isolated,
+            policy=policy,
             default=rt.deployment_default,
         )
         if refused is not None:
-            hint = (
-                ""
-                if refused.reason == "work_crosses_line"
-                else " The setup panel's Isolate with a copy, or set_channel_isolation "
-                "with fork_from, makes one."
-            )
             console.print(
-                f"[red]{channel_id}: {escape(str(refused))}{hint} Nothing was changed.[/red]"
+                f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
+                "alone in the same command, or use the setup panel's Isolate or "
+                "set_channel_isolation, which do both. Nothing was changed.[/red]"
             )
             raise typer.Exit(1)
 
@@ -506,8 +508,8 @@ def tenants_access_policy_set_command(
         list[str] | None,
         typer.Option(
             help=(
-                "Channel id whose own agents stay inside it (repeatable). Each needs an agent "
-                "set as its default that answers nowhere else and is not built in."
+                "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
+                "and its default agent pinned to it alone, answering nowhere else."
             )
         ),
     ] = None,
@@ -798,7 +800,6 @@ async def tenants_access_policy_set(
 
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
-    isolated = cast("tuple[str, ...] | None", changes.get("isolated_channel_ids"))
     named = set(pins_to_add) | set(
         cast("dict[str, tuple[str, ...]]", changes.get("agent_channel_pins", {}))
     )
@@ -844,10 +845,6 @@ async def tenants_access_policy_set(
             # blind; --clear is the way out of that state.
             current = previous = await load_access_policy(session, tenant_id=tenant_id)
             before = current.agent_channel_pins
-            if isolated:
-                await _require_isolatable(
-                    rt, console, session, tenant_id=tenant_id, current=current, isolated=isolated
-                )
             if edits_pins:
                 changes["agent_channel_pins"] = _merge_pins(
                     current.agent_channel_pins, add=pins_to_add, remove=pins_to_remove
@@ -863,7 +860,21 @@ async def tenants_access_policy_set(
                         f"{', '.join(dropped)}. Use --add-pin-agent to keep them, or "
                         "--replace-pins to drop them. Nothing was changed."
                     )
-            policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
+            try:
+                policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
+            except ValidationError as exc:
+                message = "; ".join(str(error["msg"]) for error in exc.errors())
+                raise typer.BadParameter(f"{message}. Nothing was changed.") from None
+            if policy.isolated_channel_ids:
+                await _require_isolatable(
+                    rt,
+                    console,
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    current=current,
+                    policy=policy,
+                )
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
     _warn_ended_isolation(previous, policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)

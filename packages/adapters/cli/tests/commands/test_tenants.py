@@ -943,6 +943,14 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
         settings=_FakeSettings(),
     )
 
+    with pytest.raises(typer.BadParameter, match="must also be sealed"):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="iso",
+            isolated_channel=[local],
+        )
     console = _make_console()
     with pytest.raises(typer.Exit):
         await tenants_access_policy_set(
@@ -950,26 +958,46 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
             console=console,
             platform="discord",
             external_id="iso",
+            sealed_channel=[local, shared],
             isolated_channel=[local, shared],
+            add_pin_agent=[f"local={local}", f"shared={shared}"],
         )
     assert "also answers outside this channel" in _output(console), _output(console)
     assert await _policy(db_session_factory, workspace_id="iso") == OPEN_ACCESS_POLICY, (
         "a refusal writes nothing"
     )
+    console = _make_console()
+    with pytest.raises(typer.Exit):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=console,
+            platform="discord",
+            external_id="iso",
+            sealed_channel=[local],
+            isolated_channel=[local],
+        )
+    assert "is not one of them" in _output(console), "its agent must be pinned to it"
 
     await tenants_access_policy_set(
         rt=rt,
         console=_make_console(),
         platform="discord",
         external_id="iso",
+        sealed_channel=[local],
         isolated_channel=[local],
+        add_pin_agent=[f"local={local}"],
     )
     policy = await _policy(db_session_factory, workspace_id="iso")
     assert policy.isolated_channel_ids == (local,), "its own agent answers only there"
     assert "Isolation ended" not in capsys.readouterr().err
 
     await tenants_access_policy_set(
-        rt=rt, console=_make_console(), platform="discord", external_id="iso", clear=True
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="iso",
+        clear=True,
+        replace_pins=True,
     )
     assert f"Isolation ended for {local}" in capsys.readouterr().err, "ending it warns"
 

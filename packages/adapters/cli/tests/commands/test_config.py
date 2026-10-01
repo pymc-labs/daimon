@@ -440,7 +440,13 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
         db_session, scope=other, tenant_id=tenant.id, agent_name="shared", mode="agent"
     )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
     )
 
     async def run(action: str, scope_str: str, value: str = "") -> str:
