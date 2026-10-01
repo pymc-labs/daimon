@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Collection, Iterable, Sequence
 from typing import Final
 
+from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     administered_channel_ids,
@@ -297,20 +298,25 @@ async def may_bind_as_channel_default(
     *,
     tenant_id: uuid.UUID,
     platform: str,
+    channel_id: str,
     agent_names: tuple[str, ...],
     ma_agent_id: str | None,
     default: DeploymentDefault,
     caller: ChannelAdminCaller,
     is_daimon_managed: bool,
+    policy: TenantAccessPolicy,
 ) -> bool:
-    """Whether `caller` may make the agent the default of a channel they run.
+    """Whether `caller` may make the agent the default of `channel_id`.
 
-    Server admins bind anything. A channel admin binds only
+    Nobody binds an agent pinned elsewhere: admission would refuse every turn
+    there. Otherwise server admins bind anything. A channel admin binds only
     agents shared by design (tenant-wide or defaults-managed, which stay
     read-only to them) or agents already local to them, one answering nowhere
     included. Never another channel's own agent: that would lend its keys and
     memory to this channel and take its edit rights from that channel's admins.
     """
+    if is_outside_agent_pin(policy, agent_names=agent_names, channel_id=channel_id):
+        return False
     if caller.is_server_admin or is_daimon_managed:
         return True
     reach = await load_agent_reach(
