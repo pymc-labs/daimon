@@ -381,9 +381,10 @@ An integration can issue codes over MCP with an operator token holding
 `promo:create` (see [architecture](architecture.md#operator-tokens)):
 `create_promo_code`, `list_promo_codes` and `revoke_promo_code` take the same
 terms as `daimon promo`, and no server admin sees them. A token minted with
-`--max-issued-usd` may issue at most that much credit in total, counted as
-`amount_usd × max_redemptions` per code (so `max_redemptions` is required);
-`mcp_tokens.issued_usd` tracks the total, and revoking a code gives none back.
+`--max-issued-usd` (whole cents) may issue at most that much credit in total,
+counted as `amount_usd × max_redemptions` per code (so `max_redemptions` is
+required); `mcp_tokens.issued_usd` tracks the total, and revoking a code gives
+none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 
 ## The tables
 

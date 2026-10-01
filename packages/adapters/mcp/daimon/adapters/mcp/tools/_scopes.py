@@ -8,7 +8,7 @@ the scope (``IdentityMiddleware`` disables every other tool for it), and
 whatever the tool checks next.
 
 To open a later ``channels:write`` tool (channel admins, isolation,
-environment, channel agent) to operator tokens: tag it
+environment) to operator tokens: tag it
 ``{"admin", *scope_tags("channels:write")}``, call
 ``require_scope(auth, "channels:write")`` first, and list it under the scope
 in docs/architecture.md. The verifier, the middleware filter and the audit
