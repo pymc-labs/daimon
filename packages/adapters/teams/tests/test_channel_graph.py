@@ -181,13 +181,18 @@ def _texts(fake: TeamsApiFake) -> str:
 
 
 def test_a_channel_message_keeps_its_team_for_the_graph_lookup() -> None:
-    activity = MessageActivity.model_validate(_load("channel_media_reply"))
-    inbound = parse_inbound(
-        activity, configured_tenant=ENTRA_TENANT_ID, service_url=activity.service_url
-    )
-    assert isinstance(inbound, TeamsInbound)
-    assert inbound.team_id == "19:team@thread.tacv2"
-    assert inbound.team_group_id is None, "channel messages omit aadGroupId; it is looked up"
+    """As captured, a channel activity names its team's group; one without it is looked up."""
+    for name, group in (
+        ("channel_attachments_reply", TEAM_GROUP_ID),
+        ("channel_media_reply", None),
+    ):
+        activity = MessageActivity.model_validate(_load(name))
+        inbound = parse_inbound(
+            activity, configured_tenant=ENTRA_TENANT_ID, service_url=activity.service_url
+        )
+        assert isinstance(inbound, TeamsInbound)
+        assert inbound.team_id == "19:team@thread.tacv2"
+        assert inbound.team_group_id == group
 
 
 async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains_the_file(
@@ -278,6 +283,16 @@ async def test_without_graph_the_turn_runs_and_the_person_hears_what_was_missed(
         "I couldn't read a pasted image (I can't read this channel's messages), "
         "a shared file (files shared in channels need a 1:1 chat)."
     ) in _texts(teams_api_fake), "never a silent drop"
+
+
+async def test_without_graph_the_agent_knows_a_channel_messages_media_went_unread(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The captured activity names no media, so only the agent is told, not the person."""
+    [turn] = await _run(db_session_factory, teams_api_fake, _load("channel_attachments_reply"))
+
+    assert "images and files could not be read" in turn["user_message"]
+    assert "couldn't read" not in _texts(teams_api_fake), "no notice on every text-only message"
 
 
 async def test_a_bare_mention_runs_over_the_replayed_thread(

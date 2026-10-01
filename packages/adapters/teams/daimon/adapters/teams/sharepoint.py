@@ -175,7 +175,11 @@ class SharePoint:
 
     async def download_url(self, content_url: str, *, group_id: str) -> str:
         """The pre-authorised download URL of the shared file at `content_url` in the team site."""
-        url = httpx.URL(content_url)
+        # Teams sends the path unencoded: a `#` or `?` there is part of the file's name.
+        try:
+            url = httpx.URL(content_url.replace("#", "%23").replace("?", "%3F"))
+        except httpx.InvalidURL as err:
+            raise GraphUnavailable("not a URL") from err
         parts = url.path.strip("/").split("/")
         if not is_sharepoint_host(url) or len(parts) < 3 or parts[0] not in ("sites", "teams"):
             raise GraphUnavailable("not a SharePoint site file")

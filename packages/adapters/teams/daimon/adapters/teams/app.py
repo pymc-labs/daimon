@@ -868,6 +868,7 @@ class TeamsApp:
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
+            channel=inbound.kind == "channel",
             # A channel activity carries only the text: its media are on Graph's copy.
             channel_media=await reader.read_media(inbound) if reader else None,
             graph_token=reader.token if reader else None,

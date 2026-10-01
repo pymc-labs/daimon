@@ -251,6 +251,7 @@ async def prepare_attachments(
     *,
     bot_token: BotToken,
     service_url: str | None,
+    channel: bool = False,
     channel_media: ChannelMedia | None = None,
     graph_token: BotToken | None = None,
 ) -> PreparedAttachments:
@@ -271,6 +272,12 @@ async def prepare_attachments(
     blocks: list[BetaManagedAgentsImageBlockParam] = []
     lines: list[str] = []
     unread: list[str] = []
+    if channel and channel_media is None and not unnamed:
+        # The activity names no media, so whether any were missed is unknown.
+        lines.append(
+            "[attachment] This channel message's images and files could not be read; "
+            "say so if the person refers to one."
+        )
     for file in unnamed:
         image = file.kind == "embedded_image"
         what = "an image" if image else "a file"

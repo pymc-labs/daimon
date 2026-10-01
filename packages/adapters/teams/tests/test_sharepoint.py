@@ -199,6 +199,27 @@ async def test_download_url_finds_a_shared_file_through_its_site_library() -> No
     assert len(seen) == 5, "the sites and their libraries are looked up once"
 
 
+async def test_download_url_reads_the_unencoded_path_teams_sends() -> None:
+    """As captured, a channel file's `contentUrl` is not percent-encoded: `#` is in the name."""
+    routes = {
+        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
+        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(
+            {"value": [{"id": "b!d", "webUrl": LIBRARY}]}
+        ),
+        ("GET", "/v1.0/drives/b!d/root:/Daimon Testing/q3 #2?.xlsx"): _ok(
+            {"id": "01Q3", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
+        ),
+    }
+    content_url = (
+        "https://example.sharepoint.com/sites/team/Shared Documents/Daimon Testing/q3 #2?.xlsx"
+    )
+
+    url = await _sharepoint(routes, []).download_url(content_url, group_id=GROUP)
+
+    assert url == DOWNLOAD_URL
+
+
 async def test_download_url_refuses_a_file_on_another_granted_site() -> None:
     """App permissions reach every granted site; a link to one not the team's is not opened."""
     seen: list[httpx.Request] = []
@@ -249,6 +270,7 @@ async def test_download_url_lists_the_libraries_again_when_none_holds_the_file()
         "http://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx",
         "https://example.sharepoint.com/personal/u/Documents/q3.xlsx",
         "https://example.sharepoint.com/sites/team/Shared%20Documents/%2e%2e/%2e%2e/q3.xlsx",
+        "https://example.sharepoint.com/sites/team/Shared Documents/q3\x00.xlsx",
     ],
 )
 async def test_download_url_refuses_a_link_off_a_sharepoint_site_without_a_request(

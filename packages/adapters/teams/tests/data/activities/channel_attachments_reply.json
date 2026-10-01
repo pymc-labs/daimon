@@ -11,6 +11,7 @@
       "id": "19:channel-1@thread.tacv2"
     },
     "team": {
+      "aadGroupId": "00000000-0000-0000-0000-000000007ea3",
       "id": "19:team@thread.tacv2"
     },
     "tenant": {
