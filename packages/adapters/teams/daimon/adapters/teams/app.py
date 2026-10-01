@@ -52,7 +52,7 @@ from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
-from daimon.core.continuity.continuation import check_wake_responder
+from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -928,7 +928,8 @@ class TeamsApp:
             log.error("teams.continuation.dispatch_failed", conversation_id=key, exc_info=exc)
 
     async def _asking_agent_id(self, row: TaskContinuationRow, tenant_id: uuid.UUID) -> str | None:
-        """The agent of the requester's live session here, which a private input resumes."""
+        """The agent that asked for a private input, while the requester's live session is
+        still with it (`load_asking_agent_id`)."""
         if row.reason != "private_input_applied":
             return None
         async with self.runtime.sessionmaker() as session:
@@ -939,7 +940,9 @@ class TeamsApp:
                 thread_id=row.thread_id,
                 account_id=row.requester_account_id,
             )
-        return live.ma_agent_id if live is not None else None
+            return await load_asking_agent_id(
+                session, row, live_ma_agent_id=live.ma_agent_id if live is not None else None
+            )
 
     async def _run_continuation(
         self,
