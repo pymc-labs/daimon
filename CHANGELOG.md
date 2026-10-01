@@ -296,6 +296,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn that only ran tools ("✅ Done.") and failure notices no longer end with
   the agent, time, token, cost and balance line. The feedback buttons stay on
   the last part of the answer.
+- **Teams agents know how file delivery works there.** The guidance block
+  every agent gets now has a Teams paragraph: in a 1:1 chat, saving a file
+  under `/mnt/session/outputs` is the delivery path, with Slack's write rules,
+  and the person accepts it from a download card; in a channel no file can be
+  attached, so the agent says so once in its reply, pastes short text inline
+  or points to a 1:1 chat. Channel threads no longer get a separate note per
+  file. `send_message`'s refusal of files on Teams now says where files go
+  instead of "not available yet". Agents pick it up at their next reconcile
+  or edit.
 
 - A handoff or private-input continuation whose process dies mid-dispatch is
   no longer stuck in `claimed`: it is retried if its turn had not started, and
