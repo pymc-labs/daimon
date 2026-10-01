@@ -29,6 +29,7 @@ sealed (docs/architecture.md, "Trust model").
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
@@ -38,7 +39,10 @@ from daimon.adapters.mcp.hub.identity import (
     _hub_auth,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._ctx import (
+    _admission_recheck,  # pyright: ignore[reportPrivateUsage]
+    _admit,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
     admin_readable_legacy_sessions,
@@ -211,11 +215,14 @@ async def _list_my_sessions_impl(
 def register_hub_tools(
     mcp: FastMCP, runtime: McpRuntime, *, billing_config: BillingConfig | None
 ) -> None:
-    async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> tuple[AuthIdentity, bool]:
-        """Admit a hub turn; returns the identity and whether the caller is an admin.
+    async def _admitted(
+        ctx: Context, daimon_id: str, tool_name: str
+    ) -> tuple[AuthIdentity, bool, Callable[[], Awaitable[None]]]:
+        """Admit a hub turn; returns the identity, whether the caller is an admin,
+        and the re-check the turn runs right before its create and send.
 
         One live-admin decision per call serves both the pin exemption and
-        sealed-session access.
+        sealed-session access; the re-check reads the stored role again.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         is_admin = await hub_caller_is_admin(runtime, auth)
@@ -231,7 +238,14 @@ def register_hub_tools(
             agent_names=names,
             pin_exempt=is_admin,
         )
-        return admitted, is_admin
+        recheck = _admission_recheck(
+            admitted,
+            sessionmaker=runtime.session_factory,
+            tool_name=tool_name,
+            agent_names=names,
+            pin_exempt=is_admin,
+        )
+        return admitted, is_admin, recheck
 
     async def _read_mode(auth: AuthIdentity) -> Literal["read"] | None:
         return "read" if await hub_caller_is_admin(runtime, auth) else None
@@ -268,11 +282,13 @@ def register_hub_tools(
         result to continue the same conversation. On timeout the error carries
         the handle; resume with it rather than asking again.
         """
-        auth, is_admin = await _admitted(ctx, daimon_id, "ask")
+        auth, is_admin, recheck = await _admitted(ctx, daimon_id, "ask")
         with admin_sealed_access("continue" if is_admin else None):
             if handle is not None:
                 await _verify_account_owns_session(runtime, auth, handle)
-            return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
+            return _ask_tool_result(
+                await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck)
+            )
 
     @mcp.tool
     async def start_turn(  # pyright: ignore[reportUnusedFunction]
@@ -282,18 +298,18 @@ def register_hub_tools(
 
         Returns ``{"handle": ...}`` for polling with ``get_session``.
         """
-        auth, _ = await _admitted(ctx, daimon_id, "start_turn")
-        return await _start_turn_impl(runtime, auth, message)
+        auth, _, recheck = await _admitted(ctx, daimon_id, "start_turn")
+        return await _start_turn_impl(runtime, auth, message, recheck=recheck)
 
     @mcp.tool
     async def continue_turn(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, handle: str, message: str
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting."""
-        auth, is_admin = await _admitted(ctx, daimon_id, "continue_turn")
+        auth, is_admin, recheck = await _admitted(ctx, daimon_id, "continue_turn")
         with admin_sealed_access("continue" if is_admin else None):
             await _verify_account_owns_session(runtime, auth, handle)
-            return await _continue_turn_impl(runtime, auth, handle, message)
+            return await _continue_turn_impl(runtime, auth, handle, message, recheck=recheck)
 
     @mcp.tool
     async def get_session(  # pyright: ignore[reportUnusedFunction]

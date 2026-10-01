@@ -31,10 +31,20 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
 from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
+)
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_oauth import complete_mcp_oauth_flow, prepare_authorization
+from daimon.core.mcp_oauth.complete import McpOAuthWriteRefusedError
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -206,7 +216,14 @@ def build_oauth_mcp_routes(
                     now=moment,
                     session_factory=runtime.session_factory,
                     default=runtime.deployment_default,
+                    may_write=lambda: _may_write(flow, request_row),
                 )
+        except McpOAuthWriteRefusedError:
+            # A pin landed during the code exchange: nothing was stored.
+            log.info("mcp_oauth.refused_pinned_after_exchange", mcp_server_url=flow.mcp_server_url)
+            if request_row is not None:
+                await _settle(request_row, outcome="declined", state="refused")
+            return _error_page("pinned")
         except (DaimonError, httpx.HTTPError, anthropic.AnthropicError) as err:
             log.warning(
                 "mcp_oauth.callback_failed",
@@ -244,16 +261,32 @@ def build_oauth_mcp_routes(
         async with runtime.session_factory() as session:
             if request_row is not None:
                 return await request_pin_refusal(session, row=request_row, agent=agent) is not None
-            # No originating request to place it: under any pin, fail closed
-            # unless the requester is an admin now.
+            # No originating request to place it: it has no conversation, so
+            # under any pin only an admin may finish it.
             try:
                 policy = await load_access_policy(session, tenant_id=flow.tenant_id)
             except AccessPolicyUnreadable:
                 return True
-            if not policy.agent_channel_pins:
-                return False
             account = await get_account(session, flow.account_id)
-            return account is None or account.role is not Role.ADMIN
+            return not authorize(
+                policy,
+                subject=build_subject(
+                    is_admin=account is not None and account.role is Role.ADMIN,
+                    platform_user_id=None,
+                ),
+                action=Action.CONFIGURE,
+                surface=Surface.CONFIG,
+                agent=(
+                    AgentRef.unresolved()
+                    if agent is None
+                    else build_agent_ref(agent.name, agent.metadata)
+                ),
+                place=Place(),
+            )
+
+    async def _may_write(flow: McpOAuthFlowRow, request_row: CredentialRequestRow | None) -> bool:
+        """The pinned-agent write rule asked again just before the grant is stored."""
+        return not await _pinned_refusal(flow, request_row)
 
     async def _settle(
         row: CredentialRequestRow,

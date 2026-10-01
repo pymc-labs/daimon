@@ -40,8 +40,7 @@ from daimon.core.access_policy import (
     is_invoker_allowed,
     is_write_protected,
 )
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
@@ -337,7 +336,7 @@ async def _build_fire(
                 subject=Subject(),
                 action=Action.RUN_AGENT,
                 surface=Surface.ROUTINE,
-                agent=AgentRef.of(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
+                agent=build_agent_ref(ran.name, ran.metadata, row.agent_name),
                 place=Place(channel_id=fire_channel_id),
             ):
                 log.info(

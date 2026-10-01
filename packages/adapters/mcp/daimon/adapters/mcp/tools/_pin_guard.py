@@ -16,12 +16,18 @@ from collections.abc import Awaitable, Callable
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
-    agent_pin_names,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import (
+    Action,
+    Place,
+    Surface,
+    authorize,
+    build_agent_ref,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -77,10 +83,10 @@ async def require_pin_write_access(
         ma_agent = await ma_agent()
     if not authorize(
         policy,
-        subject=Subject(is_admin=False, platform_user_id=auth.platform_user_id),
+        subject=mcp_subject(auth),
         action=Action.CONFIGURE,
         surface=Surface.CONFIG,
-        agent=AgentRef.of(*agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        agent=build_agent_ref(ma_agent.name, ma_agent.metadata),
         place=(
             Place.from_origin(
                 parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
