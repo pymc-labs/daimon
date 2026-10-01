@@ -8,8 +8,9 @@ without a live platform lookup; it starts empty.
 `task_continuations_waiting_idx` serves agent reach's read of the wakes still
 owed to an agent. `thread_sessions.channel_id` records the channel a session
 runs for when it is created, so agent reach places it without waiting for its
-spend; older rows take their latest spend's channel (a Slack thread id is the
-bare thread ts, so it never names one).
+spend; older live rows take their latest spend's channel (a Slack thread id is
+the bare thread ts, so it never names one). Agent reach reads live rows only,
+so the backfill touches no other.
 
 downgrade: destructive
 """
@@ -80,13 +81,15 @@ def upgrade() -> None:
         """
         UPDATE thread_sessions AS ts SET channel_id = latest.channel_id
         FROM (
-            SELECT DISTINCT ON (tenant_id, managed_session_id)
-                tenant_id, managed_session_id, channel_id
-            FROM usage_events
-            WHERE channel_id IS NOT NULL
-            ORDER BY tenant_id, managed_session_id, occurred_at DESC
+            SELECT DISTINCT ON (live.id) live.id, spend.channel_id
+            FROM thread_sessions AS live
+            JOIN usage_events AS spend
+                ON spend.managed_session_id = live.ma_session_id
+                AND spend.tenant_id = live.tenant_id
+            WHERE live.status = 'live' AND spend.channel_id IS NOT NULL
+            ORDER BY live.id, spend.occurred_at DESC
         ) AS latest
-        WHERE latest.tenant_id = ts.tenant_id AND latest.managed_session_id = ts.ma_session_id
+        WHERE ts.id = latest.id
         """
     )
 

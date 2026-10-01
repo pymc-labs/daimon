@@ -58,25 +58,36 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
     await conn.run_sync(run("downgrade"))
     assert not await table_exists(), "downgrade drops channel_admins"
     assert not await waiting_index_exists(), "downgrade drops the waiting wakes index"
-    for ma_session_id in ("sess_spent", "sess_quiet"):
+    for ma_session_id, status in (
+        ("sess_spent", "live"),
+        ("sess_quiet", "live"),
+        ("sess_retired", "retired"),
+    ):
         await db_session.execute(
             text(
-                "INSERT INTO thread_sessions (tenant_id, platform, thread_id, ma_session_id) "
-                "VALUES (:tenant, 'slack', '1700000000.000100', :sess)"
+                "INSERT INTO thread_sessions (tenant_id, platform, thread_id, ma_session_id, "
+                "status) VALUES (:tenant, 'slack', '1700000000.000100', :sess, :status)"
             ),
-            {"tenant": tenant.id, "sess": ma_session_id},
+            {"tenant": tenant.id, "sess": ma_session_id, "status": status},
         )
-    for event_id, channel_id, occurred_at in (
-        ("e1", "c-old", datetime(2026, 1, 1, tzinfo=UTC)),
-        ("e2", "c-new", datetime(2026, 2, 1, tzinfo=UTC)),
-        ("e3", None, datetime(2026, 3, 1, tzinfo=UTC)),
+    for session_id, event_id, channel_id, occurred_at in (
+        ("sess_spent", "e1", "c-old", datetime(2026, 1, 1, tzinfo=UTC)),
+        ("sess_spent", "e2", "c-new", datetime(2026, 2, 1, tzinfo=UTC)),
+        ("sess_spent", "e3", None, datetime(2026, 3, 1, tzinfo=UTC)),
+        ("sess_retired", "e4", "c-old", datetime(2026, 1, 1, tzinfo=UTC)),
     ):
         await db_session.execute(
             text(
                 "INSERT INTO usage_events (tenant_id, managed_session_id, event_id, channel_id, "
-                "occurred_at) VALUES (:tenant, 'sess_spent', :event, :channel, :at)"
+                "occurred_at) VALUES (:tenant, :sess, :event, :channel, :at)"
             ),
-            {"tenant": tenant.id, "event": event_id, "channel": channel_id, "at": occurred_at},
+            {
+                "tenant": tenant.id,
+                "sess": session_id,
+                "event": event_id,
+                "channel": channel_id,
+                "at": occurred_at,
+            },
         )
     await conn.run_sync(run("upgrade"))
     assert await table_exists(), "upgrade recreates channel_admins"
@@ -84,8 +95,13 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
     channels = await db_session.execute(
         text("SELECT ma_session_id, channel_id FROM thread_sessions ORDER BY ma_session_id")
     )
-    assert channels.tuples().all() == [("sess_quiet", None), ("sess_spent", "c-new")], (
-        "a session takes its latest attributed spend's channel; one with none stays unknown"
+    assert channels.tuples().all() == [
+        ("sess_quiet", None),
+        ("sess_retired", None),
+        ("sess_spent", "c-new"),
+    ], (
+        "a live session takes its latest attributed spend's channel; one with none, "
+        "and every non-live row, stays unknown"
     )
 
     role_ids = await db_session.execute(
