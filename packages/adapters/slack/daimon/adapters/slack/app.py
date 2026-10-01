@@ -807,8 +807,8 @@ class SlackApp:
 
                     self._spawn(_run_channel_admins())
             elif cb_id == CALLBACK_ADD_SKILL:
-                # Pure evaluate: errors, a fresh preview, or close and add.
-                _as = evaluate_add_skill_submission(payload)
+                # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
+                _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
                 await client.send_socket_mode_response(
                     SocketModeResponse(envelope_id=req.envelope_id, payload=_as.response_payload)
                 )

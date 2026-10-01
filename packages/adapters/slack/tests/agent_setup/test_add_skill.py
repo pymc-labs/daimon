@@ -32,6 +32,7 @@ from daimon.adapters.slack.agent_setup.state import (
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import ma_agent
@@ -98,6 +99,17 @@ def test_the_form_points_files_to_chat_and_uses_a_fresh_action_id() -> None:
     assert view["submit"]["text"] == "Preview"
     assert "attach it in a message" in str(view["blocks"])
     assert ACTION_ADD_SKILL not in LEGACY_ACTION_IDS
+
+
+def test_a_long_description_is_clipped_without_hiding_the_files() -> None:
+    preview = bundle_from_markdown(_MD.replace("Take meeting notes.", "a" + "&" * 1000)).preview
+    sections = [
+        block["text"]["text"]
+        for block in build_add_skill_form(meta=META, text=_MD, preview=preview)["blocks"]
+        if block["type"] == "section"
+    ]
+    assert all(len(text) <= 3000 for text in sections), "escaping grew it past Slack's cap"
+    assert sections[-1] == "*Files:* `SKILL.md`"
 
 
 class _World:

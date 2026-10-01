@@ -76,10 +76,11 @@ NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
     "Ask me and I'll write the request for them. Making your own agent is not restricted."
 )
 
-#: A skill added or removed by a member on an agent that answers beyond their channels.
+#: A skill added or removed by a member on an agent someone else also uses.
 NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
-    "This agent answers in a channel or the whole workspace, so changing its skills "
-    f"needs {ADMIN_NOUN} or an admin of every channel it answers in."
+    "Others use this agent (a channel or workspace default, a thread, or someone else's "
+    f"routine or queued task), so changing its skills needs {ADMIN_NOUN} or an admin of "
+    "every channel it answers in."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a

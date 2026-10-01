@@ -3,8 +3,9 @@
 Discord modals carry a file input, so its form takes a pasted SKILL.md (up to
 4,000 characters) or one .md or .zip. Slack modals carry no file input, so its
 form takes a paste (up to 3,000 characters) and points files to chat, where
-add_skill runs the same checks on both platforms. If Slack gains file inputs,
-update this record rather than deleting it.
+add_skill runs the same checks on both platforms. Chat adds only through a
+confirmation card, so without tool safety a Slack file has no way in. If Slack
+gains file inputs, update this record rather than deleting it.
 """
 
 from __future__ import annotations
@@ -34,11 +35,12 @@ def test_discord_takes_a_paste_or_a_file() -> None:
     assert isinstance(upload, discord.ui.FileUpload)
 
 
-def test_slack_takes_a_paste_and_points_files_to_chat() -> None:
-    form = build_add_skill_form(
-        meta=PanelMetadata(team_id="T1", channel_id="C1", view="add_skill", agent_name="helper")
-    )
+def test_slack_takes_a_paste_and_points_files_to_chat_only_where_chat_can_confirm() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", view="add_skill", agent_name="helper")
+    form = build_add_skill_form(meta=meta)
     inputs = [block["element"] for block in form["blocks"] if block["type"] == "input"]
     assert [element["type"] for element in inputs] == ["plain_text_input"]
     assert inputs[0]["max_length"] == MAX_SKILL_PASTE_CHARS == 3000
     assert "attach it in a message" in str(form["blocks"])
+    no_card = str(build_add_skill_form(meta=meta, files_in_chat=False)["blocks"])
+    assert "attach it" not in no_card and "paste the SKILL.md" in no_card

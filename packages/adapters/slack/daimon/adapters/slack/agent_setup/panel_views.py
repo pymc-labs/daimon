@@ -807,13 +807,19 @@ def _file_list(paths: Sequence[str], *, shown: int = 15) -> str:
 
 
 def build_add_skill_form(
-    *, meta: PanelMetadata, text: str = "", preview: SkillPreview | None = None
+    *,
+    meta: PanelMetadata,
+    text: str = "",
+    preview: SkillPreview | None = None,
+    files_in_chat: bool = True,
 ) -> dict[str, Any]:
     """Paste a SKILL.md; with `preview`, show what it holds and submit to add it.
 
-    Slack modals take no files, so a .zip goes through chat instead. The
+    Slack modals take no files, so a .zip goes through chat instead, which
+    only works where chat has a confirmation card (`files_in_chat`). The
     previewed hash travels in `meta.skill_hash`; submitting changed text
-    previews again rather than adding.
+    previews again rather than adding. The description gets its own section,
+    so a long one is clipped without hiding the files.
     """
     agent = escape_mrkdwn(meta.agent_name or "this agent")
     blocks: list[dict[str, Any]] = []
@@ -823,9 +829,10 @@ def build_add_skill_form(
         blocks.append(
             _section(
                 f"*Add {escape_mrkdwn(preview.name)} to {agent}?*\n"
-                f"{escape_mrkdwn(preview.description)}\n*Files:* {_file_list(preview.files)}"
+                f"{escape_mrkdwn(preview.description)}"
             )
         )
+        blocks.append(_section(f"*Files:* {_file_list(preview.files)}"))
         if preview.scripts:
             blocks.append(_section(f"⚠️ *{agent} could run:* {_file_list(preview.scripts)}"))
     element: dict[str, Any] = {
@@ -849,6 +856,8 @@ def build_add_skill_form(
         "Changed text is previewed again."
         if preview is not None
         else f"For a .zip or a file, attach it in a message and ask me to add it to {agent}."
+        if files_in_chat
+        else "Slack forms take no files, so paste the SKILL.md here."
     )
     blocks.append(_context(note))
     return finish_modal(

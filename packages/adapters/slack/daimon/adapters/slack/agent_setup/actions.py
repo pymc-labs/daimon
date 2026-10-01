@@ -786,7 +786,8 @@ async def _dispatch_panel_action(
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=panel_views.build_add_skill_form(
-                meta=meta.with_view("add_skill", agent_name=agent_name, root_view_id=view_id)
+                meta=meta.with_view("add_skill", agent_name=agent_name, root_view_id=view_id),
+                files_in_chat=runtime.settings.tool_safety.enabled,
             ),
         )
         return
