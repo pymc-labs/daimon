@@ -139,6 +139,25 @@ async def load_administered_channel_ids(
     return administered_channel_ids(caller, grants)
 
 
+async def load_live_subject(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
+) -> Subject:
+    """The caller as their live platform role and roles describe them.
+
+    For a panel click, where the platform says who the caller is right now. A
+    server admin's grants are not read; they need none.
+    """
+    if caller.is_server_admin:
+        return build_subject(is_admin=True, platform_user_id=caller.platform_user_id)
+    return build_subject(
+        is_admin=False,
+        platform_user_id=caller.platform_user_id,
+        administered_channel_ids=await load_administered_channel_ids(
+            session, tenant_id=tenant_id, platform=platform, caller=caller
+        ),
+    )
+
+
 async def load_stored_subject(
     session: AsyncSession,
     *,
@@ -180,6 +199,7 @@ __all__ = [
     "fold_mentions",
     "is_channel_admin",
     "load_administered_channel_ids",
+    "load_live_subject",
     "load_stored_subject",
     "normalize_channel_admin_ids",
 ]

@@ -16,8 +16,9 @@ import uuid
 import jwt as pyjwt
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import AgentRef
+from daimon.core.authz import AgentRef, build_subject
 from daimon.core.mcp_auth import (
+    authorize_coding_token,
     coding_token_channel,
     mint_agent_mcp_token,
     mint_internal_mcp_token,
@@ -431,3 +432,60 @@ def test_coding_token_channel_binds_only_sealed_or_pinned_channels(
     assert (
         coding_token_channel(_PINS, agent=AgentRef.of(*names), channel_id=channel_id) == expected
     ), "a token binds only to a sealed channel or one inside its agent's pin"
+
+
+_CHANNEL_ADMIN = build_subject(
+    is_admin=False, platform_user_id="u-ca", administered_channel_ids=("c-acme", "c-sealed")
+)
+
+
+@pytest.mark.parametrize(
+    ("names", "channel_id", "allowed"),
+    [
+        (("acme",), "c-acme", True),
+        (("acme",), "c-sealed", False),
+        (("other",), "c-sealed", False),
+        (("other",), "c-acme", False),
+        (("acme",), "c-other", False),
+        (("acme",), None, False),
+    ],
+    ids=[
+        "own-pinned-agent",
+        "pinned-elsewhere",
+        "unpinned-in-sealed",
+        "unpinned-unbound",
+        "another-channel",
+        "dm",
+    ],
+)
+def test_authorize_coding_token_lets_a_channel_admin_mint_only_bound_for_their_agent(
+    names: tuple[str | None, ...], channel_id: str | None, allowed: bool
+) -> None:
+    """A channel admin mints for an agent whose pin they administer, bound to that channel."""
+    decision, bound = authorize_coding_token(
+        _PINS, subject=_CHANNEL_ADMIN, agent=AgentRef.of(*names), channel_id=channel_id
+    )
+
+    assert bool(decision) is allowed, "only their own pinned agent, inside its pin"
+    if decision:
+        assert bound == channel_id, "a channel admin's token is always bound to its channel"
+
+
+@pytest.mark.parametrize("channel_id", ["c-acme", "c-other", "c-sealed", None])
+@pytest.mark.parametrize("names", [("acme",), ("other",)])
+def test_authorize_coding_token_leaves_a_server_admin_unchanged(
+    names: tuple[str | None, ...], channel_id: str | None
+) -> None:
+    """A server admin mints everywhere, bound exactly where `coding_token_channel` binds."""
+    agent = AgentRef.of(*names)
+    decision, bound = authorize_coding_token(
+        _PINS,
+        subject=build_subject(is_admin=True, platform_user_id="u-admin"),
+        agent=agent,
+        channel_id=channel_id,
+    )
+
+    assert decision, "a server admin may always mint"
+    assert bound == coding_token_channel(_PINS, agent=agent, channel_id=channel_id), (
+        "the binding is unchanged for a server admin"
+    )

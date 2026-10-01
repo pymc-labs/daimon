@@ -26,6 +26,9 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
     AgentRef,
+    Decision,
+    Place,
+    Subject,
     Surface,
     authorize,
     build_subject,
@@ -208,6 +211,29 @@ def coding_token_channel(
     ):
         return channel_id
     return None
+
+
+def authorize_coding_token(
+    policy: TenantAccessPolicy, *, subject: Subject, agent: AgentRef, channel_id: str | None
+) -> tuple[Decision, str | None]:
+    """Whether `subject` may mint a coding-tool token pressed in `channel_id`, and its binding.
+
+    The binding is `coding_token_channel`'s; `authorize(MINT_CODING_TOKEN)`
+    then decides the mint at that place, so a server admin mints as before and
+    a channel admin only a token bound to a channel they administer.
+    """
+    bound_channel_id = coding_token_channel(policy, agent=agent, channel_id=channel_id)
+    decision = authorize(
+        policy,
+        subject=subject,
+        action=Action.MINT_CODING_TOKEN,
+        surface=Surface.CONFIG,
+        agent=agent,
+        place=Place()
+        if bound_channel_id is None
+        else build_turn_place(channel_id=bound_channel_id, thread_id=None),
+    )
+    return decision, bound_channel_id
 
 
 def token_jti(token: str) -> uuid.UUID:
