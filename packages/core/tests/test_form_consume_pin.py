@@ -174,29 +174,30 @@ async def test_pin_waits_for_a_pending_consume_then_applies_after(
     row = await _seed(db_session)
     await _seed_policy(db_session_factory, row, policy_row=policy_row)
     factory = async_sessionmaker(race_engine, expire_on_commit=False)
-    order: list[str] = []
+    form_spent_when_pin_locked: list[bool] = []
     consumer_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
     pinner_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
     async def consume() -> CredentialRequestRow | None:
         async with factory.begin() as session:
             consumer_pid.set_result(await _pid(session))
-            consumed = await consume_form_unless_pinned(
+            return await consume_form_unless_pinned(
                 session, row=row, agent=_AGENT, now=datetime.now(UTC)
             )
-        order.append("consume")
-        return consumed
 
     async def pin() -> None:
         async with factory.begin() as session:
             pinner_pid.set_result(await _pid(session))
             await lock_access_policy(session, tenant_id=row.tenant_id)
+            # Commit order, read from the database once the lock is held: the
+            # consume that held it first has already committed.
+            peeked = await store.peek_credential_request(session, token=row.token)
+            form_spent_when_pin_locked.append(peeked is not None and peeked.used_at is not None)
             await set_access_policy(
                 session,
                 tenant_id=row.tenant_id,
                 policy=TenantAccessPolicy(agent_channel_pins={"acme": ("C_ELSEWHERE",)}),
             )
-        order.append("pin")
 
     async with factory() as holder, holder.begin():
         # Another submit holds the form row: this consume decides, then its
@@ -216,7 +217,7 @@ async def test_pin_waits_for_a_pending_consume_then_applies_after(
     await asyncio.wait_for(pinning, 10)
 
     assert consumed is not None and consumed.used_at is not None
-    assert order == ["consume", "pin"]
+    assert form_spent_when_pin_locked == [True]
     async with factory() as session:
         assert await request_pin_refusal(session, row=row, agent=_AGENT) == PIN_WRITE_REFUSAL
 
