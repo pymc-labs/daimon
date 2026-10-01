@@ -26,7 +26,11 @@ from daimon.core.authz import (
     build_agent_ref,
 )
 from daimon.core.channel_admins import load_stored_subject
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_access_policy,
+)
 from daimon.core.stores.credential_requests import consume_credential_request
 from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,12 +107,17 @@ async def consume_form_unless_pinned(
 ) -> CredentialRequestRow | None:
     """Decide the pin rule and spend the form in the caller's consume transaction.
 
-    The policy is read in the same transaction as the single-use UPDATE, so no
-    other write sits between the decision and the consume. A refusal raises
+    The tenant's policy lock (`lock_access_policy`, the operator CLI's writer
+    lock, which exists even with no policy row) is taken before the policy is
+    read and held until the caller's transaction ends. A policy edit committed
+    first is read and refuses; one that arrives later waits for the consume to
+    commit or roll back, so no pin lands between the decision and the
+    single-use UPDATE. A refusal raises
     `FormPinRefused` before anything is written; the caller renders
     ``refusal`` and its transaction rolls back. Otherwise this is
     `consume_credential_request`: None when the form is no longer consumable.
     """
+    await lock_access_policy(session, tenant_id=row.tenant_id)
     refusal = await request_pin_refusal(session, row=row, agent=agent)
     if refusal is not None:
         raise FormPinRefused(refusal)
