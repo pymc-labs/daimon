@@ -39,6 +39,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin
@@ -242,4 +243,75 @@ async def test_the_guard_lets_an_admin_through(
         runtime, _member(tenant_id, is_admin=True), ma_agent=agent, origin=None
     )
     with pytest.raises(ToolError):
+        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+
+
+async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_an_origin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A direct tool has no origin; the admin of the pin's channel may still use it."""
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    agent = ma_agent(
+        id=_AGENT_ID,
+        name="Acme Display",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "acme-config"},
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="C_OTHER",
+        role_ids=[],
+        user_ids=["42"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="C_ACME",
+        role_ids=[],
+        user_ids=["42"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+    agent_key = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
+    )
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
+
+
+async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME", "C_OPS")}),
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="C_ACME",
+        role_ids=[],
+        user_ids=["42"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
+    with pytest.raises(ToolError, match="pinned this agent"):
         await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)

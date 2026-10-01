@@ -17,9 +17,11 @@ from daimon.adapters.mcp.tools.channel_admins import (
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_agent
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import accounts
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -122,7 +124,11 @@ async def test_channel_admin_sets_only_their_own_channels_default(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(propagation, "resolve_setup_agent", AsyncMock())
+    monkeypatch.setattr(
+        propagation,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="agent_helper", name="helper", metadata={})),
+    )
     tenant_id = await _tenant(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
     member = _auth(tenant_id)
@@ -189,7 +195,7 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    resolve = AsyncMock(return_value=SimpleNamespace(metadata={}))
+    resolve = AsyncMock(return_value=SimpleNamespace(id="agent_own", name="other-own", metadata={}))
     monkeypatch.setattr(propagation, "resolve_setup_agent", resolve)
     tenant_id = await _tenant(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
@@ -213,12 +219,40 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
         is None
     ), "the refused bind wrote nothing"
 
-    resolve.return_value = SimpleNamespace(metadata={MA_METADATA_KEY_MANAGED: "true"})
+    resolve.return_value = SimpleNamespace(
+        id="agent_own", name="other-own", metadata={MA_METADATA_KEY_MANAGED: "true"}
+    )
     await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
-    resolve.return_value = SimpleNamespace(metadata={})
+    resolve.return_value = SimpleNamespace(id="agent_own", name="other-own", metadata={})
     await propagation._set_agent_default_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, _auth(tenant_id, admin=True), "other-own", CHANNEL
     )
+
+
+async def test_nobody_binds_a_pinned_agent_as_another_channels_default(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = SimpleNamespace(id="agent_pinned", name="pinned", metadata={})
+    monkeypatch.setattr(propagation, "resolve_setup_agent", AsyncMock(return_value=agent))
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"pinned": (OTHER_CHANNEL,)}),
+        )
+    admin = _auth(tenant_id, admin=True)
+
+    with pytest.raises(ToolError, match="pinned 'pinned' to other channels"):
+        await propagation._set_agent_default_impl(runtime, admin, "pinned", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "the refused bind wrote nothing"
+    await propagation._set_agent_default_impl(runtime, admin, "pinned", OTHER_CHANNEL)  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
