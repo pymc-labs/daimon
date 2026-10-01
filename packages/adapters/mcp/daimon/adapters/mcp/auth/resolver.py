@@ -53,6 +53,21 @@ class AuthIdentity:
     # admin grant names it; both read by the verifier from the database.
     platform_role_ids: tuple[str, ...] = ()
     is_channel_admin: bool = False
+    # The channel the agent key was minted in, from its mcp_tokens row; read
+    # through `token_channel_id`.
+    bound_channel_id: str | None = None
+
+
+def token_channel_id(auth: AuthIdentity) -> str | None:
+    """The channel an agent key's calls run inside, or None.
+
+    A key minted in a sealed channel, or in a channel its agent is pinned to,
+    records that channel (`daimon.core.mcp_auth.coding_token_channel`), and
+    its calls count as a turn there: the pin, the seal, the environment, the
+    channel budget and usage attribution all see it. Every other caller (an
+    unbound key, a chat turn, the hub, a CLI token) runs outside every channel.
+    """
+    return auth.bound_channel_id if auth.agent_id is not None else None
 
 
 def resolve_role(role_str: str | None) -> Role:

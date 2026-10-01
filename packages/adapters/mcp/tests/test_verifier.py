@@ -259,3 +259,59 @@ async def test_verifier_computes_the_channel_admin_claim_from_stored_roles(
         "a new grant shows on the next verify"
     )
     assert after.claims["platform_role_ids"] == ["r1"], "the stored role ids ride along"
+
+
+async def _agent_token(
+    sessionmaker: async_sessionmaker[AsyncSession], *, platform: str | None, channel_id: str | None
+) -> str:
+    async with sessionmaker() as s, s.begin():
+        tenant_id, account_id = await seed_tenant_and_account(s)
+        return await mint_agent_mcp_token(
+            s,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="test",
+            secret=SECRET,
+            now=dt.datetime(2099, 1, 1, tzinfo=dt.UTC),
+            platform=platform,
+            channel_id=channel_id,
+        )
+
+
+async def test_verifier_reads_the_bound_channel_from_the_token_row(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token = await _agent_token(sessionmaker, platform="discord", channel_id="c-1")
+    result = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+    assert result is not None
+    assert result.claims["bound_channel_id"] == "c-1"
+
+
+async def test_verifier_drops_a_bound_channel_claimed_in_the_jwt(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only the registry row binds a token; a signed claim of its own does not."""
+    unbound = await _agent_token(sessionmaker, platform=None, channel_id=None)
+    claims = pyjwt.decode(unbound, SECRET, algorithms=["HS256"])
+    forged = pyjwt.encode({**claims, "bound_channel_id": "c-1"}, SECRET, algorithm="HS256")
+    async with sessionmaker() as s, s.begin():
+        _tenant_id, account_id = await seed_tenant_and_account(s)
+    no_jti = pyjwt.encode(
+        {"sub": str(account_id), "iat": 0, "bound_channel_id": "c-1"}, SECRET, algorithm="HS256"
+    )
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    for token in (forged, no_jti):
+        result = await verifier.verify_token(token)
+        assert result is not None
+        assert "bound_channel_id" not in result.claims
+
+
+async def test_verifier_rejects_a_binding_on_another_platform(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token = await _agent_token(sessionmaker, platform="slack", channel_id="C1")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    assert await verifier.verify_token(token) is None, (
+        "a Discord account's key binds no Slack channel"
+    )

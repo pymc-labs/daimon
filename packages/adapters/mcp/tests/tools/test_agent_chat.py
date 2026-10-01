@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -63,12 +64,19 @@ from daimon.adapters.mcp.tools.agent_chat import (
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_BILLING_EXEMPT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_SEALED,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tenant_balance import debit_amount
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
@@ -1681,8 +1689,8 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
 # ---------------------------------------------------------------------------
 
 
-def _agent_and_env_router() -> MARouter:
-    """Router with one agent + one environment, for start_turn's happy path."""
+def _agent_and_env_router(*extra_envs: dict[str, Any]) -> MARouter:
+    """Router with one agent + one environment (plus `extra_envs`), for start_turn's happy path."""
     env_payload = {
         "id": _ENV_ID,
         "type": "environment",
@@ -1713,7 +1721,7 @@ def _agent_and_env_router() -> MARouter:
             ]
         ),
     )
-    router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload]))
+    router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload, *extra_envs]))
     return router
 
 
@@ -2282,6 +2290,10 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "github_app_id",
         "github_app_private_key",
         "billing_exempt",
+        "memory_read_only",
+        "budget_channel_id",
+        "origin_channel_id",
+        "origin_seal_ids",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 
@@ -3286,3 +3298,126 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
     assert "pinned this agent" in str(payload.get("content"))
     mock_create_session.assert_not_awaited()
     assert sends == []
+
+
+async def _seal_tenant(
+    db_session_factory: async_sessionmaker[AsyncSession], *, sealed: tuple[str, ...]
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, platform="discord", workspace_id=str(_TENANT_ID), id=_TENANT_ID)
+        await set_access_policy(
+            session, tenant_id=_TENANT_ID, policy=TenantAccessPolicy(sealed_channel_ids=sealed)
+        )
+
+
+def _bound_auth(channel_id: str | None) -> AuthIdentity:
+    return replace(_auth(), platform="discord", bound_channel_id=channel_id)
+
+
+@pytest.mark.parametrize(
+    ("bound", "seal"),
+    [("c-1", frozenset({"c-1"})), ("c-2", frozenset()), (None, frozenset())],
+    ids=["bound-sealed", "bound-open", "unbound"],
+)
+async def test_start_turn_opens_a_bound_keys_session_in_its_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    bound: str | None,
+    seal: frozenset[str],
+) -> None:
+    """Origin, budget channel and seal follow the key's channel; an unbound key gets none."""
+    await _seal_tenant(db_session_factory, sealed=("c-1",))
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _bound_auth(bound), "hi")
+
+    assert create.await_args is not None
+    kwargs = create.await_args.kwargs
+    assert (kwargs["budget_channel_id"], kwargs["origin_channel_id"]) == (bound, bound)
+    assert kwargs["origin_seal_ids"] == seal
+    assert kwargs["memory_read_only"] is bool(seal), "a sealed channel's memory is read-only"
+
+
+async def test_start_turn_with_bundle_stamps_a_bound_keys_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seal_tenant(db_session_factory, sealed=("c-1",))
+    create_bodies: list[dict[str, Any]] = []
+
+    def on_create(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        create_bodies.append(json_body(request))
+        return httpx.Response(200, json=_session_json(status="running"))
+
+    router = _isolated_agent_and_env_router()
+    router.add("POST", r"/v1/sessions", on_create)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: httpx.Response(200, json=_file_metadata_payload(m.group(1))),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+
+    await _start_turn_impl(runtime, _bound_auth("c-1"), "hi", _mint_bundle())
+
+    metadata = create_bodies[0]["metadata"]
+    assert metadata[MA_METADATA_KEY_CHANNEL] == "c-1"
+    assert metadata[MA_METADATA_KEY_BUDGET_CHANNEL] == "c-1"
+    assert MA_METADATA_KEY_SEALED in metadata, "a sealed channel's session stays sealed"
+
+
+async def test_start_turn_resolves_a_bound_keys_channel_environment(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seal_tenant(db_session_factory, sealed=())
+    async with db_session_factory() as session, session.begin():
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=_TENANT_ID, channel_id="c-1"),
+            tenant_id=_TENANT_ID,
+            environment_name="channel-env",
+        )
+    channel_env = {
+        "id": "env_channel",
+        "type": "environment",
+        "name": "channel-env",
+        "config": EMPTY_CLOUD_CONFIG.model_dump(mode="json"),
+        "description": "",
+        "metadata": {"daimon_tenant": str(_TENANT_ID), "daimon_name": "channel-env"},
+        "created_at": "2026-06-23T00:00:00Z",
+        "updated_at": "2026-06-23T00:00:00Z",
+    }
+    router = _agent_and_env_router(channel_env)
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id="env_channel", status="running"
+        )
+    )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _bound_auth("c-1"), "hi")
+
+    assert create.await_args is not None
+    assert create.await_args.kwargs["environment"].id == "env_channel"

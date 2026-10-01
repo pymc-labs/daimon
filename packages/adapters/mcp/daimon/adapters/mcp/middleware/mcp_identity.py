@@ -324,6 +324,7 @@ class IdentityMiddleware(Middleware):
             and _token is not None
             and _token.claims.get("channel_admin") is True
         )
+        raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
         identity = AuthIdentity(
             account_id=account_id,
             tenant_id=tenant_id,
@@ -337,6 +338,12 @@ class IdentityMiddleware(Middleware):
             is_admin=is_admin,
             platform_role_ids=platform_role_ids,
             is_channel_admin=is_channel_admin,
+            # Set by the verifier from the token's row; an agent key's only.
+            bound_channel_id=(
+                raw_bound_channel
+                if isinstance(raw_bound_channel, str) and agent_id is not None
+                else None
+            ),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
         if is_admin:

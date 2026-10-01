@@ -31,7 +31,8 @@ class DaimonJWTVerifier(JWTVerifier):
 
     On success, stashes `tenant_id` (from the account's DB row) into
     `AccessToken.claims` so downstream middleware can read it without a
-    second DB query.
+    second DB query, and `bound_channel_id` from an agent key's registry row
+    when it was minted in a channel.
     """
 
     def __init__(
@@ -70,6 +71,17 @@ class DaimonJWTVerifier(JWTVerifier):
                 row = await get_mcp_token(session, jti=jti_uuid)
                 if row is None or row.revoked_at is not None:
                     return None
+                # A channel of another platform than the account's is no
+                # binding this deployment minted.
+                if row.platform is not None and row.platform != identity_row.platform:
+                    return None
+                bound_channel_id = row.channel_id
+            else:
+                bound_channel_id = None
+            # Only the registry row binds a token to a channel, never a claim.
+            access.claims.pop("bound_channel_id", None)
+            if bound_channel_id is not None:
+                access.claims["bound_channel_id"] = bound_channel_id
             access.claims["tenant_id"] = str(identity_row.tenant_id)
             access.claims["role"] = identity_row.role.value
             access.claims["platform"] = identity_row.platform

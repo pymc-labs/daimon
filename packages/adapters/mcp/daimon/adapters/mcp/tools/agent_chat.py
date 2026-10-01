@@ -64,9 +64,10 @@ from anthropic.types.beta import (
 )
 from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
@@ -218,15 +219,20 @@ async def _resolve_environment_name(
 ) -> str | None:
     """Resolve environment_name through the shared channel/tenant/deployment cascade.
 
-    MCP has no channel, so ``ScopeContext.channel_id`` stays None and the
-    cascade falls through tenant -> ``runtime.deployment_default``. This is
-    the same shared ``resolve()`` the Discord adapter uses (parity fix,
-    MPP-01) — no second tenant-row-only resolution path.
+    An MCP call has no channel of its own, so the cascade falls through
+    tenant -> ``runtime.deployment_default``, except for an agent key minted
+    in a channel (``token_channel_id``), which resolves as a turn there does.
+    This is the same shared ``resolve()`` the Discord adapter uses (parity
+    fix, MPP-01) — no second tenant-row-only resolution path.
     """
     async with runtime.session_factory() as session:
         resolved = await resolve(
             session,
-            context=ScopeContext(tenant_id=auth.tenant_id, account_id=auth.account_id),
+            context=ScopeContext(
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                channel_id=token_channel_id(auth),
+            ),
             default=runtime.deployment_default,
         )
     return resolved.environment_name
@@ -251,8 +257,9 @@ async def _verify_agent_owns_session(
 
     A conversation that ran in a sealed channel is then refused outright: these
     callers (agent keys, the hub) run outside every channel, and its transcript
-    holds what the seal keeps in. Checked on every call, so a follow-up after
-    the channel is sealed is refused too.
+    holds what the seal keeps in. An agent key minted in that channel is inside
+    it (``token_channel_id``). Checked on every call, so a follow-up after the
+    channel is sealed is refused too.
     """
     s = await runtime.client.beta.sessions.retrieve(handle)
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
@@ -381,6 +388,10 @@ async def _start_turn_impl(
     it: the operator absorbs that usage. The stamp is the creator's posture
     and covers the whole session, including later ``continue_turn`` calls.
 
+    An agent key minted in a channel (``token_channel_id``) opens the session
+    as a turn in that channel would: stamped with the channel as its origin
+    and its budget channel, sealed (and memory read-only) when the channel is.
+
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
     """
     _require_outside_chat_turn(auth)
@@ -400,6 +411,13 @@ async def _start_turn_impl(
         raise ToolError("environment not found")
 
     is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
+    channel_id = token_channel_id(auth)
+    seal: frozenset[str] = frozenset()
+    if (
+        channel_id is not None
+        and channel_id in (await load_channel_policy(runtime, auth)).sealed_channel_ids
+    ):
+        seal = frozenset({channel_id})
 
     if bundle is not None:
         if not is_isolated:
@@ -434,6 +452,10 @@ async def _start_turn_impl(
             tenant_id=auth.tenant_id,
             resources=resources,
             billing_exempt=billing_exempt,
+            memory_read_only=bool(seal),
+            budget_channel_id=channel_id,
+            origin_channel_id=channel_id,
+            origin_seal_ids=seal,
         )
     else:
         github_fallback_pat: str | None = (
@@ -462,6 +484,10 @@ async def _start_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
+            memory_read_only=bool(seal),
+            budget_channel_id=channel_id,
+            origin_channel_id=channel_id,
+            origin_seal_ids=seal,
         )
 
     if (observation := current_outcome.get()) is not None:
@@ -949,7 +975,7 @@ def register_agent_chat_tools(
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
     before creating a session or sending an event, including the operator's
     channel pin: a pinned agent is refused here, since an MCP turn runs in no
-    channel. Every other tool —
+    channel, unless the key was minted in one of its channels. Every other tool —
     including ``cancel_turn`` and ``get_turn_cost`` — stays on bare ``_auth``;
     ``deliver_turn_charts`` is the one exception that performs a bounded
     artifact-store write when optional link delivery is configured.

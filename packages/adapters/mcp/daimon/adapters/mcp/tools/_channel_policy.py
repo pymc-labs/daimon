@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
@@ -224,8 +224,13 @@ async def load_read_policy(
     ordinary chat. A token bound to neither can't claim an origin at all, so a
     sealed read with it is judged from outside. An origin that is malformed,
     expired, another account's or another responder's counts as none too.
+    An agent key minted in a channel needs no origin: its calls run inside
+    that channel (`token_channel_id`), and only that channel.
     """
     policy = await load_channel_policy(runtime, auth)
+    bound = token_channel_id(auth)
+    if bound is not None:
+        return ChannelReadPolicy(policy=policy, origin_channel_ids=frozenset({bound}))
     outside = ChannelReadPolicy(policy=policy)
     executing_agent = auth.agent_id or auth.chat_agent_id
     if (

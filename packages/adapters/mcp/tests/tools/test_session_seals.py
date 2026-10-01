@@ -121,8 +121,8 @@ class _World:
             **extra,
         )
 
-    def agent_key_auth(self) -> AuthIdentity:
-        """An agent-chat key (headless: plugin, another program)."""
+    def agent_key_auth(self, bound_channel_id: str | None = None) -> AuthIdentity:
+        """An agent-chat key (headless: plugin, another program), maybe minted in a channel."""
         agent_uuid = derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=_AGENT)
         return AuthIdentity(
             account_id=self.account_id,
@@ -130,6 +130,7 @@ class _World:
             role=Role.USER,
             platform=self.platform,
             agent_id=agent_uuid,
+            bound_channel_id=bound_channel_id,
         )
 
     def runtime(self) -> McpRuntime:
@@ -405,6 +406,35 @@ async def test_agent_key_cannot_read_or_continue_a_sealed_conversation(world: _W
         await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
     assert world.sent == [], "a refused follow-up must never reach the session"
     assert [s.id for s in await _list_my_sessions_impl(runtime, auth)] == ["ses_mine"]
+
+
+async def test_an_agent_key_minted_in_a_sealed_channel_reads_and_continues_it(
+    world: _World,
+) -> None:
+    await world.seal(_SEALED)
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session("ses_mine")
+    runtime = world.runtime()
+    auth = world.agent_key_auth(bound_channel_id=_SEALED)
+
+    page = await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
+    await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
+
+    assert _SEALED_TOPIC in _events_text(page)
+    assert world.sent == ["ses_acme"]
+    listed = sorted(s.id for s in await _list_my_sessions_impl(runtime, auth))
+    assert listed == ["ses_acme", "ses_mine"]
+
+
+async def test_an_agent_key_minted_in_another_channel_stays_outside_the_seal(
+    world: _World,
+) -> None:
+    await world.seal(_SEALED)
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    auth = world.agent_key_auth(bound_channel_id=_OPEN)
+
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_events_impl(world.runtime(), auth, "ses_acme", None, None, None)
 
 
 async def test_hub_lists_no_sealed_conversation(world: _World) -> None:

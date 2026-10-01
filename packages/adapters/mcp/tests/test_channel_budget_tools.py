@@ -365,6 +365,9 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     assert await channel(member, str(uuid.uuid4())) is None, "an unknown origin"
     assert await channel(member, "not-a-uuid") is None, "a malformed origin"
     assert await channel(member, None) is None
+    bound = dataclasses.replace(other_agent, bound_channel_id="c-key")
+    assert await channel(bound, None) == "c-key", "a key minted in a channel spends there"
+    assert await channel(bound, here) == "c-key", "whatever origin it names"
 
 
 @pytest.mark.parametrize(("is_private", "caller_in_channel"), [(False, False), (True, True)])
