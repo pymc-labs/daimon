@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scoped operator tokens for integrations.** `daimon mcp
+  mint-operator-token` mints a token that acts over `/mcp` for one server
+  admin with only the scopes it names: `tenant:read`, `channels:write`,
+  `promo:redeem` and the deployment-wide `promo:create`, optionally capped
+  by `--max-issued-usd`. Every request rechecks that the token is live and
+  its account is still an admin, and is rate limited
+  (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`) and audited with the token and
+  scope. New tools: `get_tenant_summary`, and for `promo:create` only,
+  `create_promo_code`, `list_promo_codes` and `revoke_promo_code`.
+  `daimon mcp list-tokens` and `revoke-token` manage registered tokens.
+  `mint-token` tokens now expire after `--ttl-days` (default 90) and can be
+  revoked; tokens minted before keep working. Run migration
+  `0035_operator_tokens` before deploying.
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
