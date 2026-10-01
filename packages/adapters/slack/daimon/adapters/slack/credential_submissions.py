@@ -286,7 +286,11 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=await resolve_is_admin(client, user_id=user_id),
+        platform="slack",
+        caller=ChannelAdminCaller(
+            platform_user_id=user_id,
+            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
