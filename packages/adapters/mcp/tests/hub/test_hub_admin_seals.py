@@ -5,7 +5,8 @@ Admins are trusted (docs/architecture.md, "Trust model"): the hub runs
 headless and its output reaches only the admin, so an admin may list and
 read any sealed conversation of the agent, anyone's. A follow-up from the
 hub would join the channel's own conversation, so continuing a sealed
-channel session stays refused for admins too, and sends nothing.
+channel session stays refused for admins too, and sends nothing. A channel
+admin holds the same hub read, limited to the channels they administer.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
@@ -308,3 +310,70 @@ async def test_an_admin_never_reads_another_members_teams_personal_chat(hub: _Hu
         events = await hub.call("list_events", handle=handle)
         assert events.get("isError") and _TOPIC not in str(events), (handle, events)
     assert hub.sent == []
+
+
+async def _grant(hub: _Hub, channel_id: str) -> None:
+    await set_channel_admins(
+        hub.db,
+        tenant_id=hub.tenant_id,
+        platform="discord",
+        channel_id=channel_id,
+        role_ids=[],
+        user_ids=["u1"],
+        actor_account_id=None,
+    )
+    await hub.db.commit()
+
+
+async def test_a_channel_admin_reads_sealed_conversations_of_their_channels_only(
+    hub: _Hub,
+) -> None:
+    """Anyone's sealed conversation in a channel they administer; never another channel's, a
+    private DM, or once the grant is gone."""
+    await set_access_policy(
+        hub.db,
+        tenant_id=hub.tenant_id,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED, "chan-ops")),
+    )
+    await _grant(hub, _SEALED)
+    someone_else = uuid.uuid4()
+    hub.add_session("ses_mine", daimon_channel=_SEALED, daimon_thread="thr-1")
+    hub.add_session("ses_theirs", account=someone_else, daimon_channel=_SEALED)
+    hub.add_session("ses_mine_ops", daimon_channel="chan-ops")
+    hub.add_session("ses_theirs_ops", account=someone_else, daimon_channel="chan-ops")
+    hub.add_session(
+        "ses_theirs_dm", account=someone_else, daimon_channel=_SEALED, daimon_private_dm="x"
+    )
+    hub.add_session("ses_legacy", account=someone_else)
+    await _map_thread(hub, "ses_legacy", _SEALED)
+
+    listed = str(await hub.call("list_my_sessions"))
+    assert "ses_mine" in listed and "ses_theirs" in listed, "their channel's are listed"
+    for handle in ("ses_mine", "ses_theirs"):
+        events = await hub.call("list_events", handle=handle)
+        assert not events.get("isError") and _TOPIC in str(events), (handle, events)
+    for handle in ("ses_mine_ops", "ses_theirs_ops", "ses_theirs_dm", "ses_legacy"):
+        assert handle not in listed, f"{handle} is outside the channels they administer"
+        events = await hub.call("list_events", handle=handle)
+        assert events.get("isError") and _TOPIC not in str(events), (handle, events)
+
+    await delete_channel_admins(
+        hub.db, tenant_id=hub.tenant_id, platform="discord", channel_id=_SEALED
+    )
+    await hub.db.commit()
+    events = await hub.call("list_events", handle="ses_theirs")
+    assert events.get("isError") and _TOPIC not in str(events), "the stored grant decides"
+    assert hub.sent == []
+
+
+@pytest.mark.parametrize("tool", ["continue_turn", "ask"])
+async def test_a_channel_admin_never_continues_a_sealed_conversation_from_the_hub(
+    hub: _Hub, tool: str
+) -> None:
+    await _grant(hub, _SEALED)
+    hub.add_session("ses_sealed", daimon_channel=_SEALED, daimon_thread="thr-1")
+
+    result = await hub.call(tool, handle="ses_sealed", message="private personnel note")
+
+    assert result.get("isError") and "continue it in its channel" in str(result), result
+    assert hub.sent == [], "a refused follow-up must never reach the session"
