@@ -3,7 +3,7 @@
 Subcommands:
   * mint-token         — signs an expiring, revocable JWT for local debug / tests.
   * mint-agent-token   — mints a long-lived, revocable agent-scoped token.
-  * mint-operator-token, list-tokens, revoke-token — see `mcp_tokens`.
+  * mint-operator-token, list-tokens, revoke-token, set-token-scopes — see `mcp_tokens`.
   * url                — prints DAIMON_MCP__PUBLIC_URL.
   * janitor            — find and optionally archive orphan daimon-mcp:* vaults.
   * sweep-credentials  — delete+recreate stale is_admin creds (defense-in-depth).

@@ -1,4 +1,4 @@
-"""`daimon mcp mint-operator-token | list-tokens | revoke-token` and the CLI token row."""
+"""`daimon mcp mint-operator-token | list-tokens | revoke-token | set-token-scopes`, CLI token row."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ import pytest
 import typer
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.commands.mcp import mint_token
-from daimon.adapters.cli.commands.mcp_tokens import list_tokens, mint_operator_token, revoke_token
+from daimon.adapters.cli.commands.mcp_tokens import (
+    list_tokens,
+    mint_operator_token,
+    revoke_token,
+    set_token_scopes,
+)
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import (
     AnthropicSettings,
@@ -26,6 +31,7 @@ from daimon.core.errors import ConfigError, StoreError
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import PostgresDsn, SecretStr
 from rich.console import Console
@@ -181,3 +187,84 @@ async def test_mint_token_registers_an_expiring_cli_row(
         row = await get_mcp_token(s, jti=uuid.UUID(claims["jti"]))
     assert row is not None and row.kind == "cli", "new CLI tokens are registered"
     assert row.expires_at is not None and row.expires_at - row.created_at == dt.timedelta(days=7)
+
+
+def _jti(token: str) -> uuid.UUID:
+    return uuid.UUID(pyjwt.decode(token, SECRET, algorithms=["HS256"])["jti"])
+
+
+@pytest.mark.asyncio
+async def test_mint_and_revoke_write_audit_rows_without_the_token(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id = await _seed(schema_sessionmaker)
+    token = await _mint(schema_sessionmaker, tenant_id, "u-1", ["tenant:read"])
+    jti = _jti(token)
+
+    await revoke_token(rt=_rt(schema_sessionmaker), console=_console()[0], jti=jti)
+
+    async with schema_sessionmaker() as s:
+        events = await list_events(s, tenant_id=tenant_id)
+    assert [
+        (e.tool_name, e.outcome, e.reason, e.token_kind, e.token_jti, e.account_id) for e in events
+    ] == [
+        ("cli/mint-operator-token", "allowed", "token_minted", "operator", jti, account_id),
+        ("cli/revoke-token", "allowed", "token_revoked", "operator", jti, account_id),
+    ], "minting and revoking are audited with the tenant, kind, jti and reason"
+    assert token not in "".join(e.model_dump_json() for e in events), "never the token value"
+
+
+@pytest.mark.asyncio
+async def test_set_token_scopes_narrows_the_row_and_audits(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id = await _seed(schema_sessionmaker)
+    token = await _mint(schema_sessionmaker, tenant_id, "u-1", ["tenant:read", "promo:redeem"])
+    jti = _jti(token)
+
+    await set_token_scopes(
+        rt=_rt(schema_sessionmaker), console=_console()[0], jti=jti, scopes=["tenant:read"]
+    )
+
+    async with schema_sessionmaker() as s:
+        row = await get_mcp_token(s, jti=jti)
+        events = await list_events(s, tenant_id=tenant_id)
+    assert row is not None and row.scopes == ("tenant:read",), "the removed scope is gone"
+    assert [(e.tool_name, e.reason, e.token_jti) for e in events][-1] == (
+        "cli/set-token-scopes",
+        "token_scopes_narrowed",
+        jti,
+    ), "narrowing is audited"
+
+
+@pytest.mark.asyncio
+async def test_set_token_scopes_never_adds_a_scope(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id = await _seed(schema_sessionmaker)
+    jti = _jti(await _mint(schema_sessionmaker, tenant_id, "u-1", ["tenant:read"]))
+
+    with pytest.raises(typer.BadParameter, match="lacks channels:write"):
+        await set_token_scopes(
+            rt=_rt(schema_sessionmaker),
+            console=_console()[0],
+            jti=jti,
+            scopes=["tenant:read", "channels:write"],
+        )
+
+    async with schema_sessionmaker() as s:
+        row = await get_mcp_token(s, jti=jti)
+    assert row is not None and row.scopes == ("tenant:read",), "a refused change writes nothing"
+
+
+@pytest.mark.asyncio
+async def test_set_token_scopes_refuses_a_revoked_token(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id = await _seed(schema_sessionmaker)
+    jti = _jti(await _mint(schema_sessionmaker, tenant_id, "u-1", ["tenant:read"]))
+    rt = _rt(schema_sessionmaker)
+    await revoke_token(rt=rt, console=_console()[0], jti=jti)
+
+    with pytest.raises(StoreError, match="no live operator token"):
+        await set_token_scopes(rt=rt, console=_console()[0], jti=jti, scopes=["tenant:read"])

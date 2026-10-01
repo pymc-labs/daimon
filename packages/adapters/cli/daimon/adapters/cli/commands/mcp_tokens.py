@@ -1,9 +1,10 @@
-"""`daimon mcp mint-operator-token | list-tokens | revoke-token`: registered MCP tokens.
+"""`daimon mcp mint-operator-token | list-tokens | revoke-token | set-token-scopes`.
 
 An operator token lets an external integration call a scoped set of MCP
 tools for one server admin. It is minted here only, never from chat, so a
 ``promo:create`` token (which issues credit any tenant can redeem) always
-comes from someone with deployment access.
+comes from someone with deployment access. Minting, revoking and narrowing
+each write a security audit row naming the token's jti, never its value.
 """
 
 from __future__ import annotations
@@ -21,17 +22,25 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
 from daimon.core.config import load_settings
 from daimon.core.errors import ConfigError, StoreError
-from daimon.core.mcp_auth import mint_operator_mcp_token
+from daimon.core.mcp_auth import mint_operator_mcp_token, token_jti
 from daimon.core.operator_tokens import (
+    MAX_TTL_DAYS,
     OPERATOR_SCOPES,
     OperatorTokenError,
     parse_operator_scopes,
     validate_operator_terms,
+    validate_scope_narrowing,
 )
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenKind, Role
 from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.mcp_tokens import list_mcp_tokens, revoke_mcp_token
+from daimon.core.stores.mcp_tokens import (
+    list_mcp_tokens,
+    lock_mcp_token,
+    revoke_mcp_token,
+    update_mcp_token_scopes,
+)
+from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,6 +85,33 @@ async def _resolve_admin_account(
     return identity
 
 
+async def _audit_token_change(
+    session: AsyncSession,
+    *,
+    command: str,
+    reason: str,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    kind: McpTokenKind,
+    jti: uuid.UUID,
+) -> None:
+    """Record a CLI change to a registered token, in the same transaction as the change."""
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_id=None,
+        platform=None,
+        platform_user_id=None,
+        tool_name=f"cli/{command}",
+        operation=None,
+        outcome="allowed",
+        reason=reason,
+        token_kind=kind,
+        token_jti=jti,
+    )
+
+
 async def mint_operator_token(
     *,
     rt: CliRuntime,
@@ -112,6 +148,15 @@ async def mint_operator_token(
             now=now,
             ttl_days=ttl_days,
             max_issued_usd=ceiling,
+        )
+        await _audit_token_change(
+            session,
+            command="mint-operator-token",
+            reason="token_minted",
+            tenant_id=tenant_id,
+            account_id=identity.account_id,
+            kind="operator",
+            jti=token_jti(token),
         )
     console.print(token, soft_wrap=True, highlight=False, markup=False)
     expires = (now + dt.timedelta(days=ttl_days)).isoformat()
@@ -163,9 +208,48 @@ async def list_tokens(
 async def revoke_token(*, rt: CliRuntime, console: Console, jti: uuid.UUID) -> None:
     async with rt.sessionmaker() as session, session.begin():
         row = await revoke_mcp_token(session, jti=jti, now=dt.datetime.now(dt.UTC))
-    if row is None:
-        raise StoreError(f"no live token {jti}")
+        if row is None:
+            raise StoreError(f"no live token {jti}")
+        await _audit_token_change(
+            session,
+            command="revoke-token",
+            reason="token_revoked",
+            tenant_id=row.tenant_id,
+            account_id=row.account_id,
+            kind=row.kind,
+            jti=row.jti,
+        )
     console.print(f"revoked {row.kind} token {row.jti}: its next request gets a 401")
+
+
+async def set_token_scopes(
+    *, rt: CliRuntime, console: Console, jti: uuid.UUID, scopes: list[str]
+) -> None:
+    """Narrow a live operator token to ``scopes``, which must all be on it already."""
+    try:
+        requested = parse_operator_scopes(scopes)
+    except OperatorTokenError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    async with rt.sessionmaker() as session, session.begin():
+        current = await lock_mcp_token(session, jti=jti)
+        if current is None or current.kind != "operator" or current.revoked_at is not None:
+            raise StoreError(f"no live operator token {jti}")
+        try:
+            validate_scope_narrowing(current=current.scopes, requested=requested)
+        except OperatorTokenError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        row = await update_mcp_token_scopes(session, jti=jti, scopes=requested)
+        assert row is not None, "the row is locked and was live a statement ago"
+        await _audit_token_change(
+            session,
+            command="set-token-scopes",
+            reason="token_scopes_narrowed",
+            tenant_id=row.tenant_id,
+            account_id=row.account_id,
+            kind=row.kind,
+            jti=row.jti,
+        )
+    console.print(f"token {row.jti} now has {', '.join(row.scopes)}; its next request uses them")
 
 
 _KINDS: dict[str, McpTokenKind] = {"agent": "agent", "operator": "operator", "cli": "cli"}
@@ -185,7 +269,9 @@ def register_token_commands(app: typer.Typer) -> None:
             list[str],
             typer.Option("--scope", help=f"Repeat per scope: {', '.join(OPERATOR_SCOPES)}."),
         ],
-        ttl_days: Annotated[int, typer.Option("--ttl-days", help="Days until it expires.")] = 30,
+        ttl_days: Annotated[
+            int, typer.Option("--ttl-days", help=f"Days until it expires, at most {MAX_TTL_DAYS}.")
+        ] = 30,
         max_issued_usd: Annotated[
             str | None,
             typer.Option(
@@ -242,9 +328,27 @@ def register_token_commands(app: typer.Typer) -> None:
 
         run_cli(_go(), console=console)
 
+    @app.command("set-token-scopes")
+    def set_token_scopes_command(  # pyright: ignore[reportUnusedFunction]
+        jti: Annotated[uuid.UUID, typer.Option("--jti", help="The operator token's jti.")],
+        scope: Annotated[
+            list[str],
+            typer.Option("--scope", help="Repeat per scope to keep; others are removed."),
+        ],
+    ) -> None:
+        """Narrow an operator token's scopes. It can only remove scopes, never add."""
+        settings = load_settings()
+        console = Console(highlight=False)
+
+        async def _go() -> None:
+            async with build_runtime(settings) as rt:
+                await set_token_scopes(rt=rt, console=console, jti=jti, scopes=scope)
+
+        run_cli(_go(), console=console)
+
     @app.command("revoke-token")
     def revoke_token_command(jti: uuid.UUID) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Revoke a registered MCP token by its jti."""
+        """Revoke a registered MCP token by its jti. It stops working on its next request."""
         settings = load_settings()
         console = Console(highlight=False)
 
