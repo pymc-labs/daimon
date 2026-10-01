@@ -73,6 +73,9 @@ _DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
     "channel_protected": "This channel is protected, so it can't be moved to a DM.",
     "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
     "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
+    "channel_budget_exceeded": (
+        "This channel has used its spending budget. A workspace admin can raise or clear it."
+    ),
 }
 
 
@@ -158,6 +161,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=channel_id,
                 role=role,
                 is_dm=True,
+                dm_source_channel_id=channel_id,
                 now=datetime.now(UTC),
             )
             require_unsealed_source(admission)

@@ -23,7 +23,7 @@ from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, nor
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_tenant
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -65,7 +65,7 @@ def _submission(code: str) -> dict[str, Any]:
     return {
         "view": {
             "id": "V_FORM",
-            "private_metadata": json.dumps({"root_view_id": "V_ROOT"}),
+            "private_metadata": json.dumps({"root_view_id": "V_ROOT", "channel_id": "C1"}),
             "state": {"values": {"billing_redeem_code": {"code": {"value": code}}}},
         }
     }
@@ -157,7 +157,7 @@ async def test_open_pushes_the_form_for_admins_only(fake_slack_web_client: Any) 
         "team": {"id": _TEAM},
         "user": {"id": _USER},
         "trigger_id": "TR",
-        "view": {"id": "V"},
+        "view": {"id": "V", "private_metadata": json.dumps({"channel_id": "C1"})},
     }
     with _slack(fake_slack_web_client, admin=False):
         await handle_redeem_open(MagicMock(), payload)
@@ -168,8 +168,8 @@ async def test_open_pushes_the_form_for_admins_only(fake_slack_web_client: Any) 
         "a non-admin should get a notice, not the form"
     )
     assert second["callback_id"] == "billing_redeem", "an admin should get the redeem form"
-    assert json.loads(second["private_metadata"]) == {"root_view_id": "V"}, (
-        "the form should remember the panel it came from"
+    assert json.loads(second["private_metadata"]) == {"root_view_id": "V", "channel_id": "C1"}, (
+        "the form should remember the panel and the channel it came from"
     )
 
 
@@ -180,6 +180,7 @@ async def test_submission_redeems_and_refreshes_the_panel(
 ) -> None:
     """A submitted code credits the workspace and refreshes the panel; a repeat is refused."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C1")
     terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
     await promo_store.insert_promo_code(
         db_session, code_hash=hash_promo_code(normalize_promo_code("WELCOME-2026")), terms=terms
@@ -206,6 +207,12 @@ async def test_submission_redeems_and_refreshes_the_panel(
     ), "the form should confirm the credit"
     assert root["view_id"] == "V_ROOT" and "$10.00 balance" in _texts(root["view"]["blocks"]), (
         "the panel should show the new balance"
+    )
+    assert "this channel: $0.00 of $5.00" in _texts(root["view"]["blocks"]), (
+        "the refreshed panel should keep the channel's budget line"
+    )
+    assert json.loads(root["view"]["private_metadata"]) == {"channel_id": "C1"}, (
+        "and keep the channel for the next refresh"
     )
     assert retry["view"]["callback_id"] == "billing_redeem", "a repeat should reopen the form"
     assert "already redeemed" in _texts(retry["view"]["blocks"]), (

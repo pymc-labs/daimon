@@ -106,6 +106,7 @@ source_modules = [
     "daimon.core.billing_panel",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
+    "daimon.core.channel_budget",
     "daimon.core.checkpoint_prompt",
     "daimon.core.config",
     "daimon.core.confirmation",

@@ -18,6 +18,7 @@ from daimon.core.scope import ConfigTier
 AdmissionDenialReason = Literal[
     "balance_depleted",
     "cap_exceeded",
+    "channel_budget_exceeded",
     "invoker_not_allowed",
     "channel_protected",
     "agent_pinned_elsewhere",
@@ -26,8 +27,8 @@ MissingConfigPart = Literal["agent", "environment"]
 
 
 class AdmissionDenied(DaimonError):
-    """Raised by `admit()` when the invoker policy, channel protection, balance or cap
-    gate rejects the turn.
+    """Raised by `admit()` when the invoker policy, channel protection, balance, cap
+    or channel budget gate rejects the turn.
 
     Carries only a closed reason literal — no rendered user-facing text.
     Denial copy stays adapter-side.

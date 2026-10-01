@@ -730,6 +730,7 @@ async def run_prepared_turn_impl(
                 external_user_id=external_user_id,
                 ma_session_id=new_session_id,
                 model_id=recovery.model_id,
+                channel_id=prepared.admission.budget_channel_id,
             )
 
             log.info(

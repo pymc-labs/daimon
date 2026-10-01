@@ -7,6 +7,7 @@ the chat-neutral ones in daimon.core.billing_panel.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from daimon.core.billing_panel import (
     period_label,
     spend_over_cap,
 )
+from daimon.core.channel_budget import describe_budget
 
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
 
@@ -43,6 +45,12 @@ def _timed_credit_lines(state: BillingPanelState) -> str:
     if len(state.timed_credit) > 3:
         lines.append(f"\n⏳ {len(state.timed_credit) - 3} more timed credits")
     return "".join(lines)
+
+
+def _channel_budget_suffix(state: BillingPanelState) -> str:
+    if state.channel_budget is None:
+        return ""
+    return f"\nthis channel: {describe_budget(state.channel_budget)}"
 
 
 def build_loading_view() -> dict[str, Any]:
@@ -106,6 +114,7 @@ def build_billing_container(
         credit_line = (
             f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
             f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
@@ -200,6 +209,7 @@ def build_billing_container(
             f"🏦 *Server credit*\n"
             f"{fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
             f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
@@ -207,12 +217,17 @@ def build_billing_container(
 
 
 def build_billing_view(
-    state: BillingPanelState, *, now: datetime, since: datetime
+    state: BillingPanelState, *, now: datetime, since: datetime, channel_id: str | None = None
 ) -> dict[str, Any]:
-    """The /billing modal around ``build_billing_container``."""
+    """The /billing modal around ``build_billing_container``.
+
+    ``channel_id`` is the channel /billing ran in, kept in the view so a
+    refresh from the redeem form still shows that channel's budget.
+    """
     return {
         "type": "modal",
         "title": {"type": "plain_text", "text": "Billing"},
         "close": {"type": "plain_text", "text": "Close"},
+        "private_metadata": json.dumps({"channel_id": channel_id or ""}),
         "blocks": build_billing_container(state, now=now, since=since),
     }

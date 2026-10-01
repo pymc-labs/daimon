@@ -17,7 +17,8 @@ events are no-ops. No need to distinguish "headless-only" sessions.
 Attribution comes off the metadata `create_session` stamps on every session:
 `daimon_tenant` is the billed tenant (the tenant_ledger debit keys on it) and
 `daimon_account` resolves to the owning human's platform_user_id for per-member
-usage reporting.
+usage reporting. `daimon_budget_channel`, when present, is the channel whose
+budget the replayed spend counts toward.
 
 A session stamped `daimon_billing_exempt` was created for a `BillingExempt`
 caller (a headless run with no recorder, an MCP caller with no platform user).
@@ -47,6 +48,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -158,6 +160,7 @@ async def sweep_headless_usage(
         )
         model_id = session.agent.model.id
         pricing = MODEL_PRICING.get(model_id)
+        channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
 
         async for event in client.beta.sessions.events.list(session.id, order="asc"):
             if event.type != "span.model_request_end":
@@ -171,6 +174,7 @@ async def sweep_headless_usage(
                 event=event,
                 markup=markup,
                 pricing=pricing,
+                channel_id=channel_id,
             )
             recorded += 1
     if watermark is not None:

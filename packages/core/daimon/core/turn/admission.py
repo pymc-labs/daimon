@@ -2,13 +2,14 @@
 
 A single core call performs identity resolution, the channel -> tenant ->
 deployment config cascade, MA resolve + SDK retrieve, the per-tenant balance
-gate, and the per-user monthly cap gate -- returning a frozen `Admission` or
-raising a typed error. No boolean gate result crosses this boundary.
+gate, the per-user monthly cap gate and the channel budget gate -- returning a
+frozen `Admission` or raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> agent pin -> balance -> cap. A tenant that is both over-balance and mis-configured must
-see the config error (matches both adapters' inline sequences today). The
+-> agent pin -> balance -> cap -> channel budget. A tenant that is both
+over-balance and mis-configured must see the config error (matches both
+adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
 about the tenant's configuration and never reaches an MA call.
 
@@ -27,6 +28,7 @@ from typing import Literal
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import is_over_cap
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
@@ -70,6 +72,10 @@ class Admission:
     origin_channel_id: str | None = None
     origin_thread_id: str | None = None
     origin_seal_ids: frozenset[str] = frozenset()
+    # Parent channel the turn's spend is attributed to; in a DM, the channel it
+    # was moved from, or None. Apart from `origin_channel_id`, which drives the
+    # seal: a DM is budgeted to its source channel but never runs there.
+    budget_channel_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -84,6 +90,7 @@ async def admit(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -104,6 +111,7 @@ async def admit(
                 thread_id=thread_id,
                 role=role,
                 is_dm=is_dm,
+                dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )
@@ -126,6 +134,7 @@ async def admit_impl(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -296,6 +305,17 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
+    # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
+    budget_channel_id = dm_source_channel_id if is_dm else channel_id
+    if await is_over_channel_budget(
+        sessionmaker=deps.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=budget_channel_id,
+        now=now,
+    ):
+        raise AdmissionDenied(reason="channel_budget_exceeded")
+
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
@@ -325,4 +345,5 @@ async def admit_impl(
         agent=agent,
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
+        budget_channel_id=budget_channel_id,
     )

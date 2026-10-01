@@ -54,6 +54,8 @@ Deliberate carve-outs:
 - Hosted chart artifacts in operator-owned object storage are not deleted by
   account purge; operators must enforce retention with a bucket lifecycle rule.
 - `usage_events` and `tenant_user_caps` rows are retained for billing integrity.
+  A `channel_budgets` row belongs to the tenant; erasure only nulls the
+  `set_by_account_id` of the admin who set it, through ON DELETE SET NULL.
   Their `delete_all_for_user` helpers exist and are deliberately uncalled here.
   `promo_redemptions` rows stay with the tenant too; account deletion only
   clears who redeemed the code, through ON DELETE SET NULL.

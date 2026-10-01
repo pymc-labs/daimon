@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 90 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 94 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -71,6 +71,17 @@ Agent tools: list / get / create / update / fork / archive.
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents in the tenant pool, including each agent's attached ``mcp_servers`` and ``skills``. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
+
+## `channel_budgets`
+
+Channel budget tools: read a channel's spending budget; admins set, clear and list them.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_channel_budget` | admin only | Remove a channel's spending budget, so only the balance and caps apply. |
+| `get_channel_budget` | Discord callers, Slack callers | Show a channel's spending budget: its limit, window and what it has spent. |
+| `list_channel_budgets` | admin only | List every channel budget in this server or workspace with its spend. |
+| `set_channel_budget` | admin only | Set or replace a channel's spending budget. |
 
 ## `channels`
 

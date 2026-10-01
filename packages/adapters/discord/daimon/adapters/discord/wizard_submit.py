@@ -70,6 +70,7 @@ import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
     AGENT_PINNED_ELSEWHERE_NOTICE,
+    CHANNEL_BUDGET_NOTICE,
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
@@ -520,6 +521,9 @@ async def run_wizard_submit_turn_observed(
                     "Your answers were recorded, but "
                     + _credit_depleted_message(_resolve_bot_display_name(bot.runtime.settings))
                 )
+            elif err.reason == "channel_budget_exceeded":
+                _log.info("wizard_submit.skipped.over_channel_budget", short_id=row.id)
+                await channel.send("Your answers were recorded, but " + CHANNEL_BUDGET_NOTICE)
             else:
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
                 await channel.send(

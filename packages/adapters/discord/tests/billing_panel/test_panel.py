@@ -25,6 +25,8 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.stores.domain import ChannelBudgetRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -726,6 +728,31 @@ def test_member_container_has_you_group_and_no_top_spenders_group() -> None:
     text = _joined_container_text(container)
     assert "**You**" in text, "member container must contain the You group"
     assert "🏆" not in text, "member container must not contain the Top spenders group"
+
+
+def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one() -> None:
+    budget = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        channel_id="c",
+        limit_usd=Decimal("5"),
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    status = ChannelBudgetStatus(budget=budget, spent_usd=Decimal("1.2"), is_active=True)
+    for is_admin in (False, True):
+        with_budget = _make_state(is_admin=is_admin, channel_budget=status)
+        text = _joined_container_text(build_billing_container(with_budget, now=NOW, since=SINCE))
+        assert "this channel: $1.20 of $5.00 (monthly)" in text
+        plain = _joined_container_text(
+            build_billing_container(_make_state(is_admin=is_admin), now=NOW, since=SINCE)
+        )
+        assert "this channel" not in plain
 
 
 def test_over_cap_container_has_color_over_cap_accent() -> None:

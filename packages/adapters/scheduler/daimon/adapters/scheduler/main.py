@@ -43,6 +43,7 @@ from daimon.core.access_policy import (
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -297,6 +298,7 @@ async def _build_fire(
                 tenant_id=row.tenant_id,
                 markup=settings.billing.markup,
                 pricing=MODEL_PRICING.get(model_id),
+                channel_id=row.channel_id,
             )
 
         # Resolve agent + environment by daimon-tag at fire time,
@@ -347,6 +349,27 @@ async def _build_fire(
                 async with sm() as pin_s, pin_s.begin():
                     await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
                 return
+        # Admission gate: the routine's channel budget, after the cap (run_one_tick),
+        # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
+        # billed to (the destination's parent, else where the routine was made).
+        if await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+            log.info(
+                "routine.skipped.over_channel_budget",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                channel_id=row.channel_id,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+            return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
@@ -401,6 +424,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
+            budget_channel_id=row.channel_id,
         )
 
         if row.destination_kind is None:

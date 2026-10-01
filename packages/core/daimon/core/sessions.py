@@ -37,6 +37,7 @@ from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -78,6 +79,7 @@ def _session_metadata(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     billing_exempt: ExemptReason | None,
+    budget_channel_id: str | None = None,
 ) -> dict[str, str]:
     """The metadata stamp every Daimon-created session carries.
 
@@ -85,6 +87,7 @@ def _session_metadata(
     the owning account. `daimon_billing_exempt=<reason>` marks a session
     created for a `BillingExempt` caller, which the sweep skips (the operator
     absorbs its usage). It is decided once, here, from the creator's posture.
+    `daimon_budget_channel` is the channel whose budget the sweep charges.
     """
     metadata: dict[str, str] = {}
     if account_id is not None:
@@ -93,6 +96,8 @@ def _session_metadata(
         metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
     if billing_exempt is not None:
         metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
+    if budget_channel_id is not None:
+        metadata[MA_METADATA_KEY_BUDGET_CHANNEL] = budget_channel_id
     return metadata
 
 
@@ -117,6 +122,7 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
+    budget_channel_id: str | None = None,
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
@@ -138,6 +144,10 @@ async def create_session(
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
+
+    ``budget_channel_id`` is the channel whose budget the session's spend counts
+    toward (for a DM, the channel it was moved from). It is stamped apart from
+    the origin, so budgeting a DM never puts it under that channel's seal.
 
     When a per-agent GitHub PAT is resolvable and the vault was ensured, a
     GitHub Copilot MCP credential is mirrored into the vault
@@ -448,7 +458,10 @@ async def create_session(
             _log.info("session.tool_safety_applied", agent_id=agent.id)
 
     metadata = _session_metadata(
-        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+        account_id=account_id,
+        tenant_id=tenant_id,
+        billing_exempt=billing_exempt,
+        budget_channel_id=budget_channel_id,
     )
     if slack_turn_context_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)

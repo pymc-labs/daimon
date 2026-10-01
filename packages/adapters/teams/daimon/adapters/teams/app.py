@@ -129,6 +129,8 @@ _NOT_INVITED = (
 _PINNED_ELSEWHERE = (
     "This agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
+# Teams sets no channel budgets, so this is unreachable; the reply keeps the map total.
+_CHANNEL_BUDGET = "This channel has used its spending budget. An admin can raise or clear it."
 _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
     "1:1 chat with me, or ask an admin to restore it."
@@ -144,6 +146,7 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "cap_exceeded": ("turn.skipped.over_cap", _CAP_REACHED),
     "invoker_not_allowed": ("turn.skipped.invoker_not_allowed", _NOT_INVITED),
     "agent_pinned_elsewhere": ("turn.skipped.agent_pinned_elsewhere", _PINNED_ELSEWHERE),
+    "channel_budget_exceeded": ("turn.skipped.channel_budget_exceeded", _CHANNEL_BUDGET),
     # A protected channel hears nothing, a refusal included.
     "channel_protected": ("turn.skipped.channel_protected", None),
 }

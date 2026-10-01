@@ -129,8 +129,13 @@ config). The order is load-bearing and documented as such in the module:
    whose `archived_at` is set.
 7. Balance gate — `tenant_balance.is_over_balance`.
 8. Monthly cap gate — `billing.is_over_cap`.
+9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
+   parent channel, or for a DM the channel it was moved from with `/dm`
+   (`dm_source_channel_id`); skipped in an older DM or where the channel has
+   no budget. The channel is carried on `Admission.channel_id` so every debit
+   for the turn is attributed to it.
 
-The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
+The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
 A Slack `app_mention` runs a turn only when its text contains the bot's own
@@ -628,7 +633,8 @@ against.
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
   the same `create_session` the chat path uses and delegates the drain to the
   same driver under the same ceiling — but it calls neither `admit()` nor
-  `bind_session()`. A routine with a destination is told where its result
+  `bind_session()`. The scheduler runs the balance, cap and channel budget
+  gates itself before each fire. A routine with a destination is told where its result
   goes; if the agent does not post there, the row's outbox goes `pending` and
   the chat adapter for the tenant's platform posts the result tail through
   its delivery poller (`daimon.core.routine_delivery`), after the access
@@ -638,7 +644,9 @@ against.
   drive a session directly. They do not use the chokepoint either; they re-run
   the same balance and cap gates through `_admit` in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py` and create
-  sessions via `daimon.core.sessions.create_session`.
+  sessions via `daimon.core.sessions.create_session`. The billed media tool
+  runs the same gates, then the budget of the channel named by the calling
+  turn's `origin_context_id`, and charges its spend to that channel.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
@@ -650,7 +658,8 @@ against.
   a wake poller (`run_wake_poller`) that opens threads with due rows and hands them
   to the adapter's continuation dispatch. That dispatch takes the thread's
   turn guard and goes through `admit()`, `bind_session()` and
-  `run_prepared_turn()` like a mention, so the balance and cap gates apply.
+  `run_prepared_turn()` like a mention, so the balance, cap and channel
+  budget gates apply.
   A claim holds a lease, and `started_at` is committed just before the turn
   starts. If a claim's lease expires before `started_at` is set, the wake is
   retried. If it expires after, the wake is settled `interrupted` and never

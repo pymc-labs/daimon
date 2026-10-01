@@ -15,6 +15,7 @@ from decimal import Decimal
 import httpx
 import structlog
 from daimon.core.billing import month_start as month_start
+from daimon.core.channel_budget import ChannelBudgetStatus, get_channel_budget_status
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_jwt
@@ -70,6 +71,8 @@ class BillingPanelState:
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
     # Some promo code is redeemable now (admin view only); gates the redeem button
     has_redeemable_promo_code: bool = False
+    # The invoking channel's budget (both views); None when it has none.
+    channel_budget: ChannelBudgetStatus | None = None
 
 
 def member_label(user_id: str) -> str:
@@ -99,10 +102,13 @@ async def load_billing_snapshot(
     is_admin: bool,
     since: datetime,
     now: datetime,
+    platform: str | None = None,
+    channel_id: str | None = None,
 ) -> BillingPanelState:
     """The caller's spend, turns and cap plus the balance; tenant totals only for an admin.
 
-    ``now`` is when live timed promo credit is measured.
+    ``now`` is when live timed promo credit and the budget window are measured.
+    With ``platform`` and ``channel_id``, the state carries that channel's budget.
     """
     state = BillingPanelState(
         is_admin=False,
@@ -123,6 +129,13 @@ async def load_billing_snapshot(
         member_rows=(),
         over_cap_count=0,
         timed_credit=tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now)),
+        channel_budget=(
+            None
+            if platform is None or channel_id is None
+            else await get_channel_budget_status(
+                session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
+            )
+        ),
     )
     if not is_admin:
         return state

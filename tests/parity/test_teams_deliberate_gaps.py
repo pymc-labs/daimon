@@ -11,7 +11,8 @@ answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; channel history and files need Microsoft Graph; and a dialog's
 password field cannot take a `.env` upload or a repository token. Removing the
 app archives nothing. The `billing` card has no promo code surface: Teams
-admins redeem with the MCP tool `redeem_promo_code`.
+admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
+Discord and Slack only, so the card shows no channel budget either.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -29,6 +30,9 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools.channel_budgets import (
+    _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.credential_requests import (
     _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
@@ -38,9 +42,10 @@ from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
 from daimon.core.billing_panel import BillingPanelState
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.config import TeamsSettings
 from daimon.core.promo_credit import ActiveTimedCredit
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import ChannelBudgetRow, Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -133,6 +138,47 @@ def test_the_teams_billing_card_has_no_promo_code_surface() -> None:
     card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
     assert "redeem" not in card.lower() and "timed credit" not in card.lower(), (
         "Teams has no promo code UI on purpose; if it gains one, replace this record"
+    )
+
+
+async def test_teams_has_no_channel_budgets() -> None:
+    """The budget tools refuse Teams, and the card renders no budget line even if given one."""
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform="teams"
+    )
+    with pytest.raises(ToolError, match="only for Discord servers and Slack workspaces"):
+        await _get_channel_budget_impl(cast(Any, MagicMock()), auth, "19:chat")
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    budget = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=auth.tenant_id,
+        platform="teams",
+        channel_id="19:chat",
+        limit_usd=Decimal("5"),
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    state = BillingPanelState(
+        is_admin=False,
+        caller_user_id="u",
+        caller_spend=0.0,
+        caller_turns=0,
+        caller_cap=None,
+        guild_balance_usd=Decimal("10"),
+        guild_spend=0.0,
+        guild_turns=0,
+        guild_distinct_members=0,
+        member_rows=(),
+        over_cap_count=0,
+        channel_budget=ChannelBudgetStatus(budget, Decimal("1"), True),
+    )
+    card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
+    assert "this channel" not in card.lower(), (
+        "Teams has no channel budgets on purpose; if it gains them, replace this record"
     )
 
 

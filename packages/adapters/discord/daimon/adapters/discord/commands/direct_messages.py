@@ -6,7 +6,12 @@ from typing import Literal
 
 import anthropic
 import structlog
-from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot, log_anthropic_overload
+from daimon.adapters.discord.bot import (
+    CHANNEL_BUDGET_NOTICE,
+    GLOBAL_CAP_NOTICE,
+    DaimonBot,
+    log_anthropic_overload,
+)
 from daimon.adapters.discord.checks import is_member_guild_admin, require_registered_guild
 from daimon.core.direct_messages import (
     reply_to_dm,
@@ -32,6 +37,12 @@ log = structlog.get_logger(__name__)
 _CONVERSATION_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
 
+def _error_text(exc: Exception, fallback: str) -> str:
+    if isinstance(exc, AdmissionDenied) and exc.reason == "channel_budget_exceeded":
+        return "Sorry, " + CHANNEL_BUDGET_NOTICE
+    return str(exc) if isinstance(exc, DaimonError) else fallback
+
+
 _DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
     "agent_pinned_elsewhere": (
         "This channel's agent only runs in the channels an operator pinned it to, "
@@ -43,6 +54,7 @@ _DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
     "channel_protected": "This channel is protected, so it can't be moved to a DM.",
     "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
     "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
+    "channel_budget_exceeded": "Sorry, " + CHANNEL_BUDGET_NOTICE,
 }
 
 
@@ -96,15 +108,17 @@ class DirectMessageCog(commands.Cog):
             if not permissions.view_channel or not permissions.read_message_history:
                 raise DaimonError("You need access to this channel's history to move it to DMs.")
             parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
+            source_channel_id = str(parent_id or channel.id)
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
                 platform="discord",
                 external_user_id=str(member.id),
-                channel_id=str(parent_id or channel.id),
+                channel_id=source_channel_id,
                 thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 role=Role.ADMIN if is_admin else Role.USER,
                 is_dm=True,
+                dm_source_channel_id=source_channel_id,
                 now=datetime.now(UTC),
             )
             require_unsealed_source(admission)
@@ -133,7 +147,7 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(dm_channel.id),
                 external_user_id=str(member.id),
                 source_url=source_url,
-                source_channel_id=str(parent_id or channel.id),
+                source_channel_id=source_channel_id,
                 source_thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 context=context,
             )
@@ -234,10 +248,8 @@ class DirectMessageCog(commands.Cog):
                 alert_webhook_url=self.bot.runtime.settings.ops.alert_webhook_url,
             )
             log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
-            error = (
-                str(exc)
-                if isinstance(exc, DaimonError)
-                else "Couldn't verify or complete this private conversation. Please retry."
+            error = _error_text(
+                exc, "Couldn't verify or complete this private conversation. Please retry."
             )
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(error, allowed_mentions=discord.AllowedMentions.none())

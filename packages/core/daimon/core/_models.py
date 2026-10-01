@@ -349,6 +349,9 @@ class Routine(Base):
     # that only knows `last_result_tail` cannot change what gets posted.
     delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Channel the routine's spend is attributed to and budget-gated by: its
+    # destination's parent channel, resolved when the destination is set.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -752,6 +755,8 @@ class UsageEvent(Base):
         Integer, nullable=False, server_default=text("0")
     )
     event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Parent channel of the turn or tool call that spent it; NULL when unknown.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TenantUserCap(Base):
@@ -849,6 +854,13 @@ class TenantLedger(Base):
     __table_args__ = (
         Index("tenant_ledger_tenant_idx", "tenant_id"),
         Index("tenant_ledger_idem_idx", "idempotency_key", unique=True),
+        Index(
+            "tenant_ledger_tenant_channel_idx",
+            "tenant_id",
+            "channel_id",
+            "occurred_at",
+            postgresql_where=text("channel_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -870,6 +882,57 @@ class TenantLedger(Base):
     payment_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Set on debits only: the parent channel whose budget the spend counts against.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ChannelBudget(Base):
+    """A spend limit on one channel. No row = no limit.
+
+    Spend is the channel's ledger debits inside the window: `monthly` is the
+    current UTC calendar month, `total` everything since `starts_at` (or ever),
+    `fixed` the `[starts_at, ends_at)` range, outside which it does not gate.
+    """
+
+    __tablename__ = "channel_budgets"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "platform", "channel_id", name="uq_channel_budgets_tenant_channel"
+        ),
+        CheckConstraint("limit_usd >= 0", name="ck_channel_budgets_limit"),
+        CheckConstraint(
+            "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_channel_budgets_window"
+        ),
+        CheckConstraint(
+            "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
+            "AND starts_at < ends_at) "
+            "OR (\"window\" = 'total' AND ends_at IS NULL) "
+            "OR (\"window\" = 'monthly' AND starts_at IS NULL AND ends_at IS NULL)",
+            name="ck_channel_budgets_bounds",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -2077,7 +2140,8 @@ class TurnOutcome(Base):
             "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
-            "'admission_balance_depleted', 'admission_cap_exceeded', 'admission_denied', "
+            "'admission_balance_depleted', 'admission_cap_exceeded', "
+            "'admission_channel_budget_exceeded', 'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
             "'unknown')",
@@ -2173,7 +2237,8 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
-    # The channel (and thread) /dm was run in; re-checked against seals each turn.
+    # The parent channel (and thread) /dm was run in; re-checked against seals
+    # each turn, and the DM's spend counts toward that channel's budget.
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Slack: channel:thread_ts of every copied message, so later thread seals match.

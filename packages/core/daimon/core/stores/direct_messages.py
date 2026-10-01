@@ -188,3 +188,17 @@ async def delete_conversations_for_account(session: AsyncSession, *, account_id:
         )
     ).all()
     return len(removed)
+
+
+async def get_source_channel(
+    session: AsyncSession, *, tenant_id: uuid.UUID, scope_id: str
+) -> str | None:
+    """The channel a DM scope was started from; None for an unknown scope or an older DM."""
+    return (
+        await session.execute(
+            select(DirectMessageConversation.source_channel_id).where(
+                DirectMessageConversation.tenant_id == tenant_id,
+                DirectMessageConversation.scope_id == scope_id,
+            )
+        )
+    ).scalar()

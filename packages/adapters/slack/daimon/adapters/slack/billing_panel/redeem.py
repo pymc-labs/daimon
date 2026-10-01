@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -50,8 +50,19 @@ def _text_view(text: str) -> dict[str, Any]:
     }
 
 
-def build_redeem_modal(*, root_view_id: str, error: str | None = None) -> dict[str, Any]:
-    """The code form. ``error`` is a refusal from the last attempt."""
+def _metadata(view: dict[str, Any]) -> dict[str, Any]:
+    try:
+        meta = json.loads(str(view.get("private_metadata") or "") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return cast("dict[str, Any]", meta) if isinstance(meta, dict) else {}
+
+
+def build_redeem_modal(
+    *, root_view_id: str, channel_id: str = "", error: str | None = None
+) -> dict[str, Any]:
+    """The code form. ``error`` is a refusal from the last attempt; ``channel_id``
+    is the channel /billing ran in, for the panel refresh."""
     blocks: list[dict[str, Any]] = []
     if error is not None:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ {error}"}})
@@ -74,7 +85,7 @@ def build_redeem_modal(*, root_view_id: str, error: str | None = None) -> dict[s
         "title": _TITLE,
         "submit": {"type": "plain_text", "text": "Redeem"},
         "close": {"type": "plain_text", "text": "Back"},
-        "private_metadata": json.dumps({"root_view_id": root_view_id}),
+        "private_metadata": json.dumps({"root_view_id": root_view_id, "channel_id": channel_id}),
         "blocks": blocks,
     }
 
@@ -104,15 +115,14 @@ class RedeemDecision:
     code: str
     view_id: str
     root_view_id: str
+    channel_id: str = ""
 
 
 def evaluate_redeem_submission(payload: dict[str, Any]) -> RedeemDecision:
     """No I/O: read the code and pick the ack. An empty code stays on the form."""
     view: dict[str, Any] = payload.get("view") or {}
-    try:
-        meta: dict[str, Any] = json.loads(str(view.get("private_metadata") or "") or "{}")
-    except json.JSONDecodeError:
-        meta = {}
+    meta = _metadata(view)
+    channel_id = str(meta.get("channel_id") or "")
     state: dict[str, Any] = view.get("state") or {}
     values: dict[str, Any] = state.get("values") or {}
     block: dict[str, Any] = values.get(_CODE_BLOCK_ID) or {}
@@ -130,6 +140,7 @@ def evaluate_redeem_submission(payload: dict[str, Any]) -> RedeemDecision:
             code="",
             view_id=view_id,
             root_view_id=root_view_id,
+            channel_id=channel_id,
         )
     return RedeemDecision(
         proceed=True,
@@ -137,6 +148,7 @@ def evaluate_redeem_submission(payload: dict[str, Any]) -> RedeemDecision:
         code=code,
         view_id=view_id,
         root_view_id=root_view_id,
+        channel_id=channel_id,
     )
 
 
@@ -158,7 +170,9 @@ async def handle_redeem_open(runtime: SlackRuntime, payload: dict[str, Any]) -> 
         # views.push, not views.open: the button lives in the open /billing modal.
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs
             trigger_id=trigger_id,
-            view=build_redeem_modal(root_view_id=root_view_id)
+            view=build_redeem_modal(
+                root_view_id=root_view_id, channel_id=str(_metadata(view).get("channel_id") or "")
+            )
             if is_admin
             else _text_view(_ADMIN_ONLY),
         )
@@ -174,6 +188,7 @@ async def _refresh_panel(
     team_id: str,
     user_id: str,
     root_view_id: str,
+    channel_id: str,
     now: datetime,
 ) -> None:
     """Redraw the /billing panel under the form. A failure leaves the success reply alone."""
@@ -187,9 +202,12 @@ async def _refresh_panel(
                 is_admin=True,
                 since=since,
                 now=now,
+                platform="slack",
+                channel_id=channel_id or None,
             )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=root_view_id, view=build_billing_view(state, now=now, since=since)
+            view_id=root_view_id,
+            view=build_billing_view(state, now=now, since=since, channel_id=channel_id),
         )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
         log.warning("slack.billing_redeem_refresh_failed", team_id=team_id, exc_info=exc)
@@ -228,7 +246,9 @@ async def run_redeem_submission(
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=decision.view_id,
                 view=build_redeem_modal(
-                    root_view_id=decision.root_view_id, error=redeem_result_text(result)
+                    root_view_id=decision.root_view_id,
+                    channel_id=decision.channel_id,
+                    error=redeem_result_text(result),
                 ),
             )
             return
@@ -242,6 +262,7 @@ async def run_redeem_submission(
                 team_id=team_id,
                 user_id=user_id,
                 root_view_id=decision.root_view_id,
+                channel_id=decision.channel_id,
                 now=now,
             )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:

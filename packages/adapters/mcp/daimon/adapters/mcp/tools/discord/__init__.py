@@ -63,6 +63,9 @@ from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow as ThreadRow,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._participation import (
+    resolve_visible_channel as resolve_visible_channel,
+)
+from daimon.adapters.mcp.tools.discord._participation import (
     verify_participation_scope as verify_participation_scope,
 )
 from daimon.adapters.mcp.tools.discord._read import (

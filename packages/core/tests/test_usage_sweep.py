@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 import structlog
 import structlog.testing
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -29,6 +30,8 @@ from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
@@ -52,6 +55,8 @@ def _session_dict(
     account_id: uuid.UUID | str,
     model: str = "claude-sonnet-4-6",
     billing_exempt: str | None = None,
+    origin_channel_id: str | None = None,
+    budget_channel_id: str | None = None,
     updated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """A headless MA session tagged the way create_session tags it."""
@@ -61,6 +66,10 @@ def _session_dict(
     }
     if billing_exempt is not None:
         metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
+    if origin_channel_id is not None:
+        metadata[MA_METADATA_KEY_CHANNEL] = origin_channel_id
+    if budget_channel_id is not None:
+        metadata[MA_METADATA_KEY_BUDGET_CHANNEL] = budget_channel_id
     s = ma_session(
         id=session_id,
         agent=ma_session_agent(id="agent_headless1", name="headless-agent", model=model),
@@ -201,6 +210,54 @@ async def test_sweep_records_usage_for_headless_session_attributed_to_tenant_and
     assert row.event_id == "evt_1", "event_id is the span.model_request_end event id"
     assert row.input_tokens == 100, "tokens sourced from event.model_usage"
     assert row.output_tokens == 50, "tokens sourced from event.model_usage"
+
+
+@pytest.mark.parametrize(
+    ("origin_channel_id", "budget_channel_id"),
+    [(None, None), ("chan-1", "chan-1"), ("dm-1", "chan-1"), ("chan-2", None)],
+    ids=["unstamped", "channel", "dm-budgeted-to-source", "seal-stamp-only"],
+)
+async def test_sweep_attributes_spend_to_the_budget_channel_stamp(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    origin_channel_id: str | None,
+    budget_channel_id: str | None,
+) -> None:
+    """`daimon_budget_channel` lands on both rows, so the channel's budget counts the
+    debit; `daimon_channel` (where the conversation runs, for the seal) never does."""
+    principal = await make_platform_principal(db_session, platform="discord", external_id="u-7")
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_channel",
+                    tenant_id=principal.tenant_id,
+                    account_id=principal.account_id,
+                    origin_channel_id=origin_channel_id,
+                    budget_channel_id=budget_channel_id,
+                )
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_1", input_tokens=100, output_tokens=50)]
+        ),
+    )
+
+    await sweep_headless_usage(
+        build_fake_anthropic(router.dispatch), db_session_factory, markup=Decimal("1.0")
+    )
+
+    usage = (await db_session.execute(select(UsageEvent))).scalars().one()
+    debit = (await db_session.execute(select(TenantLedger))).scalars().one()
+    assert usage.channel_id == budget_channel_id, "usage row should carry the budget channel"
+    assert debit.channel_id == budget_channel_id, "debit row should carry the budget channel"
 
 
 async def test_sweep_idempotent_across_runs_no_double_count(

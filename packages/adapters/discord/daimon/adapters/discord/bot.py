@@ -235,6 +235,10 @@ INVOKER_NOT_ALLOWED_NOTICE = (
     "you aren't on this server's list of people who can start a turn. A server admin can add you."
 )
 
+CHANNEL_BUDGET_NOTICE = (
+    "this channel has used its spending budget. A server admin can raise or clear it."
+)
+
 AGENT_PINNED_ELSEWHERE_NOTICE = (
     "this agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
@@ -2464,6 +2468,13 @@ class DaimonBot(commands.Bot):
                 await target.send(
                     _credit_depleted_message(_resolve_bot_display_name(self.runtime.settings))
                 )
+            elif err.reason == "channel_budget_exceeded":
+                log.info(
+                    "turn.skipped.over_channel_budget",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                )
+                await target.send("Sorry, " + CHANNEL_BUDGET_NOTICE)
             else:
                 log.info(
                     "turn.skipped.over_cap",
@@ -2515,6 +2526,7 @@ class DaimonBot(commands.Bot):
                         markup=self.runtime.settings.billing.markup,
                         max_input_chars=naming.max_input_chars,
                         timeout_seconds=naming.timeout_seconds,
+                        channel_id=admission.budget_channel_id,
                     )
             thread = await message.create_thread(
                 name=thread_name,

@@ -135,9 +135,20 @@ CASES = [
     SearchCase("let churn-explorer finish this", "hand_off_task", frozenset([])),
     SearchCase("let's start fresh", "start_fresh_task", frozenset([])),
     SearchCase("start over with a clean workspace", "start_fresh_task", frozenset([])),
+    SearchCase(
+        "cap spending in #growth at $20 a month",
+        "set_channel_budget",
+        frozenset(["clear_channel_budget"]),
+    ),
+    SearchCase(
+        "how much of its budget has this channel spent", "get_channel_budget", frozenset([])
+    ),
+    SearchCase("remove the spending limit on #growth", "clear_channel_budget", frozenset([])),
 ]
 # Teams hides these on purpose; tests/parity/test_teams_deliberate_gaps.py records why.
-_TEAMS_HIDDEN = frozenset({"request_repo_binding", "request_skill_repo_token"})
+_TEAMS_HIDDEN = frozenset(
+    {"request_repo_binding", "request_skill_repo_token", "get_channel_budget"}
+)
 
 
 def _make_app(

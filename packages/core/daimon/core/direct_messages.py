@@ -154,10 +154,11 @@ async def start_dm(
 ) -> DirectMessageRow:
     """Select a workspace explicitly and give the DM a new thread-like scope.
 
-    Caller admits the source with is_dm=True and calls `require_unsealed_source`
-    before reading history or opening the DM. Each move resets the private
-    scope; a prior workspace's physical DM history is never replayed into this
-    one.
+    Caller admits the source with is_dm=True and `dm_source_channel_id`, and
+    calls `require_unsealed_source`, before reading history or opening the DM.
+    `source_channel_id` is the parent channel `/dm` ran in; the DM's turns
+    count toward its budget. Each move resets the private scope; a prior
+    workspace's physical DM history is never replayed into this one.
     """
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
@@ -297,6 +298,7 @@ async def reply_to_dm(
             thread_id=conversation.scope_id,
             role=role,
             is_dm=True,
+            dm_source_channel_id=conversation.source_channel_id,
             now=now,
         )
         if admission.account_id != conversation.account_id:

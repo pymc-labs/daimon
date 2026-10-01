@@ -40,6 +40,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
 | `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>` |
+| `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
 | `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
@@ -338,7 +339,7 @@ discovery is pull-only, through the `/routines` panel. The strings that land
 in `last_error` come from a small, closed set: `invoker_not_allowed` (the
 creator is no longer on the allowlist and not a stored admin),
 `access_policy_unreadable`, `balance_depleted`,
-`cap_exceeded`, `routine has no created_by_user_id`, `routine tenant not
+`cap_exceeded`, `channel_budget_exceeded`, `routine has no created_by_user_id`, `routine tenant not
 found`, `scheduler_shutdown`, `timeout: exceeded <n>s` from the outer guard, and otherwise
 `<ExceptionType>: <message>` truncated to 500 characters — a ceiling breach
 arrives as `TurnError: ceiling: …`.
@@ -353,9 +354,15 @@ the per-account MCP vault credential with them. Everything else is tuning:
 the six `DAIMON_SCHEDULER__*` settings in
 [configuration.md](configuration.md#scheduler).
 
-Per run, three gates still apply — the tenant's invoker allowlist, checked
-against the creator, the tenant's credit balance and the per-person monthly
-cap. See [billing.md](billing.md). Taking someone off the allowlist stops
+Per run, four gates still apply — the tenant's invoker allowlist, checked
+against the creator, the tenant's credit balance, the per-person monthly cap
+and, for a routine with a `channel_id`, that channel's budget, checked last,
+after the agent's channel pin. See [billing.md](billing.md#channel-budgets).
+A run refused by a budget records
+`channel_budget_exceeded` and the routine fires again at its next slot. A
+Discord thread destination saved before channel budgets existed has no
+`channel_id` until its destination is set again. Taking someone off the
+allowlist stops
 their routines at the next fire; the routine stays enabled and records
 `invoker_not_allowed`. A fire has no live platform role, so only the stored
 admin role exempts the creator.

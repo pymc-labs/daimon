@@ -45,7 +45,9 @@ async def create_routine(
     next_fire_at: datetime | None = None,
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
+    channel_id: str | None = None,
 ) -> RoutineRow:
+    """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
     _check_destination(destination_kind, destination_id)
@@ -62,6 +64,7 @@ async def create_routine(
         next_fire_at=next_fire_at,
         destination_kind=destination_kind,
         destination_id=destination_id,
+        channel_id=channel_id,
     )
     session.add(orm)
     await session.flush()
@@ -125,9 +128,12 @@ async def update_routine(
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     clear_destination: bool = False,
+    channel_id: str | None = None,
 ) -> RoutineRow | None:
-    """PATCH: `None` leaves a field alone. A destination is set as a pair;
-    `clear_destination=True` removes it (and any pending delivery)."""
+    """PATCH: `None` leaves a field alone. A destination is set as a pair, with
+    the `channel_id` it resolves to; `clear_destination=True` removes the pair
+    (and any pending delivery) but keeps `channel_id`, so the routine's spend
+    still counts toward the same budget."""
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
@@ -141,7 +147,11 @@ async def update_routine(
         )
     elif destination_kind is not None or destination_id is not None:
         _check_destination(destination_kind, destination_id)
-        values.update(destination_kind=destination_kind, destination_id=destination_id)
+        values.update(
+            destination_kind=destination_kind,
+            destination_id=destination_id,
+            channel_id=channel_id,
+        )
         current = await get_routine(session, routine_id, tenant_id=tenant_id)
         if (
             current is not None

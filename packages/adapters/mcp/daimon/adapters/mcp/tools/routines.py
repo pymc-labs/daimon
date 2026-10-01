@@ -22,6 +22,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -237,6 +238,9 @@ async def _check_destination(
     it, checked with the parent channel and category resolved here. The
     adapter re-checks all of it at post time, so a channel protected or
     removed later is still honoured.
+
+    Returns the channel the routine's spend is budgeted against: the
+    destination's parent channel, or None without a destination.
     """
     if (kind is None) != (destination_id is None):
         raise ToolError("destination_kind and destination_id must be given together")
@@ -391,6 +395,7 @@ async def _create_routine_impl(
     catch_up_policy: CatchUpPolicy = "skip",
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
@@ -400,6 +405,11 @@ async def _create_routine_impl(
     )
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
+    budget_channel_id = destination_channel_id
+    if destination_kind is None:
+        budget_channel_id = await origin_budget_channel(
+            runtime.session_factory, auth, origin_context_id
+        )
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -440,6 +450,7 @@ async def _create_routine_impl(
             next_fire_at=next_fire_at,
             destination_kind=destination_kind,
             destination_id=destination_id,
+            channel_id=budget_channel_id,
         )
 
 
@@ -575,6 +586,7 @@ async def _update_routine_impl(
             destination_kind=destination_kind,
             destination_id=destination_id,
             clear_destination=clear_destination,
+            channel_id=new_destination_channel_id,
         )
         if updated is None:
             raise ToolError("routine not found")
@@ -611,6 +623,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         catch_up_policy: CatchUpPolicy = "skip",
         destination_kind: RoutineDestinationKind | None = None,
         destination_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> RoutineRow:
         """Create a routine in the caller's tenant partition.
 
@@ -621,7 +634,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``. A protected channel is refused. Without a destination the
-        result is only recorded (``last_result_tail``), as before.
+        result is only recorded (``last_result_tail``), as before. A run's
+        spend counts toward the destination channel's budget, or without a
+        destination the budget of the channel named by ``origin_context_id``
+        (this turn's), and a run is skipped while that budget is used up.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -658,6 +674,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             catch_up_policy=catch_up_policy,
             destination_kind=destination_kind,
             destination_id=destination_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -688,7 +705,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """PATCH-update a routine. Only provided fields are changed.
 
         ``destination_kind`` + ``destination_id`` set where results go (see
-        ``create_routine``); ``clear_destination=true`` removes it.
+        ``create_routine``); ``clear_destination=true`` removes it, and the
+        routine's spend still counts toward the same channel's budget.
 
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 

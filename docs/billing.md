@@ -8,7 +8,8 @@ credit left. Operators can explicitly fund individual tenants themselves.
 
 Metering and the balance gate work out of the box with no configuration.
 Stripe top-ups and the per-person monthly cap need setup — see
-[settings](#settings-that-turn-things-on) below.
+[settings](#settings-that-turn-things-on) below. [Channel
+budgets](#channel-budgets) are off until an admin sets one.
 
 ## Tenant funding mode
 
@@ -116,8 +117,8 @@ tenant was charged.
 
 ## The gates, in order
 
-Two gates run before a turn starts, always balance then cap. For chat they
-live in `packages/core/daimon/core/turn/admission.py`; the gate order there is
+Three gates run before a turn starts, always balance, then cap, then channel
+budget. For chat they live in `packages/core/daimon/core/turn/admission.py`; the gate order there is
 load-bearing and documented as such.
 
 **Balance** — `is_over_balance` in
@@ -134,15 +135,27 @@ with a null-user row acting as the tenant's default. The cap is therefore
 **per person**, defaulted tenant-wide; there is no aggregate tenant cap, no
 per-session cap and no window other than the calendar month.
 
+**Channel budget** — `is_over_channel_budget` in
+`packages/core/daimon/core/channel_budget.py` compares a channel's spend in
+its budget window against the budget's limit; see
+[channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
+channel it came from. A turn with no channel (an older DM, an MCP turn) and a
+channel with no budget are never gated.
+
 A denial raises `AdmissionDenied` carrying only the reason literal
-(`balance_depleted` or `cap_exceeded`); the wording belongs to each adapter.
-The turn aborts — it never silently degrades to a cheaper model. The same two
-checks are re-run, with the same order, by the MCP tools that start a turn
-(`_admit` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`) and by
-each scheduled routine fire, which records `balance_depleted` or
-`cap_exceeded` as that run's error instead of raising. Discord's unprompted
-thread participation checks too, and skips silently, on the grounds that a
-billing notice is owed to someone who actually asked.
+(`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
+belongs to each adapter. The turn aborts — it never silently degrades to a
+cheaper model. The balance and cap checks are re-run, with the same order, by
+the MCP tools that start a turn (`_admit` in
+`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`); the billed media
+tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
+channel, found from its `origin_context_id`. Each scheduled
+routine fire runs all three, the budget last against the routine's channel
+(after the agent pin check), and records the reason as that run's error
+instead of raising. Wakes pass through
+chat admission, so all three apply. Discord's unprompted thread participation
+checks all three too, and skips silently, on the grounds that a billing
+notice is owed to someone who actually asked.
 
 Two boundaries of the design worth stating plainly:
 
@@ -187,6 +200,54 @@ Two boundaries of the design worth stating plainly:
   the tenant by the sweep, with the platform user taken from the session's
   account stamp. `daimon run` normally targets a session from
   `daimon sessions create`, which carries no tenant stamp and is never swept.
+
+## Channel budgets
+
+An admin can cap what one channel may spend with `set_channel_budget` (MCP)
+or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
+budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
+with no row there is no limit, and nothing is created by default. It works
+the same with or without Stripe and for either funding mode. Budgets exist on
+Discord and Slack only; Teams has none.
+
+- **Spend** is the channel's debits in `tenant_ledger` inside the window,
+  markup included: what the tenant was charged for turns there, not the
+  pre-markup usage `/billing` totals. Debits carry the parent channel, so a
+  thread counts toward its channel. A session records it in its own
+  `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
+  reads; it is kept apart from `daimon_channel`, where the conversation runs,
+  so a DM counts toward its source channel without being placed in it.
+- **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
+  or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
+  budget with a `starts_at` gates nothing before it, and a fixed one nothing
+  after its end. Panels show a fixed window as `START until END`, and a
+  total window that has not started as `from START`.
+- **The gate** trips once spend reaches the limit, so a limit of 0 stops the
+  channel. Like the other gates it runs once before a turn, so a turn in
+  progress finishes past the limit.
+
+Members can read a channel's budget with `get_channel_budget`; listing,
+setting and clearing are admin-only. `/billing` in a channel with a budget
+shows `this channel: $spent of $limit (window)`.
+
+What a budget does not cover:
+
+- **Earlier spend.** Attribution starts with this release; debits recorded
+  before it have no channel and count toward no budget.
+- **DMs started before this release** have no source channel, so their
+  turns are neither attributed nor gated. A DM moved with `/dm` since then
+  records the parent channel it came from
+  (`direct_message_conversations.source_channel_id`): `/dm` is refused while
+  that channel's budget is used up, and the DM's turns and media calls
+  count toward it and are gated by it. `get_channel_budget` in such a DM
+  reads that channel's budget.
+- **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
+  like) record no channel and do not check budgets yet. A media tool call
+  without a live `origin_context_id` is not attributed either.
+- **Routines with no channel**: made without a destination outside a
+  channel (no `origin_context_id`, or from a DM), and Discord thread
+  destinations saved before this release (see
+  [routines.md](routines.md#turning-routines-on)).
 
 ## The signup credit
 
@@ -320,14 +381,15 @@ including timed credit not yet started, stays.
 
 | Table | Holds |
 | --- | --- |
-| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. |
-| `usage_events` | token counts per model call. No money column; cost is computed on read. |
+| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any. |
+| `usage_events` | token counts per model call, with the same `channel_id`. No money column; cost is computed on read. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
 | `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
+| `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
