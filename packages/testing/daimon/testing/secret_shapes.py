@@ -16,6 +16,16 @@ from urllib.parse import quote
 Render = Callable[[str], str]
 
 
+class _Opaque:
+    """An object whose repr names a secret, as a nested log value."""
+
+    def __init__(self, canary: str) -> None:
+        self._canary = canary
+
+    def __repr__(self) -> str:
+        return f"Opaque(password={self._canary})"
+
+
 def new_canary() -> str:
     """A canary holding a hyphen, one of the characters that ends naive matches."""
     return "hard-" + uuid.uuid4().hex[:12]
@@ -76,6 +86,8 @@ TEXT_SHAPES: dict[str, Render] = {
     "upload-path-encoded": lambda c: f"Referer: {_encoded(f'https://h/uploads/{c}')}",
     "slack-file-path-encoded-twice": lambda c: f"see {_encoded(f'/slack/file/x.{c}', 2)}",
     "upload-path-partly-encoded": lambda c: f"x /%75ploads/{c} y",
+    "long-url-query": lambda c: f"403 for https://connector.example/{'a' * 600}?v={c}",
+    "long-relative-target": lambda c: f'"GET /{"b" * 9000}?v={c} HTTP/1.1" 500',
     "discord-webhook": lambda c: (
         f"POST https://discord.com/api/webhooks/123456789/{c} returned 404"
     ),
@@ -87,4 +99,6 @@ FIELD_SHAPES: dict[str, Callable[[str], dict[str, object]]] = {
     "nested-header": lambda c: {"diagnostic": {"headers": {"Authorization": c}}},
     "list-of-dicts": lambda c: {"items": [{"client_secret": c}]},
     "text-in-field": lambda c: {"detail": f"token={c}"},
+    "nested-object-repr": lambda c: {"diagnostic": {"items": [_Opaque(c)]}},
+    "nested-bytes": lambda c: {"diagnostic": {"items": [f"password={c}".encode()]}},
 }

@@ -13,8 +13,8 @@ import uvicorn
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import build_runtime
 from daimon.core.config import load_settings
-from daimon.core.logging_setup import configure_log_level
-from daimon.core.observability import init_sentry, install_log_redaction
+from daimon.core.logging_setup import configure_logging
+from daimon.core.observability import init_sentry
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 log = structlog.get_logger()
@@ -29,7 +29,7 @@ async def main() -> None:
         log.error("teams adapter requires DAIMON_CRYPTO__KEYS for token decryption")
         sys.exit(1)
     # Configure the JSON log chain BEFORE the first log line so it takes effect.
-    configure_log_level(settings.log.level)
+    configure_logging(settings.log.level)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,
@@ -48,7 +48,6 @@ async def main() -> None:
                 log_config=None,  # JSON chain already configured; uvicorn uses structlog.
             )
         )
-        install_log_redaction()
         log.info("starting_teams_adapter", port=settings.teams.port)
         await server.serve()
 

@@ -75,9 +75,9 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.logging_setup import configure_log_level
+from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.observability import init_sentry, install_log_redaction
+from daimon.core.observability import init_sentry
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
@@ -163,9 +163,10 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
-    # The JSON chain (with log redaction) before the first log line; without it
-    # structlog's dev renderer prints rich tracebacks with frame locals.
-    configure_log_level(effective_settings.log.level)
+    # The JSON chain and stdlib redaction before the first log line (uvicorn
+    # has configured its loggers by the time it calls this factory); without
+    # it structlog's dev renderer prints rich tracebacks with frame locals.
+    configure_logging(effective_settings.log.level)
     sentry_dsn = (
         effective_settings.sentry.dsn.get_secret_value() if effective_settings.sentry.dsn else None
     )
@@ -177,9 +178,6 @@ def create_mcp_app(
         traces_sample_rate=effective_settings.sentry.traces_sample_rate,
         integrations=[StarletteIntegration()],
     )
-    # uvicorn has configured its loggers by the time it calls this factory:
-    # redact request targets (capability paths, OAuth query values) in them.
-    install_log_redaction()
     _validate_settings(effective_settings, skip_auth=auth is not None)
 
     effective_sessionmaker = sessionmaker

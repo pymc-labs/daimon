@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 
 import structlog
-from daimon.core.observability import redact_log_event
+from daimon.core.observability import install_log_redaction, redact_log_event, redact_rendered
 
 
 def configure_log_level(level: str) -> None:
@@ -32,6 +32,8 @@ def configure_log_level(level: str) -> None:
         # Exception text and string fields can quote a credential.
         redact_log_event,
         structlog.processors.JSONRenderer(),
+        # Last: redact the rendered line itself.
+        redact_rendered,
     ]
     structlog.configure(
         processors=processors,
@@ -39,3 +41,12 @@ def configure_log_level(level: str) -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,
     )
+
+
+def configure_logging(level: str) -> None:
+    """The one logging setup for every service entrypoint: the redacting JSON
+    structlog chain, plus redaction of all stdlib log output in the process
+    (every handler including `logging.lastResort`, a root stderr handler,
+    warnings and unraisable exceptions). Call before the first log line."""
+    configure_log_level(level)
+    install_log_redaction()

@@ -44,9 +44,11 @@ from __future__ import annotations
 import ast
 import bisect
 import contextvars
+import copy
 import json
 import logging
 import re
+import sys
 import traceback
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -218,7 +220,18 @@ def _redact_value(value: object, *, oauth: bool = False, depth: int = 0) -> obje
         return tuple(items) if isinstance(value, tuple) else items
     if isinstance(value, str):
         return _redact_secret_text(value)
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    # Anything else (bytes, objects) renders as its repr downstream; redact
+    # that text now, at any depth.
+    return _redact_secret_text(_safe_repr(value))
+
+
+def _safe_repr(value: object) -> str:
+    try:
+        return repr(value)
+    except Exception:
+        return f"<{type(value).__name__}>"
 
 
 def _matching_closers(text: str) -> dict[int, int]:
@@ -332,6 +345,10 @@ class _ValueIndex:
         limit = min(len(text), start + _VALUE_LIMIT)
         if start >= limit:
             return start
+        if text.startswith(_REDACTED, start):
+            # Already redacted (a later pass over redacted text): the marker
+            # is the whole value.
+            return start + len(_REDACTED)
         first = text[start]
         if first == "\\" and start + 1 < limit and text[start + 1] in "\"'":
             end = self._next(self._escaped_quotes[text[start + 1]], start + 1)
@@ -406,23 +423,27 @@ def _redact_url_queries(text: str) -> str:
     """Redact the query of each URL or request target found in free text.
 
     Covers `scheme://…?query` and relative targets (`/path?query`, as in an
-    access-log line). Anchored on `?` and searched backwards a bounded
-    distance, so the cost stays linear however the text repeats fragments.
+    access-log line), however long the path. Each `?` is placed in its
+    whitespace/quote-delimited token (one pass over the delimiters), and each
+    token is classified once, so the cost stays linear.
     """
+    boundaries = [m.end() for m in _TARGET_DELIMITER.finditer(text)]
+    classified: dict[int, bool] = {}
     out: list[str] = []
     cursor = 0
     position = text.find("?")
     while position != -1:
-        window_start = max(cursor, position - 512)
-        scheme = text.rfind("://", window_start, position)
-        is_url = scheme != -1 and not any(c.isspace() for c in text[scheme:position])
-        if not is_url:
-            delimiters = list(_TARGET_DELIMITER.finditer(text, window_start, position))
-            token_start = delimiters[-1].end() if delimiters else window_start
-            is_url = text.startswith("/", token_start) and position - token_start > 1
+        index = bisect.bisect_right(boundaries, position) - 1
+        token_start = boundaries[index] if index >= 0 else 0
+        token_start = max(token_start, cursor)
+        is_url = classified.get(token_start)
+        if is_url is None:
+            head = text[token_start:position]
+            is_url = "://" in head or (head.startswith("/") and len(head) > 1)
+            classified[token_start] = is_url
         if is_url:
-            end_match = _QUERY_END.search(text, position + 1, position + 8192)
-            end = end_match.start() if end_match else min(len(text), position + 8192)
+            end_match = _QUERY_END.search(text, position + 1)
+            end = end_match.start() if end_match else len(text)
             out.append(text[cursor : position + 1])
             out.append(_redact_query(text[position + 1 : end]))
             cursor = end
@@ -567,10 +588,7 @@ def _redact_url(url: str) -> str:
         host = f"{host}:{parts.port}"
     # Match capability routes on the decoded path (two levels), as the server
     # routes it: an encoded `/%75ploads/<token>` is the same capability.
-    path = unquote(parts.path)
-    if "%" in path:
-        path = unquote(path)
-    return urlunsplit((parts.scheme, host, _redact_path_tokens(path), "", ""))
+    return urlunsplit((parts.scheme, host, _redact_target_path(parts.path), "", ""))
 
 
 def _scrub_url_fields(data: dict[str, object]) -> None:
@@ -603,21 +621,21 @@ def redact_request_target(target: str) -> str:
 def _redact_target_path(path: str) -> str:
     """Capability segments replaced; a percent-encoded path is judged decoded.
 
-    Encoding is not protection, but decoded text isn't reused either (a
-    decoded space or quote could end a value early): if the decoded view
-    holds anything to redact, the whole path is replaced.
+    Literal capability routes are redacted first (a token whose `=` padding
+    is encoded stays inside its replaced segment). Encoding is not
+    protection, but decoded text is never reused (a decoded space or quote
+    could end a value early): if the decoded view of what remains holds a
+    capability segment or other secret text, the whole path is replaced.
     """
+    path = _redact_path_tokens(path)
     decoded = unquote(path)
     if "%" in decoded:
         decoded = unquote(decoded)
     if decoded == path:
-        return _redact_path_tokens(path)
-    tokens_redacted = _redact_path_tokens(decoded)
-    if _redact_secret_text(tokens_redacted) != tokens_redacted:
+        return path
+    if _redact_path_tokens(decoded) != decoded or _redact_secret_text(decoded) != decoded:
         return "/" + _REDACTED
-    # Whole capability segments are replaced, so the decoded route is safe
-    # to keep; otherwise the original (encoded) path is unchanged.
-    return tokens_redacted if tokens_redacted != decoded else path
+    return path
 
 
 def redact_text(text: str) -> str:
@@ -831,74 +849,126 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
 
 
 _ACCESS_LOGGER = "uvicorn.access"
-# Loggers whose records can carry request targets or third-party URLs.
-# Includes libraries that log through their own, non-propagating handlers
-# (fastmcp prints tool-exception tracebacks with a RichHandler).
-_REDACTED_LOGGERS = ("", "uvicorn", "uvicorn.error", _ACCESS_LOGGER, "fastmcp", "mcp")
 # Outbound-request loggers that print full URLs at INFO.
 _QUIETED_LOGGERS = ("httpx", "httpcore")
 
 
+def _redact_record_text(record: logging.LogRecord) -> None:
+    """Redact a record's message in place (access records keep their args)."""
+    if record.name == _ACCESS_LOGGER and isinstance(record.args, tuple) and len(record.args) >= 3:
+        args = list(record.args)
+        if isinstance(args[2], str):
+            args[2] = _redact_secret_text(redact_request_target(args[2]))
+        record.args = tuple(args)
+        return
+    try:
+        message = record.getMessage()
+    except (TypeError, ValueError):
+        return
+    redacted = _redact_secret_text(message)
+    if redacted != message:
+        record.msg = redacted
+        record.args = None
+
+
+def _redacted_for_output(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy safe for any output handler: message redacted, traceback folded
+    in as redacted text, exc_info dropped (rich and other handlers render
+    exc_info themselves, with frame locals). The original keeps exc_info."""
+    out = copy.copy(record)
+    _redact_record_text(out)
+    if out.exc_info or out.exc_text:
+        trace = (
+            "".join(traceback.format_exception(*out.exc_info)).rstrip("\n")
+            if out.exc_info
+            else (out.exc_text or "")
+        )
+        out.msg = f"{out.getMessage()}\n{_redact_secret_text(trace)}"
+        out.args = None
+        out.exc_info = None
+        out.exc_text = None
+    if out.stack_info:
+        out.stack_info = _redact_secret_text(out.stack_info)
+    return out
+
+
 class LogRedactionFilter(logging.Filter):
-    """Redact stdlib log records (uvicorn access/error, anything on root).
+    """For callers that attach it explicitly: the record continues as a
+    redacted copy (message, cached traceback text and stack text)."""
 
-    Access records keep their positional args (uvicorn's formatter reads
-    them) with the request target redacted; other records are redacted as
-    formatted text, and their traceback text is redacted too.
-    """
+    def filter(self, record: logging.LogRecord) -> logging.LogRecord:
+        if record.name == _ACCESS_LOGGER:
+            _redact_record_text(record)
+            return record
+        return _redacted_for_output(record)
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        if (
-            record.name == _ACCESS_LOGGER
-            and isinstance(record.args, tuple)
-            and len(record.args) >= 3
-        ):
-            args = list(record.args)
-            if isinstance(args[2], str):
-                args[2] = _redact_secret_text(redact_request_target(args[2]))
-            record.args = tuple(args)
-            return True
-        try:
-            message = record.getMessage()
-        except (TypeError, ValueError):
-            return True
-        redacted = _redact_secret_text(message)
-        if record.exc_info:
-            # Fold the traceback into the message as redacted text and drop
-            # exc_info: handlers like rich's render exc_info themselves (with
-            # frame locals) and would bypass any exc_text set here.
-            trace = "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
-            redacted = f"{redacted}\n{_redact_secret_text(trace)}"
-            record.exc_info = None
-            record.exc_text = None
-        if redacted != message:
-            record.msg = redacted
-            record.args = None
-        return True
+
+_handler_handle = logging.Handler.handle
+_handler_format = logging.Handler.format
+_installed = False
+
+
+def _redacting_format(self: logging.Handler, record: logging.LogRecord) -> str:
+    """The last step of every stdlib handler: redact the rendered line."""
+    return _redact_secret_text(_handler_format(self, record))
+
+
+def redact_rendered(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+    """structlog's last processor, after the renderer: redact the final line
+    (whatever a renderer made of nested values and reprs). After a renderer
+    structlog passes the rendered string here, not a dict."""
+    del logger, method_name
+    rendered = cast("object", event_dict)
+    if isinstance(rendered, str):
+        return cast("EventDict", _redact_secret_text(rendered))
+    return event_dict
+
+
+def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool | logging.LogRecord:
+    """Every stdlib handler, wherever and whenever attached (including
+    `logging.lastResort`), emits a redacted copy. Sentry's own logging
+    handlers get the original (their events go through `before_send`), so
+    its logging integration keeps exc_info."""
+    if type(self).__module__.startswith("sentry_sdk"):
+        return _handler_handle(self, record)
+    return _handler_handle(self, _redacted_for_output(record))
+
+
+def _redacting_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
+    exc = unraisable.exc_value
+    trace = (
+        "".join(traceback.format_exception(type(exc), exc, unraisable.exc_traceback))
+        if exc is not None
+        else ""
+    )
+    where = unraisable.err_msg or "Exception ignored in"
+    sys.stderr.write(_redact_secret_text(f"{where}: {unraisable.object!r}\n{trace}"))
 
 
 def install_log_redaction() -> None:
-    """Redact stdlib logging in this process (root, uvicorn, fastmcp and every
-    handler already attached anywhere); idempotent.
+    """Redact all stdlib log output in this process; idempotent.
 
-    Call after the server has configured logging (an app factory runs after
-    uvicorn's own `dictConfig`). Filters go on the loggers and on every
-    handler they already have, so propagated records are covered too.
+    Every `logging.Handler` emits a redacted copy of each record (including
+    handlers added later, child loggers and `logging.lastResort`), root gets
+    a stderr handler when it has none (so library warnings go through a
+    redacting handler instead of the bare last-resort path), warnings are
+    routed through logging, and unraisable exceptions print redacted.
     """
-    redaction = LogRedactionFilter()
-    targets: list[logging.Filterer] = []
-    for name in _REDACTED_LOGGERS:
-        logger = logging.getLogger(name)
-        targets += [logger, *logger.handlers]
-    # Every handler any library has already attached, wherever it sits in
-    # the logger tree: a logger filter doesn't see records propagated from a
-    # child, but a handler filter sees every record that handler emits.
-    for existing in list(logging.Logger.manager.loggerDict.values()):
-        if isinstance(existing, logging.Logger):
-            targets += existing.handlers
-    for target in targets:
-        if not any(isinstance(f, LogRedactionFilter) for f in target.filters):
-            target.addFilter(redaction)
+    global _installed
+    if not _installed:
+        logging.Handler.handle = _redacting_handle  # type: ignore[method-assign]
+        logging.Handler.format = _redacting_format  # type: ignore[method-assign]
+        sys.unraisablehook = _redacting_unraisablehook
+        logging.captureWarnings(True)
+        _installed = True
+    root = logging.getLogger()
+    if not root.handlers:
+        fallback = logging.StreamHandler(sys.stderr)
+        fallback.setLevel(logging.WARNING)
+        root.addHandler(fallback)
+    access = logging.getLogger(_ACCESS_LOGGER)
+    if not any(isinstance(f, LogRedactionFilter) for f in access.filters):
+        access.addFilter(LogRedactionFilter())
     for name in _QUIETED_LOGGERS:
         logger = logging.getLogger(name)
         logger.setLevel(max(logger.getEffectiveLevel(), logging.WARNING))
