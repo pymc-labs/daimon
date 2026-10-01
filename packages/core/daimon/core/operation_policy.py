@@ -22,7 +22,9 @@ There are three rule families, each a fixed short-circuit order:
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`. Adding or removing one of an agent's skills
   changes what it does, so it follows the same order: the managed agent is
-  forked first, and anyone may change an agent that answers nowhere.
+  forked first, and anyone may change an agent that answers nowhere. For the
+  two skill kinds "nowhere" is strict (`needs_strict_reach`): no bound
+  thread and no routine or queued continuation of anyone else's either.
 
 - **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`):
   attachments never enter the agent spec, so the managed-agent absolutism
@@ -80,6 +82,8 @@ _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset(
     {"key_add", "keys_import", "mcp_connect", "skill_repo_connect"}
 )
+
+_STRICT_REACH_OPERATIONS: frozenset[OperationKind] = frozenset({"skill_add", "skill_remove"})
 
 
 class TargetFacts(BaseModel):
@@ -158,10 +162,21 @@ def needs_reachability_read(
     return not is_admin and not is_daimon_managed
 
 
+def needs_strict_reach(operation: OperationKind) -> bool:
+    """True when "reachable" must count bound threads and others' unattended runs too.
+
+    New skill files reach everyone who talks to the agent and every run that
+    fires it, so a member may add or remove one only on an agent nobody else
+    uses in any way. The other kinds keep the cascade-only reading.
+    """
+    return operation in _STRICT_REACH_OPERATIONS
+
+
 __all__ = [
     "OperationKind",
     "PolicyOutcome",
     "TargetFacts",
     "decide_operation",
     "needs_reachability_read",
+    "needs_strict_reach",
 ]

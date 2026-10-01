@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 from daimon.core.agent_reach import (
@@ -11,6 +12,7 @@ from daimon.core.agent_reach import (
     may_bind_as_channel_default,
 )
 from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -21,6 +23,7 @@ from daimon.core.stores.direct_messages import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import (
     make_account,
@@ -314,3 +317,65 @@ async def test_a_dm_counts_as_the_channel_it_was_started_from(db_session: AsyncS
     assert await _is_local(db_session, tenant.id), "a /dm leaves the agent with c1's admins"
     await delete_conversations_for_account(db_session, account_id=account.id)
     assert await channels() == {"c1"}, "a DM no longer live here answers nowhere"
+
+
+async def _member_may(
+    db_session: AsyncSession, tenant_id: uuid.UUID, operation: OperationKind, agent_name: str
+) -> bool:
+    facts = await load_target_facts(
+        db_session,
+        operation,
+        tenant_id=tenant_id,
+        platform="discord",
+        agent_name=agent_name,
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u1"),
+        is_daimon_managed=False,
+    )
+    return decide_operation(operation, is_admin=False, target=facts) == "allow"
+
+
+async def test_a_member_changes_skills_only_on_an_agent_nobody_else_uses(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="c2",
+        thread_id="t1",
+        responder_ma_agent_id="agent_1",
+        responder_name="threaded",
+        kind="handoff",
+    )
+    await _member(db_session, tenant, "u9", admin=True)
+    await make_routine(db_session, tenant=tenant, created_by_user_id="u9", agent_name="scheduled")
+    await record_continuation(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="c3",
+        thread_id="t3",
+        requester_account_id=(await make_account(db_session, tenant=tenant)).id,
+        requester_external_user_id="u5",
+        target_ma_agent_id="agent_3",
+        target_name="queued",
+        reason="timer",
+        idempotency_key=uuid.uuid4(),
+        requested_work="finish the report",
+    )
+    await make_routine(db_session, tenant=tenant, created_by_user_id="u1", agent_name="mine")
+
+    for agent_name in ("threaded", "scheduled", "queued"):
+        assert await _member_may(db_session, tenant.id, "agent_spec_edit", agent_name), (
+            "the edit rules still read the cascade only"
+        )
+        for operation in ("skill_add", "skill_remove"):
+            assert not await _member_may(db_session, tenant.id, operation, agent_name), (
+                f"{agent_name}: a bound thread or someone else's unattended run counts"
+            )
+    assert await _member_may(db_session, tenant.id, "skill_add", "mine"), (
+        "the caller's own routine is no one else's"
+    )
+    assert await _member_may(db_session, tenant.id, "skill_add", "unused")

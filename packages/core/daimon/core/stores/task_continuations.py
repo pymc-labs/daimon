@@ -175,6 +175,28 @@ async def list_pending_continuations(
     return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
+async def list_queued_continuation_requesters(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, target_name: str
+) -> list[tuple[str, str]]:
+    """`(requester, parent channel)` of every continuation still to run `target_name`.
+
+    Pending or claimed, due or not; a handoff that carried no work never runs
+    and is left out.
+    """
+    rows = await session.execute(
+        select(TaskContinuation.requester_external_user_id, TaskContinuation.parent_channel_id)
+        .where(
+            TaskContinuation.tenant_id == tenant_id,
+            TaskContinuation.platform == platform,
+            TaskContinuation.target_name == target_name,
+            TaskContinuation.status.in_(("pending", "claimed")),
+            TaskContinuation.requested_work.is_not(None),
+        )
+        .distinct()
+    )
+    return [(requester, channel) for requester, channel in rows.tuples()]
+
+
 def _dispatchable(now: datetime, *, max_attempts: int) -> ColumnElement[bool]:
     """Rows a dispatcher may claim at `now`.
 

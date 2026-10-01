@@ -14,6 +14,10 @@ to any S.
 A private conversation counts as the channel `/dm` ran in: its DM channel's
 row and its `dm:` scope answer only while it is the tenant's live conversation
 there, and then as that source channel.
+
+Skill changes read reach strictly (`operation_policy.needs_strict_reach`): an
+agent answers nowhere only with no cascade place, no bound thread, and no
+routine or queued continuation of anyone but the caller, whatever their rights.
 """
 
 from __future__ import annotations
@@ -26,7 +30,12 @@ from daimon.core.channel_admins import (
     administered_channel_ids,
     load_administered_channel_ids,
 )
-from daimon.core.operation_policy import OperationKind, TargetFacts, needs_reachability_read
+from daimon.core.operation_policy import (
+    OperationKind,
+    TargetFacts,
+    needs_reachability_read,
+    needs_strict_reach,
+)
 from daimon.core.scope import (
     AnsweringPlace,
     ChannelConfigRow,
@@ -42,6 +51,7 @@ from daimon.core.stores.scoped_config_read import (
     is_agent_reachable_in_tenant,
     list_propagations_for_tenant,
 )
+from daimon.core.stores.task_continuations import list_queued_continuation_requesters
 from daimon.core.stores.thread_agent_bindings import (
     list_bound_parent_channel_ids,
     list_dm_bindings,
@@ -73,6 +83,8 @@ class AgentReach(BaseModel):
     places: tuple[AnsweringPlace, ...] = ()
     thread_parent_channel_ids: frozenset[str] = frozenset()
     routine_creators: tuple[RoutineCreatorRights, ...] = ()
+    continuations: tuple[tuple[str, str], ...] = ()
+    """`(requester, parent channel)` of queued continuations that run the agent."""
 
     @property
     def is_tenant_wide(self) -> bool:
@@ -96,6 +108,24 @@ class AgentReach(BaseModel):
             )
         )
 
+    def answers_only_for(self, platform_user_id: str | None) -> bool:
+        """No place, no bound thread, and no routine or continuation of anyone else's."""
+        return (
+            not self.places
+            and not self.thread_parent_channel_ids
+            and all(c.platform_user_id == platform_user_id for c in self.routine_creators)
+            and all(requester == platform_user_id for requester, _ in self.continuations)
+        )
+
+    def is_strictly_local_to(
+        self, channel_ids: Collection[str], *, platform_user_id: str | None
+    ) -> bool:
+        """`is_local_to`, and nobody else's continuation posts outside `channel_ids`."""
+        return self.is_local_to(channel_ids, platform_user_id=platform_user_id) and all(
+            requester == platform_user_id or channel in channel_ids
+            for requester, channel in self.continuations
+        )
+
 
 def build_agent_reach(
     agent_name: str,
@@ -108,6 +138,7 @@ def build_agent_reach(
     grants: Sequence[ChannelAdminsRow] = (),
     dm_origins: Sequence[DmOrigin] = (),
     dm_bindings: Iterable[tuple[str, str, str]] = (),
+    continuations: Iterable[tuple[str, str]] = (),
 ) -> AgentReach:
     """`grants` are the tenant's channel admin rows, read for routine creators' rights.
 
@@ -151,6 +182,7 @@ def build_agent_reach(
             )
             for creator in routine_creators
         ),
+        continuations=tuple(continuations),
     )
 
 
@@ -179,6 +211,9 @@ async def load_agent_reach(
         grants=await list_channel_admins(session, tenant_id=tenant_id, platform=platform),
         dm_origins=await list_dm_origins(session, tenant_id=tenant_id),
         dm_bindings=await list_dm_bindings(session, tenant_id=tenant_id),
+        continuations=await list_queued_continuation_requesters(
+            session, tenant_id=tenant_id, platform=platform, target_name=agent_name
+        ),
     )
 
 
@@ -258,6 +293,16 @@ async def load_target_facts(
         operation, is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
     ):
         return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    if needs_strict_reach(operation):
+        return await _strict_target_facts(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            agent_name=agent_name,
+            default=default,
+            caller=caller,
+            is_daimon_managed=is_daimon_managed,
+        )
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=agent_name, default=default
     )
@@ -269,6 +314,35 @@ async def load_target_facts(
         default=default,
         caller=caller,
     )
+    return TargetFacts(
+        is_daimon_managed=is_daimon_managed,
+        is_reachable_in_tenant=reachable,
+        is_local_to_caller_channels=local,
+    )
+
+
+async def _strict_target_facts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_name: str,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+    is_daimon_managed: bool,
+) -> TargetFacts:
+    reach = await load_agent_reach(
+        session, tenant_id=tenant_id, platform=platform, agent_name=agent_name, default=default
+    )
+    reachable = not reach.answers_only_for(caller.platform_user_id)
+    local = False
+    if reachable:
+        administered = await load_administered_channel_ids(
+            session, tenant_id=tenant_id, platform=platform, caller=caller
+        )
+        local = bool(administered) and reach.is_strictly_local_to(
+            administered, platform_user_id=caller.platform_user_id
+        )
     return TargetFacts(
         is_daimon_managed=is_daimon_managed,
         is_reachable_in_tenant=reachable,
