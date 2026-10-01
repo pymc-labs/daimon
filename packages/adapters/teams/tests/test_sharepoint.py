@@ -370,12 +370,26 @@ async def test_the_general_channel_folder_is_named_without_a_channel_lookup() ->
 async def test_resolve_leaves_an_unreachable_shared_file_without_a_link() -> None:
     """No site grant: the file keeps no download URL, so it is named, never fetched."""
     shared = SharedFile("q3.xlsx", f"{LIBRARY}/q3.xlsx")
-    routes = {("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _denied}
+    routes = {("GET", f"/v1.0/groups/{GROUP}/sites/root"): _denied}
     files = ChannelFiles(_sharepoint(routes, []), TeamGroups(_no_group), _no_names)
 
     media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP)
 
     assert media.files == (dataclasses.replace(shared, refused=True),), "named, never linked"
+
+
+async def test_resolve_does_not_call_a_file_on_a_site_outside_the_team_refused() -> None:
+    """The team's site is granted but the link is elsewhere: no grant would open it."""
+    shared = SharedFile("pay.xlsx", "https://example.sharepoint.com/sites/finance/Docs/pay.xlsx")
+    routes = {
+        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
+        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/finance"): _denied,
+    }
+    files = ChannelFiles(_sharepoint(routes, []), TeamGroups(_no_group), _no_names)
+
+    media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP)
+
+    assert media.files == (shared,), "unreachable, so no Enable files offer"
 
 
 async def _no_group(_: str) -> str | None:

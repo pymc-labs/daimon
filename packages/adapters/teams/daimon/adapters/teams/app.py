@@ -1002,6 +1002,7 @@ class TeamsApp:
                 inbound.conversation_id, enable_files_card(url), service_url=inbound.service_url
             )
         except TEAMS_SEND_ERRORS:
+            self._files_offered.pop(group_id, None)
             log.warning("teams.enable_files.send_failed", exc_info=True)
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:

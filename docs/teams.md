@@ -170,7 +170,8 @@ needed.
    `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
 3. When a daimon admin shares a file in a team whose site is not granted,
    the bot posts an **Enable files** card (at most every 15 minutes per team).
-   A SharePoint or global admin clicks it and signs in once; the Teams service
+   A SharePoint or global admin clicks it and signs in once (the first in the
+   organisation must be a global admin, who consents for everyone); the Teams service
    then grants the app write on that team's site, and its next message sees
    the files.
 

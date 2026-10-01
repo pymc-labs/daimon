@@ -193,7 +193,11 @@ def callback_route(
     async def callback(request: Request) -> HTMLResponse:
         query = request.query_params
         if "error" in query:
-            return _page("Files not turned on", "The sign-in did not complete.", status=400)
+            text = (
+                "The sign-in did not complete. The first sign-in in the organisation must be "
+                "a global admin, who approves the permission for everyone."
+            )
+            return _page("Files not turned on", text, status=400)
         group_id = verify_state(query.get("state", ""), secret=secret, now=time.time())
         if group_id is None or not settings.public_url:
             return _page(

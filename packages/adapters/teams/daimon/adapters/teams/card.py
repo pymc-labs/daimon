@@ -69,8 +69,8 @@ def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
 
 
 ENABLE_FILES = (
-    "I can't open this team's files yet. A Microsoft 365 admin (SharePoint or global) "
-    "can turn them on for this team with one sign-in."
+    "I can't open this team's files yet. A Microsoft 365 admin can turn them on for this "
+    "team with one sign-in; the first one in the organisation must be a global admin."
 )
 
 
