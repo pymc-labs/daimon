@@ -146,7 +146,9 @@ CASES = [
     SearchCase("remove the spending limit on #growth", "clear_channel_budget", frozenset([])),
 ]
 # Teams hides these on purpose; tests/parity/test_teams_deliberate_gaps.py records why.
-_TEAMS_HIDDEN = frozenset({"request_repo_binding", "request_skill_repo_token"})
+_TEAMS_HIDDEN = frozenset(
+    {"request_repo_binding", "request_skill_repo_token", "get_channel_budget"}
+)
 
 
 def _make_app(
