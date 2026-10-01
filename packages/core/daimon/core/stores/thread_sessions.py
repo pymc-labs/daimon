@@ -68,6 +68,37 @@ async def get_live_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def get_thread_session_at(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: _uuid.UUID,
+    at: datetime,
+) -> ThreadSessionRow | None:
+    """The caller's newest row in the thread created at or before `at`, any status.
+
+    That is the session the caller was talking to at `at`; dead and
+    superseded rows are kept, so it is found after it was replaced.
+    """
+    orm = (
+        await session.execute(
+            select(ThreadSession)
+            .where(
+                ThreadSession.tenant_id == tenant_id,
+                ThreadSession.platform == platform,
+                ThreadSession.thread_id == thread_id,
+                ThreadSession.account_id == account_id,
+                ThreadSession.created_at <= at,
+            )
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return None if orm is None else ThreadSessionRow.model_validate(orm)
+
+
 async def list_live_session_channel_ids(
     session: AsyncSession,
     *,

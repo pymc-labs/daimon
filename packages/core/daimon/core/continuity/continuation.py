@@ -40,7 +40,13 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
-from daimon.core.stores.domain import ChatPlatform, ContinuationReason, CredentialRequestRow
+from daimon.core.stores.credential_requests import get_credential_request_by_idempotency_key
+from daimon.core.stores.domain import (
+    ChatPlatform,
+    ContinuationReason,
+    CredentialRequestRow,
+    TaskContinuationRow,
+)
 from daimon.core.stores.task_continuations import (
     claim_continuation as _claim_continuation_row,
 )
@@ -53,6 +59,7 @@ from daimon.core.stores.task_continuations import (
 from daimon.core.stores.task_continuations import (
     settle_continuation as _settle_continuation_row,
 )
+from daimon.core.stores.thread_sessions import get_thread_session_at
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -67,6 +74,7 @@ __all__ = [
     "check_wake_responder",
     "claim_continuation",
     "decide_continuation",
+    "load_asking_agent_id",
     "record_continuation",
     "record_input_continuation",
     "sanitize_requested_work",
@@ -182,14 +190,45 @@ def check_wake_responder(
     against the agent it names, so a handoff runs only as its destination.
     A private input resumes the agent that asked, which in a setup
     conversation or for another agent's key is not the key's agent, so it
-    may also run as `asking_ma_agent_id`: the agent of the requester's live
-    session in the thread.
+    may also run as `asking_ma_agent_id` (`load_asking_agent_id`): the agent
+    that asked, while the requester's live session is still with it.
     """
     if admitted_ma_agent_id == target_ma_agent_id:
         return
     if reason == "private_input_applied" and admitted_ma_agent_id == asking_ma_agent_id:
         return
     raise ResponderChanged(target_name=target_name, current_name=admitted_name, reason=reason)
+
+
+async def load_asking_agent_id(
+    session: AsyncSession, row: TaskContinuationRow, *, live_ma_agent_id: str | None
+) -> str | None:
+    """The agent an applied private input may resume besides its target, or None.
+
+    The asking agent is the one the requester's session in the thread ran
+    when the input was asked for, and it counts only while their live
+    session (`live_ma_agent_id`) is still with it. A thread rerouted or handed
+    off since then moved them to another agent, which never asked; a request
+    row erased since leaves nothing to tell, so neither resumes.
+    """
+    if row.reason != "private_input_applied" or live_ma_agent_id is None:
+        return None
+    request = await get_credential_request_by_idempotency_key(
+        session, idempotency_key=row.idempotency_key
+    )
+    if request is None:
+        return None
+    asked = await get_thread_session_at(
+        session,
+        tenant_id=row.tenant_id,
+        platform=row.platform,
+        thread_id=row.thread_id,
+        account_id=row.requester_account_id,
+        at=request.created_at,
+    )
+    if asked is None or asked.ma_agent_id != live_ma_agent_id:
+        return None
+    return live_ma_agent_id
 
 
 def build_input_continuation(

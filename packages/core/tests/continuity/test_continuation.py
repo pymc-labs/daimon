@@ -19,17 +19,23 @@ from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     MIN_REQUESTED_WORK,
     ContinuationRequest,
+    ResponderChanged,
     build_input_continuation,
+    check_wake_responder,
     claim_continuation,
     decide_continuation,
+    load_asking_agent_id,
     record_continuation,
+    record_input_continuation,
     sanitize_requested_work,
     settle_continuation,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.testing.factories import make_account, make_tenant
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic, not_found_response
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -530,3 +536,115 @@ async def test_decide_continuation_turn_running_copy_is_not_handoff_shaped_for_p
     assert "stats-bot is still working on the previous message here." in decision.message, (
         "the non-handoff copy names the agent that is already answering"
     )
+
+
+@pytest.mark.parametrize("reason", ["timer", "task_handoff"])
+def test_only_private_input_resumes_as_the_asking_agent(reason: ContinuationReason) -> None:
+    """A setup conversation asks for another agent's key and resumes itself."""
+    check_wake_responder(
+        reason="private_input_applied",
+        target_ma_agent_id="agt_key_owner",
+        target_name="key-owner",
+        admitted_ma_agent_id="agt_setup",
+        admitted_name="setup",
+        asking_ma_agent_id="agt_setup",
+    )
+    with pytest.raises(ResponderChanged):
+        check_wake_responder(
+            reason=reason,
+            target_ma_agent_id="agt_key_owner",
+            target_name="key-owner",
+            admitted_ma_agent_id="agt_setup",
+            admitted_name="setup",
+            asking_ma_agent_id="agt_setup",
+        )
+
+
+async def test_private_input_resumes_only_while_the_live_session_is_with_the_asking_agent(
+    db_session: AsyncSession,
+) -> None:
+    """A thread rerouted after the ask moves the requester to an agent that never asked."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="t1",
+        ma_agent_id="agt_setup",
+        created_at=now - timedelta(hours=1),
+    )
+    request = await create_credential_request(
+        db_session,
+        token=f"tok_{uuid.uuid4()}",
+        kind="env",
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+        target="API_KEY",
+        mcp_server_url=None,
+        requester_platform_user_id="u1",
+        channel_id="t1",
+        expires_at=now + timedelta(hours=1),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="agt_key_owner",
+        target_name="key-owner",
+        requested_work="finish wiring the key",
+        platform="discord",
+        parent_channel_id="c1",
+        origin_thread_id="t1",
+    )
+    assert await record_input_continuation(db_session, request, platform="discord")
+    row = await get_continuation(db_session, idempotency_key=request.idempotency_key)
+    assert row is not None, "the applied input queued its wake"
+
+    async def asking() -> str | None:
+        live = await get_live_thread_session(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="t1",
+            account_id=account.id,
+        )
+        return await load_asking_agent_id(
+            db_session, row, live_ma_agent_id=live.ma_agent_id if live is not None else None
+        )
+
+    assert await asking() == "agt_setup", "the live session is the one that asked"
+    check_wake_responder(
+        reason=row.reason,
+        target_ma_agent_id=row.target_ma_agent_id,
+        target_name=row.target_name,
+        admitted_ma_agent_id="agt_setup",
+        admitted_name="setup",
+        asking_ma_agent_id=await asking(),
+    )
+    with pytest.raises(ResponderChanged):
+        check_wake_responder(
+            reason=row.reason,
+            target_ma_agent_id=row.target_ma_agent_id,
+            target_name=row.target_name,
+            admitted_ma_agent_id="agt_other",
+            admitted_name="other",
+            asking_ma_agent_id=await asking(),
+        )
+
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="t1",
+        ma_agent_id="agt_other",
+        created_at=now + timedelta(minutes=5),
+    )
+    assert await asking() is None, "a session opened with another agent since never asked"
+    with pytest.raises(ResponderChanged):
+        check_wake_responder(
+            reason=row.reason,
+            target_ma_agent_id=row.target_ma_agent_id,
+            target_name=row.target_name,
+            admitted_ma_agent_id="agt_other",
+            admitted_name="other",
+            asking_ma_agent_id=await asking(),
+        )
