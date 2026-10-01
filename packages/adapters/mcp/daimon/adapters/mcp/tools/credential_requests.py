@@ -5,10 +5,12 @@ card through the caller's platform. Secret values never enter tool arguments.
 Submission checks requester identity; these enrollment paths deliberately do
 not inherit the admin gate for direct agent-spec mutations.
 
-Replacing a key that already exists is the one exception: it destroys shared
-state, so `daimon.core.operation_policy` decides it here, *before* the mint,
-and a refusal posts no card at all — nobody is asked for a secret they were
-never going to be allowed to save.
+Two exceptions: replacing a key that already exists destroys shared state,
+and a skill-repo import attaches skills to the agent. `daimon.core.operation_policy`
+decides both here, *before* the mint, and a refusal posts no card at all —
+nobody is asked for a secret they were never going to be allowed to save. A
+skill-repo request naming a defaults-managed agent is refused for everyone,
+since its skills could never be attached.
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools.agents import (
+    _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -63,6 +68,8 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
 from daimon.core.operation_policy import (
+    OperationKind,
+    PolicyOutcome,
     TargetFacts,
     decide_operation,
     needs_reachability_read,
@@ -253,6 +260,42 @@ async def _resolve_agent_uuid(
     return agent_uuid, ma_agent
 
 
+async def _decide_attachment_write(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    operation: OperationKind,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+) -> PolicyOutcome:
+    """Decide an attachment-family `operation` by this caller against `ma_agent`.
+
+    An admin is allowed on any target (that is the first-run onboarding step),
+    a non-admin is refused on a defaults-managed agent and on one that
+    currently answers somewhere in the tenant. The reachability read is paid
+    for only when the policy says the answer actually depends on it.
+    """
+    is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    reachable = False
+    if needs_reachability_read(
+        operation, is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
+    ):
+        async with runtime.session_factory() as session:
+            reachable = await is_agent_shared_for_key_changes(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(ma_agent.id),
+                default=runtime.deployment_default,
+                caller_account_id=auth.account_id,
+                caller_platform_user_id=auth.platform_user_id,
+            )
+    return decide_operation(
+        operation,
+        is_admin=auth.is_admin,
+        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    )
+
+
 async def _require_key_replacement_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -265,33 +308,8 @@ async def _require_key_replacement_allowed(
 
     `adding` is set when `key` is not being overwritten but shadowed: a
     different name (`adding`) the same tool reads as `key`.
-
-    `key_replace` is an attachment operation: an admin is allowed on any
-    target (that is the first-run onboarding step), a non-admin is refused on
-    a defaults-managed agent and on one that currently answers somewhere in
-    the tenant. The reachability read is paid for only when the policy says
-    the answer actually depends on it.
     """
-    is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "key_replace", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_shared_for_key_changes(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
-                ma_agent_id=str(ma_agent.id),
-                default=runtime.deployment_default,
-                caller_account_id=auth.account_id,
-                caller_platform_user_id=auth.platform_user_id,
-            )
-    outcome = decide_operation(
-        "key_replace",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
-    )
+    outcome = await _decide_attachment_write(runtime, auth, "key_replace", ma_agent=ma_agent)
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
@@ -787,6 +805,18 @@ async def _request_skill_repo_token_impl(
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    _reject_system_agent(ma_agent)
+    if await _decide_attachment_write(runtime, auth, "skill_repo_connect", ma_agent=ma_agent) in (
+        "managed_agent",
+        "needs_admin",
+    ):
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here, so importing skills onto it "
+            "needs a server or workspace admin, and the caller is not one. Nothing changed "
+            "and no card was posted. Tell them an admin can ask Daimon to import these "
+            f"skills, or fork '{ma_agent.name}' and import them onto the fork. Do not ask "
+            "anyone for a token here and do not retry."
+        )
     return await _mint_and_post(
         runtime,
         auth,

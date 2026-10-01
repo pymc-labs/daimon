@@ -179,3 +179,71 @@ async def test_apply_defaults_provisions_cli_local_deterministically(
     assert ledger_count == 0, (
         "apply_defaults must not seed a tenant_ledger trial row for cli:local (billing-exempt)"
     )
+
+
+async def test_apply_prunes_seeded_rows_for_skills_no_longer_in_the_tree(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A leftover row would keep blocking the name and the leftover's delete.
+
+    Rows for skills still in the tree survive, and a dry run prunes nothing.
+    """
+    from anthropic.types.beta import SkillListResponse
+    from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.stores.seeded_skills import list_seeded_skill_names, record_seeded_skill
+
+    _write_tree(tmp_path)
+    (tmp_path / "skills" / "eda").mkdir(parents=True)
+    (tmp_path / "skills" / "eda" / "SKILL.md").write_text("---\nname: eda\ndescription: d\n---\nb")
+    router = _full_router()
+    router.add(
+        "POST",
+        r"/v1/environments",
+        lambda req, _m: httpx.Response(
+            200, json=ma_environment(id="env_1", name="default").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda req, _m: httpx.Response(
+            200, json=ma_agent(id="ag_1", name="daimon").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/skills",
+        lambda req, _m: httpx.Response(
+            200,
+            json=SkillListResponse(
+                id="sk_eda",
+                type="custom",
+                display_title="eda",
+                latest_version="1",
+                created_at="2026-04-21T00:00:00Z",
+                updated_at="2026-04-21T00:00:00Z",
+                source="custom",
+            ).model_dump(mode="json"),
+        ),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+    await apply_defaults(db_session_factory, client, tmp_path, dry_run=False, run_preflight=False)
+    tenant_id = derive_tenant_uuid(platform="cli", workspace_id="local")
+    async with db_session_factory.begin() as session:
+        await record_seeded_skill(
+            session, tenant_id=tenant_id, name="retired", content_hash="h", anthropic_id="sk_old"
+        )
+
+    await apply_defaults(db_session_factory, client, tmp_path, dry_run=True, run_preflight=False)
+    async with db_session_factory() as session:
+        assert await list_seeded_skill_names(session, tenant_id=tenant_id) == {
+            "eda",
+            "retired",
+        }, "a dry run writes nothing"
+
+    await apply_defaults(db_session_factory, client, tmp_path, dry_run=False, run_preflight=False)
+    async with db_session_factory() as session:
+        assert await list_seeded_skill_names(session, tenant_id=tenant_id) == {"eda"}, (
+            "only the retired row goes"
+        )

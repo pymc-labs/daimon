@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Seeded defaults are protected from chat edits.** Skill-repo imports now
+  gate like other attachment writes: a member needs an admin on an agent
+  that answers for others, and neither the import nor a push resync
+  attaches to a defaults-managed agent, even for admins. An import may not
+  reuse a seeded skill's name, and only an admin import may replace an
+  existing library skill. `delete_skill` refuses seeded skills, and
+  `update_environment`/`archive_environment` refuse defaults-managed
+  environments. The skill-import card names what did not import or attach.
+  Apply frees the names of retired default skills. `sync_skills` outcomes
+  gain an optional `refusal` reason. Operators can still delete a seeded
+  skill with `daimon skills delete`.
 - Admins are trusted: pins and seals protect members and channels, not admins. An admin is exempt from an agent's channel pin in a DM (Teams personal chats included) and in their own hub turns (`ask`, `start_turn`, `continue_turn`), where the reply reaches only them, and may list and read anyone's sealed conversations from the hub; continuing a sealed channel conversation from the hub is refused for everyone ("continue it in its channel"). Credential and configuration tools on a pinned agent are open to an admin's chat turn. Pins still hold for admins in channels, threads, handoffs and routines, and `fork_agent` still refuses a pinned source. On every turn, wherever a pinned agent runs, its sends on Discord, Slack and Teams reach only its pinned channels, the requester's own DM with daimon (Slack IM or Teams personal chat), and direct messages to the requester. Every DM session is stamped private, so admins never read another member's DM (Slack, Teams or `/dm`) from the hub. A hub caller counts as an admin by the account's stored role, which the person's next platform turn refreshes. Agent-scoped keys and tokens with no platform user are never admins, and a pin now binds a signed bearer with no platform user too (previously it skipped admission entirely). A DM closed because its source channel was sealed now says so plainly. `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` can be stored as agent keys by anyone; every other `GIT_*` name is still refused.
 - **`DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS` is removed.** Setting it
   to `false` made every caller in a Discord thread share one agent session,

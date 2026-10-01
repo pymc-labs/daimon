@@ -30,6 +30,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, list_response
@@ -530,6 +531,48 @@ async def test_skills_sync_happy_path(
     out = buf.getvalue()
     assert "my-skill" in out, "sync outcome table must contain skill name 'my-skill'"
     assert "created" in out, "sync outcome table must contain action 'created'"
+
+
+@pytest.mark.asyncio
+async def test_skills_sync_refuses_a_seeded_skill_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repo skill named like a seeded one is reported failed and never uploaded."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await get_tenant(s, derive_tenant_uuid(platform="cli", workspace_id="local"))
+        assert tenant is not None, "conftest autoseeds the cli:local tenant"
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        await record_seeded_skill(
+            s, tenant_id=tenant.id, name="my-skill", content_hash="h", anthropic_id="sk_seeded"
+        )
+
+    monkeypatch.setattr("daimon.core.skills.pipeline.fetch_repo", _tracking_fetch([]))
+    posts: list[str] = []
+
+    def on_post(req: httpx.Request, _m: object) -> httpx.Response:
+        posts.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
+    router.add("POST", r"/v1/skills", on_post)
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, highlight=False, width=200)
+
+    await sync_skills(
+        _build_rt_with_router(db_session_factory, router),
+        console,
+        url="https://github.com/org/repo",
+        branch="main",
+        path="",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, content=b""))
+        ),
+    )
+
+    assert posts == [], "the seeded skill must not be created or versioned"
+    assert "failed" in buf.getvalue(), "the outcome table reports the refusal"
 
 
 @pytest.mark.asyncio
