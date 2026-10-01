@@ -136,6 +136,8 @@ CASES = [
     SearchCase("let's start fresh", "start_fresh_task", frozenset([])),
     SearchCase("start over with a clean workspace", "start_fresh_task", frozenset([])),
 ]
+# Teams hides these on purpose; tests/parity/test_teams_deliberate_gaps.py records why.
+_TEAMS_HIDDEN = frozenset({"request_repo_binding", "request_skill_repo_token"})
 
 
 def _make_app(
@@ -188,13 +190,16 @@ def _result_text(response: dict[str, object]) -> str:
     return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.query)
 async def test_setup_query_ranks_tool_and_siblings(
     sessionmaker: async_sessionmaker[AsyncSession],
     platform: str,
     case: SearchCase,
 ) -> None:
+    expected = {case.top_hit} if isinstance(case.top_hit, str) else case.top_hit
+    if platform == "teams" and (expected | case.co_surface) & _TEAMS_HIDDEN:
+        pytest.skip("the case names a tool Teams hides on purpose")
     app = _make_app(sessionmaker, platform=platform)
     response = await mcp_session(
         app,
@@ -206,7 +211,6 @@ async def test_setup_query_ranks_tool_and_siblings(
         },
     )
     hits = re.findall(r"^### (\w+)", _result_text(response), re.MULTILINE)
-    expected = {case.top_hit} if isinstance(case.top_hit, str) else case.top_hit
     detail = (
         f"{case.query!r}: expected {expected}, co-surface {case.co_surface}; ordered hits={hits}"
     )
@@ -215,7 +219,7 @@ async def test_setup_query_ranks_tool_and_siblings(
     assert len(hits) <= 5, f"search window exceeded five: {detail}"
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_member_cannot_search_or_call_routing_mutation(
     sessionmaker: async_sessionmaker[AsyncSession],
     platform: str,
@@ -251,7 +255,7 @@ async def test_member_cannot_search_or_call_routing_mutation(
     )
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_member_default_agent_edit_refuses_with_admin_handoff(
     sessionmaker: async_sessionmaker[AsyncSession],
     platform: str,

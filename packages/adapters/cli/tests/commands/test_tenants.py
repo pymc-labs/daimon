@@ -360,8 +360,8 @@ async def test_tenants_list_rejects_unknown_platform(
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     console = _make_console()
 
-    with pytest.raises(typer.BadParameter, match="discord, cli, slack"):
-        await tenants_list(rt=rt, console=console, platform="teams", as_json=True)
+    with pytest.raises(typer.BadParameter, match="discord, cli, slack, teams"):
+        await tenants_list(rt=rt, console=console, platform="matrix", as_json=True)
 
 
 async def test_tenants_funding_mode_changes_only_the_selected_tenant(
@@ -659,6 +659,11 @@ async def test_access_policy_get_refuses_null_row(
         ("slack", "sealed_channel", "C123ABC:"),
         ("slack", "sealed_channel", "C123ABC:yesterday"),
         ("slack", "protected_channel", "C123ABC:1700000000.000100"),
+        ("teams", "invoker", "U123ABC"),
+        ("teams", "invoker", str(uuid.UUID(int=0xABCDEF)).upper()),
+        ("teams", "protected_channel", "C123ABC"),
+        ("teams", "protected_category", "19:ok@thread.tacv2"),
+        ("teams", "sealed_channel", "19:abc@thread.tacv2;messageid=x"),
         ("cli", "invoker", " "),
         ("discord", "invoker", ""),
     ],
@@ -677,6 +682,8 @@ async def test_access_policy_rejects_each_bad_id_without_writing(
     valid = (
         "111111111111111111"
         if platform == "discord"
+        else (str(uuid.UUID(int=7)) if field == "invoker" else "19:ok@thread.tacv2")
+        if platform == "teams"
         else "U123ABC"
         if field == "invoker"
         else "C123ABC"
@@ -787,6 +794,15 @@ async def test_concurrent_policy_edits_preserve_both_fields(
         ("discord", ["1" * 15, "2" * 21], ["3" * 15, "4" * 21]),
         ("slack", ["U123ABC", "W456DEF"], ["C123ABC", "G456DEF", "D789ABC"]),
         ("cli", ["local-user"], ["local-channel"]),
+        (
+            "teams",
+            [str(uuid.UUID(int=7))],
+            [
+                "19:abc123@thread.tacv2",
+                "19:x_y@thread.skype",
+                "19:abc123@thread.tacv2;messageid=17",
+            ],
+        ),
     ],
 )
 async def test_access_policy_accepts_platform_ids(
@@ -806,14 +822,14 @@ async def test_access_policy_accepts_platform_ids(
         external_id="valid-ids",
         invoker=users,
         protected_channel=channels,
-        protected_category=channels,
+        protected_category=None if platform == "teams" else channels,
         sealed_channel=channels,
     )
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert policy.invoker_user_ids == tuple(users)
     assert policy.protected_channel_ids == tuple(channels)
-    assert policy.protected_category_ids == tuple(channels)
+    assert policy.protected_category_ids == (() if platform == "teams" else tuple(channels))
     assert policy.sealed_channel_ids == tuple(channels)
 
 

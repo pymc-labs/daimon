@@ -1,5 +1,5 @@
 """Scenario: a posted control card reaches the same states, wearing the same
-copy, on Discord and on Slack.
+copy, on Discord, Slack and Teams.
 
 A posted control is the one durable record of a request for a private value:
 the agent drops a card in the channel, exactly one person can open its form,
@@ -25,15 +25,17 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
+import pytest
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import WRONG_REQUESTER_MESSAGE, build_posted_card, expired_message
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_mcp_credentials import list_credentials
 from daimon.core.stores.credential_requests import peek_credential_request
+from daimon.core.stores.domain import Platform
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter
@@ -72,6 +74,9 @@ class _Install:
 def _ids(driver: PlatformDriver) -> tuple[str, str, str, str]:
     if driver.param_id == "discord":
         return ("800000777", "333000000000000777", "100000000000000042", "100000000000000099")
+    if driver.param_id == "teams":
+        tenant, requester, interloper = (str(uuid.UUID(int=n)) for n in (0x777, 0x42, 0x99))
+        return (tenant, "19:parity-card@thread.tacv2", requester, interloper)
     return ("T_PARITY", "C_PARITY", "U_REQUESTER", "U_INTERLOPER")
 
 
@@ -82,7 +87,7 @@ async def _install(
     async with session_factory.begin() as session:
         tenant = await make_tenant(
             session,
-            platform="discord" if driver.param_id == "discord" else "slack",
+            platform=cast(Platform, driver.param_id),
             workspace_id=workspace_id,
         )
         # `turn_origins.account_id` is the one account id in this flow with an
@@ -495,6 +500,8 @@ async def test_replacement_precondition_failure_renders_superseded(
     )
 
 
+# A Teams dialog takes no `.env` upload (test_teams_deliberate_gaps.py).
+@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
 async def test_env_file_parse_error_does_not_consume_the_request(
     driver: PlatformDriver, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -548,6 +555,8 @@ async def test_env_file_parse_error_does_not_consume_the_request(
     assert stored == [], "a rejected file is rejected whole, not line by line"
 
 
+# A Teams dialog takes no `.env` upload (test_teams_deliberate_gaps.py).
+@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
 async def test_env_file_valid_upload_applies_all_keys(
     driver: PlatformDriver, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

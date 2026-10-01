@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.self_edit import (
+    REDACTED_VALUE,
     AgentRepoBindingPublic,
     _clear_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
     _get_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
@@ -118,13 +119,14 @@ async def test_self_write_then_read_round_trip(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
 
-    written = await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello: world")
-    assert written.key == "config.yaml", "write must persist the requested key"
+    written = await _self_write_file_impl(runtime, auth, key="CONFIG_TOKEN", content="hello: world")
+    assert written.key == "CONFIG_TOKEN", "write must persist the requested key"
     assert written.content == "hello: world", "write must persist the requested content"
 
-    read = await _self_read_file_impl(runtime, auth, key="config.yaml")
+    read = await _self_read_file_impl(runtime, auth, key="CONFIG_TOKEN")
     assert read is not None, "read of just-written key must hit"
-    assert read.content == "hello: world", "read must return the same content that was written"
+    assert read.key == "CONFIG_TOKEN", "read must return the stored row"
+    assert read.content == REDACTED_VALUE, "values never come back as tool output"
 
 
 async def test_self_list_files_returns_only_caller_partition(
@@ -137,8 +139,8 @@ async def test_self_list_files_returns_only_caller_partition(
     runtime = _runtime(committing_sessionmaker)
 
     auth_a = _auth_identity(tenant_id=tenant_id, agent_id=agent_a)
-    await _self_write_file_impl(runtime, auth_a, key="config.yaml", content="a")
-    await _self_write_file_impl(runtime, auth_a, key="notes.md", content="b")
+    await _self_write_file_impl(runtime, auth_a, key="CONFIG_TOKEN", content="a")
+    await _self_write_file_impl(runtime, auth_a, key="NOTES_TOKEN", content="b")
 
     auth_b = _auth_identity(tenant_id=tenant_id, agent_id=agent_b)
     rows = await _self_list_files_impl(runtime, auth_b)
@@ -171,12 +173,12 @@ async def test_self_delete_file_after_write_removes_row(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
 
-    await _self_write_file_impl(runtime, auth, key="ephemeral.txt", content="bye")
+    await _self_write_file_impl(runtime, auth, key="EPHEMERAL_TOKEN", content="bye")
     rows_before = await _self_list_files_impl(runtime, auth)
     assert len(rows_before) == 1, "list must show the row that was just written"
 
-    result = await _self_delete_file_impl(runtime, auth, key="ephemeral.txt")
-    assert result == {"deleted": True, "key": "ephemeral.txt"}, (
+    result = await _self_delete_file_impl(runtime, auth, key="EPHEMERAL_TOKEN")
+    assert result == {"deleted": True, "key": "EPHEMERAL_TOKEN"}, (
         "delete must report success on a row that existed"
     )
 
@@ -1148,3 +1150,81 @@ async def test_no_identity_args_in_self_edit_tool_schemas(
 
     missing = _SELF_EDIT_TOOL_NAMES - seen
     assert not missing, f"register_self_edit_tools did not register all 7 tools; missing: {missing}"
+
+
+async def test_self_read_and_list_withhold_values_a_person_entered(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """H3: a key submitted through a credential form never comes back as tool output.
+
+    The form path writes with the requester's account id, and the requester's
+    later turns read with that same id, so the reader and the writer match.
+    """
+    from daimon.core.stores.agent_files import put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="crm-secret-value",
+            # Same account the credential form records: the person who asked.
+            set_by_account_id=auth.account_id,
+        )
+    await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="my own note")
+
+    secret = await _self_read_file_impl(runtime, auth, key="CRM_TOKEN")
+    own = await _self_read_file_impl(runtime, auth, key="NOTES_TOKEN")
+    listed = await _self_list_files_impl(runtime, auth)
+
+    assert secret is not None and "crm-secret-value" not in secret.content
+    assert secret.content == REDACTED_VALUE
+    assert own is not None and own.content == REDACTED_VALUE
+    assert [r.key for r in listed] == ["CRM_TOKEN", "NOTES_TOKEN"]
+    assert all(
+        "crm-secret-value" not in r.content and "my own note" not in r.content for r in listed
+    )
+
+
+async def test_self_write_file_without_encryption_keys_names_the_operator_step(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """H6: on a deployment with no crypto keys, the agent is told why nothing saved."""
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    keyless = async_sessionmaker(
+        bind=committing_sessionmaker.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    runtime = _runtime(keyless)
+    auth = _auth_identity(tenant_id=tenant_id)
+
+    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+        await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="x")
+
+
+@pytest.mark.parametrize(
+    ("key", "match"),
+    [
+        ("TAR_OPTIONS", "reserved name"),
+        ("R_PROFILE_USER", "reserved name"),
+        ("LD_PRELOAD", "reserved name"),
+        ("SNOWFLAKE_USER", "not a secret name"),
+        ("DATABASE_URL", "not a secret name"),
+        ("NOTES", "not a secret name"),
+        ("notes.md", "must match"),
+    ],
+)
+async def test_self_write_file_refuses_every_non_secret_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], key: str, match: str
+) -> None:
+    """An agent key is always a member: only secret names, never tool controls."""
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity()
+    with pytest.raises(ToolError, match=match):
+        await _self_write_file_impl(runtime, auth, key=key, content="v")

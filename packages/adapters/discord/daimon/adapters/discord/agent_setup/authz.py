@@ -58,7 +58,8 @@ import discord
 log = structlog.get_logger()
 
 _SYSTEM_AGENT_MESSAGE = (
-    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 _REACHABLE_AGENT_MESSAGE = (
     f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
@@ -67,7 +68,7 @@ _REACHABLE_AGENT_MESSAGE = (
 _SHARED_AGENT_MESSAGE = (
     "This agent answers for other people here, so changing its repo or its keys "
     f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to fork it; the fork starts with no keys of its own."
+    "to make you a new agent of your own."
 )
 
 

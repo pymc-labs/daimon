@@ -43,7 +43,7 @@ from daimon.adapters.discord.credential_modals import (
     EnvFileModal,
     McpCredentialModal,
 )
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import (
@@ -63,7 +63,6 @@ from daimon.core.config import (
     ThreadNamingSettings,
 )
 from daimon.core.credential_requests import CUSTOM_ID_PATTERN, CUSTOM_ID_PREFIX
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -76,13 +75,14 @@ from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import CredentialRequestRow, Role
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard, read_discord_card, walk_components
-from .protocol import PanelAction, parity_account_id
+from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
 _BALANCE_BLOCKED_TEXT = (
@@ -490,7 +490,7 @@ class DiscordDriver:
             runtime,
             auth,
             name=name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=name),
+            expected_ma_agent_id=await pin_agent(runtime.client, tenant_id=tenant_id, name=name),
         )
 
     async def fork_agent(
@@ -516,7 +516,9 @@ class DiscordDriver:
             auth,
             source_name=source_name,
             new_name=new_name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=source_name),
+            expected_ma_agent_id=await pin_agent(
+                runtime.client, tenant_id=tenant_id, name=source_name
+            ),
         )
 
     async def purge_account(
@@ -661,9 +663,7 @@ class DiscordDriver:
         # The tools refuse to mint for an agent they cannot pin by MA id, and
         # take that id off the origin's configuration target when the caller
         # passes none -- so the origin names the agent this card is for.
-        agents = await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
-        if not agents:
-            raise AssertionError(f"the router serves no agent named {agent_name!r}")
+        agent_id = await pin_agent(anthropic, tenant_id=tenant_id, name=agent_name)
         now = datetime.now(UTC)
         async with sessionmaker.begin() as session:
             origin = await create_origin(
@@ -675,7 +675,7 @@ class DiscordDriver:
                 thread_id=channel_id,
                 responder_ma_agent_id="ag_parity_responder",
                 responder_name="Daimon",
-                configuration_target_ma_agent_id=agents[0].id,
+                configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
                 expires_at=now + timedelta(minutes=30),
@@ -696,7 +696,7 @@ class DiscordDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             elif kind == "env_file":
                 await _request_agent_key_impl(
@@ -708,7 +708,7 @@ class DiscordDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             elif kind == "mcp":
                 if mcp_server_url is None:
@@ -722,7 +722,7 @@ class DiscordDriver:
                     channel_id=channel_id,
                     pending_task=pending_task,
                     origin_context_id=str(origin.id),
-                    expected_ma_agent_id=agents[0].id,
+                    expected_ma_agent_id=agent_id,
                 )
             else:
                 raise NotImplementedError(
@@ -1065,21 +1065,6 @@ class DiscordDriver:
 
     def captured_views(self) -> list[CapturedView]:
         return list(self._views)
-
-
-async def _pin_agent(runtime: McpRuntime, *, tenant_id: uuid.UUID, name: str) -> str:
-    """The MA id the tool must be handed to act on `name`.
-
-    `resolve_setup_agent` refuses a platform call that names an agent without
-    pinning its identity, which is the whole point of the guard: a namesake
-    recreated since the caller last looked must not be adopted silently. A
-    real turn passes the id off the roster it just listed; this does the same
-    read.
-    """
-    agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=name)
-    if not agents:
-        raise AssertionError(f"the router serves no agent named {name!r}")
-    return agents[0].id
 
 
 def _token_from_components(components: object) -> str:

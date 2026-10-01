@@ -36,6 +36,10 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
 from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_replaced as edit_slack_card_replaced,
 )
+from daimon.adapters.mcp.tools.teams._send import (
+    _post_teams_credential_card_impl,  # pyright: ignore[reportPrivateUsage]
+    edit_teams_card_state,
+)
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -46,6 +50,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -54,7 +59,7 @@ from daimon.core.operation_policy import (
     decide_operation,
     needs_reachability_read,
 )
-from daimon.core.stores.agent_files import get_agent_file
+from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     list_live_credential_requests,
@@ -74,6 +79,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # MCP adapter cannot import each other (import-linter's independence
 # contract), and this rule is small enough not to warrant a core lift.
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _caller_is_admin(auth: AuthIdentity) -> bool:
+    """Whether this caller may REQUEST a key outside the member allowlist.
+
+    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    ADMIN, or the token is an internal CLI/scheduler/headless token carrying
+    the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
+    role from the account that owns it, which may be an admin — so it is
+    treated as a member here regardless, as `self_write_file` is.
+
+    This only decides whether the card may be minted. The value is written
+    when a person submits the form, and the Discord and Slack submit paths
+    re-check that person's live platform admin status against the same name
+    policy, so a mint by an admin-capable token never lets a member store an
+    admin-only name.
+    """
+    return auth.is_admin and auth.agent_id is None
+
 
 # `normalize_owner_repo` does not truncate to two path segments (it only
 # strips a known prefix/suffix), so a URL like
@@ -255,7 +279,7 @@ async def _require_key_replacement_allowed(
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
-            f"'{key}' it already has needs a server or workspace admin, and the caller "
+            f"'{key}' it already has needs an admin, and the caller "
             f"is not one. Nothing changed: the existing '{key}' is still in use and no "
             "card was posted. Tell them an admin can ask Daimon to replace the "
             f"'{key}' key on '{ma_agent.name}'. Do not ask anyone for the value here "
@@ -319,6 +343,8 @@ async def _mint_and_post(
 ) -> RequestCredentialResult:
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
+    if auth.platform == "teams" and runtime.teams_client is None:
+        raise ToolError("Teams tools are not configured on this server")
     token = mint_request_token()
     now = datetime.now(UTC)
     expires_at = now + DEFAULT_TTL
@@ -348,7 +374,7 @@ async def _mint_and_post(
             origin_thread_id=origin.thread_id,
             now=now,
         )
-        await create_credential_request(
+        row = await create_credential_request(
             session,
             token=token,
             kind=kind,
@@ -387,6 +413,8 @@ async def _mint_and_post(
                 mcp_server_url=mcp_server_url,
                 branch=branch,
             )
+        elif auth.platform == "teams":
+            message_id = await _post_teams_credential_card_impl(runtime, auth, row=row)
         else:
             message_id = await _post_credential_button_impl(
                 runtime,
@@ -416,6 +444,8 @@ async def _mint_and_post(
     for old in retired:
         if auth.platform == "slack":
             await edit_slack_card_replaced(runtime, auth, row=old)
+        elif auth.platform == "teams":
+            await edit_teams_card_state(runtime, row=old, state="replaced")
         else:
             await edit_discord_card_replaced(runtime, row=old)
     return RequestCredentialResult(
@@ -439,17 +469,45 @@ async def _request_agent_key_impl(
     expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
-    if key is not None and not _POSIX_KEY_RE.match(key):
-        raise ToolError(
-            "key must match [A-Za-z_][A-Za-z0-9_]* "
-            "(letters, digits, underscores; must not start with a digit)"
-        )
+    if key is not None:
+        problem = env_name_problem(key, is_admin=_caller_is_admin(auth))
+        if problem == "bad_name":
+            raise ToolError(
+                "key must match [A-Za-z_][A-Za-z0-9_]* "
+                "(letters, digits, underscores; must not start with a digit)"
+            )
+        if problem == "reserved_name":
+            raise ToolError(
+                f"{key} is a reserved name: it changes how the agent's shell, git, "
+                "interpreters or HTTP clients run, so it cannot be stored as a key."
+            )
+        if problem == "not_credential_name":
+            raise ToolError(
+                f"{key} is not a secret name a member can add. Use a name ending in "
+                f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, "
+                "region and URL names."
+            )
     if key is None:
         named = _named_single_key(purpose)
         if named is not None:
             raise ToolError(
                 f"You named one key ({named}); pass it as `key` instead of requesting a file."
             )
+        if auth.platform == "teams":
+            # A Teams dialog has no file input, so the upload form cannot exist here.
+            raise ToolError(
+                "Teams cannot take a .env file upload. Request each key by name with `key`."
+            )
+    async with runtime.session_factory() as session:
+        writable = agent_env_writes_allowed(session)
+    if not writable:
+        # Fail closed before anyone is asked for a value that could not be stored
+        # encrypted. Tell the model plainly so it relays the operator step.
+        raise ToolError(
+            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
+            "can't be saved and no card was posted. Tell them the operator must set "
+            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
+        )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
@@ -695,7 +753,7 @@ async def _request_repo_binding_impl(
 
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -745,7 +803,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_mcp_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -794,7 +852,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_mcp_oauth(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

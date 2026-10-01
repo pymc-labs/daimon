@@ -212,6 +212,8 @@ async def _start(
         channel_id="dm-42",
         external_user_id="42",
         source_url="https://example.com/source",
+        source_channel_id="source",
+        source_thread_id=None,
         context=[TranscriptTurn(role="user", text=context)],
     )
 
@@ -490,6 +492,7 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
     source_message.author.id = 42
     source_message.author.display_name = "member"
     source_message.content = "Continue this task privately"
+    source_message.type = discord.MessageType.default
 
     async def history(**kwargs):
         yield source_message
@@ -892,6 +895,8 @@ async def test_slack_real_turn_registers_destination_for_leak_guard_and_cleans_o
         channel_id="D42",
         external_user_id="42",
         source_url="slack://source",
+        source_channel_id="source",
+        source_thread_id=None,
         context=[],
     )
     if concurrent_channel:
@@ -938,7 +943,10 @@ async def test_dm_policy_controls_actual_memory_mount_after_sys019_merge(
     assert mounts and mounts[0]["access"] == ("read_only" if restricted else "read_write")
 
 
-async def test_dm_sealed_source_keeps_read_only_memory(db_session, db_session_factory):
+async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
+    db_session, db_session_factory
+):
+    """H1: the DM sits outside the seal, so a sealed source never moves into one."""
     tenant, deps, _, _, _, created = await _setup(db_session, db_session_factory)
     async with db_session_factory.begin() as session:
         await set_access_policy(
@@ -954,12 +962,17 @@ async def test_dm_sealed_source_keeps_read_only_memory(db_session, db_session_fa
         role=Role.USER,
         now=datetime.now(UTC),
     )
-    route = await _start(tenant, deps, admission)
-    await _reply(deps, route)
-    mounts = [
-        resource for resource in created[-1]["resources"] if resource["type"] == "memory_store"
-    ]
-    assert mounts and mounts[0]["access"] == "read_only"
+    assert admission.source_sealed is True
+    with pytest.raises(DaimonError, match="sealed"):
+        await _start(tenant, deps, admission)
+    assert created == [], "no DM session may be created for a sealed source"
+    async with db_session_factory() as session:
+        assert (
+            await get_conversation(
+                session, platform="discord", route_key="dm-42", external_user_id="42"
+            )
+            is None
+        )
 
 
 async def test_dm_tightening_memory_policy_replaces_the_writable_session(
@@ -1215,6 +1228,8 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         channel_id="D42",
         external_user_id="42",
         source_url="slack://source",
+        source_channel_id="source",
+        source_thread_id=None,
         context=[],
     )
     with aioresponses() as http:
@@ -1286,3 +1301,212 @@ async def test_execution_destination_requires_exact_live_owner_row(db_session, m
         )
         is None
     )
+
+
+async def _seal_and_expect_quarantine(
+    db_session_factory, deps, tenant, route, sent, created, *, sealed, platform="discord"
+):
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(sealed_channel_ids=sealed)
+        )
+    events_before = len(sent)
+    sessions_before = len(created)
+    with pytest.raises(DaimonError, match="now sealed"):
+        await _reply(deps, route, message_id="2")
+    assert len(sent) == events_before, "no turn may run with the sealed context"
+    assert len(created) == sessions_before
+    async with db_session_factory() as session:
+        assert (
+            await get_conversation(
+                session, platform=platform, route_key=route.route_key, external_user_id="42"
+            )
+            is None
+        ), "the DM is quarantined: its copied context and history are gone"
+        live = await session.scalar(
+            sql_text(
+                "SELECT count(*) FROM thread_sessions WHERE thread_id = :t AND status = 'live'"
+            ),
+            {"t": route.scope_id},
+        )
+    assert live == 0, "the provider session that saw the context is retired"
+
+
+@pytest.mark.parametrize(
+    ("source_thread_id", "legacy", "sealed"),
+    [
+        (None, False, ("source",)),
+        ("222", False, ("source",)),
+        (None, True, ("source",)),
+        ("222", True, ("some-other-channel",)),
+    ],
+    ids=["channel", "thread-under-sealed-parent", "legacy-channel", "legacy-thread-fails-closed"],
+)
+async def test_dm_whose_source_is_sealed_later_is_quarantined(
+    db_session, db_session_factory, source_thread_id, legacy, sealed
+):
+    """H1: an existing DM re-checks its source against the current seal list every turn."""
+    tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
+    route = await start_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        workspace_id="123",
+        route_key="dm-42",
+        channel_id="dm-42",
+        external_user_id="42",
+        source_url=f"https://discord.com/channels/123/{source_thread_id or 'source'}",
+        source_channel_id="source",
+        source_thread_id=source_thread_id,
+        context=[TranscriptTurn(role="user", text="client detail before the seal")],
+    )
+    assert await _reply(deps, route)
+    if legacy:
+        async with db_session_factory.begin() as session:
+            await session.execute(
+                sql_text(
+                    "UPDATE direct_message_conversations "
+                    "SET source_channel_id = NULL, source_thread_id = NULL"
+                )
+            )
+    await _seal_and_expect_quarantine(
+        db_session_factory, deps, tenant, route, sent, created, sealed=sealed
+    )
+
+
+async def test_slack_dm_ends_when_a_copied_thread_is_sealed_on_its_own_later(
+    db_session, db_session_factory
+):
+    tenant, deps, admission, sent, streams, created = await _setup(
+        db_session, db_session_factory, platform="slack"
+    )
+    route = await start_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="slack",
+        workspace_id="123",
+        route_key="123:D42",
+        channel_id="D42",
+        external_user_id="42",
+        source_url="slack://channel?team=123&id=C1",
+        source_channel_id="C1",
+        source_thread_id=None,
+        context=[TranscriptTurn(role="user", text="thread detail")],
+        source_thread_keys=["C1:1700000000.000100", "C1:1700000000.000300"],
+    )
+    assert await _reply(deps, route)
+    await _seal_and_expect_quarantine(
+        db_session_factory,
+        deps,
+        tenant,
+        route,
+        sent,
+        created,
+        sealed=("C1:1700000000.000100",),
+        platform="slack",
+    )
+
+
+async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real_admission(
+    db_session, db_session_factory
+):
+    """H1: the Discord command, real admit() and a seeded seal on the thread's parent."""
+    tenant, deps, _admission, _sent, _streams, _created = await _setup(
+        db_session, db_session_factory
+    )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(sealed_channel_ids=("100",))
+        )
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 200
+    thread.parent_id = 100
+    thread.history = MagicMock()
+    member = MagicMock()
+    member.id = 42
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    member.create_dm = AsyncMock()
+    thread.permissions_for = MagicMock(
+        return_value=MagicMock(view_channel=True, read_message_history=True)
+    )
+    guild = MagicMock()
+    guild.id = 123
+    guild.owner_id = 99
+    guild.fetch_member = AsyncMock(return_value=member)
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.channel = thread
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    bot = MagicMock()
+    bot.runtime.turn_deps = deps
+    bot.runtime.sessionmaker = db_session_factory
+    cog = DirectMessageCog(bot)
+
+    await DirectMessageCog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]
+
+    thread.history.assert_not_called()
+    member.create_dm.assert_not_called()
+    assert "sealed" in interaction.followup.send.await_args.args[0]
+
+
+async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(
+    db_session, db_session_factory, monkeypatch
+):
+    """H1: Slack /dm has no thread_ts, so a thread-only seal is filtered from history."""
+    from daimon.adapters.slack import direct_messages as slack_dm
+
+    tenant, deps, _admission, _sent, _streams, _created = await _setup(
+        db_session, db_session_factory, platform="slack", workspace="T1"
+    )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+        )
+    client = MagicMock()
+    client.conversations_history = AsyncMock(
+        return_value={
+            "messages": [
+                {"ts": "1700000000.000300", "user": "U2", "text": "open chatter"},
+                {
+                    "ts": "1700000000.000200",
+                    "thread_ts": "1700000000.000100",
+                    "user": "U3",
+                    "text": "sealed broadcast reply",
+                },
+                {
+                    "ts": "1700000000.000100",
+                    "thread_ts": "1700000000.000100",
+                    "user": "U3",
+                    "text": "sealed thread root",
+                },
+            ]
+        }
+    )
+    client.conversations_open = AsyncMock(return_value={"channel": {"id": "D42"}})
+    client.chat_postMessage = AsyncMock()
+    client.chat_postEphemeral = AsyncMock()
+    monkeypatch.setattr(slack_dm, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(slack_dm, "_live_role", AsyncMock(return_value=Role.USER))
+    runtime = MagicMock()
+    runtime.turn_deps = deps
+    runtime.sessionmaker = db_session_factory
+
+    await slack_dm.handle_dm_command(
+        runtime, {"team_id": "T1", "user_id": "42", "channel_id": "C1", "text": ""}
+    )
+
+    async with db_session_factory() as session:
+        stored = await get_conversation(
+            session, platform="slack", route_key="T1:D42", external_user_id="42"
+        )
+    assert stored is not None, client.chat_postEphemeral.await_args
+    assert "open chatter" in stored.context
+    assert "sealed" not in stored.context
+    assert stored.source_channel_id == "C1"
+    assert stored.source_thread_keys == ["C1:1700000000.000300"]

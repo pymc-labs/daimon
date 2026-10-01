@@ -20,9 +20,9 @@ Pattern sequence for billing_topup block_action:
   7. On failure, views.update the open modal with a static "not configured" message
      instead of leaving the dropdown silently dead
 
-Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | AssertionError |
-SlackApiError at the handler level; logs + captures to Sentry, then answers the open
-modal via views.update. Never stripe.
+Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | SlackApiError
+at the handler level; logs + captures to Sentry, then answers the open modal
+via views.update. Never stripe.
 """
 
 from __future__ import annotations
@@ -34,12 +34,16 @@ import httpx
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.billing_panel.checkout import create_checkout
-from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
 from daimon.adapters.slack.billing_panel.views import build_billing_view, build_loading_view
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.billing_panel import (
+    TOPUP_AMOUNTS,
+    create_checkout,
+    load_billing_snapshot,
+    month_start,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
@@ -48,9 +52,6 @@ from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
-
-# Preset top-up amounts; any amount not in this set is rejected (T-82-10)
-_PRESET_AMOUNTS: frozenset[int] = frozenset({10, 25, 50, 100})
 
 
 async def handle_billing_command(
@@ -92,11 +93,11 @@ async def handle_billing_command(
 
         # Load billing snapshot from DB
         now = datetime.now(UTC)
-        since = datetime(now.year, now.month, 1, tzinfo=UTC)
+        since = month_start(now)
         async with runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
-                team_id=team_id,
+                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
@@ -187,7 +188,7 @@ async def handle_topup_select(
                 raw_value=raw_value,
             )
             return
-        if amount not in _PRESET_AMOUNTS:
+        if amount not in TOPUP_AMOUNTS:
             log.warning(
                 "slack.billing_topup.amount_not_in_preset",
                 team_id=team_id,
@@ -221,7 +222,7 @@ async def handle_topup_select(
             text=f"<{url}|Complete payment>",
         )
 
-    except (DaimonError, httpx.HTTPStatusError, AssertionError, SlackApiError) as exc:
+    except (DaimonError, httpx.HTTPStatusError, SlackApiError) as exc:
         log.error(
             "slack.billing_topup_failed",
             team_id=team_id,

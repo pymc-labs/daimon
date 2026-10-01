@@ -17,7 +17,7 @@ from daimon.adapters.mcp.tools.timers import (
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.continuity.wakes import claim_wake
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import ChatPlatform, Role
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
@@ -39,33 +39,41 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     )
 
 
-def _auth(tenant_id: uuid.UUID, account_id: uuid.UUID, *, role: Role = Role.USER) -> AuthIdentity:
+def _auth(
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    role: Role = Role.USER,
+    platform: ChatPlatform = "discord",
+) -> AuthIdentity:
     return AuthIdentity(
         account_id=account_id,
         tenant_id=tenant_id,
         role=role,
-        platform="discord",
+        platform=platform,
         platform_user_id="42",
     )
 
 
+@pytest.mark.parametrize("platform", ["discord", "teams"])
 async def test_create_list_and_cancel_a_timer_from_a_turn(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    platform: ChatPlatform,
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)
     caller = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
-    auth = _auth(tenant.id, caller.id)
+    auth = _auth(tenant.id, caller.id, platform=platform)
     fire_at = (datetime.now(UTC) + timedelta(hours=2)).replace(microsecond=0)
 
     async with turn_origin(
         committing_sessionmaker,
         tenant_id=tenant.id,
         account_id=caller.id,
-        platform="discord",
+        platform=platform,
         parent_channel_id="C_PARENT",
         thread_id="T_THREAD",
         responder_ma_agent_id="agt_daimon",
@@ -87,14 +95,17 @@ async def test_create_list_and_cancel_a_timer_from_a_turn(
     async with committing_sessionmaker() as session:
         row = await get_continuation(session, idempotency_key=uuid.UUID(timer.timer_id))
     assert row is not None and row.reason == "timer" and row.status == "pending"
+    assert row.platform == platform, "the timer fires through the platform it was set on"
     assert row.target_ma_agent_id == "agt_daimon", "the timer resumes the agent that set it"
     assert row.requester_external_user_id == "42", "the timer runs as the person who asked"
 
     assert [t.timer_id for t in await _list_timers_impl(runtime, auth)] == [timer.timer_id]
-    assert await _list_timers_impl(runtime, _auth(tenant.id, other.id)) == []
+    assert await _list_timers_impl(runtime, _auth(tenant.id, other.id, platform=platform)) == []
 
     with pytest.raises(ToolError, match="timer not found"):
-        await _cancel_timer_impl(runtime, _auth(tenant.id, other.id), timer_id=timer.timer_id)
+        await _cancel_timer_impl(
+            runtime, _auth(tenant.id, other.id, platform=platform), timer_id=timer.timer_id
+        )
     result = await _cancel_timer_impl(runtime, auth, timer_id=timer.timer_id)
     assert result.cancelled is True
     assert (

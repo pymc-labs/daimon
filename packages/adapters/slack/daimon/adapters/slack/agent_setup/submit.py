@@ -41,16 +41,15 @@ from daimon.adapters.slack.agent_setup.read import (
     coding_tools_available,
     load_panel_details,
     load_panel_roster,
+    public_mcp_url,
     resolve_attributions,
 )
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
     decode_panel_metadata,
 )
-from daimon.adapters.slack.agent_setup.write import (
-    create_blank_agent,
-)
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -266,12 +265,13 @@ async def run_new_agent_submission(
 
         try:
             outcome = await create_blank_agent(
-                runtime,
+                runtime.anthropic,
                 tenant_id=tenant_id,
                 name=name,
                 system=purpose,
                 model=model or DEFAULT_AGENT_MODEL,
                 account_id=account_id,
+                public_url=public_mcp_url(runtime),
             )
             if outcome.anthropic_id is None:
                 raise DaimonError(

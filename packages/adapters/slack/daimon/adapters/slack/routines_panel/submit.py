@@ -21,20 +21,20 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anthropic
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.routines_panel.read import load_routines
+from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.cron import next_slot_at_or_after
+from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.routines import can_manage_routine
 from daimon.core.stores.routines import create_routine, delete_routine, get_routine
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -182,23 +182,6 @@ async def _refuse_non_admin(
     return False
 
 
-def _compute_next_fire_at(cron_expr: str, timezone_: str) -> datetime | None:
-    """Validate timezone + cron and return the next fire datetime (UTC) or None.
-
-    Returns None when the timezone or cron expression is invalid so the caller
-    can report a clean ephemeral. Croniter raises a mix of ValueError/KeyError
-    on bad expressions; catching all here is the named-boundary exception.
-    """
-    try:
-        ZoneInfo(timezone_)
-    except ZoneInfoNotFoundError:
-        return None
-    try:
-        return next_slot_at_or_after(cron_expr, timezone_, datetime.now(UTC))
-    except Exception:  # croniter raises mixed types; named boundary
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Background run (post-ack I/O)
 # ---------------------------------------------------------------------------
@@ -235,8 +218,9 @@ async def run_routines_create_submission(
         timezone_ = str(extra.get("timezone") or "")
         trigger_message = str(extra.get("trigger_message") or "")
 
-        next_fire_at = _compute_next_fire_at(cron_expr, timezone_)
-        if next_fire_at is None:
+        try:
+            next_fire_at = validated_next_slot(cron_expr, timezone_, datetime.now(UTC))
+        except InvalidScheduleError:
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
@@ -329,8 +313,7 @@ async def run_routines_delete_submission(
                 )
                 return
             is_admin = await resolve_is_admin(web_client, user_id=user_id)
-            is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
-            if not (is_admin or is_creator):
+            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
@@ -344,7 +327,10 @@ async def run_routines_delete_submission(
         # Refresh the underlying panel in place (best-effort — the row is gone).
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
-                session, runtime.anthropic, tenant_id=tenant_id
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                viewer_user_id=await routines_viewer(web_client, user_id=user_id),
             )
         state = RoutinesPanelState(
             rows=entries, over_cap_count=over_cap_count, agent_name_map=agent_name_map

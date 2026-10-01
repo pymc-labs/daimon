@@ -46,6 +46,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import ChatPlatform
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import get_binding, upsert_responder_binding
@@ -63,17 +64,15 @@ from pydantic import Field
 _REPLY_VERBATIM = "Reply with `confirmation` verbatim and nothing else."
 
 
-def _channel_mention(platform: Literal["discord", "slack"], channel_id: str) -> str:
+def _channel_mention(platform: ChatPlatform, channel_id: str) -> str:
     """Render a parent channel id as this platform's channel-link mention.
 
-    Discord and Slack both render `<#id>` as a clickable channel link, kept
-    as an explicit per-platform switch rather than a bare f-string so a
-    future platform with different mention syntax is not silently handed
-    the wrong one.
+    Discord and Slack both render `<#id>` as a clickable channel link. Teams has
+    no text syntax for one, so it names the place: a 1:1 chat id starts `a:`.
     """
-    if platform in ("discord", "slack"):
-        return f"<#{channel_id}>"
-    raise ValueError(f"unsupported platform for channel mention: {platform!r}")
+    if platform == "teams":
+        return "this chat" if channel_id.startswith("a:") else "this channel"
+    return f"<#{channel_id}>"
 
 
 @dataclass(frozen=True)
@@ -120,8 +119,8 @@ async def _hand_off_task_impl(
     question, which is a refusal the caller answers and retries.
     """
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    # `require_turn_origin` already refused any platform but these two.
-    platform = cast(Literal["discord", "slack"], origin.platform)
+    # `require_turn_origin` already refused any non-chat platform.
+    platform = cast(ChatPlatform, origin.platform)
 
     destination = next(
         (

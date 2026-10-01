@@ -98,12 +98,12 @@ def build_checkout_route(
 
 _SUCCESS_HTML = (
     "<html><body><h1>Payment received</h1>"
-    "<p>Your server credit is updated. Return to Discord.</p>"
+    "<p>Your credit is updated. You can return to your chat.</p>"
     "</body></html>"
 )
 _CANCEL_HTML = (
     "<html><body><h1>Checkout cancelled</h1>"
-    "<p>No charge was made. Return to Discord.</p>"
+    "<p>No charge was made. You can return to your chat.</p>"
     "</body></html>"
 )
 

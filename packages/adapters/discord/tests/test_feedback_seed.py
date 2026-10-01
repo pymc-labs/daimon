@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.errors import TurnError
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
@@ -27,7 +27,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.support_escalation import ESCALATE
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant

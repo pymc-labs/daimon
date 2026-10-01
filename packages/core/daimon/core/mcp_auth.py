@@ -18,6 +18,7 @@ supersede it with a tenant-aware variant — keep the signature stable.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 
 import jwt as pyjwt
@@ -159,3 +160,29 @@ async def mint_agent_mcp_token(
         secret,
         algorithm="HS256",
     )
+
+
+def token_jti(token: str) -> uuid.UUID:
+    """The jti of a token this process just signed.
+
+    Unverified on purpose: the caller minted it a statement earlier, and the
+    registry row, not the signature, is the authority on revocation.
+    """
+    claims: dict[str, object] = pyjwt.decode(token, options={"verify_signature": False})
+    raw = claims.get("jti")
+    assert isinstance(raw, str), "a minted agent token always carries a jti claim"
+    return uuid.UUID(raw)
+
+
+def coding_tool_config(*, agent_name: str, public_url: str, jwt: str) -> tuple[str, str]:
+    """The `claude mcp add` one-liner and the `.mcp.json` snippet for one agent token.
+
+    The server key is `daimon-<agent-name>` so several agents share one config file.
+    """
+    key_name = f"daimon-{agent_name}"
+    config = {key_name: {"url": public_url, "headers": {"Authorization": f"Bearer {jwt}"}}}
+    cli = (
+        f'claude mcp add --transport http "{key_name}" "{public_url}" '
+        f'--header "Authorization: Bearer {jwt}"'
+    )
+    return cli, json.dumps(config, indent=2)

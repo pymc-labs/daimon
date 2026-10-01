@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack", "scheduler", "headless"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams", "scheduler", "headless"])
 async def test_refusal_written_once_and_no_content_columns(
     db_session: AsyncSession, db_engine: AsyncEngine, platform: str
 ) -> None:

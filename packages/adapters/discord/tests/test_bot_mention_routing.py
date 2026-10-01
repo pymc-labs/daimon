@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid as _derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache
@@ -28,6 +28,7 @@ from daimon.core.stores.tenants import (
     get_tenant_liveness,
     set_provision_status,
 )
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

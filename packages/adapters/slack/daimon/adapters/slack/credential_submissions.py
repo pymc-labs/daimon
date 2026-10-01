@@ -35,7 +35,6 @@ from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_policy import AGENT_GONE_MESSAGE, refuse_unless_allowed
 from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
-    mask_tail,
     store_inline_pat,
 )
 from daimon.adapters.slack.credential_forms import refusal_text
@@ -43,7 +42,7 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
-from daimon.core.continuity.continuation import build_input_continuation
+from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
     CredentialRequestKind,
@@ -55,9 +54,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_problem,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -76,15 +77,17 @@ from daimon.core.posted_controls import (
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_unchanged
+from daimon.core.stores.agent_files import (
+    AgentEnvEncryptionRequiredError,
+    list_agent_files,
+    put_agent_file_if_unchanged,
+)
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
-from daimon.core.stores.task_continuations import record_continuation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "ContinuationTrigger",
@@ -179,45 +182,6 @@ async def _consume(
         return await credential_requests_store.consume_credential_request(
             session, token=token, now=now
         )
-
-
-async def _record_input_continuation(
-    session: AsyncSession, *, row: CredentialRequestRow, audit_only: bool = False
-) -> bool:
-    """Queue the continuation this consumed request owes; True when one was.
-
-    Runs in the caller's transaction, beside the write it belongs to: the
-    saved value and the turn waiting on it are one fact, and a crash between
-    them would leave a thread waiting on work nobody will ever pick up.
-
-    False when the row predates the frozen-target columns or carries no origin
-    thread — `build_input_continuation` refuses to address those, and a
-    continuation with no destination is worse than none.
-
-    `audit_only` drops the requested work, which is how a partial write records
-    that the click happened without promising a turn the failure means it
-    cannot deliver: `decide_continuation` skips a row that requested nothing.
-    """
-    request = build_input_continuation(row, platform="slack")
-    if request is None:
-        return False
-    if audit_only:
-        request = request.model_copy(update={"requested_work": None})
-    await record_continuation(
-        session,
-        tenant_id=request.tenant_id,
-        platform=request.platform,
-        parent_channel_id=request.parent_channel_id,
-        thread_id=request.thread_id,
-        requester_account_id=request.requester_account_id,
-        requester_external_user_id=request.requester_external_user_id,
-        target_ma_agent_id=request.target_ma_agent_id,
-        target_name=request.target_name,
-        reason=request.reason,
-        idempotency_key=request.idempotency_key,
-        requested_work=request.requested_work,
-    )
-    return True
 
 
 async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
@@ -337,6 +301,19 @@ async def _validate_submission(
     return row
 
 
+def _env_name_refusal(name: str, problem: str) -> str:
+    """One-line refusal for a key name the submitter may not store."""
+    if problem == "bad_name":
+        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
+    if problem == "reserved_name":
+        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
+    return (
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
+    )
+
+
 async def run_env_credential_submission(
     runtime: SlackRuntime,
     *,
@@ -386,6 +363,21 @@ async def run_env_credential_submission(
         await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
     )
 
+    # The name a member may store is re-checked against the submitter's live
+    # role. `key_add` needs no gate, but the NAME does: a tool-control or
+    # redirect name is refused for a member even on a brand-new key.
+    is_admin = await resolve_is_admin(client, user_id=user_id)
+    name_problem = env_name_problem(request.target, is_admin=is_admin)
+    if name_problem is not None:
+        await post_ephemeral(
+            client,
+            thread_ts=request.origin_thread_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=_env_name_refusal(request.target, name_problem),
+        )
+        return
+
     now = datetime.now(UTC)
     state: CardState = "applied"
     queued = False
@@ -417,7 +409,14 @@ async def run_env_credential_submission(
                 if written is None:
                     state = "superseded"
                 else:
-                    queued = await _record_input_continuation(session, row=consumed)
+                    queued = await record_input_continuation(session, consumed, platform="slack")
+    except AgentEnvEncryptionRequiredError as err:
+        # Rolled back with the consume: nothing stored, the request stays live.
+        log.error("credential_request.env_write_refused_no_crypto_keys")
+        await post_ephemeral(
+            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
     except Exception:
         log.exception("credential_request.env_write_failed", key_present=True)
         await post_ephemeral(
@@ -570,7 +569,7 @@ async def _apply_env_file_entries(
             await credential_requests_store.set_credential_request_outcome(
                 session, token=token, outcome="applied"
             )
-            queued = await _record_input_continuation(session, row=consumed)
+            queued = await record_input_continuation(session, consumed, platform="slack")
             return consumed, (), queued
     except _KeyAppearedMidWrite as err:
         # The rollback took the consume with it, so the request is live again:
@@ -659,7 +658,8 @@ async def run_env_file_credential_submission(
     try:
         # `decode_env_bytes` re-measures the real bytes against the same cap
         # the submission checked the client's reported size against.
-        entries = parse_env_file(decode_env_bytes(body))
+        is_admin = await resolve_is_admin(client, user_id=user_id)
+        entries = parse_env_file(decode_env_bytes(body), member_writable_only=not is_admin)
     except EnvFileRejected as err:
         log.info(
             "credential_request.env_file_rejected",
@@ -675,9 +675,17 @@ async def run_env_file_credential_submission(
         )
         return
 
-    consumed, collisions, queued = await _apply_env_file_entries(
-        runtime, token=token, entries=entries, now=datetime.now(UTC)
-    )
+    try:
+        consumed, collisions, queued = await _apply_env_file_entries(
+            runtime, token=token, entries=entries, now=datetime.now(UTC)
+        )
+    except AgentEnvEncryptionRequiredError as err:
+        # Rolled back with the consume: nothing stored, the request stays live.
+        log.error("credential_request.env_file_refused_no_crypto_keys")
+        await post_ephemeral(
+            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -834,7 +842,7 @@ async def run_mcp_credential_submission(
 
     mcp_server_url = consumed.mcp_server_url
     if mcp_server_url is None:
-        log.error("credential_request.mcp_missing_server_url", token_tail=token[-4:])
+        log.error("credential_request.mcp_missing_server_url", agent_id=str(consumed.agent_id))
         await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
         await post_ephemeral(
             client,
@@ -848,7 +856,7 @@ async def run_mcp_credential_submission(
     log.info(
         "credential_request.mcp.submit",
         mcp_server_url=mcp_server_url,
-        token_masked=mask_tail(value),
+        token_present=bool(value),
     )
     # Ask the server first, as on Discord: a rejected token must not be
     # stored, mirrored and attached only to fail every later turn (#79).
@@ -930,7 +938,7 @@ async def run_mcp_credential_submission(
             await credential_requests_store.set_credential_request_outcome(
                 session, token=token, outcome="write_failed"
             )
-            await _record_input_continuation(session, row=consumed, audit_only=True)
+            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
         await edit_posted_card(
             client,
             row=consumed,
@@ -970,7 +978,7 @@ async def run_mcp_credential_submission(
             await credential_requests_store.set_credential_request_outcome(
                 session, token=token, outcome="write_failed"
             )
-            await _record_input_continuation(session, row=consumed, audit_only=True)
+            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
         await edit_posted_card(
             client,
             row=consumed,
@@ -999,7 +1007,7 @@ async def run_mcp_credential_submission(
         await credential_requests_store.set_credential_request_outcome(
             session, token=token, outcome="applied"
         )
-        queued = await _record_input_continuation(session, row=consumed)
+        queued = await record_input_continuation(session, consumed, platform="slack")
     # The card is the receipt — no ephemeral beside it.
     await edit_posted_card(
         client,
@@ -1202,7 +1210,7 @@ async def _report_skill_repo_failure(
         await credential_requests_store.set_credential_request_outcome(
             session, token=row.token, outcome="write_failed"
         )
-        await _record_input_continuation(session, row=row, audit_only=True)
+        await record_input_continuation(session, row, platform="slack", carries_work=False)
     await edit_posted_card(
         client,
         row=row,
@@ -1286,7 +1294,7 @@ async def run_skill_repo_credential_submission(
         repo_url=url,
         branch=branch,
         path=path,
-        pat_masked=mask_tail(value),
+        pat_present=bool(value),
     )
 
     is_token_stored = False
@@ -1381,8 +1389,8 @@ async def run_skill_repo_credential_submission(
         await credential_requests_store.set_credential_request_outcome(
             session, token=token, outcome="applied" if attach.attached else "write_failed"
         )
-        queued = await _record_input_continuation(
-            session, row=consumed, audit_only=not attach.attached
+        queued = await record_input_continuation(
+            session, consumed, platform="slack", carries_work=attach.attached
         )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
@@ -1487,7 +1495,7 @@ async def run_repo_bind_credential_submission(
         "credential_request.repo.submit",
         repo_url=repo_url,
         branch=branch,
-        pat_masked=mask_tail(pat) if pat else None,
+        pat_present=bool(pat),
     )
 
     try:
@@ -1544,7 +1552,7 @@ async def run_repo_bind_credential_submission(
         await credential_requests_store.set_credential_request_outcome(
             session, token=token, outcome="applied"
         )
-        queued = await _record_input_continuation(session, row=consumed)
+        queued = await record_input_continuation(session, consumed, platform="slack")
     # No `unsaved_work`: this bind copies nothing, and the copy line is a
     # promise only the panel's own flow is in a position to make.
     await edit_posted_card(

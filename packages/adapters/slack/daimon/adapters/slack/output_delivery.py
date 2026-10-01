@@ -15,20 +15,18 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.media.filenames import display_filename_for, sanitize_title
+from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
-    MAX_BYTES_PER_FILE,
     DeliverableFile,
     OutputPostingUnavailable,
     SkippedFile,
+    render_oversize_notice,
     sweep_session_outputs,
 )
 from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger(__name__)
-
-_MIB = 1024 * 1024
 
 # Workspace-wide, persistent failures: retrying per file (or per turn) is pure
 # noise, so these abort the sweep and produce one deduped notice per team.
@@ -93,15 +91,8 @@ def _build_skip_notice(
     web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
 ) -> Callable[[SkippedFile], Awaitable[None]]:
     async def on_skip(skipped: SkippedFile) -> None:
-        size_mib = skipped.size_bytes / _MIB
-        limit_mib = MAX_BYTES_PER_FILE // _MIB
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=(
-                f"I couldn't attach `{sanitize_title(skipped.filename)}` — it is "
-                f"{size_mib:.1f} MiB, over the {limit_mib} MiB delivery limit."
-            ),
+            channel=channel_id, thread_ts=thread_ts, text=render_oversize_notice(skipped)
         )
 
     return on_skip

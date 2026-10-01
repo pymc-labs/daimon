@@ -17,11 +17,11 @@ from typing import Any
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
 from daimon.adapters.slack.billing_panel.views import build_billing_view, slack_time
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.billing_panel import load_billing_snapshot, month_start
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
@@ -177,12 +177,12 @@ async def _refresh_panel(
     now: datetime,
 ) -> None:
     """Redraw the /billing panel under the form. A failure leaves the success reply alone."""
-    since = datetime(now.year, now.month, 1, tzinfo=UTC)
+    since = month_start(now)
     try:
         async with runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
-                team_id=team_id,
+                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 platform_user_id=user_id,
                 is_admin=True,
                 since=since,

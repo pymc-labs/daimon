@@ -37,20 +37,35 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
 
 
 def build_session_factory(
-    engine: AsyncEngine, *, crypto_keys: tuple[str, ...] | None = None
+    engine: AsyncEngine,
+    *,
+    crypto_keys: tuple[str, ...] | None = None,
+    allow_plaintext: bool | None = None,
 ) -> async_sessionmaker[AsyncSession]:
     """Build an `async_sessionmaker` bound to `engine`.
 
     `expire_on_commit=False` so Pydantic mapping in stores can read attributes
-    after commit without a reload.
+    after commit without a reload. Without crypto keys, agent key writes are
+    refused unless `allow_plaintext` (default: the crypto settings) opts in.
     """
-    if crypto_keys is None:
-        crypto_keys = tuple(k.get_secret_value() for k in load_crypto_settings().keys)
+    if crypto_keys is None or allow_plaintext is None:
+        crypto = load_crypto_settings()
+        if crypto_keys is None:
+            crypto_keys = tuple(k.get_secret_value() for k in crypto.keys)
+        if allow_plaintext is None:
+            allow_plaintext = crypto.allow_plaintext
     if not crypto_keys:
-        structlog.get_logger(__name__).warning("agent_env.encryption_disabled")
+        log = structlog.get_logger(__name__)
+        if allow_plaintext:
+            log.warning("agent_env.encryption_disabled", allow_plaintext=True)
+        else:
+            log.error(
+                "agent_env.encryption_keys_missing",
+                hint="set DAIMON_CRYPTO__KEYS; agent key writes are refused until then",
+            )
     return async_sessionmaker(
         engine,
         expire_on_commit=False,
         class_=AsyncSession,
-        info={"crypto_keys": crypto_keys},
+        info={"crypto_keys": crypto_keys, "crypto_allow_plaintext": allow_plaintext},
     )

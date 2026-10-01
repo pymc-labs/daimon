@@ -8,7 +8,12 @@ import anthropic
 import structlog
 from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot, log_anthropic_overload
 from daimon.adapters.discord.checks import is_member_guild_admin, require_registered_guild
-from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
+from daimon.core.direct_messages import (
+    reply_to_dm,
+    require_dm_enabled,
+    require_unsealed_source,
+    start_dm,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -23,6 +28,7 @@ from discord import app_commands
 from discord.ext import commands
 
 log = structlog.get_logger(__name__)
+_CONVERSATION_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
 
 class DirectMessageCog(commands.Cog):
@@ -81,6 +87,7 @@ class DirectMessageCog(commands.Cog):
                 is_dm=True,
                 now=datetime.now(UTC),
             )
+            require_unsealed_source(admission)
             messages = [message async for message in channel.history(limit=12)]
             context = [
                 TranscriptTurn(
@@ -90,7 +97,9 @@ class DirectMessageCog(commands.Cog):
                     text=f"{message.author.display_name}: {message.content}",
                 )
                 for message in reversed(messages)
-                if message.content
+                # System notices (thread created, pins, joins) are not the
+                # conversation, and a thread-created notice names the thread.
+                if message.content and message.type in _CONVERSATION_TYPES
             ]
             dm_channel = await member.create_dm()
             source_url = f"https://discord.com/channels/{guild.id}/{channel.id}"
@@ -104,6 +113,8 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(dm_channel.id),
                 external_user_id=str(member.id),
                 source_url=source_url,
+                source_channel_id=str(parent_id or channel.id),
+                source_thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 context=context,
             )
             await dm_channel.send(
