@@ -1126,6 +1126,8 @@ def test_routing_view_offers_isolation_to_admins_by_state() -> None:
     assert not member & {ACTION_ISOLATE, ACTION_ISOLATE_COPY, ACTION_END_ISOLATION}, (
         "members get no isolation buttons"
     )
+    dm = set(_action_ids(_routing(channel_admins=[], isolated=False, channel_id="D0123456")))
+    assert not dm & {ACTION_ISOLATE, ACTION_ISOLATE_COPY}, "a DM can't be isolated"
 
 
 def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> None:

@@ -568,7 +568,7 @@ def build_routing_view(
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
     channel's admins and a button to edit this channel's. `isolated` is too,
-    when the panel has a channel: it adds that channel's isolation buttons.
+    when the panel has a channel, not a DM: it adds that channel's isolation buttons.
     """
     blocks: list[dict[str, Any]] = []
     if page.items:
@@ -614,7 +614,7 @@ def build_routing_view(
     blocks.append({"type": "divider"})
     if channel_admins is not None:
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
-    if isolated is not None and channel_id:
+    if isolated is not None and _is_channel(channel_id):
         blocks.extend(_isolation_blocks(channel_id=channel_id, isolated=isolated))
     blocks.append(
         _context(
@@ -644,6 +644,11 @@ def build_routing_view(
     )
 
 
+def _is_channel(channel_id: str) -> bool:
+    """A DM (`D…`) has no channel admins and can't be isolated."""
+    return bool(channel_id) and not channel_id.startswith("D")
+
+
 def _channel_admins_blocks(
     grants: Sequence[ChannelAdminsRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
@@ -657,8 +662,7 @@ def _channel_admins_blocks(
     if len(lines) < len(grants):
         lines.append(f"_and {len(grants) - len(lines)} more_")
     listing = "\n".join(lines) or "_no channel has its own admins yet_"
-    # A DM (`D…`) has no channel admins to edit.
-    editable = bool(channel_id) and not channel_id.startswith("D")
+    editable = _is_channel(channel_id)
     edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
     return [
         _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
