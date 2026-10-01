@@ -248,7 +248,13 @@ its content out: agent chat's `start_turn`, `ask` and `continue_turn` are off
 the surface a chat turn's token (`chat_agent_id`) sees, and refuse that
 credential outright if they are ever reached with it
 (`_require_outside_chat_turn`), so every session they create comes from a
-headless caller outside every channel. Operators edit the policy with the CLI:
+headless caller outside every channel. The one exception is an agent key
+minted with "Use from your coding tools" in a sealed channel, or in a channel
+its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
+records that channel (`coding_token_channel`), and its calls run as a turn
+there -- under the channel's pin, seal, environment and budget, with its
+sessions stamped to the channel (`token_channel_id`). Keys minted anywhere
+else are unchanged. Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -554,6 +560,7 @@ but them:
 | Credential and configuration tools on a pinned agent | from inside its channels only, or anywhere by a chat turn's channel admin of every pinned channel | allowed (a chat turn's admin) |
 | `fork_agent` of a pinned agent | refused | refused |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
+| An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
 
 On every turn, wherever a pinned agent runs (including an exempt admin turn
 and a member's turn inside its channel), its sends (messages, replies,
