@@ -2134,6 +2134,13 @@ class TaskContinuation(Base):
             "available_at",
             postgresql_where=text("available_at IS NOT NULL"),
         ),
+        # Agent reach reads the wakes still owed to an agent.
+        Index(
+            "task_continuations_waiting_idx",
+            "tenant_id",
+            "target_name",
+            postgresql_where=text("status IN ('pending', 'claimed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
