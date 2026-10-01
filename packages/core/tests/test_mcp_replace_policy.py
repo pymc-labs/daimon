@@ -20,6 +20,7 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _URL = "https://mcp.linear.app/sse"
@@ -136,7 +137,20 @@ async def test_a_channel_admin_replaces_a_server_only_on_an_agent_local_to_them(
     assert await outcome("u9") == "needs_admin", "an admin of another channel may not"
     assert await outcome("u5") == "needs_admin", "a plain member may not"
     assert await outcome("u1", managed=True) == "managed_agent", "managed stays a server admin's"
-    assert await outcome("u1", platform="teams") == "needs_admin", "teams has no channel admins"
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            await set_channel_admins(
+                db_session,
+                tenant_id=tenant.id,
+                platform="teams",
+                channel_id="c1",
+                role_ids=[],
+                user_ids=["u1"],
+                actor_account_id=None,
+            )
+    assert await outcome("u1", platform="teams") == "needs_admin", (
+        "no Teams grant can be stored, so c1's Discord admin holds nothing as a Teams caller"
+    )
 
 
 async def test_the_first_shared_token_for_an_already_connected_url_is_a_replacement(
