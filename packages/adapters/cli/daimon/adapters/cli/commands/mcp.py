@@ -1,8 +1,9 @@
 """`daimon mcp …` — operator primitives for the MCP adapter.
 
 Subcommands:
-  * mint-token         — signs a JWT for local debug / integration tests.
+  * mint-token         — signs an expiring, revocable JWT for local debug / tests.
   * mint-agent-token   — mints a long-lived, revocable agent-scoped token.
+  * mint-operator-token, list-tokens, revoke-token — see `mcp_tokens`.
   * url                — prints DAIMON_MCP__PUBLIC_URL.
   * janitor            — find and optionally archive orphan daimon-mcp:* vaults.
   * sweep-credentials  — delete+recreate stale is_admin creds (defense-in-depth).
@@ -16,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 
 import typer
+from daimon.adapters.cli.commands.mcp_tokens import register_token_commands
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
@@ -23,7 +25,7 @@ from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import ConfigError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt
+from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token
 from daimon.core.mcp_credential_sweep import sweep_stale_admin_credentials
 from daimon.core.mcp_vault_janitor import archive_orphan_mcp_vaults
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -31,6 +33,7 @@ from rich.console import Console
 from rich.table import Table
 
 mcp_app = typer.Typer(help="Operator commands for the daimon-mcp adapter.")
+register_token_commands(mcp_app)
 
 
 @mcp_app.command("url")
@@ -56,18 +59,27 @@ def mcp_mint_token_command(
         "--os-user",
         help="OS user to mint a token for. Defaults to settings.cli.local_user.",
     ),
+    ttl_days: int = typer.Option(90, "--ttl-days", help="Days until the token expires."),
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await mint_token(rt=rt, os_user=os_user)
+            await mint_token(rt=rt, os_user=os_user, ttl_days=ttl_days)
 
     run_cli(_with_defaults(), console=console)
 
 
-async def mint_token(*, rt: CliRuntime, os_user: str | None) -> None:
+async def mint_token(*, rt: CliRuntime, os_user: str | None, ttl_days: int = 90) -> None:
+    """Mint the CLI principal's token with a jti, an exp and a registry row.
+
+    `daimon mcp revoke-token` revokes it. Tokens minted before rows existed
+    carry no jti; they cannot be told apart from vault tokens, so they keep
+    verifying as before.
+    """
+    if not 1 <= ttl_days <= 365:
+        raise typer.BadParameter("--ttl-days must be 1 to 365")
     if rt.settings.mcp.jwt_secret is None:
         raise ConfigError(
             "DAIMON_MCP__JWT_SECRET is unset. Generate one with "
@@ -82,11 +94,14 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None) -> None:
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=resolved_user
         )
-    token = mint_jwt(
-        account_id=principal.account_id,
-        secret=rt.settings.mcp.jwt_secret.get_secret_value().encode(),
-        now=dt.datetime.now(dt.UTC),
-    )
+        token = await mint_cli_mcp_token(
+            session,
+            account_id=principal.account_id,
+            tenant_id=tenant_id,
+            secret=rt.settings.mcp.jwt_secret.get_secret_value().encode(),
+            now=dt.datetime.now(dt.UTC),
+            ttl_days=ttl_days,
+        )
     typer.echo(token)
 
 
