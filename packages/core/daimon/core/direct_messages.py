@@ -261,6 +261,7 @@ async def reply_to_dm(
     expected_scope_id: str,
     text: str,
     role: Role,
+    platform_role_ids: Sequence[str] | None = None,
 ) -> str | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
@@ -298,6 +299,7 @@ async def reply_to_dm(
             channel_id=conversation.channel_id,
             thread_id=conversation.scope_id,
             role=role,
+            platform_role_ids=platform_role_ids,
             is_dm=True,
             dm_source_channel_id=conversation.source_channel_id,
             now=now,

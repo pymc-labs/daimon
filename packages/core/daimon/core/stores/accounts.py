@@ -7,7 +7,7 @@ path needed by the MCP verifier (account-existence check).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any, cast
 
 from daimon.core._models import Account, PlatformPrincipal, Tenant, UserConfig
@@ -43,6 +43,7 @@ async def get_account_with_tenant(
             Tenant.platform,
             Tenant.external_id,
             PlatformPrincipal.external_id,  # platform_user_id — null when no matching principal
+            Account.platform_role_ids,
         )
         .select_from(Account)
         .join(Tenant, Tenant.id == Account.tenant_id)
@@ -56,7 +57,7 @@ async def get_account_with_tenant(
     row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return None
-    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id = row
+    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id, role_ids = row
     return AccountIdentityRow(
         account_id=acct_id,
         tenant_id=tenant_id,
@@ -64,6 +65,7 @@ async def get_account_with_tenant(
         platform=platform,
         external_id=ext_id,
         platform_user_id=platform_user_id,
+        platform_role_ids=tuple(role_ids),
     )
 
 
@@ -84,6 +86,19 @@ async def set_role(
     if orm is None:
         return
     orm.role = role.value
+    await session.flush()
+
+
+async def set_platform_role_ids(
+    session: AsyncSession,
+    account_id: uuid.UUID,
+    role_ids: Sequence[str],
+) -> None:
+    """Replace the account's stored platform role ids. No error if the account is gone."""
+    orm = await session.get(Account, account_id)
+    if orm is None:
+        return
+    orm.platform_role_ids = sorted(set(role_ids))
     await session.flush()
 
 

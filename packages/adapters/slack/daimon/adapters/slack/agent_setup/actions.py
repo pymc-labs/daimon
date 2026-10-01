@@ -24,7 +24,7 @@ state from the typed ``PanelMetadata`` the views carry, never from the click.
 Navigation pushes; paging and the Details expansions update the view they were
 clicked on, so the stack never grows past the two depths the design uses.
 
-Only three clicks leave the read path, and none of them edits an existing
+Only four clicks leave the read path, and none of them edits an existing
 agent:
   - New agent pushes the creation form, whose submission is handled in
     submit.py. Creating an unscoped agent has no tenant-wide blast radius, so
@@ -32,6 +32,9 @@ agent:
   - Use from your coding tools mints a scoped bearer token behind a live admin
     check resolved post-ack, server-side (hiding ≠ gating). Token values
     are never logged, not even in part.
+  - Channel admins, on Who answers where, pushes the form naming this
+    channel's admins, submitted in channel_admins.py. Workspace admins only,
+    re-checked live on the click and on the submission.
   - The setup-conversation button opens a thread with Daimon. Every change to
     an existing agent, and every routing change, happens in that conversation,
     where the chat tool owns the authorization.
@@ -78,6 +81,7 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
+from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.errors import render_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
@@ -96,11 +100,16 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
+from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
+
+CHANNEL_ADMINS_NEED_ADMIN_MESSAGE = (
+    "Only a workspace admin can name a channel's admins. Nothing changed."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +241,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_NEW,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_REVOKE_TOKEN,
+        panel_views.ACTION_CHANNEL_ADMINS,
     }
 )
 
@@ -334,17 +344,22 @@ async def load_agents_view(
     )
 
 
-async def _load_routing_view(
+async def load_routing_view(
     runtime: SlackRuntime,
     *,
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
     is_admin: bool,
 ) -> dict[str, Any]:
-    """Build the Who-answers-where view for `meta`'s page."""
+    """Build the Who-answers-where view for `meta`'s page; admins also get the channel admins."""
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session, tenant_id=tenant_id, default=runtime.deployment_default
+        )
+        channel_admins = (
+            await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
+            if is_admin
+            else None
         )
         attributions = await resolve_attributions(
             session, tenant_id=tenant_id, account_ids=_answering_map_account_ids(answering_map)
@@ -378,6 +393,7 @@ async def _load_routing_view(
         setup_links=setup_links,
         channel_id=meta.channel_id,
         unrouted_agent_name=unrouted_agent_name,
+        channel_admins=channel_admins,
     )
 
 
@@ -451,7 +467,7 @@ async def _update_paged_view(
     view_info: dict[str, Any] = payload.get("view") or {}
     target = meta.with_page(max(meta.page + delta, 0))
     view = (
-        await _load_routing_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
+        await load_routing_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
         if meta.view == "routing"
         else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
     )
@@ -532,7 +548,7 @@ async def _dispatch_panel_action(
         return
 
     if action_id == panel_views.ACTION_ROUTING:
-        view = await _load_routing_view(
+        view = await load_routing_view(
             runtime,
             tenant_id=tenant_id,
             meta=meta.with_view("routing"),
@@ -604,6 +620,28 @@ async def _dispatch_panel_action(
             view=build_new_agent_form(
                 meta=meta.with_view("new_agent", root_view_id=view_id),
                 model_choices=list_model_choices(default=DEFAULT_AGENT_MODEL),
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_CHANNEL_ADMINS:
+        if not is_admin or not meta.channel_id:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
+            )
+            return
+        async with runtime.sessionmaker() as session:
+            grant = await get_channel_admins(
+                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
+            )
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_channel_admins_form(
+                meta=meta.with_view("channel_admins", root_view_id=view_id),
+                user_ids=grant.user_ids if grant else (),
             ),
         )
         return

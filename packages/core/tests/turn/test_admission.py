@@ -931,6 +931,39 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
     assert exc_info.value.reason == "invoker_not_allowed", "no live role must mean non-admin"
 
 
+async def test_admit_stores_the_live_platform_role_ids_like_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Role ids are replaced on each turn that passes them and kept when one does not."""
+    from daimon.core.stores.accounts import get_account_with_tenant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    async def turn(role_ids: list[str] | None) -> tuple[str, ...]:
+        admission = await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="member-1",
+            channel_id="chan-1",
+            now=_NOW,
+            platform_role_ids=role_ids,
+        )
+        async with db_session_factory() as session:
+            row = await get_account_with_tenant(session, account_id=admission.account_id)
+        assert row is not None, "the account exists"
+        return row.platform_role_ids
+
+    assert await turn(["r2", "r1"]) == ("r1", "r2"), "role ids are stored sorted"
+    assert await turn(None) == ("r1", "r2"), "a turn with no role ids leaves them alone"
+    assert await turn([]) == (), "a member who lost every role stores none"
+
+
 async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_balance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

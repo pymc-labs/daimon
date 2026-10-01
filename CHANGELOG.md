@@ -99,6 +99,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on, and sessions carry it as
   `daimon_budget_channel`.
+- **Channel admins.** Server and workspace admins can name the roles and
+  members who run a channel, with `set_channel_admins`, `list_channel_admins`
+  and `clear_channel_admins`, from Who answers where in the setup panel, or
+  with `daimon channels admins`. A channel admin may change agents that answer
+  only in channels they run (instructions, skills, keys, MCP servers, repos)
+  and set or clear those channels' default agent, though never to another
+  channel's own agent; built-in agents and the server default stay with server
+  admins. Slack grants are by member only. A routine or wake set up by someone
+  with more rights keeps the agent out of a channel admin's hands, and so do a
+  personal default, someone else's live session or routine in another channel
+  or in no known one, and, for key, MCP server and skill repo changes,
+  answering nowhere. Connecting a skill repo now counts an agent as shared
+  wherever a key change does (someone's personal default, a bound thread, or
+  another member's routine or live session) on Discord and Slack too, as it
+  already did over MCP. An admin of every channel an agent is pinned to may
+  change it from outside them, and from the hub may list and read the sealed
+  conversations of the channels they run, as a server admin may of any, when
+  every seal on one lies in those channels; DMs stay private. No chat
+  tool or panel can make a pinned agent the default of a channel outside its
+  pin; the operator CLI still can. Nothing changes until a channel admin is
+  named.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
@@ -221,7 +242,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("remind me in two hours"). A timer runs in the thread it was set in, as the
   person who asked for it, and goes through the wake queue. A cancelled timer
   never fires, and a timer whose thread now answers to a different agent is
-  skipped with a notice instead of running under that agent. Migration
+  skipped with a notice instead of running under that agent. Handoffs and
+  applied private input are now skipped the same way. Migration
   `0029_feat084_timers` adds the `timer` reason; deploy it and timer-aware
   Discord, Slack and MCP builds before anyone can create timers (see
   `docs/architecture.md`). Downgrading it deletes all timer rows.

@@ -32,7 +32,10 @@ from anthropic.types.beta.beta_managed_agents_agent import Tool as MATool
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_server_url import same_mcp_url
@@ -44,7 +47,6 @@ from daimon.core.operation_policy import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_mcp_credentials as cred_store
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
@@ -79,35 +81,37 @@ async def decide_mcp_replacement(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
+    platform: str,
     agent: BetaManagedAgentsAgent,
-    is_admin: bool,
+    caller: ChannelAdminCaller,
     default: DeploymentDefault,
 ) -> PolicyOutcome:
     """Attachment-family decision for replacing one of ``agent``'s MCP servers.
 
     Admin: allowed. Otherwise refused on a defaults-managed agent or one that
-    answers somewhere in the tenant (a default, a bound handoff or setup
-    thread, or someone's personal default); allowed on a private draft. The
-    reachability read is paid for only when the answer depends on it.
+    is shared for key changes (`is_agent_shared_for_key_changes`), unless the
+    caller administers every channel it answers and runs in; allowed on a
+    private draft. Every routine and live session counts, the caller's own
+    included. The facts are read only when the answer depends on them.
     """
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
+    facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
     if needs_reachability_read(
-        "mcp_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
+        "mcp_replace", is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
     ):
         async with session_factory() as session:
-            reachable = await is_agent_shared_for_key_changes(
+            facts = await load_target_facts(
                 session,
+                "mcp_replace",
                 tenant_id=tenant_id,
-                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                platform=platform,
+                agent_names=agent_pin_names(agent.name, agent.metadata),
                 ma_agent_id=str(agent.id),
                 default=default,
+                caller=caller,
+                is_daimon_managed=is_daimon_managed,
             )
-    return decide_operation(
-        "mcp_replace",
-        is_admin=is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
-    )
+    return decide_operation("mcp_replace", is_admin=caller.is_server_admin, target=facts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +134,8 @@ async def decide_mcp_connect(
     agent_id: uuid.UUID,
     server_name: str,
     url: str,
-    is_admin: bool,
+    platform: str,
+    caller: ChannelAdminCaller,
     default: DeploymentDefault,
     shares_token: bool,
 ) -> McpConnectDecision:
@@ -164,7 +169,12 @@ async def decide_mcp_connect(
         # name in the meantime makes the attach refuse rather than repoint it.
         return McpConnectDecision(replaces=False, replace_allowed=False)
     outcome = await decide_mcp_replacement(
-        session_factory, tenant_id=tenant_id, agent=agent, is_admin=is_admin, default=default
+        session_factory,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent=agent,
+        caller=caller,
+        default=default,
     )
     return McpConnectDecision(replaces=True, replace_allowed=outcome == "allow")
 

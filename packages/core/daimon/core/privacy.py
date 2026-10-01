@@ -27,6 +27,7 @@ import uuid
 
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
+from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
@@ -84,6 +85,7 @@ class PurgePreview(BaseModel):
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -100,6 +102,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_user_tokens, "Slack user token(s)"),
         (preview.slack_turn_contexts, "Slack turn context(s)"),
         (preview.direct_message_conversations, "private conversation(s)"),
+        (preview.channel_admins, "channel admin grant(s)"),
     )
     parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
     return ", ".join(parts) if parts else "nothing visible to you yet"
@@ -370,6 +373,16 @@ async def collect_purge_preview(
             )
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+
+        # 16. channel_admins — the channels whose grant lists this person's id.
+        channel_admins_total = 0
+        for pp in pp_list:
+            channel_admins_total += await channel_admins_store.count_channel_admin_grants_for_user(
+                session,
+                tenant_id=pp.tenant_id,
+                platform=pp.platform,
+                platform_user_id=pp.external_id,
+            )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -391,5 +404,6 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        channel_admins=PurgePreviewRow(count=channel_admins_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
     )

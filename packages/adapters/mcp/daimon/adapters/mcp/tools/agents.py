@@ -580,7 +580,9 @@ async def _update_agent_impl(
     if skills is not None:
         touched_fields.add("skills")
     if touched_fields & reachability.REACHABILITY_GATED_FIELDS:
-        await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=name)
+        await reachability.require_admin_for_reachable_agent(
+            runtime, auth, agent_name=name, agent=agent
+        )
     mcp_replace_allowed = (
         await _require_mcp_replace_allowed(
             runtime,
@@ -739,8 +741,9 @@ async def _require_mcp_replace_allowed(
     outcome = await decide_mcp_replacement(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
         agent=agent,
-        is_admin=auth.is_admin,
+        caller=reachability.channel_admin_caller(auth),
         default=runtime.deployment_default,
     )
     if outcome != "allow":
@@ -777,7 +780,9 @@ async def _attach_mcp_server_impl(
     )
     _reject_system_agent(agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=agent_name, agent=agent
+    )
 
     existing = list(agent.mcp_servers or [])
     # No-op check on the initially-found agent (acceptable: a concurrent change

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord.checks import (
+    channel_admin_caller,
+    member_role_ids,
     refuse_if_not_admin,
     require_manage_guild,
     require_registered_guild,
@@ -253,3 +255,27 @@ async def test_routines_refusal_gives_an_admin_the_requested_action() -> None:
     assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True, (
         "the refusal is private to the caller"
     )
+
+
+def _role(role_id: int, *, default: bool = False) -> MagicMock:
+    role = MagicMock(spec=discord.Role)
+    role.id = role_id
+    role.is_default.return_value = default
+    return role
+
+
+def test_channel_admin_caller_reads_live_roles_without_everyone() -> None:
+    member = MagicMock(spec=discord.Member)
+    member.id, member.guild.owner_id = 7, 1
+    member.roles = [_role(1, default=True), _role(55)]
+    member.guild_permissions.administrator = member.guild_permissions.manage_guild = False
+    assert member_role_ids(member) == ["55"], "the default role is dropped"
+    caller = channel_admin_caller(member)
+    assert (caller.platform_user_id, caller.role_ids, caller.is_server_admin) == (
+        "7",
+        frozenset({"55"}),
+        False,
+    ), "the caller carries its id and roles, not server admin"
+    user = MagicMock(spec=discord.User)
+    user.id = 8
+    assert channel_admin_caller(user).role_ids == frozenset(), "a non-member holds no roles"

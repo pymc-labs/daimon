@@ -57,17 +57,18 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.domain import RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 
 import discord
 
@@ -127,8 +128,12 @@ async def refuse_if_shared_and_not_admin_for_request(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     operation: Literal["repo_bind", "skill_repo_connect"] = "repo_bind",
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Click-time re-check for the chat-initiated repo-bind write.
+
+    `caller_account_id` (the requester's, who alone may click) leaves their own
+    live sessions out of the sharing read, as their routines are.
 
     Returns True when the caller must return immediately (the write is
     refused); False when the write may proceed. Order, each short-circuiting:
@@ -153,7 +158,8 @@ async def refuse_if_shared_and_not_admin_for_request(
        (`metadata.get(MA_METADATA_KEY_MANAGED) == "true"`) -> refuse; it
        belongs to the deployment and every member of the install shares it.
     5. Otherwise, read reachability fresh from the database and refuse when
-       the agent currently resolves for some channel or the workspace.
+       the agent currently resolves for some channel or the workspace outside
+       the channels the clicker administers.
     6. Otherwise allow.
 
     Steps 2, 4, and 5 are `refuse_if_shared_and_not_admin`'s steps 2, 3, and
@@ -193,20 +199,21 @@ async def refuse_if_shared_and_not_admin_for_request(
         await _send_ephemeral(interaction, _AGENT_GONE_MESSAGE)
         return True
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(operation, is_admin=False, is_daimon_managed=is_daimon_managed):
-        async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=tenant_id,
-                agent_name=agent.name,
-                default=runtime.deployment_default,
-            )
-    outcome = decide_operation(
-        operation,
-        is_admin=False,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
-    )
+    async with runtime.sessionmaker() as session:
+        facts = await load_target_facts(
+            session,
+            operation,
+            tenant_id=tenant_id,
+            platform="discord",
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(interaction.user),
+            is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=str(interaction.user.id),
+        )
+    outcome = decide_operation(operation, is_admin=False, target=facts)
     if outcome in ("managed_agent", "needs_admin"):
         await _send_ephemeral(
             interaction,

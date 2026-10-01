@@ -237,6 +237,19 @@ async def _fetch_tenant(session: AsyncSession, *, tenant_id: uuid.UUID) -> Tenan
     )
 
 
+async def has_personal_default(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_names: Collection[str]
+) -> bool:
+    """Whether someone in the tenant has one of `agent_names` as their personal default."""
+    personal = await session.scalar(
+        select(UserConfig.account_id)
+        .join(Account, Account.id == UserConfig.account_id)
+        .where(Account.tenant_id == tenant_id, UserConfig.agent_name.in_(agent_names))
+        .limit(1)
+    )
+    return personal is not None
+
+
 async def is_agent_shared_for_key_changes(
     session: AsyncSession,
     *,
@@ -286,13 +299,7 @@ async def is_agent_shared_for_key_changes(
     )
     if bound is not None:
         return True
-    personal = await session.scalar(
-        select(UserConfig.account_id)
-        .join(Account, Account.id == UserConfig.account_id)
-        .where(Account.tenant_id == tenant_id, UserConfig.agent_name.in_(names))
-        .limit(1)
-    )
-    if personal is not None:
+    if await has_personal_default(session, tenant_id=tenant_id, agent_names=names):
         return True
     routine_stmt = select(Routine.id).where(
         Routine.tenant_id == tenant_id,

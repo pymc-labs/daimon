@@ -21,6 +21,7 @@ their pre-turn gate.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal
@@ -39,13 +40,14 @@ from daimon.core.authz import (
     build_turn_place,
 )
 from daimon.core.billing import is_over_cap
+from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -144,6 +146,7 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -165,6 +168,7 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
+                platform_role_ids=platform_role_ids,
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
@@ -188,6 +192,7 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -204,9 +209,26 @@ async def admit_impl(
         )
         if role is not None:
             await set_role(session, principal.account_id, role)
+        # Kept like the role so MCP calls can match channel admin role grants.
+        if platform_role_ids is not None:
+            await set_platform_role_ids(session, principal.account_id, platform_role_ids)
         await session.commit()
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        # Matched against the live role ids; a server admin needs no grant.
+        administered = (
+            frozenset[str]()
+            if role is Role.ADMIN
+            else await load_administered_channel_ids(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                caller=ChannelAdminCaller(
+                    platform_user_id=external_user_id,
+                    role_ids=frozenset(platform_role_ids or ()),
+                ),
+            )
+        )
 
     # --- Channel protection, first of the policy gates: the turn's reply
     # would land in its thread or channel, so a protected target refuses the
@@ -220,7 +242,11 @@ async def admit_impl(
     # non-admin, never a stored role the user may have lost. An unreadable
     # policy raised `AccessPolicyUnreadable` above -- refused, never open.
     # Both gates are `authorize(START_TURN)`, protection first. ---
-    subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+    subject = build_subject(
+        is_admin=role is Role.ADMIN,
+        platform_user_id=external_user_id,
+        administered_channel_ids=administered,
+    )
     turn_place = build_turn_place(
         channel_id=channel_id,
         thread_id=thread_id,

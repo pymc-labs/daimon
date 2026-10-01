@@ -21,7 +21,12 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.reachability import (
+    require_bindable_as_channel_default,
+    require_channel_admin,
+)
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
@@ -72,6 +77,16 @@ class ClearDefaultResult:
     requirement. Supplied by the tool rather than recalled from a prompt."""
 
 
+async def _require_scope_admin(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
+) -> None:
+    """The workspace default needs a server admin; a channel's also admits its channel admins."""
+    if channel_id is None:
+        _require_admin(auth)
+    else:
+        await require_channel_admin(runtime, auth, channel_id=channel_id)
+
+
 async def _set_agent_default_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -79,10 +94,21 @@ async def _set_agent_default_impl(
     channel_id: str | None,
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
-    _require_admin(auth)
+    await _require_scope_admin(runtime, auth, channel_id)
+    agent = None
     if expected_ma_agent_id is not None or auth.platform in CHAT_PLATFORMS:
-        await resolve_setup_agent(
+        agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+    if channel_id is not None:
+        await require_bindable_as_channel_default(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            agent_name=agent_name,
+            agent=agent,
+            is_daimon_managed=agent is not None
+            and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
 
     tenant_id: uuid.UUID = auth.tenant_id
@@ -120,7 +146,7 @@ async def _clear_agent_default_impl(
     auth: AuthIdentity,
     channel_id: str | None,
 ) -> ClearDefaultResult:
-    _require_admin(auth)
+    await _require_scope_admin(runtime, auth, channel_id)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -289,7 +315,7 @@ async def _explain_agent_resolution_impl(
 
 
 def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", "channel-admin"})
     async def set_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -303,7 +329,10 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin).
+        core).  Requires Manage Server (admin); an admin of the channel may set
+        that channel's default to a built-in agent, the workspace default, an
+        agent that answers nowhere yet, or one that answers only in channels
+        they administer.
 
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -321,7 +350,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", "channel-admin"})
     async def clear_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,
@@ -332,7 +361,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent).  Requires Manage Server (admin).
+        default the call is a no-op (idempotent).  Requires Manage Server (admin);
+        an admin of the channel may clear that channel's default.
 
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),

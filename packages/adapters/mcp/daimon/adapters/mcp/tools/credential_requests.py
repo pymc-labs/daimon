@@ -35,6 +35,11 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
+from daimon.adapters.mcp.tools.reachability import (
+    UNPLACED_RUN_REASON,
+    channel_admin_caller,
+    target_facts,
+)
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -47,6 +52,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     edit_teams_card_state,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -56,7 +62,7 @@ from daimon.core.credential_requests import (
     mint_request_token,
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
     env_alias_shadowed,
@@ -72,7 +78,6 @@ from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
     decide_operation,
-    needs_reachability_read,
 )
 from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
@@ -82,7 +87,6 @@ from daimon.core.stores.credential_requests import (
     update_credential_request_message,
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
@@ -266,34 +270,24 @@ async def _decide_attachment_write(
     operation: OperationKind,
     *,
     ma_agent: BetaManagedAgentsAgent,
-) -> PolicyOutcome:
+) -> tuple[PolicyOutcome, TargetFacts]:
     """Decide an attachment-family `operation` by this caller against `ma_agent`.
 
     An admin is allowed on any target (that is the first-run onboarding step),
     a non-admin is refused on a defaults-managed agent and on one that
-    currently answers somewhere in the tenant. The reachability read is paid
-    for only when the policy says the answer actually depends on it.
+    currently answers somewhere in the tenant outside the channels they
+    administer. The reachability read is paid for only when the policy says
+    the answer actually depends on it.
     """
-    is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        operation, is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_shared_for_key_changes(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
-                ma_agent_id=str(ma_agent.id),
-                default=runtime.deployment_default,
-                caller_account_id=auth.account_id,
-                caller_platform_user_id=auth.platform_user_id,
-            )
-    return decide_operation(
+    facts = await target_facts(
+        runtime,
+        auth,
         operation,
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        agent_names=agent_pin_names(ma_agent.name, ma_agent.metadata),
+        ma_agent_id=str(ma_agent.id),
+        is_daimon_managed=ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
+    return decide_operation(operation, is_admin=auth.is_admin, target=facts), facts
 
 
 async def _require_key_replacement_allowed(
@@ -309,10 +303,11 @@ async def _require_key_replacement_allowed(
     `adding` is set when `key` is not being overwritten but shadowed: a
     different name (`adding`) the same tool reads as `key`.
     """
-    outcome = await _decide_attachment_write(runtime, auth, "key_replace", ma_agent=ma_agent)
+    outcome, facts = await _decide_attachment_write(runtime, auth, "key_replace", ma_agent=ma_agent)
+    shared = UNPLACED_RUN_REASON if facts.has_unplaced_run else "is shared with everyone here"
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
+            f"'{ma_agent.name}' {shared}, and adding '{adding}' "
             f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
             "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
@@ -321,7 +316,7 @@ async def _require_key_replacement_allowed(
         )
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
+            f"'{ma_agent.name}' {shared}, so replacing the key "
             f"'{key}' it already has needs an admin, and the caller "
             f"is not one. Nothing changed: the existing '{key}' is still in use and no "
             "card was posted. Tell them an admin can ask Daimon to replace the "
@@ -354,7 +349,8 @@ async def _require_mcp_replacement_allowed(
         agent_id=agent_id,
         server_name=server_name,
         url=url,
-        is_admin=auth.is_admin,
+        platform=auth.platform or "",
+        caller=channel_admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
     )
@@ -806,10 +802,10 @@ async def _request_skill_repo_token_impl(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
     _reject_system_agent(ma_agent)
-    if await _decide_attachment_write(runtime, auth, "skill_repo_connect", ma_agent=ma_agent) in (
-        "managed_agent",
-        "needs_admin",
-    ):
+    outcome, _ = await _decide_attachment_write(
+        runtime, auth, "skill_repo_connect", ma_agent=ma_agent
+    )
+    if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, so importing skills onto it "
             "needs a server or workspace admin, and the caller is not one. Nothing changed "

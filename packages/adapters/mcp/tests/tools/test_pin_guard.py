@@ -9,6 +9,7 @@ alone would have let these through.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -82,7 +83,9 @@ async def _pinned(
     return runtime, tenant.id
 
 
-def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
+def _member(
+    tenant_id: uuid.UUID, *, is_admin: bool = False, administered: Collection[str] = ()
+) -> AuthIdentity:
     """A chat turn's credential: its role was checked live at admission."""
     return AuthIdentity(
         account_id=uuid.uuid4(),
@@ -92,6 +95,7 @@ def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
         platform_user_id="42",
         chat_agent_id=uuid.uuid4(),
         is_admin=is_admin,
+        administered_channel_ids=frozenset(administered),
     )
 
 
@@ -245,6 +249,80 @@ async def test_the_guard_lets_an_admin_through(
     )
     with pytest.raises(ToolError):
         await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
+
+
+async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_an_origin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A direct tool has no origin; the admin of the pin's channel may still use it.
+
+    The grants are the verifier's read of the stored ones (`test_verifier.py`).
+    """
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    agent = ma_agent(
+        id=_AGENT_ID,
+        name="Acme Display",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "acme-config"},
+    )
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(
+            runtime, _member(tenant_id, administered={"C_OTHER"}), ma_agent=agent, origin=None
+        )
+
+    await require_pin_write_access(
+        runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
+    )
+    agent_key = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
+        administered_channel_ids=frozenset({"C_ACME"}),
+    )
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
+
+
+@pytest.mark.parametrize("is_admin", [False, True], ids=["channel-admin", "server-admin"])
+async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    is_admin: bool,
+) -> None:
+    """Both exemptions read stored roles, so both need a chat turn's fresh credential."""
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
+    login = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN if is_admin else Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        is_admin=is_admin,
+        administered_channel_ids=frozenset() if is_admin else frozenset({"C_ACME"}),
+    )
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(runtime, login, ma_agent=agent, origin=None)
+
+
+async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME", "C_OPS")}),
+    )
+    await db_session.commit()
+    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
+    with pytest.raises(ToolError, match="pinned this agent"):
+        await require_pin_write_access(
+            runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
+        )
 
 
 @pytest.mark.parametrize(

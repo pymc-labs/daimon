@@ -97,7 +97,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.credential_origin import (
     is_credential_interaction_valid,
     refuse_if_credential_target_unavailable,
@@ -109,6 +109,8 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
@@ -121,7 +123,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
@@ -153,12 +155,7 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
-from daimon.core.operation_policy import (
-    PolicyOutcome,
-    TargetFacts,
-    decide_operation,
-    needs_reachability_read,
-)
+from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
@@ -178,7 +175,6 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 
@@ -405,22 +401,24 @@ async def _decide_key_replacement(
         # gone, so nothing can establish that it is not shared.
         return "needs_admin"
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=is_daimon_managed):
-        async with runtime.sessionmaker() as session:
-            reachable = await is_agent_shared_for_key_changes(
-                session,
-                tenant_id=row.tenant_id,
-                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
-                ma_agent_id=str(agent.id),
-                default=runtime.deployment_default,
-                caller_account_id=row.account_id,
-                caller_platform_user_id=row.requester_platform_user_id,
-            )
+    async with runtime.sessionmaker() as session:
+        facts = await load_target_facts(
+            session,
+            "key_replace",
+            tenant_id=row.tenant_id,
+            platform="discord",
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(interaction.user),
+            is_daimon_managed=is_daimon_managed,
+            caller_account_id=row.account_id,
+            caller_platform_user_id=row.requester_platform_user_id,
+        )
     return decide_operation(
         "key_replace",
         is_admin=False,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        target=facts,
     )
 
 
@@ -448,7 +446,10 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        platform="discord",
+        caller=channel_admin_caller(interaction.user).model_copy(
+            update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -1140,6 +1141,7 @@ class SkillRepoModal(discord.ui.Modal):
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
             operation="skill_repo_connect",
+            caller_account_id=self._row.account_id,
         ):
             # Same shape as the repo bind: nothing is spent, and the card
             # stops offering a form this submitter could never finish.
@@ -1487,6 +1489,7 @@ class RepoBindModal(discord.ui.Modal):
             runtime=self._runtime,
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
+            caller_account_id=self._row.account_id,
         ):
             # The gate runs before the consume, so the request is NOT spent —
             # an admin can still use this same card. The card itself is

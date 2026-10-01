@@ -33,6 +33,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange
@@ -530,7 +531,9 @@ class TeamsCredentialRequests:
                 agent_id=row.agent_id,
                 server_name=row.target,
                 url=row.mcp_server_url,
-                is_admin=is_admin,
+                # Teams has no channel admins (see `CHANNEL_ADMIN_PLATFORMS`).
+                platform="teams",
+                caller=ChannelAdminCaller(platform_user_id=None, is_server_admin=is_admin),
                 default=self._runtime.deployment_default,
                 shares_token=True,
             )

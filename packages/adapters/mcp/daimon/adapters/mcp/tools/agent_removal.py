@@ -40,13 +40,10 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
     delete_credential as delete_agent_mcp_credential,
-)
-from daimon.core.stores.scoped_config_read import (
-    is_agent_shared_for_key_changes,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -99,25 +96,15 @@ async def _detach_mcp_server_impl(
     # from an agent nobody has scoped; a member's own attach to a shared agent
     # still needs an admin to undo, because the removal reaches everyone.
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "mcp_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_shared_for_key_changes(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_names=_agent_names(agent, agent_name),
-                ma_agent_id=str(agent.id),
-                default=runtime.deployment_default,
-                caller_account_id=auth.account_id,
-                caller_platform_user_id=auth.platform_user_id,
-            )
-    outcome = decide_operation(
+    facts = await reachability.target_facts(
+        runtime,
+        auth,
         "mcp_remove",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
+    outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Disconnecting '{server_name}' from '{agent_name}' needs a workspace or server "
@@ -187,7 +174,9 @@ async def _remove_skill_impl(
     )
     _reject_system_agent(agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=agent_name, agent=agent
+    )
 
     titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=[agent], tenant_id=auth.tenant_id
@@ -279,28 +268,18 @@ async def _remove_agent_key_impl(
     )
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "key_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            # Every name the agent answers to, live thread bindings and
-            # personal defaults: a removal followed by a fresh add is a
-            # replacement, so it needs the same wide check `key_replace` uses.
-            reachable = await is_agent_shared_for_key_changes(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_names=_agent_names(agent, agent_name),
-                ma_agent_id=str(agent.id),
-                default=runtime.deployment_default,
-                caller_account_id=auth.account_id,
-                caller_platform_user_id=auth.platform_user_id,
-            )
-    outcome = decide_operation(
+    # Every name the agent answers to, live thread bindings and personal
+    # defaults: a removal followed by a fresh add is a replacement, so it
+    # needs the same wide check `key_replace` uses.
+    facts = await reachability.target_facts(
+        runtime,
+        auth,
         "key_remove",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
+    outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Removing {key} from '{agent_name}' needs a workspace or server admin, and the "

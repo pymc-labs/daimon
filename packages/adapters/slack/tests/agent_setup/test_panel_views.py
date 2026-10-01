@@ -10,12 +10,14 @@ describing a state that no longer exists.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
@@ -23,9 +25,12 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
+    CALLBACK_CHANNEL_ADMINS,
     CALLBACK_NEW_AGENT,
+    CHANNEL_ADMINS_INPUT_ID,
     LEGACY_ACTION_IDS,
     build_agents_view,
+    build_channel_admins_form,
     build_creating_view,
     build_details_view,
     build_new_agent_form,
@@ -44,7 +49,7 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
-from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow
+from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, ChannelAdminsRow
 from daimon.testing import ma_agent
 
 _TEAM_ID = "T_PANEL"
@@ -265,6 +270,7 @@ def _all_views() -> list[dict[str, Any]]:
             setup_links=[],
             channel_id=_CHANNEL_ID,
             unrouted_agent_name=None,
+            channel_admins=[],
         ),
         build_creating_view(agent_name="new-agent", meta=meta),
     ]
@@ -1085,4 +1091,85 @@ def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
     creating = build_creating_view(agent_name="churn-explorer", meta=meta)
     assert json.loads(creating["private_metadata"])["p"] == 3, (
         "the placeholder in between must not drop the page either"
+    )
+
+
+def _routing(
+    *, channel_admins: list[ChannelAdminsRow] | None, channel_id: str = _CHANNEL_ID
+) -> dict[str, Any]:
+    return build_routing_view(
+        _answering_map(),
+        page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
+        meta=_meta(view="routing"),
+        is_admin=channel_admins is not None,
+        attributions={},
+        setup_links=[],
+        channel_id=channel_id,
+        unrouted_agent_name=None,
+        channel_admins=channel_admins,
+    )
+
+
+def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> None:
+    grant = ChannelAdminsRow(
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        channel_id=_OTHER_CHANNEL_ID,
+        role_ids=(),
+        user_ids=("U0LEAD1", "U0LEAD2"),
+        updated_by_account_id=None,
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    admin = _routing(channel_admins=[grant])
+    assert f"<#{_OTHER_CHANNEL_ID}> → <@U0LEAD1>, <@U0LEAD2>" in "\n".join(_texts(admin)), (
+        "each channel lists its members"
+    )
+    assert ACTION_CHANNEL_ADMINS in _action_ids(admin), "admins may edit this channel"
+    member = _routing(channel_admins=None)
+    assert ACTION_CHANNEL_ADMINS not in _action_ids(member), "members see no channel admins"
+    assert not any("Channel admins" in text for text in _texts(member)), (
+        "members see no channel admins text"
+    )
+    in_dm = _routing(channel_admins=[grant], channel_id="D0DIRECT")
+    assert ACTION_CHANNEL_ADMINS not in _action_ids(in_dm), "a DM has no channel admins to edit"
+    assert "U0LEAD1" in "\n".join(_texts(in_dm)), "a DM panel still lists the grants"
+
+
+def test_channel_admins_listing_fits_one_section_without_clipping() -> None:
+    users = tuple(f"U{n:060d}" for n in range(25))
+    grants = [
+        ChannelAdminsRow(
+            tenant_id=uuid.uuid4(),
+            platform="slack",
+            channel_id=f"C{n:010d}",
+            role_ids=(),
+            user_ids=users,
+            updated_by_account_id=None,
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for n in range(40)
+    ]
+    (section,) = [t for t in _texts(_routing(channel_admins=grants)) if "*Channel admins*" in t]
+    assert len(section) <= 3000, f"{len(section)} characters exceed Slack's section cap"
+    assert not section.endswith("…"), "the listing is budgeted, not clipped mid-mention"
+    assert "+20 more" in section, "extra members fold per channel"
+    assert re.search(r"_and \d+ more_$", section), "channels left out are counted"
+
+
+def test_channel_admins_form_prefills_members_and_keeps_the_ids_the_submission_reads() -> None:
+    form = build_channel_admins_form(
+        meta=_meta(view="channel_admins", root_view_id="V_ROUTING"), user_ids=["U0LEAD1"]
+    )
+    assert form["callback_id"] == CALLBACK_CHANNEL_ADMINS, (
+        "the form submits to the channel admins callback"
+    )
+    (field,) = [block for block in form["blocks"] if block["type"] == "input"]
+    assert field["block_id"] == field["element"]["action_id"] == CHANNEL_ADMINS_INPUT_ID, (
+        "the picker's block and action ids match"
+    )
+    assert field["element"]["initial_users"] == ["U0LEAD1"], (
+        "the picker starts with the current admins"
+    )
+    assert json.loads(form["private_metadata"])["r"] == "V_ROUTING", (
+        "the form returns to the routing panel"
     )

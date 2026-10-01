@@ -742,6 +742,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
+        "channel_admins": "channel_admins",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -788,6 +789,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id",
         "direct_message_conversations": "account_id FK -> accounts.id",
+        # The person's user id leaves every grant; updated_by is SET NULL.
+        "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(

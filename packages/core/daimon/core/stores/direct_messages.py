@@ -12,6 +12,9 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+DM_SCOPE_PREFIX = "dm:"
+"""Thread id prefix of a private conversation's scope."""
+
 
 class DirectMessageBusy(DaimonError):
     """A previous message still owns this private conversation."""
@@ -37,6 +40,35 @@ class DirectMessageRow(BaseModel):
     history: list[dict[str, str]]
     recent_message_ids: list[str]
     active_until: datetime | None
+
+
+class DmOrigin(BaseModel):
+    """A tenant's live private conversation and the channel it was started from."""
+
+    model_config = ConfigDict(frozen=True)
+
+    channel_id: str
+    scope_id: str
+    source_channel_id: str | None
+
+    @property
+    def origin(self) -> str:
+        """The source channel, or the DM channel itself when none was recorded."""
+        return self.source_channel_id or self.channel_id
+
+
+async def list_dm_origins(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[DmOrigin]:
+    rows = await session.execute(
+        select(
+            DirectMessageConversation.channel_id,
+            DirectMessageConversation.scope_id,
+            DirectMessageConversation.source_channel_id,
+        ).where(DirectMessageConversation.tenant_id == tenant_id)
+    )
+    return [
+        DmOrigin(channel_id=channel, scope_id=scope, source_channel_id=source)
+        for channel, scope, source in rows.tuples()
+    ]
 
 
 async def get_conversation(

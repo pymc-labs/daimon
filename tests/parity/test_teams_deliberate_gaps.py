@@ -12,7 +12,8 @@ keyed inside it; channel history and files need Microsoft Graph; and a dialog's
 password field cannot take a `.env` upload or a repository token. Removing the
 app archives nothing. The `billing` card has no promo code surface: Teams
 admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
-Discord and Slack only, so the card shows no channel budget either.
+Discord and Slack only, so the card shows no channel budget either. So are
+channel admins: only the listed admins administer a Teams channel.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -30,6 +31,9 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools.channel_admins import (
+    _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.channel_budgets import (
     _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -42,6 +46,7 @@ from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
 from daimon.core.billing_panel import BillingPanelState
+from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.config import TeamsSettings
 from daimon.core.promo_credit import ActiveTimedCredit
@@ -179,6 +184,28 @@ async def test_teams_has_no_channel_budgets() -> None:
     card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
     assert "this channel" not in card.lower(), (
         "Teams has no channel budgets on purpose; if it gains them, replace this record"
+    )
+
+
+async def test_teams_has_no_channel_admins() -> None:
+    """The grant tools refuse Teams, and no Teams caller administers a channel."""
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        platform="teams",
+        is_admin=True,
+    )
+    with pytest.raises(ToolError, match="only on Discord and Slack"):
+        await _list_channel_admins_impl(cast(Any, MagicMock()), auth)
+    administered = await load_administered_channel_ids(
+        cast(Any, MagicMock()),
+        tenant_id=auth.tenant_id,
+        platform="teams",
+        caller=ChannelAdminCaller(platform_user_id="u", role_ids=frozenset({"r"})),
+    )
+    assert administered == frozenset(), (
+        "Teams has no channel admins on purpose; if it gains them, replace this record"
     )
 
 
