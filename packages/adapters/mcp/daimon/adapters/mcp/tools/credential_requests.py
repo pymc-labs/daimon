@@ -23,6 +23,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -402,6 +403,7 @@ async def _mint_and_post(
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
 ) -> RequestCredentialResult:
+    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
     if auth.platform == "teams" and runtime.teams_client is None:

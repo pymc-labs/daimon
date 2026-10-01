@@ -1389,3 +1389,126 @@ async def test_routine_reads_hide_other_members_routines(
         await _get_routine_impl(runtime, member, routine_id=theirs.id)
     admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
     assert {row.id for row in await _list_routines_impl(runtime, admin)} == {theirs.id, mine.id}
+
+
+_PINNED_CHANNEL = "111111111111111111"
+
+
+@pytest.mark.parametrize("change", ["clear-destination", "switch-to-pinned-agent"])
+async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    change: str,
+) -> None:
+    """An update is a save too: it must not leave a pinned agent's routine posting
+    anywhere but a pinned channel, whether by dropping the destination or by
+    switching an unpinned routine onto the pinned agent. Admins included."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": (_PINNED_CHANNEL,)}),
+    )
+    pinned_routine = change == "clear-destination"
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_resolved" if pinned_routine else "ag_other",
+        agent_name="daimon" if pinned_routine else "other",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="daily",
+        destination_kind="channel" if pinned_routine else None,
+        destination_id=_PINNED_CHANNEL if pinned_routine else None,
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        if pinned_routine:
+            await _update_routine_impl(
+                runtime, admin, routine_id=created.id, clear_destination=True
+            )
+        else:
+            await _update_routine_impl(runtime, admin, routine_id=created.id, agent_name="daimon")
+    async with committing_sessionmaker() as session:
+        row = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert row is not None and row.agent_id == created.agent_id
+    assert row.destination_id == created.destination_id, "a refused update changes nothing"
+
+
+def _display_named_agent(tenant_id: uuid.UUID) -> dict[str, object]:
+    return ma_agent(
+        id="ag_resolved",
+        name="Acme Display",
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
+    ).model_dump(mode="json")
+
+
+async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """The caller names the config name; the pin is on the display name."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": (_PINNED_CHANNEL,)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _create_routine_impl(
+            runtime,
+            _auth_identity(tenant_id=tenant.id, is_admin=True),
+            agent_name="acme-config",
+            cron_expr="0 9 * * *",
+            timezone="UTC",
+            trigger_message="report",
+        )
+
+
+async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A routine saved before the pin, under the config name, must not keep being
+    editable into running the pinned agent outside its channels."""
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_resolved",
+        agent_name="acme-config",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="report",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": (_PINNED_CHANNEL,)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _update_routine_impl(
+            runtime,
+            _auth_identity(tenant_id=tenant.id, is_admin=True),
+            routine_id=created.id,
+            trigger_message="report, but more",
+        )

@@ -41,6 +41,7 @@ from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
@@ -342,6 +343,17 @@ async def _validate_submission(
             thread_ts=row.origin_thread_id,
             user_id=user_id,
             text=AGENT_GONE_MESSAGE,
+        )
+        return None
+    async with runtime.sessionmaker() as session:
+        pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+    if pin_refusal is not None:
+        await post_ephemeral(
+            client,
+            channel_id=row.parent_channel_id or channel_id,
+            thread_ts=row.origin_thread_id,
+            user_id=user_id,
+            text=pin_refusal,
         )
         return None
     return row

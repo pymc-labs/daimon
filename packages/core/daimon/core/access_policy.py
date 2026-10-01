@@ -114,3 +114,20 @@ def is_outside_agent_pin(
             continue
         return True
     return False
+
+
+DM_SCOPE_PREFIX = "dm:"
+
+
+def origin_pin_location(
+    *, parent_channel_id: str | None, thread_id: str | None
+) -> tuple[str | None, str | None]:
+    """The (channel_id, parent_channel_id) to test a turn origin against a pin.
+
+    A private DM conversation's scope id (``dm:…``, `direct_messages.py`)
+    stands in for its thread id; a DM runs in no workspace channel, so it is
+    outside every pin, as ``admit(is_dm=True)`` treats it.
+    """
+    if thread_id is not None and thread_id.startswith(DM_SCOPE_PREFIX):
+        return None, None
+    return thread_id or parent_channel_id, parent_channel_id

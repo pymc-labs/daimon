@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._credential_button import (
@@ -489,3 +490,46 @@ async def test_callback_settles_the_card_when_managed_agents_refuses_the_vault_w
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed", "the card is not left pending"
+
+
+@pytest.mark.parametrize("requester_is_admin", [False, True], ids=["member", "admin"])
+async def test_a_pin_added_between_the_click_and_the_callback_stops_the_connection(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    requester_is_admin: bool,
+) -> None:
+    """The flow was started for an unpinned agent; by the callback it is pinned to a
+    channel the request didn't come from. No grant, no attach, unless an admin."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.domain import Role
+
+    flow, tenant_id = await _seed_flow(db_session)
+    await db_session.commit()
+    anthropic, created, updates = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/oauth/mcp/start?state={flow.state}")
+        async with db_session_factory.begin() as session:
+            await set_access_policy(
+                session,
+                tenant_id=tenant_id,
+                policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("C_PINNED",)}),
+            )
+            if requester_is_admin:
+                await set_role(session, flow.account_id, Role.ADMIN)
+        done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
+
+    if requester_is_admin:
+        assert done.status_code == 200 and "Connected notion" in done.text, done.text
+        assert created and updates
+    else:
+        assert done.status_code == 403 and "pinned" in done.text, done.text
+        assert created == [], "no grant is stored"
+        assert updates == [], "nothing is attached"

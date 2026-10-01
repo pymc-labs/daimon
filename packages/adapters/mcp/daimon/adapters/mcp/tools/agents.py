@@ -32,6 +32,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
@@ -568,6 +569,7 @@ async def _update_agent_impl(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
     if tools is not None:
@@ -773,6 +775,7 @@ async def _attach_mcp_server_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
 
     existing = list(agent.mcp_servers or [])

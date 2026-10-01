@@ -269,7 +269,7 @@ async def admit_impl(
     # has no channel, so it is outside every pin. Admins get no exemption. ---
     if is_outside_agent_pin(
         policy,
-        agent_names=(config.agent_name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
         channel_id=None if is_dm else (thread_id or channel_id),
         parent_channel_id=None if is_dm else channel_id,
     ):

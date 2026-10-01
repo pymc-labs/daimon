@@ -32,6 +32,7 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange
@@ -267,6 +268,13 @@ class TeamsCredentialRequests:
         root = mcp.app_root_url
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
             return dialog_message(_UNCONFIGURED_OAUTH)
+        agent = await find_agent_by_derived_uuid(
+            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        )
+        async with self._runtime.sessionmaker() as session:
+            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+        if pin_refusal is not None:
+            return dialog_message(pin_refusal)
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker.begin() as session:
             consumed = await store.consume_credential_request(session, token=row.token, now=now)
@@ -310,6 +318,10 @@ class TeamsCredentialRequests:
         )
         if agent is None:
             return dialog_message(_AGENT_GONE)
+        async with self._runtime.sessionmaker() as session:
+            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+        if pin_refusal is not None:
+            return dialog_message(pin_refusal)
         url = activity.service_url
         work = (
             self._save_env(row, agent, secret, is_admin=actor.is_admin, service_url=url)
