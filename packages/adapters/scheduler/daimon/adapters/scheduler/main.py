@@ -280,27 +280,6 @@ async def _build_fire(
                 await record_result(s, row.id, tail=None, error="balance_depleted")
             return
 
-        # Admission gate: the budget of the channel the routine posts to, after
-        # the cap (run_one_tick) and balance gates. No channel, no budget gate.
-        if await is_over_channel_budget(
-            sessionmaker=sm,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=row.channel_id,
-            now=datetime.now(UTC),
-        ):
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
-            log.info(
-                "routine.skipped.over_channel_budget",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-                channel_id=row.channel_id,
-            )
-            async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
-            return
-
         # Bind routine context now; headless_runner calls the factory once
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
@@ -363,6 +342,27 @@ async def _build_fire(
                 async with sm() as pin_s, pin_s.begin():
                     await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
                 return
+        # Admission gate: the routine's channel budget, after the cap (run_one_tick),
+        # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
+        # billed to (the destination's parent, else where the routine was made).
+        if await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+            log.info(
+                "routine.skipped.over_channel_budget",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                channel_id=row.channel_id,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+            return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
