@@ -311,7 +311,8 @@ async def set_channel_isolation(
     """Isolate `channel_id` or end its isolation; raise `ChannelIsolationRefused` if refused.
 
     A fork only happens when the channel has no usable agent of its own, so
-    repeating a request with `fork` never copies twice.
+    repeating a request with `fork` never copies twice. A copy whose channel is
+    refused by the locked re-check is archived.
     """
     if not isolated:
         async with sessionmaker.begin() as session:
@@ -354,20 +355,26 @@ async def set_channel_isolation(
     }
     new_name = isolated_agent_name(channel_label, channel_id, taken=taken)
     dropped = tuple(await fork(source, new_name))
-    async with sessionmaker.begin() as session:
-        await lock_access_policy(session, tenant_id=tenant_id)
-        await set_fields(
-            session,
-            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
-            tenant_id=tenant_id,
-            agent_name=new_name,
-            mode="agent",
-            actor_account_id=actor_account_id,
-        )
-        await _locked_facts(
-            anthropic, session, tenant_id=tenant_id, channel_id=channel_id, default=default
-        )
-        await _write_policy(session, tenant_id=tenant_id, channel_id=channel_id, isolated=True)
+    try:
+        async with sessionmaker.begin() as session:
+            await lock_access_policy(session, tenant_id=tenant_id)
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
+                tenant_id=tenant_id,
+                agent_name=new_name,
+                mode="agent",
+                actor_account_id=actor_account_id,
+            )
+            await _locked_facts(
+                anthropic, session, tenant_id=tenant_id, channel_id=channel_id, default=default
+            )
+            await _write_policy(session, tenant_id=tenant_id, channel_id=channel_id, isolated=True)
+    except ChannelIsolationRefused:
+        copy = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name)
+        if copy is not None:
+            await anthropic.beta.agents.archive(copy.id)
+        raise
     return IsolationChange(channel_id, True, new_name, source, True, dropped)
 
 

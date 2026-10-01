@@ -182,6 +182,65 @@ async def test_isolating_with_a_fork_binds_the_copy(
     assert refused.value.reason == "agent_confined", "another channel's own agent isn't copied"
 
 
+async def test_a_copy_refused_after_the_fork_is_archived(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Work that starts crossing the line while the copy is made refuses under
+    the lock, and the copy no channel got is archived."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+
+    async def fork(source: str, new_name: str) -> tuple[str, ...]:
+        copy = ma_agent(id="agent_fork", name=new_name, tenant_id=tenant.id)
+        state.agents[copy.id] = copy.model_dump(mode="json")
+        async with db_session_factory.begin() as session:
+            await create_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="c1",
+                thread_id="t1",
+                responder_ma_agent_id="agent_0",
+                responder_name="shared",
+                kind="handoff",
+            )
+        return ()
+
+    with pytest.raises(ChannelIsolationRefused) as refused:
+        await set_channel_isolation(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            channel_id="c1",
+            isolated=True,
+            default=DEFAULT,
+            actor_account_id=None,
+            fork=fork,
+        )
+
+    assert refused.value.reason == "work_crosses_line"
+    assert archived == ["agent_fork"], "the copy no channel got is archived"
+    scope = await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
+    assert scope is not None and scope.agent_name == "shared", "the channel keeps its agent"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.isolated_channel_ids == ()
+
+
 async def test_fork_agent_copies_the_source_under_a_new_name(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
