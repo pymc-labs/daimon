@@ -70,6 +70,7 @@ from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
 from pydantic import HttpUrl
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SECRET_VALUE = "super-secret-env-value-do-not-leak"
@@ -763,22 +764,25 @@ def _vault_handler(
     tenant_id: str = "",
     agent_updates: list[dict[str, Any]] | None = None,
 ) -> Any:
+    # The agent keeps what was attached, so the publish step's re-read sees it.
+    attached: list[dict[str, str]] = []
+
     def _handler(req: httpx.Request) -> httpx.Response:
         # Agent routes back the attach half of the flow (#49): the modal must
         # add the server to the agent it just stored a credential for.
         if req.method == "GET" and req.url.path == "/v1/agents":
             return httpx.Response(
-                200, json={"data": [_ma_agent_json(tenant_id)], "has_more": False}
+                200,
+                json={"data": [_ma_agent_json(tenant_id, mcp_servers=attached)], "has_more": False},
             )
         if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
-            return httpx.Response(200, json=_ma_agent_json(tenant_id))
+            return httpx.Response(200, json=_ma_agent_json(tenant_id, mcp_servers=attached))
         if req.method == "POST" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
             body = json.loads(req.content)
             if agent_updates is not None:
                 agent_updates.append(body)
-            return httpx.Response(
-                200, json=_ma_agent_json(tenant_id, mcp_servers=body.get("mcp_servers") or [])
-            )
+            attached[:] = body.get("mcp_servers") or []
+            return httpx.Response(200, json=_ma_agent_json(tenant_id, mcp_servers=attached))
         if req.method == "GET" and req.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -1013,7 +1017,7 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
         "a card left on 'Saving…' would describe a save that has already stopped"
     )
     message = interaction.followup.send.call_args.args[0]
-    assert "saving the MCP token did not finish" in message, "the failure must still be reported"
+    assert "Nothing was saved" in message, "the failure must still be reported"
     assert "APIConnectionError" not in message, "exception classes stay in operator logs"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -1064,67 +1068,6 @@ async def test_mcp_missing_server_url_records_write_failed_rather_than_staying_p
     )
     assert await _queued_continuation(db_session_factory, row) is None, (
         "nothing was saved, so no turn is owed"
-    )
-
-
-async def test_mcp_agent_gone_after_the_vault_write_renders_partial(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The token landed; the agent it was for did not survive the form.
-
-    Same shape as the attach failure below it — the save is real, the
-    connection is not — so the card is `partial` rather than a refusal, and
-    the continuation carries no work.
-    """
-    row = await _seed_mcp_request(
-        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
-    )
-    vault = _vault_handler(
-        "vlt_agent_gone",
-        f"daimon-mcp:{row.account_id}:{row.agent_id}",
-        [],
-        tenant_id=str(row.tenant_id),
-    )
-
-    # The agent survives the pre-consume target check and is gone by the time
-    # the attach looks it up — the only window in which this branch is real.
-    lookups = 0
-
-    def _agent_gone(request: httpx.Request) -> httpx.Response:
-        nonlocal lookups
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            lookups += 1
-            if lookups > 1:
-                return httpx.Response(200, json={"data": [], "has_more": False})
-        return vault(request)
-
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(_agent_gone),
-        public_url=HttpUrl("https://mcp.example.com/mcp"),
-        jwt_secret="x" * 32,
-    )
-    modal = McpCredentialModal(runtime=runtime, request_row=row)
-    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-
-    interaction = _card_interaction()
-    await modal.on_submit(interaction)
-
-    card = _card_text(_card_edits(interaction)[-1])
-    assert "linear token saved for tester." in card, "the card must credit what was saved"
-    assert "The connection did not finish, so its tools are not available yet." in card, (
-        "and must not claim a connection nothing could attach"
-    )
-    assert RECEIVED_FOOTER not in card, "the card must not stay on 'Saving…'"
-    async with db_session_factory() as session:
-        persisted = await peek_credential_request(session, token=row.token)
-    assert persisted is not None and persisted.outcome == "write_failed", (
-        "a connection that was never attached is not an applied request"
-    )
-    queued = await _queued_continuation(db_session_factory, row)
-    assert queued is not None, "the spent request is still recorded for the trail"
-    assert queued.requested_work is None, (
-        "the waiting work must not resume against tools that are not connected"
     )
 
 
@@ -2165,60 +2108,6 @@ async def test_replacement_needs_admin_at_submit_renders_refused_and_writes_noth
     )
 
 
-async def test_mcp_attach_failure_renders_partial_and_records_an_audit_continuation(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A stored token whose server never attached is partial, not applied.
-
-    The continuation is still recorded -- the request ended somewhere -- but
-    it carries no work: resuming a task that needs those tools would fail on
-    a connection the agent does not have.
-    """
-    row = await _seed_mcp_request(
-        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
-    )
-    vault = _vault_handler(
-        "vlt_attach_fail",
-        f"daimon-mcp:{row.account_id}:{row.agent_id}",
-        [],
-        tenant_id=str(row.tenant_id),
-    )
-
-    def _attach_fails(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == f"/v1/agents/{_MA_AGENT_ID}":
-            raise httpx.ConnectError("upstream reset by peer")
-        return vault(request)
-
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(_attach_fails),
-        public_url=HttpUrl("https://mcp.example.com/mcp"),
-        jwt_secret="x" * 32,
-    )
-    modal = McpCredentialModal(runtime=runtime, request_row=row)
-    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-
-    interaction = _card_interaction()
-    await modal.on_submit(interaction)
-
-    card = _card_text(_card_edits(interaction)[-1])
-    assert "linear token saved for tester." in card, "the card must credit what was saved"
-    assert "The connection did not finish, so its tools are not available yet." in card, (
-        "and must not claim the connection the attach never made"
-    )
-    assert _MCP_TOKEN not in card, "no token may reach the card"
-    async with db_session_factory() as session:
-        persisted = await peek_credential_request(session, token=row.token)
-    assert persisted is not None and persisted.outcome == "write_failed", (
-        "a half-finished connection is not an applied request"
-    )
-    queued = await _queued_continuation(db_session_factory, row)
-    assert queued is not None, "the spent request is still recorded for the trail"
-    assert queued.requested_work is None, (
-        "the waiting work must not resume against tools that are not connected"
-    )
-
-
 async def test_success_paths_send_no_ephemeral_receipt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2474,3 +2363,295 @@ async def test_env_file_member_upload_with_a_non_secret_name_writes_nothing(
         files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert files == [], "a member upload with a non-secret name is refused whole"
     assert persisted is not None and persisted.used_at is None, "the refusal spends nothing"
+
+
+async def test_mcp_agent_gone_before_the_attach_saves_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The agent did not survive the form: the attach comes first, so nothing is
+    stored anywhere, and the card says so."""
+    row = await _seed_mcp_request(
+        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
+    )
+    vault = _vault_handler(
+        "vlt_agent_gone",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        [],
+        tenant_id=str(row.tenant_id),
+    )
+
+    # The agent survives the pre-consume target check and is gone by the time
+    # the attach looks it up — the only window in which this branch is real.
+    lookups = 0
+
+    def _agent_gone(request: httpx.Request) -> httpx.Response:
+        nonlocal lookups
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            lookups += 1
+            if lookups > 1:
+                return httpx.Response(200, json={"data": [], "has_more": False})
+        return vault(request)
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(_agent_gone),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "Nothing was saved for tester." in card
+    assert _MCP_TOKEN not in card, "no token may reach the card"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
+    assert persisted is not None and persisted.outcome == "write_failed"
+    assert stored == 0, "no agent-wide token is published without an attach"
+    assert await _queued_continuation(db_session_factory, row) is None
+
+
+async def test_mcp_attach_failure_publishes_no_token(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The attach comes before the token is published: when it fails, nothing is
+    stored, no other session can mirror anything, and no work resumes."""
+    row = await _seed_mcp_request(
+        db_session_factory, with_origin=True, requested_work="pull this week's open issues"
+    )
+    vault = _vault_handler(
+        "vlt_attach_fail",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        [],
+        tenant_id=str(row.tenant_id),
+    )
+
+    def _attach_fails(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            raise httpx.ConnectError("upstream reset by peer")
+        return vault(request)
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(_attach_fails),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "Nothing was saved for tester." in card
+    assert _MCP_TOKEN not in card, "no token may reach the card"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
+    assert persisted is not None and persisted.outcome == "write_failed"
+    assert stored == 0, "no agent-wide token is published without an attach"
+    assert await _queued_continuation(db_session_factory, row) is None
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member-refused", "admin-allowed"])
+async def test_mcp_modal_repointing_an_existing_server_on_a_shared_agent_needs_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    admin: bool,
+) -> None:
+    """H2: the agent already has `linear` elsewhere and is the deployment default.
+
+    A member's submission is refused before any vault write or attach; an
+    admin's repoints it.
+    """
+    import dataclasses
+
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://attacker.example/mcp", with_origin=True
+    )
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    existing = [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/sse"}]
+    inner = _vault_handler(
+        "vlt_replace",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        creds_created,
+        tenant_id=str(row.tenant_id),
+        agent_updates=agent_updates,
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        agent = _ma_agent_json(str(row.tenant_id), mcp_servers=existing)
+        if req.method == "GET" and req.url.path == "/v1/agents":
+            return httpx.Response(200, json={"data": [agent], "has_more": False})
+        if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            return httpx.Response(200, json=agent)
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _runtime(
+            sessionmaker=db_session_factory,
+            anthropic=build_stub_anthropic(handler),
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret="x" * 32,
+        ),
+        deployment_default=DeploymentDefault(agent_name="test-agent"),
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_admin_interaction() if admin else _member_interaction())
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.used_at is not None
+    if admin:
+        assert len(agent_updates) == 1
+        assert {"name": "linear", "type": "url", "url": "https://attacker.example/mcp"} in (
+            agent_updates[0]["mcp_servers"]
+        )
+    else:
+        assert creds_created == [], "a refused replacement writes no vault token"
+        assert agent_updates == [], "and never repoints the server"
+        assert spent.outcome == "write_failed"
+        assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_mcp_modal_member_cannot_overwrite_the_shared_token_of_a_connected_server(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """H2: same name, same URL, but the agent-wide token already exists (or the URL
+    is already connected): a member's paste would become everyone's credential."""
+    import dataclasses
+
+    from daimon.core.agent_mcp_credentials import (
+        resolve_agent_mcp_credentials,
+        save_agent_mcp_credential,
+    )
+
+    url = "https://ext.example.com/mcp"
+    row = await _seed_mcp_request(db_session_factory, mcp_server_url=url, with_origin=True)
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    existing = [{"name": "linear", "type": "url", "url": url}]
+    inner = _vault_handler(
+        "vlt_overwrite",
+        f"daimon-mcp:{row.account_id}:{row.agent_id}",
+        creds_created,
+        tenant_id=str(row.tenant_id),
+        agent_updates=agent_updates,
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        agent = _ma_agent_json(str(row.tenant_id), mcp_servers=existing)
+        if req.method == "GET" and req.url.path == "/v1/agents":
+            return httpx.Response(200, json={"data": [agent], "has_more": False})
+        if req.method == "GET" and req.url.path == f"/v1/agents/{_MA_AGENT_ID}":
+            return httpx.Response(200, json=agent)
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _runtime(
+            sessionmaker=db_session_factory,
+            anthropic=build_stub_anthropic(handler),
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret="x" * 32,
+        ),
+        deployment_default=DeploymentDefault(agent_name="test-agent"),
+    )
+    fernet = runtime.turn_deps.fernet
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        mcp_server_url=url,
+        plaintext_token="the-real-token",
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    stored = await resolve_agent_mcp_credentials(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+    )
+    assert [c.token for c in stored] == ["the-real-token"], "the shared token is unchanged"
+    assert creds_created == [] and agent_updates == []
+    assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_overwritten(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Barrier: member admitted (no token yet) -> admin saves the first shared token ->
+    member resumes. The store re-checks under its lock: admin's ciphertext stays."""
+    from daimon.adapters.discord import credential_modals
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+    from sqlalchemy import text as sql_text
+
+    url = "https://ext.example.com/mcp"
+    row = await _seed_mcp_request(db_session_factory, mcp_server_url=url, with_origin=True)
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                "vlt_barrier",
+                f"daimon-mcp:{row.account_id}:{row.agent_id}",
+                creds_created,
+                tenant_id=str(row.tenant_id),
+                agent_updates=agent_updates,
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    fernet = runtime.turn_deps.fernet
+    real_decide = credential_modals.decide_mcp_connect
+
+    async def decide_then_admin_writes(*args: Any, **kwargs: Any) -> Any:
+        decision = await real_decide(*args, **kwargs)
+        assert not decision.replaces, "the member saw no token and no server"
+        await save_agent_mcp_credential(
+            sessionmaker=db_session_factory,
+            fernet=fernet,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            mcp_server_url=url,
+            plaintext_token="admin-token",
+        )
+        return decision
+
+    monkeypatch.setattr(credential_modals, "decide_mcp_connect", decide_then_admin_writes)
+
+    async def ciphertext() -> bytes:
+        async with db_session_factory() as session:
+            return (
+                await session.execute(sql_text("SELECT encrypted_token FROM agent_mcp_credentials"))
+            ).scalar_one()
+
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    admin_ciphertext = await ciphertext()
+    assert fernet.decrypt(admin_ciphertext).decode() == "admin-token"
+    assert creds_created == [], "refused before the personal vault write"
+    # The attach of a brand-new server name comes first and stays, token-less.
+    assert "admin" in interaction.followup.send.call_args.args[0]

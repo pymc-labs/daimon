@@ -2237,7 +2237,9 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
     assert not update_called, "rejected skill dicts must never reach the MA update call"
 
 
-async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() -> None:
+async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2286,7 +2288,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing() ->
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="docs",
@@ -2346,7 +2348,9 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
     assert result.id == "ag_a", "should return the current agent state"
 
 
-async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() -> None:
+async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2392,7 +2396,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2403,7 +2407,9 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url() ->
     ], "same-name different-URL must replace the slot (last-write-wins)"
 
 
-async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
+async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2445,7 +2451,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2765,7 +2771,9 @@ async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account() -
         )
 
 
-async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> None:
+async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin must be able to attach to any stamped tenant agent regardless of which account owns it."""
     tenant_id = uuid.uuid4()
     caller_account_id = uuid.uuid4()
@@ -2818,7 +2826,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin() -> No
         account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="alices-agent",
         server_name="ctx7",
@@ -2973,7 +2981,9 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
     assert "skill-repo" in sent_skill_ids, "all existing MA skills must be preserved"
 
 
-async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -> None:
+async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3023,7 +3033,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers() -
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -3200,7 +3210,9 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
     )
 
 
-async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> None:
+async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3243,7 +3255,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -3264,7 +3276,9 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset() -> Non
     )
 
 
-async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_toolset() -> None:
+async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3346,7 +3360,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -3363,7 +3377,9 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
     assert ("mcp_toolset", "ctx7") in tool_kinds, "new mcp_toolset for the attached server appended"
 
 
-async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_name_replace() -> None:
+async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_name_replace(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Same name, different URL → mcp_server entry replaced, mcp_toolset entry not duplicated."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3426,7 +3442,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -4040,7 +4056,9 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
         )
 
 
-async def test_attach_mcp_server_allows_unrelated_server() -> None:
+async def test_attach_mcp_server_allows_unrelated_server(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#142: a different server name and a different URL still attaches normally."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4085,7 +4103,7 @@ async def test_attach_mcp_server_allows_unrelated_server() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     # Completely different name + URL — should succeed
     result = await _attach_mcp_server_impl(
-        _runtime(client, public_url=public_url),
+        _runtime(client, session_factory=db_session_factory, public_url=public_url),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -4396,7 +4414,9 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
         )
 
 
-async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
+async def test_attach_mcp_server_retries_once_on_version_conflict(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2: conflict on first attach attempt retries with a fresh agent; result is success."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4455,7 +4475,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -4466,7 +4486,9 @@ async def test_attach_mcp_server_retries_once_on_version_conflict() -> None:
     assert len(retrieve_calls) == 2, "#144-2: must re-retrieve agent after conflict"
 
 
-async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
+async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2c: two consecutive 409 conflicts on attach surface as ToolError, not a raw SDK error."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4516,7 +4538,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="modified concurrently"):
         await _attach_mcp_server_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             agent_name="a",
             server_name="ext-mcp",
@@ -5108,7 +5130,9 @@ async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap() -> None:
     )
 
 
-async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_cap() -> None:
+async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_mcp_servers = [_url_mcp_server(f"existing-{i}") for i in range(AGENT_MCP_CAP - 1)]
@@ -5126,7 +5150,7 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -5142,7 +5166,9 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
     assert not update_calls, "the merged-count refusal must fire before any agents.update request"
 
 
-async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap() -> None:
+async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_mcp_servers = [_url_mcp_server(f"existing-{i}") for i in range(AGENT_MCP_CAP - 1)]
@@ -5159,7 +5185,7 @@ async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     result = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -5371,7 +5397,9 @@ async def test_update_agent_refuses_to_repoint_the_reserved_server(
     assert not update_calls
 
 
-async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip() -> None:
+async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     update_calls: list[dict[str, Any]] = []
@@ -5386,7 +5414,9 @@ async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip() ->
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     await _update_agent_impl(
-        _runtime(client, public_url="https://mcp.example.com/mcp"),
+        _runtime(
+            client, session_factory=db_session_factory, public_url="https://mcp.example.com/mcp"
+        ),
         auth,
         name="a",
         model=None,
@@ -5397,3 +5427,82 @@ async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip() ->
         skills=None,
     )
     assert len(update_calls) == 1
+
+
+def _personal_agent_router(
+    *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> tuple[list[dict[str, Any]], AsyncAnthropic]:
+    """One agent that already has `ctx7` at the real URL; captures update bodies."""
+    updates: list[dict[str, Any]] = []
+    body = ma_agent(
+        id="ag_personal",
+        name="personal-bot",
+        mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://real.example/mcp"}],
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "personal-bot",
+            "daimon_account": str(account_id),
+        },
+    ).model_dump(mode="json")
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json_body(req))
+        return httpx.Response(200, json=body)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([body]))
+    router.add("GET", r"/v1/agents/([^/]+)", lambda _req, _m: httpx.Response(200, json=body))
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    return updates, build_fake_anthropic(router.dispatch)
+
+
+@pytest.mark.parametrize("tool", ["attach_mcp_server", "update_agent"])
+async def test_member_cannot_repoint_a_server_on_someones_personal_default_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """H2: a personal default answers another person, so repointing its server is
+    `mcp_replace` and needs an admin, though the plain reachability gate passes."""
+    from daimon.core.scope import UserScopeRef
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    async with db_session_factory() as session, session.begin():
+        from daimon.core.stores.tenants import get_tenant
+
+        tenant = await get_tenant(session, tenant_id)
+        owner = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=owner.id),
+            tenant_id=tenant_id,
+            agent_name="personal-bot",
+        )
+    member = uuid.uuid4()
+    updates, client = _personal_agent_router(tenant_id=tenant_id, account_id=member)
+    auth = AuthIdentity(account_id=member, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    runtime = _runtime(client, session_factory=db_session_factory)
+
+    with pytest.raises(ToolError, match="admin"):
+        if tool == "attach_mcp_server":
+            await _attach_mcp_server_impl(
+                runtime,
+                auth,
+                agent_name="personal-bot",
+                server_name="ctx7",
+                url="https://attacker.example/mcp",
+            )
+        else:
+            await _update_agent_impl(
+                runtime,
+                auth,
+                name="personal-bot",
+                model=None,
+                description=None,
+                system=None,
+                tools=None,
+                mcp_servers=[
+                    {"name": "ctx7", "type": "url", "url": "https://attacker.example/mcp"}
+                ],
+                skills=None,
+            )
+    assert updates == [], "the server must not be repointed"

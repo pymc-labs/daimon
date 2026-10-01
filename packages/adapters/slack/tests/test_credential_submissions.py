@@ -1215,14 +1215,20 @@ def _mcp_handler(
     """
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
     credential_written = False
+    # The agent keeps what was attached, so the publish step's re-read sees it.
+    current = {"agent": live_agent.model_dump(mode="json")}
+    lookups: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal credential_written
         path = request.url.path
         if request.method == "GET" and path == "/v1/agents":
-            if agent_gone_after_write and credential_written:
+            lookups.append(path)
+            if agent_gone_after_write and len(lookups) > 2:
+                # Survives the pre-consume identity and replacement checks,
+                # gone by the time the connect looks it up.
                 return list_response([])
-            return list_response([live_agent.model_dump(mode="json")])
+            return list_response([current["agent"]])
         if path == f"/v1/agents/{live_agent.id}":
             if request.method in ("POST", "PATCH") and attach_fails:
                 return httpx.Response(
@@ -1232,7 +1238,10 @@ def _mcp_handler(
                         "error": {"type": "invalid_request_error", "message": "nope"},
                     },
                 )
-            return httpx.Response(200, json=live_agent.model_dump(mode="json"))
+            if request.method in ("POST", "PATCH"):
+                body = json.loads(request.content)
+                current["agent"] = {**current["agent"], "mcp_servers": body.get("mcp_servers")}
+            return httpx.Response(200, json=current["agent"])
         if request.method == "GET" and path == "/v1/vaults":
             return list_response(
                 [
@@ -1331,53 +1340,6 @@ async def _run_mcp_submission(
     return tenant_id, token
 
 
-async def test_mcp_attach_failure_renders_partial_and_records_an_audit_continuation(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, attach_fails=True)
-
-    async with db_session_factory() as session:
-        request_row = await peek_credential_request(session, token=token)
-    assert request_row is not None and request_row.outcome == "write_failed", (
-        "a token stored against a server the agent never declares is not success"
-    )
-    card = _chat_updates(fake_slack_web_client)[-1]
-    assert card["text"] == "⚠️ my-server token saved for tester.", (
-        "the card must report the half that worked and the half that did not"
-    )
-    assert "The connection did not finish" in json.dumps(card)
-    pending = await _pending_continuations(db_session_factory, tenant_id=tenant_id)
-    assert [row.requested_work for row in pending] == [None], (
-        "the click is recorded for the audit trail, but a connection that is not "
-        "usable yet must not promise the turn that was waiting on it"
-    )
-
-
-async def test_mcp_vault_write_failure_refuses_the_card_instead_of_leaving_it_saving(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """Nothing reached a store, and the card must not keep saying "Saving…"."""
-    tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, vault_fails=True)
-
-    async with db_session_factory() as session:
-        request_row = await peek_credential_request(session, token=token)
-    assert request_row is not None and request_row.outcome == "write_failed", (
-        "a spent request whose write never landed must record that"
-    )
-    card = _chat_updates(fake_slack_web_client)[-1]
-    assert card["text"] == "🛡️ Nothing was saved for tester.", (
-        "the terminal card must say nothing was saved, not that a save is in flight"
-    )
-    assert RECEIVED_FOOTER not in json.dumps(card), "the card must leave the received state"
-    assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == [], (
-        "no turn may resume on a token that never reached a store"
-    )
-
-
 async def test_mcp_missing_server_url_records_write_failed_rather_than_staying_pending(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1395,39 +1357,6 @@ async def test_mcp_missing_server_url_records_write_failed_rather_than_staying_p
     )
     assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == [], (
         "nothing was saved, so no turn is owed"
-    )
-
-
-async def test_mcp_agent_gone_after_the_vault_write_renders_partial(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """The token landed; the agent it was for did not survive the form.
-
-    Same shape as the attach failure — the save is real, the connection is
-    not — so the card is `partial` rather than a refusal, and the continuation
-    carries no work.
-    """
-    tenant_id, token = await _run_mcp_submission(
-        db_session, db_session_factory, agent_gone_after_write=True
-    )
-
-    async with db_session_factory() as session:
-        request_row = await peek_credential_request(session, token=token)
-    assert request_row is not None and request_row.outcome == "write_failed", (
-        "a connection that was never attached is not an applied request"
-    )
-    card = _chat_updates(fake_slack_web_client)[-1]
-    assert card["text"] == "⚠️ my-server token saved for tester.", (
-        "the card must credit the token that was stored"
-    )
-    assert "The connection did not finish" in json.dumps(card), (
-        "and must not claim a connection nothing could attach"
-    )
-    pending = await _pending_continuations(db_session_factory, tenant_id=tenant_id)
-    assert [row.requested_work for row in pending] == [None], (
-        "the click is recorded for the audit trail, but the waiting work must not resume"
     )
 
 
@@ -1669,3 +1598,301 @@ async def test_env_submission_admin_may_store_an_identity_name(
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
     assert [r["key"] for r in rows] == ["SNOWFLAKE_USER"], "an admin may add an identity name"
+
+
+async def test_mcp_attach_failure_publishes_no_token(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The attach comes before the token is published: when it fails, nothing is
+    stored, no other session can mirror anything, and no work resumes."""
+    tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, attach_fails=True)
+
+    async with db_session_factory() as session:
+        request_row = await peek_credential_request(session, token=token)
+        stored = (
+            await session.execute(text("SELECT count(*) FROM agent_mcp_credentials"))
+        ).scalar_one()
+    assert request_row is not None and request_row.outcome == "write_failed"
+    assert stored == 0, "no agent-wide token is published without an attach"
+    card = _chat_updates(fake_slack_web_client)[-1]
+    assert card["text"] == "🛡️ Nothing was saved for tester."
+    assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == []
+
+
+async def test_mcp_vault_write_failure_after_the_attach_renders_partial(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The submitter's own vault copy is written last; when it fails the server is
+    attached and the shared token published, so the card is partial and no work
+    resumes."""
+    tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, vault_fails=True)
+
+    async with db_session_factory() as session:
+        request_row = await peek_credential_request(session, token=token)
+    assert request_row is not None and request_row.outcome == "write_failed"
+    card = _chat_updates(fake_slack_web_client)[-1]
+    assert "The connection did not finish" in json.dumps(card)
+    assert RECEIVED_FOOTER not in json.dumps(card), "the card must leave the received state"
+    pending = await _pending_continuations(db_session_factory, tenant_id=tenant_id)
+    assert [row.requested_work for row in pending] == [None]
+
+
+async def test_mcp_agent_gone_before_the_attach_saves_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The agent did not survive the form: the attach comes first, so nothing is
+    stored anywhere, and the card says so."""
+    tenant_id, token = await _run_mcp_submission(
+        db_session, db_session_factory, agent_gone_after_write=True
+    )
+
+    async with db_session_factory() as session:
+        request_row = await peek_credential_request(session, token=token)
+        stored = (
+            await session.execute(text("SELECT count(*) FROM agent_mcp_credentials"))
+        ).scalar_one()
+    assert request_row is not None and request_row.outcome == "write_failed"
+    assert stored == 0
+    card = _chat_updates(fake_slack_web_client)[-1]
+    assert card["text"] == "🛡️ Nothing was saved for tester."
+    assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == []
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member-refused", "admin-allowed"])
+async def test_mcp_submission_repointing_an_existing_server_on_a_shared_agent_needs_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    admin: bool,
+) -> None:
+    """H2: a member must not repoint a live agent's server at another URL.
+
+    The agent already declares `my-server` elsewhere and is the deployment
+    default, so a member's submission is refused before any vault write or
+    attach; an admin's goes through.
+    """
+    import dataclasses
+
+    from daimon.core.scope import DeploymentDefault
+
+    if admin:
+        _override_users_info_admin(fake_slack_web_client.mock)
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        mcp_servers=[{"name": "my-server", "type": "url", "url": "https://real.example.com/mcp"}],
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    account_id = derive_guild_account_uuid(tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="mcp",
+        target="my-server",
+        mcp_server_url=_MCP_SERVER_URL,
+        agent_id=agent_id,
+        posted_message_id=_MESSAGE_TS,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+    ma_calls: list[str] = []
+    inner = _mcp_handler(live_agent, account_id=account_id, agent_id=agent_id)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        ma_calls.append(f"{req.method} {req.url.path}")
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=handler, mcp_configured=True
+        ),
+        deployment_default=DeploymentDefault(agent_name="specialist"),
+    )
+    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    await run_mcp_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="attacker-token",
+        dispatch_continuations=_noop_dispatch,
+    )
+
+    writes = [c for c in ma_calls if c.startswith("POST")]
+    async with db_session_factory() as session:
+        request_row = await peek_credential_request(session, token=token)
+        stored = (
+            await session.execute(text("SELECT count(*) FROM agent_mcp_credentials"))
+        ).scalar_one()
+    assert request_row is not None
+    if admin:
+        assert request_row.outcome == "applied"
+        assert f"POST /v1/agents/{live_agent.id}" in writes
+    else:
+        assert writes == [], "a refused replacement writes no vault token and no attach"
+        assert stored == 0, "the agent-wide token must not be overwritten"
+        assert request_row.outcome == "write_failed"
+        assert any("admin" in t for t in _ephemeral_texts(fake_slack_web_client))
+
+
+async def test_mcp_submission_member_cannot_overwrite_the_shared_token_of_a_connected_server(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """H2: the agent already uses the URL and has its agent-wide token; a member's
+    paste must not replace it."""
+    import dataclasses
+
+    from daimon.core.agent_mcp_credentials import (
+        resolve_agent_mcp_credentials,
+        save_agent_mcp_credential,
+    )
+    from daimon.core.scope import DeploymentDefault
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        mcp_servers=[{"name": "my-server", "type": "url", "url": _MCP_SERVER_URL}],
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    account_id = derive_guild_account_uuid(tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="mcp",
+        target="my-server",
+        mcp_server_url=_MCP_SERVER_URL,
+        agent_id=agent_id,
+        posted_message_id=_MESSAGE_TS,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+    fernet = build_multifernet((fernet_key,))
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        mcp_server_url=_MCP_SERVER_URL,
+        plaintext_token="the-real-token",
+    )
+    ma_calls: list[str] = []
+    inner = _mcp_handler(live_agent, account_id=account_id, agent_id=agent_id)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        ma_calls.append(f"{req.method} {req.url.path}")
+        return inner(req)
+
+    runtime = dataclasses.replace(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=handler, mcp_configured=True
+        ),
+        deployment_default=DeploymentDefault(agent_name="specialist"),
+    )
+    runtime.turn_deps.fernet = fernet
+    await run_mcp_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="attacker-token",
+        dispatch_continuations=_noop_dispatch,
+    )
+
+    stored = await resolve_agent_mcp_credentials(
+        sessionmaker=db_session_factory, fernet=fernet, tenant_id=tenant_id, agent_id=agent_id
+    )
+    assert [c.token for c in stored] == ["the-real-token"]
+    assert not [c for c in ma_calls if c.startswith("POST")]
+    assert any("admin" in t for t in _ephemeral_texts(fake_slack_web_client))
+
+
+async def test_mcp_submission_admin_token_written_after_the_members_decision_is_not_overwritten(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Barrier: member admitted (no token yet) -> admin saves the first shared token ->
+    member resumes. The store re-checks under its lock: admin's ciphertext stays."""
+    from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    account_id = derive_guild_account_uuid(tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="mcp",
+        target="my-server",
+        mcp_server_url=_MCP_SERVER_URL,
+        agent_id=agent_id,
+        posted_message_id=_MESSAGE_TS,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+    fernet = build_multifernet((fernet_key,))
+    ma_calls: list[str] = []
+    inner = _mcp_handler(live_agent, account_id=account_id, agent_id=agent_id)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        ma_calls.append(f"{req.method} {req.url.path}")
+        return inner(req)
+
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=handler, mcp_configured=True
+    )
+    runtime.turn_deps.fernet = fernet
+    real_decide = credential_submissions_mod.decide_mcp_connect
+
+    async def decide_then_admin_writes(*args: Any, **kwargs: Any) -> Any:
+        decision = await real_decide(*args, **kwargs)
+        assert not decision.replaces
+        await save_agent_mcp_credential(
+            sessionmaker=db_session_factory,
+            fernet=fernet,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            mcp_server_url=_MCP_SERVER_URL,
+            plaintext_token="admin-token",
+        )
+        return decision
+
+    monkeypatch.setattr(credential_submissions_mod, "decide_mcp_connect", decide_then_admin_writes)
+    await run_mcp_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="member-token",
+        dispatch_continuations=_noop_dispatch,
+    )
+
+    async with db_session_factory() as session:
+        stored = (
+            await session.execute(text("SELECT encrypted_token FROM agent_mcp_credentials"))
+        ).scalar_one()
+    assert fernet.decrypt(stored).decode() == "admin-token"
+    assert not [c for c in ma_calls if c.startswith("POST /v1/vaults")], "no vault write"
+    assert any("admin" in t for t in _ephemeral_texts(fake_slack_web_client))

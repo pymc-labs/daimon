@@ -53,6 +53,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
 from daimon.core.operation_policy import (
     TargetFacts,
@@ -284,6 +285,44 @@ async def _require_key_replacement_allowed(
             "card was posted. Tell them an admin can ask Daimon to replace the "
             f"'{key}' key on '{ma_agent.name}'. Do not ask anyone for the value here "
             "and do not retry."
+        )
+
+
+async def _require_mcp_replacement_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+    agent_id: uuid.UUID,
+    server_name: str,
+    url: str,
+    shares_token: bool,
+) -> None:
+    """Raise before the mint when this connection would replace what a non-admin may not.
+
+    `mcp_replace` is an attachment operation: repointing an existing server
+    name, or overwriting the agent's shared token for a URL, on an agent that
+    answers somewhere in the tenant (or a defaults-managed one) needs an admin.
+    The submit path decides it again against the person who submits.
+    """
+    decision = await decide_mcp_connect(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        is_admin=auth.is_admin,
+        default=runtime.deployment_default,
+        shares_token=shares_token,
+    )
+    if decision.refused:
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here and already has the MCP server "
+            f"'{server_name}' (or a token for {url}), so replacing it needs a server or "
+            "workspace admin, and the caller is not one. Nothing changed and no card was "
+            f"posted. Tell them an admin can ask Daimon to replace '{server_name}' on "
+            f"'{ma_agent.name}'. Do not retry under another name."
         )
 
 
@@ -594,6 +633,15 @@ async def _request_mcp_token_impl(
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    await _require_mcp_replacement_allowed(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        shares_token=True,
+    )
     return await _mint_and_post(
         runtime,
         auth,
@@ -638,6 +686,15 @@ async def _request_mcp_oauth_impl(
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
+    )
+    await _require_mcp_replacement_allowed(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        agent_id=agent_id,
+        server_name=server_name,
+        url=url,
+        shares_token=False,
     )
     return await _mint_and_post(
         runtime,
@@ -808,7 +865,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         ctx: Context,
         agent_name: str,
         server_name: Annotated[
-            str, Field(description="Connection name; reusing a name replaces that server entry.")
+            str,
+            Field(description="Connection name; reuse at a new URL replaces it (admin if shared)."),
         ],
         url: Annotated[
             str,
@@ -832,7 +890,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
         credentials in chat. Members can use this form on shared agents and built-in
-        Daimon; the admin and fork gates for direct spec edits do not apply.
+        Daimon to add a server; replacing one the agent already has (same name at
+        another URL, or a new token for a connected URL) needs an admin there.
 
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
@@ -857,7 +916,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         ctx: Context,
         agent_name: str,
         server_name: Annotated[
-            str, Field(description="Connection name; reusing a name replaces that server entry.")
+            str,
+            Field(description="Connection name; reuse at a new URL replaces it (admin if shared)."),
         ],
         url: Annotated[
             str,
@@ -879,8 +939,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         Use ``request_mcp_token`` for servers that take a pasted bearer token and
         ``attach_mcp_server`` for public servers. Members can use this on shared
-        agents and built-in Daimon; the admin and fork gates for direct spec edits
-        do not apply.
+        agents and built-in Daimon; repointing an existing server name at another
+        URL needs an admin there.
 
         Posts a requester-only card; its button opens a private sign-in link that
         expires in ten minutes. Finishing sign-in stores the grant for that person
