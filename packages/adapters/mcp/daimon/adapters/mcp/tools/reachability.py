@@ -127,6 +127,7 @@ async def require_bindable_as_channel_default(
             caller=channel_admin_caller(auth),
             is_daimon_managed=is_daimon_managed,
             policy=policy,
+            caller_account_id=auth.account_id,
         )
     if allowed:
         return

@@ -740,8 +740,9 @@ async def _require_mcp_replace_allowed(
     outcome = await decide_mcp_replacement(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
         agent=agent,
-        is_admin=auth.is_admin,
+        caller=reachability.channel_admin_caller(auth),
         default=runtime.deployment_default,
     )
     if outcome != "allow":

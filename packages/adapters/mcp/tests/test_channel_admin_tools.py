@@ -11,6 +11,9 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import propagation
+from daimon.adapters.mcp.tools.agents import (
+    _require_mcp_replace_allowed,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.channel_admins import (
     _clear_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
@@ -32,6 +35,7 @@ from daimon.testing.factories import (
     make_routine,
     make_tenant,
 )
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -278,7 +282,11 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None, "the tenant exists"
         await make_routine(
-            session, tenant=tenant, created_by_user_id="777777777777777777", agent_name="helper"
+            session,
+            tenant=tenant,
+            created_by_user_id="777777777777777777",
+            agent_name="helper",
+            channel_id=CHANNEL,
         )
     await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
 
@@ -299,3 +307,36 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         )
     with pytest.raises(ToolError, match="runs unattended .* so an admin must change its setup"):
         await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+
+
+async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """`attach_mcp_server` replacing a server reads channel admin locality too."""
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    agent = ma_agent(
+        id="agent_helper",
+        name="helper",
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "helper"},
+        mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.example.com/a"}],
+    )
+    servers = [("linear", "https://mcp.example.com/b")]
+    member = _auth(tenant_id)
+    with pytest.raises(ToolError, match="repointing it needs a server or workspace admin"):
+        await _require_mcp_replace_allowed(runtime, member, agent, servers)
+
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    assert await _require_mcp_replace_allowed(runtime, member, agent, servers), (
+        "the admin of the only channel it answers in repoints its server"
+    )

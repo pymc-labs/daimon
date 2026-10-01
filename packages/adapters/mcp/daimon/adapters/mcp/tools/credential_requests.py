@@ -30,7 +30,7 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
-from daimon.adapters.mcp.tools.reachability import target_facts
+from daimon.adapters.mcp.tools.reachability import channel_admin_caller, target_facts
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -323,7 +323,8 @@ async def _require_mcp_replacement_allowed(
         agent_id=agent_id,
         server_name=server_name,
         url=url,
-        is_admin=auth.is_admin,
+        platform=auth.platform or "",
+        caller=channel_admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
     )
