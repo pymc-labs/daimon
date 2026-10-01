@@ -101,8 +101,10 @@ def is_outside_agent_pin(
 
     Pass every name the responder answers to (the cascade's name and the
     agent's own metadata name); a pin on any of them applies. A turn with no
-    channel (a DM, a headless run) is outside every pin. Admins get no
-    exemption: the pin exists because of what the agent's credentials reach.
+    channel (a DM, a headless run) is outside every pin. This predicate has no
+    admin exemption; callers grant one only where the output reaches the admin
+    alone (an admin's DM or hub turn -- see "Trust model" in
+    docs/architecture.md), and channel sends stay confined to the pin.
     """
     for name in agent_names:
         if name is None or name not in policy.agent_channel_pins:

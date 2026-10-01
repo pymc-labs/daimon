@@ -43,7 +43,7 @@ async def _post_slack_app_install_button_impl(  # pyright: ignore[reportUnusedFu
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         # Slack responses and the shared visibility API expose an open channel mapping.
         channel: dict[str, Any] = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        await check_channel_access(client, channel=channel, user_id=requester_id)
+        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
         await require_channel_writable(runtime, auth, channel_id=channel_id)
         text = (
             f"<@{requester_id}> — {purpose}\n"
