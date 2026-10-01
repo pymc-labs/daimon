@@ -498,13 +498,19 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     seal_ids = admission.origin_seal_ids | _seal_ids(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
-    if seal_ids == admission.origin_seal_ids:
+    # Memory posture is decided from the policy as it is now, not only from
+    # new seals: a DM turn picks up `dm_memory_read_only` switched on since
+    # admission. Read-only never relaxes back to writable here.
+    memory_read_only = (
+        admission.memory_read_only or bool(seal_ids) or (grant.is_dm and policy.dm_memory_read_only)
+    )
+    if seal_ids == admission.origin_seal_ids and memory_read_only == admission.memory_read_only:
         return admission
     return replace(
         admission,
         origin_seal_ids=seal_ids,
-        source_sealed=True,
-        memory_read_only=True,
+        source_sealed=admission.source_sealed or bool(seal_ids),
+        memory_read_only=memory_read_only,
     )
 
 

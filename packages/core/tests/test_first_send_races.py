@@ -13,13 +13,26 @@ from .test_action_time_races import setup
 from .test_session_preparation import _agent, _register
 from .turn.test_run_prepared_turn import _recovery_lifecycle
 
+# Cases: (policy change during stream open, DM turn?, already read-only?, expected error).
+# A DM turn whose tenant switches `dm_memory_read_only` on must wait, like a seal;
+# unchanged and already-read-only DM turns still send.
+_CASES = {
+    "none": (None, False, False, None),
+    "pin": ("pin", False, False, AdmissionDenied),
+    "seal": ("seal", False, False, SessionBusyError),
+    "dm-read-only": ("dm_read_only", True, False, SessionBusyError),
+    "dm-unchanged": (None, True, False, None),
+    "dm-already-read-only": ("dm_read_only", True, True, None),
+}
 
-@pytest.mark.parametrize("change", ["none", "pin", "seal"])
-async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullpool_engine, change):
+
+@pytest.mark.parametrize("case", list(_CASES))
+async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullpool_engine, case):
+    change, is_dm, read_only, error = _CASES[case]
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
         db_session, db_nullpool_engine
     )
-    prepared = await bind(admitted())
+    prepared = await bind(admitted(is_dm=is_dm, memory_read_only=read_only))
     inner = deps.anthropic._client._transport
     changed = False
 
@@ -28,7 +41,7 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullp
         if (
             request.method == "GET"
             and request.url.path == f"/v1/sessions/{prepared.ma_session_id}/events/stream"
-            and change != "none"
+            and change is not None
         ):
             await policy(change)
             changed = True
@@ -62,15 +75,14 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullp
             render_interval_s=0.001,
         )
 
-    if change == "none":
+    if error is None:
         outcome = await run()
-    else:
-        with pytest.raises(AdmissionDenied if change == "pin" else SessionBusyError):
-            await run()
-    if change == "none":
+        assert changed == (change is not None)
         assert outcome.state.error is None and not outcome.recovered
         assert transport.state.sent_batches
     else:
+        with pytest.raises(error):
+            await run()
         assert changed
         assert not transport.state.sent_batches, (
             change,
@@ -80,9 +92,9 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullp
         )
 
 
-@pytest.mark.parametrize("change", ["none", "pin", "seal"])
+@pytest.mark.parametrize("case", list(_CASES))
 async def test_checkpoint_policy_change_during_checkpoint_stream_open(
-    db_session, db_nullpool_engine, monkeypatch, change
+    db_session, db_nullpool_engine, monkeypatch, case
 ):
     from unittest.mock import AsyncMock
 
@@ -91,10 +103,11 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
 
     from .test_workspace_transfer import _seed_conversation
 
+    change, is_dm, read_only, error = _CASES[case]
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
         db_session, db_nullpool_engine
     )
-    first = await bind(admitted())
+    first = await bind(admitted(is_dm=is_dm, memory_read_only=read_only))
     moved = _agent(model_id="claude-opus-4-6")
     _register(transport.state, moved)
     inner = deps.anthropic._client._transport
@@ -111,7 +124,7 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
             not changed
             and request.method == "GET"
             and request.url.path == f"/v1/sessions/{first.ma_session_id}/events/stream"
-            and change != "none"
+            and change is not None
         ):
             await policy(change)
             changed = True
@@ -128,7 +141,7 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
     async def rebind():
         return await bind_session(
             deps,
-            admitted(moved),
+            admitted(moved, is_dm=is_dm, memory_read_only=read_only),
             tenant_id=tenant.id,
             platform="discord",
             external_user_id="user-1",
@@ -137,16 +150,15 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
             reuse_existing=True,
         )
 
-    if change == "none":
+    if error is None:
         await rebind()
-    else:
-        with pytest.raises(AdmissionDenied if change == "pin" else SessionBusyError):
-            await rebind()
-    if change == "none":
+        assert changed == (change is not None)
         assert any(sid == first.ma_session_id for sid, _ in transport.state.sent_batches), (
             transport.state.sent_batches
         )
     else:
+        with pytest.raises(error):
+            await rebind()
         assert changed
         assert not any(sid == first.ma_session_id for sid, _ in transport.state.sent_batches), (
             change,

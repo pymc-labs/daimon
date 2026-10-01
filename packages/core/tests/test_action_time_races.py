@@ -28,7 +28,7 @@ async def setup(db_session, db_nullpool_engine):
     transport = _Transport()
     deps = _deps(factory, transport)
 
-    def admitted(agent=None):
+    def admitted(agent=None, *, is_dm=False, memory_read_only=False):
         agent = agent or _agent()
         place = build_turn_place(channel_id="vault", thread_id="thread-1")
         grant = AdmissionGrant(
@@ -40,12 +40,13 @@ async def setup(db_session, db_nullpool_engine):
             run_place=place,
             channel_id="vault",
             thread_id="thread-1",
-            is_dm=False,
+            is_dm=is_dm,
         )
         return replace(
             _admission(account=account, agent=agent),
             origin_channel_id="vault",
             origin_thread_id="thread-1",
+            memory_read_only=memory_read_only,
             grant=grant,
         )
 
@@ -72,11 +73,12 @@ async def setup(db_session, db_nullpool_engine):
         )
 
     async def policy(change):
-        value = (
-            TenantAccessPolicy(agent_channel_pins={"daimon": ("elsewhere",)})
-            if change == "pin"
-            else TenantAccessPolicy(sealed_channel_ids=("vault",))
-        )
+        if change == "pin":
+            value = TenantAccessPolicy(agent_channel_pins={"daimon": ("elsewhere",)})
+        elif change == "dm_read_only":
+            value = TenantAccessPolicy(dm_memory_read_only=True)
+        else:
+            value = TenantAccessPolicy(sealed_channel_ids=("vault",))
         async with factory.begin() as session:
             await set_access_policy(session, tenant_id=tenant.id, policy=value)
 
