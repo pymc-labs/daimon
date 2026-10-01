@@ -124,7 +124,7 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.continuity.continuation import check_wake_responder
+from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -2510,7 +2510,10 @@ class SlackApp:
                 thread_id=thread_id,
                 account_id=row.requester_account_id,
             )
-        from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            asking_ma_agent_id = await load_asking_agent_id(
+                _predecessor_session, row, live_ma_agent_id=from_ma_agent_id
+            )
         from_name = (
             predecessor.effective_config.agent_name
             if predecessor is not None and predecessor.effective_config is not None
@@ -2545,7 +2548,7 @@ class SlackApp:
             target_name=row.target_name,
             admitted_ma_agent_id=follow_admission.agent.id,
             admitted_name=follow_admission.agent.name,
-            asking_ma_agent_id=from_ma_agent_id,
+            asking_ma_agent_id=asking_ma_agent_id,
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
         follow_prepared = await bind_session(
