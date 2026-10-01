@@ -13,8 +13,9 @@ is read from Microsoft Graph: images from its hosted content, with the Graph
 token and only from the Graph host. `<img>` and `<attachment>` tags in the
 activity's `text/html` body are counted only to tell the person what was
 missed when Graph cannot be read. Channel files live in SharePoint, read
-only from the team's own site once an admin grants it (`channel_files`);
-otherwise the person is told, as they are when Graph cannot be read at all.
+only from the team's own site once an admin grants it (`channel_files`).
+What cannot be read reaches the agent as an `[attachment]` line saying why,
+for its answer to explain: nothing is posted on its own.
 """
 
 from __future__ import annotations
@@ -66,13 +67,15 @@ class FetchRefused(DaimonError):
 
 @dataclass(frozen=True)
 class InboundFile:
-    """One attachment. `unreachable` (a channel share) has no fetchable `url`; an
-    `embedded_*` one is only known from a channel message's HTML, until Graph names it."""
+    """One attachment. `unreachable` and `refused` (a channel share daimon has no
+    access to) have no fetchable `url`; an `embedded_*` one is only known from a
+    channel message's HTML, until Graph names it."""
 
     kind: Literal[
         "pasted_image",
         "shared_file",
         "unreachable",
+        "refused",
         "embedded_image",
         "embedded_file",
         "graph_image",
@@ -83,11 +86,14 @@ class InboundFile:
 
 @dataclass(frozen=True)
 class SharedFile:
-    """A file shared in a channel: its SharePoint URL, and a download URL once resolved."""
+    """A file shared in a channel: its SharePoint URL, and a download URL once resolved.
+
+    `refused` when Graph denied daimon the team's files."""
 
     name: str
     content_url: str | None = None
     download_url: str | None = None
+    refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,7 +131,6 @@ class PreparedAttachments:
 
     image_blocks: list[BetaManagedAgentsImageBlockParam]
     prefix: str  # `[attachment]` lines, newline-terminated, for the user message
-    notice: str | None  # tells the person what could not be read
 
 
 def is_sharepoint_host(url: httpx.URL) -> bool:
@@ -239,7 +244,7 @@ def _resolve_embedded(
     kept += [
         InboundFile("shared_file", sanitize_title(f.name), f.download_url)
         if f.download_url
-        else InboundFile("unreachable", sanitize_title(f.name))
+        else InboundFile("refused" if f.refused else "unreachable", sanitize_title(f.name))
         for f in media.files
     ]
     return kept, []
@@ -271,7 +276,6 @@ async def prepare_attachments(
 
     blocks: list[BetaManagedAgentsImageBlockParam] = []
     lines: list[str] = []
-    unread: list[str] = []
     if channel and channel_media is None and not unnamed:
         # The activity names no media, so whether any were missed is unknown.
         lines.append(
@@ -279,18 +283,20 @@ async def prepare_attachments(
             "say so if the person refers to one."
         )
     for file in unnamed:
-        image = file.kind == "embedded_image"
-        what = "an image" if image else "a file"
-        lines.append(f"[attachment] {what} was shared but can't be opened here.")
-        unread.append(
-            "a pasted image (I can't read this channel's messages)"
-            if image
-            else "a shared file (files shared in channels need a 1:1 chat)"
+        what = "an image" if file.kind == "embedded_image" else "a file"
+        lines.append(
+            f"[attachment] {what} was shared but can't be opened: "
+            "daimon could not read this channel message."
         )
     for file in files:
+        if file.kind == "refused":
+            lines.append(
+                f"[attachment] `{file.name}` was shared but can't be opened: daimon has no "
+                "access to this team's files until a Microsoft 365 admin grants it."
+            )
+            continue
         if file.kind == "unreachable":
             lines.append(f"[attachment] `{file.name}` was shared but can't be opened here.")
-            unread.append(f"`{file.name}` (files shared in channels need a 1:1 chat)")
             continue
         pasted = file.kind in ("pasted_image", "graph_image")
         if not pasted and not file.name.lower().endswith(_IMAGE_EXTENSIONS):
@@ -325,9 +331,4 @@ async def prepare_attachments(
                 lines.append(_link_line(file, reason))
                 continue
             lines.append(f"[attachment] pasted image `{file.name}` was not inlined ({reason}).")
-            unread.append(f"`{file.name}` ({reason})")
-    return PreparedAttachments(
-        image_blocks=blocks,
-        prefix="".join(f"{line}\n" for line in lines),
-        notice=f"I couldn't read {', '.join(unread)}." if unread else None,
-    )
+    return PreparedAttachments(image_blocks=blocks, prefix="".join(f"{line}\n" for line in lines))

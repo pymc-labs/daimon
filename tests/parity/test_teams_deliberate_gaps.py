@@ -166,12 +166,12 @@ async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched(
             [InboundFile("embedded_file", "file")],
             bot_token=token,
             service_url=None,
-            channel_media=ChannelMedia(files=(SharedFile("q3.xlsx", CONTENT_URL),)),
+            channel_media=ChannelMedia(files=(SharedFile("q3.xlsx", CONTENT_URL, refused=True),)),
             graph_token=token,
         )
-    assert (
-        prepared.notice == "I couldn't read `q3.xlsx` (files shared in channels need a 1:1 chat)."
-    ), "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
+    assert "`q3.xlsx` was shared but can't be opened: daimon has no access" in prepared.prefix, (
+        "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
+    )
 
 
 def test_the_teams_billing_card_has_no_promo_code_surface() -> None:

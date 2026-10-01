@@ -9,9 +9,10 @@ server-side offer that is checked against the clicker and expires.
 In a channel each file is uploaded to the channel's Files folder through
 Graph (`channel_files`), and the links are edited in below the answer, or
 sent as one message when they do not fit (never after an unprompted
-answer): a note per file cluttered the thread. A failed upload is named
-there too. Without access a file goes down the skip path to be logged, and
-the agent guidance has the agent say so in its reply.
+answer). A failed or oversize file is named there too, but never posted on
+its own: status text below an answer is thread clutter. Without access a
+file goes down the skip path to be logged, and the agent guidance has the
+agent say so in its reply. A declined offer is only logged.
 Either way the listing entry, the delivery ledger, is deleted; the sandbox
 keeps its copy, so the agent can still read or paste it later.
 """
@@ -64,7 +65,6 @@ FILE_INFO_CONTENT_TYPE = "application/vnd.microsoft.teams.card.file.info"
 OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
-_DECLINED = "Okay, I won't send `{name}`."
 _SAVED = "Saved to this channel's files:"
 _NOT_SAVED = "I couldn't save `{name}` to this channel's files."
 
@@ -173,7 +173,7 @@ class TeamsOutputDelivery:
                 self._runtime.anthropic,
                 session_id=session_id,
                 post=functools.partial(self._offer, inbound, session_id),
-                on_skip=functools.partial(self._skip_notice, inbound),
+                on_skip=functools.partial(self._skip_notice, append),
                 sleep=self._sleep,
             )
         finally:
@@ -229,6 +229,9 @@ class TeamsOutputDelivery:
             return
         if append is not None and await append(text):
             return
+        if not links:
+            log.info("teams.channel_output.notices_withheld", count=len(notices))
+            return
         if inbound.unprompted:
             # Nobody asked: an unprompted turn posts its answer and nothing else.
             log.info("teams.channel_output.links_withheld", reason="unprompted")
@@ -242,8 +245,9 @@ class TeamsOutputDelivery:
         except TEAMS_SEND_ERRORS:
             log.warning("teams.channel_output.links_failed", exc_info=True)
 
-    async def _skip_notice(self, inbound: TeamsInbound, file: SkippedFile) -> None:
-        await self._say(inbound.conversation_id, inbound.service_url, render_oversize_notice(file))
+    async def _skip_notice(self, append: AppendToAnswer | None, file: SkippedFile) -> None:
+        if append is None or not await append(render_oversize_notice(file)):
+            log.info("teams.output.oversize_withheld", file_id=file.file_id)
 
     async def _offer(self, inbound: TeamsInbound, session_id: str, file: DeliverableFile) -> None:
         """Send a consent card, then defer: the click decides the file's fate."""
@@ -337,6 +341,4 @@ class TeamsOutputDelivery:
         await delete_output_file(
             self._runtime.anthropic, session_id=offer.session_id, file_id=offer.file_id
         )
-        await self._say(
-            offer.conversation_id, offer.service_url, _DECLINED.format(name=offer.filename)
-        )
+        log.info("teams.file_consent.declined", file_id=offer.file_id)

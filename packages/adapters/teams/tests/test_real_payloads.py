@@ -420,7 +420,9 @@ async def test_file_consent_decline_deletes_without_uploading(
 
     assert response is None
     assert uploads == [] and deletes == ["file_1"]
-    assert _posts(teams_api_fake)[-1]["text"] == "Okay, I won't send `file_example.txt`."
+    assert not any("file_example.txt" in str(p.get("text")) for p in _posts(teams_api_fake)), (
+        "a decline posts nothing"
+    )
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

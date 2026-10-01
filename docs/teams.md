@@ -118,7 +118,9 @@ A burst of replies is judged once, after the thread has been quiet for
 per hour. The turn runs as the burst's newest author and passes the same
 admission and billing gates as a mention, but posts only its answer: no
 status card or Cancel button, and every refusal, notice and error is only
-logged. Root posts are never judged, the bot's own and other bots' messages
+logged. No turn posts a status message of its own under its answer, as on
+Slack and Discord: what the person must hear rides on the answer, and only
+cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
 are ignored, and protected channels are skipped. Without Graph history (the
 consent above) a followed thread stays mention-only.
 
@@ -139,8 +141,8 @@ consent above) a followed thread stays mention-only.
   writes is uploaded to the channel's Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
   after an unprompted answer); a failed upload is named there instead.
-  Elsewhere, or when Graph refuses, the bot names a shared file and tells the
-  person it could not open it, and an output is logged
+  Elsewhere, or when Graph refuses, the agent is told the shared file's name
+  and why it could not be opened, for its answer to explain, and an output is logged
   (`teams.channel_output.skipped` or `.upload_failed`, no name or content) and
   dropped from the delivery listing; the agent's own copy stays in its
   workspace. The turn context tells the agent which case applies

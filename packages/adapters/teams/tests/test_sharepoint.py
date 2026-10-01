@@ -375,7 +375,7 @@ async def test_resolve_leaves_an_unreachable_shared_file_without_a_link() -> Non
 
     media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP)
 
-    assert media.files == (shared,), "a refusal leaves the file as it was"
+    assert media.files == (dataclasses.replace(shared, refused=True),), "named, never linked"
 
 
 async def _no_group(_: str) -> str | None:

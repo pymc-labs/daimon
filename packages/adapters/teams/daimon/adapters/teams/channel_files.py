@@ -117,6 +117,7 @@ class ChannelFiles:
                     log.warning(
                         "teams.channel_file.unreachable", status=err.status, reason=err.reason
                     )
+                    file = dataclasses.replace(file, refused=err.status in (401, 403))
             files.append(file)
         return dataclasses.replace(media, files=tuple(files))
 

@@ -873,8 +873,6 @@ class TeamsApp:
             channel_media=await reader.read_media(inbound) if reader else None,
             graph_token=reader.token if reader else None,
         )
-        if attachments.notice is not None:
-            await self._say(inbound, attachments.notice)
         config = admission.config
         async with turn_origin(
             self.runtime.sessionmaker,
@@ -959,9 +957,9 @@ class TeamsApp:
             async with self.runtime.sessionmaker.begin() as session:
                 await update_watermark(session, id=outcome.mapping_id, watermark_message_id=mark)
         if prepared.continuity.pending:
-            await self._say(
-                inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
-            )
+            pending = render_current_work_must_finish(admission.agent.name, handoff=False)
+            if not await final.append_to_answer(pending):
+                await self._say(inbound, pending)
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":

@@ -178,10 +178,10 @@ async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     assert (info.content_type, info.content_url) == (FILE_INFO_CONTENT_TYPE, CONTENT_URL)
 
 
-async def test_declined_offer_deletes_the_file_and_says_so(
+async def test_declined_offer_deletes_the_file_and_posts_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Decline is explicit: the output is deleted and the person gets an acknowledgement."""
+    """Decline is explicit: the output is deleted, with no status message under the card."""
     harness = _harness(db_session_factory)
 
     await harness.delivery.sweep(make_inbound(), "sesn_1")
@@ -189,7 +189,7 @@ async def test_declined_offer_deletes_the_file_and_says_so(
     await harness.settle()
 
     assert harness.uploads == [] and harness.deletes == ["file_csv"]
-    assert harness.sender.activities[-1].text == "Okay, I won't send `data.csv`."
+    assert len(harness.sender.activities) == 1, "only the consent card"
 
 
 @pytest.mark.parametrize(
@@ -385,13 +385,20 @@ async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_
     assert harness.deletes == ["file_csv"], "the file was still saved to the channel's Files"
 
 
-async def test_oversize_output_in_a_dm_gets_the_limit_notice(
+async def test_oversize_output_in_a_dm_is_named_below_the_answer(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The per-file cap is core's: no consent card, the notice, then delete."""
+    """The per-file cap is core's: no consent card, the limit below the answer, then delete."""
     harness = _harness(db_session_factory, [_csv(size=21 * 1024 * 1024)])
+    appended: list[str] = []
 
-    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    async def append(text: str) -> bool:
+        appended.append(text)
+        return True
 
-    assert "over the 20 MiB delivery limit" in (harness.sender.activities[0].text or "")
+    await harness.delivery.sweep(make_inbound(), "sesn_1", append=append)
+
+    [notice] = appended
+    assert "over the 20 MiB delivery limit" in notice
+    assert harness.sender.activities == [], "never a message of its own"
     assert harness.deletes == ["file_csv"]
