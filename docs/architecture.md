@@ -332,11 +332,13 @@ channels. The form's submit
 and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
 pin added later or a rename still holds; a target that can't be resolved under
 a pin is refused. The direct configuration tools (`update_agent`,
-`attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`,
-and an agent key's `set_repo_binding`/`clear_repo_binding`/`self_write_file`/
-`self_delete_file`) take no turn origin, so on a pinned agent they are an admin's
-or a channel admin's of every pinned channel; members inside its channels
-use the request tools. One guard (`tools/_pin_guard.py`) serves all of them.
+`attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`)
+take no turn origin, so on a pinned agent they are an admin's or a channel
+admin's of every pinned channel; members inside its channels use the request
+tools. An agent key's self-edit tools (`set_repo_binding`/`clear_repo_binding`/
+`self_write_file`/`self_delete_file`) are refused on a pinned agent: an agent
+key's stored roles are never trusted, so neither exemption applies to it. One
+guard (`tools/_pin_guard.py`) serves all of them.
 A sign-in (`request_mcp_oauth`) is re-checked when its callback arrives, before
 any grant or attach. Routines are checked against every name of the agent they
 run (at save and at every fire, after the scheduler self-heals to a replacement
@@ -357,18 +359,23 @@ that channel on top of the server admins (`channel_admins`,
 live role ids on the account (`accounts.platform_role_ids`) beside the role, so
 MCP tools test a grant without asking the platform; Slack has no roles, so a
 Slack grant is by user id. A channel admin may do what a server admin may for
-an agent local to their channels -- not the tenant default, every
-channel-scope row and thread binding in a channel they run, and no unattended
-run of it owed to a server admin or another channel's admin
+an agent local to their channels -- not the tenant default or anyone's
+personal default, answering or running somewhere and only in channels they
+run (channel-scope rows, thread bindings, and other people's live sessions
+and routines, each by its channel), and no unattended run of it owed to a
+server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent. A `/dm` conversation counts as the channel it was
-started from. A channel admin binds only a shared agent (managed or
-tenant-wide), one answering nowhere, or one already local to them,
-never another channel's own agent. Nobody, server admins included, binds a
-pinned agent as the default of a channel outside its pin. Key and MCP server
-replacements and removals count every place the agent answers, as for anyone:
-a personal default, a routine or a live session elsewhere keeps it from a
-channel admin. Managed agents and the tenant default stay with server
+started from. A session counts in the channel its spend was attributed to
+and a routine in the one its spend counts against; one with none recorded
+could run anywhere, and an agent answering nowhere is local to nobody, so
+locality only narrows what key and MCP server replacements and removals
+count as shared, never past it. A channel admin binds only a shared agent
+(managed or tenant-wide), one answering nowhere yet, or one already local
+to them, never another channel's own agent. No chat tool or panel binds a
+pinned agent as the default of a channel outside its pin, for server admins
+too; the operator CLI (`daimon config set`, `daimon config propagate`) still
+can. Managed agents and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
 included, keep the old grant. Unattended runs are routines and queued wakes

@@ -83,11 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
   admins. Slack grants are by member only. A routine or wake set up by someone
-  with more rights keeps the agent out of a channel admin's hands, and so do
-  a personal default or live session elsewhere for key and MCP server changes.
+  with more rights keeps the agent out of a channel admin's hands, and so do a
+  personal default, someone else's live session or routine in another channel
+  or in no known one, and, for key and MCP server changes, answering nowhere.
   An admin of every channel an agent is pinned to may change it from outside
-  them. Nobody can make a pinned agent the default of a channel outside its pin.
-  Nothing changes until a channel admin is named.
+  them. No chat tool or panel can make a pinned agent the default of a channel
+  outside its pin; the operator CLI still can. Nothing changes until a channel
+  admin is named.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
