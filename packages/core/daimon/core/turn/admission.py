@@ -29,13 +29,13 @@ from typing import Literal
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     is_invoker_allowed,
-    is_isolated,
     is_outside_agent_pin,
     is_write_protected,
+    isolated_channel_of,
+    isolation_owner,
 )
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
@@ -83,9 +83,6 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
-    # Turn from an isolated channel or a thread under one: its conversation
-    # must not move anywhere else (see `daimon.core.channel_isolation`).
-    isolated: bool = False
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -291,33 +288,22 @@ async def admit_impl(
     # only in a DM, where the reply reaches no one else; in a channel or
     # thread other members would see it, so the pin holds for them too. The
     # role is the adapter's live one, never a stored role. ---
+    agent_names = (config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
     if not (is_dm and role is Role.ADMIN) and is_outside_agent_pin(
         policy,
-        agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        agent_names=agent_names,
         channel_id=None if is_dm else (thread_id or channel_id),
         parent_channel_id=None if is_dm else channel_id,
     ):
         raise AdmissionDenied(reason="agent_pinned_elsewhere")
 
     # --- Channel isolation: inside an isolated channel only its own agents
-    # answer, and they answer nowhere else. Checked here as well as when
-    # routing is written, so an archived default falling through to a shared
-    # one, or a thread handed out before isolation, is refused rather than
-    # answered. A DM counts as the channel it came from. A setup thread
-    # answers as the built-in agent, with memory read-only. ---
-    setup_inside_isolated = False
-    if policy.isolated_channel_ids:
-        place = (dm_source_channel_id, None) if is_dm else (thread_id or channel_id, channel_id)
-        async with deps.sessionmaker() as session:
-            isolation = await load_channel_isolation(
-                session, tenant_id=tenant_id, default=deps.deployment_default, policy=policy
-            )
-        setup_inside_isolated = (
-            config.thread_binding_kind == "setup" and isolation.isolated_channel(*place) is not None
-        )
-        agent_name = agent.metadata.get(MA_METADATA_KEY_NAME) or config.agent_name
-        if not setup_inside_isolated and isolation.crosses(agent_name, *place):
-            raise AdmissionDenied(reason="channel_isolated")
+    # (pinned to it alone) answer; the pin above keeps them from answering
+    # elsewhere. A setup thread answers as the built-in agent, read-only. ---
+    inside = None if is_dm else isolated_channel_of(policy, thread_id or channel_id, channel_id)
+    own_agent = inside is not None and isolation_owner(policy, agent_names) == inside
+    if inside is not None and not own_agent and config.thread_binding_kind != "setup":
+        raise AdmissionDenied(reason="channel_isolated")
 
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
@@ -357,15 +343,11 @@ async def admit_impl(
         if candidate is not None and candidate in policy.sealed_channel_ids
     )
     source_sealed = bool(seal_ids)
-    memory_read_only = (
-        source_sealed or (is_dm and policy.dm_memory_read_only) or setup_inside_isolated
-    )
+    # An isolated channel's own agents keep their memory writable there.
+    memory_read_only = (source_sealed and not own_agent) or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
         memory_read_only=memory_read_only,
-        isolated=is_isolated(
-            policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id
-        ),
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,

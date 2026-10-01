@@ -66,6 +66,9 @@ async def set_access_policy(
         # Leave the key out when nothing is pinned, so a process built before
         # pins existed still reads the row.
         payload.pop("agent_channel_pins", None)
+    if not payload.get("isolated_channel_ids"):
+        # Same for isolation, so a rollback to a build without it reads the row.
+        payload.pop("isolated_channel_ids", None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
         .values(tenant_id=tenant_id, policy=payload)

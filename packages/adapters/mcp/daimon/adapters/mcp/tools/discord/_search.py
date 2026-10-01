@@ -81,12 +81,12 @@ _THREAD_CREATED = 18
 
 def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) -> bool:
     """Same rule as channel history: a thread-created notice naming a sealed
-    thread is withheld; one naming no thread is withheld whenever anything is sealed or isolated."""
+    thread is withheld; one naming no thread is withheld whenever anything is sealed."""
     if hit.type != _THREAD_CREATED:
         return False
     thread_id = hit.message_reference.channel_id if hit.message_reference else None
     if thread_id is None:
-        return read_policy.restricts_any
+        return bool(read_policy.policy.sealed_channel_ids)
     return not read_policy.allows(thread_id, hit.channel_id)
 
 
@@ -347,12 +347,12 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # When channel_ids is not provided, total_results is the guild-wide
         # count from the bot's perspective — suppress it to avoid leaking the
         # existence/volume of messages in channels the caller cannot view.
-        # Once anything is sealed or isolated, a scoped count could include hits in a withheld
+        # Once anything is sealed, a scoped count could include hits in a sealed
         # thread under a scoped parent, so it reports only what is shown too.
-        exact_count = bool(channel_ids) and not read_policy.restricts_any
+        exact_count = bool(channel_ids) and not read_policy.policy.sealed_channel_ids
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
-        if read_policy.restricts_any:
+        if read_policy.policy.sealed_channel_ids:
             # With anything sealed, the raw total (and a page's raw size) could
             # count withheld hits, so the hint rests on what is shown: a full
             # page of visible rows may have more behind it.

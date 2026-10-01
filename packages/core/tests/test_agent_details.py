@@ -458,7 +458,13 @@ async def test_load_agent_details_hides_an_isolated_channels_agent_from_a_member
         agent_name="local",
     )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
     )
     router = MARouter()
     router.add_agent(ma_agent(id="ag_local", name="local", tenant_id=tenant.id))

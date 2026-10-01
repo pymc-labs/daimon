@@ -20,7 +20,6 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
-from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -40,9 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
-    make_account,
     make_channel_budget,
-    make_dm_conversation,
     make_ledger_entry,
     make_tenant,
     make_tenant_config,
@@ -1141,23 +1138,30 @@ async def test_admit_records_every_seal_on_a_thread_sealed_twice(
     assert admission.origin_seal_ids == frozenset(expected)
 
 
+_ISOLATED = TenantAccessPolicy(
+    sealed_channel_ids=("chan-1",),
+    isolated_channel_ids=("chan-1",),
+    agent_channel_pins={"own": ("chan-1",)},
+)
+
+
 @pytest.mark.parametrize(
-    ("policy", "thread_id", "expected"),
+    ("policy", "thread_id", "read_only"),
     [
         (None, None, False),
-        (TenantAccessPolicy(isolated_channel_ids=("chan-1",)), None, True),
-        (TenantAccessPolicy(isolated_channel_ids=("chan-1",)), "thr-1", True),
-        (TenantAccessPolicy(isolated_channel_ids=("other",)), None, False),
+        (_ISOLATED, None, False),
+        (_ISOLATED, "thr-1", False),
+        (_ISOLATED.model_copy(update={"isolated_channel_ids": ()}), None, True),
     ],
-    ids=["open", "isolated-channel", "thread-under-isolated", "other-channel"],
+    ids=["open", "isolated-channel", "thread-under-isolated", "sealed-only"],
 )
-async def test_admit_marks_isolated_turns_and_leaves_memory_writable(
+async def test_admit_leaves_an_isolated_channels_own_agent_memory_writable(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     policy: TenantAccessPolicy | None,
     thread_id: str | None,
-    expected: bool,
+    read_only: bool,
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     await _answer_in(db_session, tenant, "chan-1", "own")
@@ -1178,8 +1182,7 @@ async def test_admit_marks_isolated_turns_and_leaves_memory_writable(
         role=Role.USER,
     )
 
-    assert admission.isolated is expected, "isolated must follow the policy"
-    assert not admission.memory_read_only, "isolation keeps memory writable, unlike sealing"
+    assert admission.memory_read_only is read_only, "a seal alone makes memory read-only"
 
 
 async def _answer_in(db_session: AsyncSession, tenant: TenantRow, channel: str, agent: str) -> None:
@@ -1200,9 +1203,7 @@ async def test_admit_refuses_an_agent_that_is_not_the_isolated_channels_own(
 ) -> None:
     """With no agent of its own, the channel falls through to the workspace default,
     which answers elsewhere too: refused, not answered across the line."""
-    tenant = await _seed_admittable_tenant(
-        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
-    )
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
@@ -1228,9 +1229,7 @@ async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_a
 ) -> None:
     from daimon.core.stores.thread_agent_bindings import create_binding
 
-    tenant = await _seed_admittable_tenant(
-        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
-    )
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
     await _answer_in(db_session, tenant, "chan-1", "own")
     await _answer_in(db_session, tenant, "chan-2", "stats-bot")
     await create_binding(
@@ -1272,9 +1271,7 @@ async def test_admit_answers_a_setup_thread_under_an_isolated_channel_read_only(
     that runs it writes no memory there."""
     from daimon.core.stores.thread_agent_bindings import create_binding
 
-    tenant = await _seed_admittable_tenant(
-        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
-    )
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
     await _answer_in(db_session, tenant, "chan-1", "own")
     await create_binding(
         db_session,
@@ -1307,138 +1304,6 @@ async def test_admit_answers_a_setup_thread_under_an_isolated_channel_read_only(
 
     assert admission.agent.id == "ag_1", "the setup conversation keeps its responder"
     assert admission.memory_read_only, "setup inside an isolated channel writes no memory"
-
-
-async def test_start_dm_refuses_to_move_an_isolated_conversation(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    tenant = await _seed_admittable_tenant(
-        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
-    )
-    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
-    deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
-    )
-    admission = await admit(
-        deps,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="anyone",
-        channel_id="chan-1",
-        now=_NOW,
-        role=Role.USER,
-        is_dm=True,
-    )
-
-    with pytest.raises(DaimonError, match="isolated"):
-        await start_dm(
-            deps,
-            admission,
-            tenant_id=tenant.id,
-            platform="discord",
-            workspace_id="guild-1",
-            route_key="dm-1",
-            channel_id="dm-1",
-            external_user_id="anyone",
-            source_url="https://example.invalid/chan-1",
-            source_channel_id="chan-1",
-            context=[],
-        )
-
-
-async def test_a_dm_moved_out_of_an_isolated_channel_leaves_its_agent_inside(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A DM started from C before it was isolated, then moved to another channel,
-    must not take C's agent out of C."""
-    from daimon.core.channel_isolation import load_channel_isolation
-    from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
-
-    tenant = await _seed_admittable_tenant(
-        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
-    )
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    await _answer_in(db_session, tenant, "dm-1", "own")
-    account = await make_account(db_session, tenant=tenant)
-    await make_dm_conversation(
-        db_session,
-        tenant=tenant,
-        account_id=account.id,
-        route_key="dm-1",
-        scope_id="dm:old",
-        source_channel_id="chan-1",
-    )
-    await create_binding(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="dm-1",
-        thread_id="dm:old",
-        responder_ma_agent_id="ag_own",
-        responder_name="own",
-        kind="handoff",
-    )
-    await db_session.commit()
-    deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
-    )
-    moving = await admit(
-        deps,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="u1",
-        channel_id="chan-2",
-        now=_NOW,
-        role=Role.USER,
-        is_dm=True,
-        dm_source_channel_id="chan-2",
-    )
-
-    await start_dm(
-        deps,
-        moving,
-        tenant_id=tenant.id,
-        platform="discord",
-        workspace_id="g1",
-        route_key="dm-1",
-        channel_id="dm-1",
-        external_user_id="u1",
-        source_url="https://example.invalid/chan-2",
-        source_channel_id="chan-2",
-        context=[],
-    )
-
-    async with db_session_factory() as session:
-        isolation = await load_channel_isolation(
-            session, tenant_id=tenant.id, default=DeploymentDefault()
-        )
-        old = await get_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="dm-1",
-            thread_id="dm:old",
-        )
-    assert isolation.channel_of("own") == "chan-1", "the moved DM no longer counts for 'own'"
-    assert old is not None and old.deleted, "the move retires the old scope's binding"
-    own_router = resolved_agent_env_router(
-        ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
-        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
-    )
-    admission = await admit(
-        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=own_router),
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="u2",
-        channel_id="chan-1",
-        now=_NOW,
-        role=Role.USER,
-    )
-    assert admission.agent.id == "ag_own", "turns in the isolated channel still answer"
 
 
 @pytest.mark.parametrize(
@@ -1710,7 +1575,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
     """Backstop for any /dm caller: no DM row is written for a sealed source."""
     from unittest.mock import MagicMock
 
-    from daimon.core.direct_messages import SEALED_SOURCE_MESSAGE, start_dm
+    from daimon.core.direct_messages import SEALED_SOURCE_MESSAGE
     from daimon.core.errors import DaimonError
     from daimon.core.turn.admission import Admission
 

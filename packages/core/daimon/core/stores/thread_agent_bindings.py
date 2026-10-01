@@ -196,57 +196,10 @@ async def list_bound_parent_channel_ids(
     return list(ids.scalars())
 
 
-async def list_handoff_parent_channel_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID
-) -> dict[str, list[str]]:
-    """Responder name -> sorted parent channels of its live handed-over threads.
-
-    Setup conversations are left out: they answer as the built-in Daimon to
-    configure some other agent, which routes nobody to it. So are private
-    conversation scopes; see `list_dm_bindings`.
-    """
-    rows = await session.execute(
-        select(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
-        .where(
-            ThreadAgentBinding.tenant_id == tenant_id,
-            ThreadAgentBinding.kind == "handoff",
-            ThreadAgentBinding.deleted.is_(False),
-            ThreadAgentBinding.thread_id.not_like(f"{DM_SCOPE_PREFIX}%"),
-        )
-        .distinct()
-        .order_by(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
-    )
-    parents: dict[str, list[str]] = {}
-    for responder_name, parent_channel_id in rows.tuples():
-        parents.setdefault(responder_name, []).append(parent_channel_id)
-    return parents
-
-
-async def list_handoff_threads(
-    session: AsyncSession, *, tenant_id: uuid.UUID, parent_channel_id: str
-) -> list[tuple[str, str]]:
-    """`(thread_id, responder_name)` of the live handed-over threads under one channel."""
-    rows = await session.execute(
-        select(ThreadAgentBinding.thread_id, ThreadAgentBinding.responder_name)
-        .where(
-            ThreadAgentBinding.tenant_id == tenant_id,
-            ThreadAgentBinding.kind == "handoff",
-            ThreadAgentBinding.deleted.is_(False),
-            ThreadAgentBinding.parent_channel_id == parent_channel_id,
-        )
-        .order_by(ThreadAgentBinding.thread_id)
-    )
-    return [(thread, responder) for thread, responder in rows.tuples()]
-
-
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[str, str, str, str]]:
-    """`(dm_channel_id, scope_id, responder_name, responder_ma_agent_id)` of every DM scope.
-
-    `start_dm` retires a conversation's old scope when it moves, so this stays
-    about one row per DM channel. A row also marks its channel as a DM.
-    """
+    """`(dm_channel_id, scope_id, responder_name, responder_ma_agent_id)` of every DM scope."""
     rows = await session.execute(
         select(
             ThreadAgentBinding.parent_channel_id,
@@ -260,30 +213,6 @@ async def list_dm_bindings(
         )
     )
     return list(rows.tuples())
-
-
-async def retire_dm_scopes(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    platform: str,
-    dm_channel_id: str,
-    keep_scope_id: str,
-) -> None:
-    """Retire a DM channel's private scopes but `keep_scope_id`, the one a move just started."""
-    await session.execute(
-        update(ThreadAgentBinding)
-        .where(
-            ThreadAgentBinding.tenant_id == tenant_id,
-            ThreadAgentBinding.platform == platform,
-            ThreadAgentBinding.parent_channel_id == dm_channel_id,
-            ThreadAgentBinding.thread_id.like(f"{DM_SCOPE_PREFIX}%"),
-            ThreadAgentBinding.thread_id != keep_scope_id,
-            ThreadAgentBinding.deleted.is_(False),
-        )
-        .values(deleted=True, updated_at=func.now())
-    )
-    await session.flush()
 
 
 async def update_target(

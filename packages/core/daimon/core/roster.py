@@ -21,7 +21,6 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
     account_id_from_metadata,
 )
 from daimon.core.scope import ConfigTier, DeploymentDefault, ScopeContext
@@ -142,7 +141,7 @@ async def load_roster(
     agents = [
         agent
         for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-        if viewer is None or viewer.sees(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
+        if viewer is None or viewer.sees_agent(agent)
     ]
     answering_name: str | None = None
     answering_tier: ConfigTier | None = None

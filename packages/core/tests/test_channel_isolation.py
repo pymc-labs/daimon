@@ -1,12 +1,12 @@
-"""Channel isolation: who is local to an isolated channel, and which bindings break it."""
+"""Channel isolation: own agents by pin, refusals and visibility."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
 
-from daimon.core.access_policy import TenantAccessPolicy, is_isolated
+import pytest
+from daimon.core.access_policy import TenantAccessPolicy, is_isolated, isolation_owner
 from daimon.core.answering_map import (
     AnsweringMap,
     ChannelAnswer,
@@ -14,110 +14,77 @@ from daimon.core.answering_map import (
     hide_across_isolation,
 )
 from daimon.core.channel_isolation import (
-    NO_ISOLATION,
-    ChannelIsolation,
     IsolationViewer,
-    build_channel_isolation,
-    load_channel_isolation,
+    binding_refusal,
+    clear_refusal,
+    is_refused_by_isolation,
+    is_thread_turn_refused,
+    keeps_routine_inside,
 )
-from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.direct_messages import DmOrigin
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.thread_agent_bindings import (
-    create_binding,
-    list_handoff_parent_channel_ids,
-)
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_tenant
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 DEFAULT = DeploymentDefault(agent_name="daimon")
 TENANT = uuid.uuid4()
+POLICY = TenantAccessPolicy(
+    sealed_channel_ids=("c1",),
+    isolated_channel_ids=("c1",),
+    agent_channel_pins={"local": ("c1",), "roamer": ("c1", "c3")},
+)
 
 
-def _channel(channel_id: str, agent: str) -> ChannelConfigRow:
-    return ChannelConfigRow(tenant_id=TENANT, channel_id=channel_id, agent_name=agent)
+def test_an_isolated_channel_must_be_sealed() -> None:
+    with pytest.raises(ValidationError, match="must also be sealed"):
+        TenantAccessPolicy(isolated_channel_ids=("c1",))
 
 
-def _isolation(*, threads: dict[str, list[str]] | None = None) -> ChannelIsolation:
-    return build_channel_isolation(
-        {"c1"},
-        tenant=None,
-        channels=[_channel("c1", "local"), _channel("c2", "shared"), _channel("c1b", "shared")],
-        default=DEFAULT,
-        thread_parent_channel_ids=threads or {},
-    )
-
-
-def test_nothing_isolated_is_inert() -> None:
-    isolation = build_channel_isolation(
-        (),
-        tenant=None,
-        channels=[_channel("c1", "local")],
-        default=DEFAULT,
-        thread_parent_channel_ids={},
-    )
-    assert isolation is NO_ISOLATION and not isolation.is_active, "no ids means no isolation"
-    assert isolation.is_visible("local", inside_channel_id=None), "every agent stays visible"
-    assert isolation.binding_refusal("local", channel_id="c2") is None, "every binding allowed"
-
-
-def test_only_agents_answering_solely_in_the_channel_are_local() -> None:
-    isolation = _isolation(threads={"shared": ["c1"], "helper": ["c1"], "roamer": ["c1", "c3"]})
-    assert isolation.channel_of("local") == "c1", "the channel default answering only in c1"
-    assert isolation.channel_of("helper") == "c1", "a thread under c1 is inside c1"
-    assert isolation.channel_of("shared") is None, "answers in c2 too"
-    assert isolation.channel_of("roamer") is None, "a thread elsewhere makes it shared"
-    assert isolation.channel_of("daimon") is None, "the tenant-wide default is never local"
-
-
-def test_visibility_splits_inside_from_outside() -> None:
-    isolation = _isolation()
-    assert isolation.is_visible("local", inside_channel_id="c1"), "local agent seen inside"
-    assert not isolation.is_visible("local", inside_channel_id=None), "hidden outside"
-    assert not isolation.is_visible("shared", inside_channel_id="c1"), "inside sees only local"
-    assert isolation.is_visible("shared", inside_channel_id=None), "outside sees shared"
-
-
-def test_binding_refusals_keep_local_agents_in_and_shared_agents_out() -> None:
-    isolation = _isolation()
-    assert isolation.binding_refusal("local", channel_id="c2") == "agent_confined"
-    assert isolation.binding_refusal("local", channel_id=None) == "agent_confined", (
-        "a local agent can't become the tenant default"
-    )
-    assert isolation.binding_refusal("local", channel_id="c1") is None, "rebinding in c1 is fine"
-    assert isolation.binding_refusal("shared", channel_id="c1") == "channel_needs_own_agent"
-    assert isolation.binding_refusal("fresh", channel_id="c1") is None, (
-        "an agent answering nowhere becomes c1's own"
-    )
-    assert (
-        isolation.binding_refusal("fresh", channel_id="c1", is_daimon_managed=True)
-        == "channel_needs_own_agent"
-    ), "a built-in agent never becomes local"
-    assert isolation.binding_refusal("shared", channel_id="c2") is None, "outside is untouched"
-    assert isolation.clear_refusal(channel_id="c1") == "channel_isolated"
-    assert isolation.clear_refusal(channel_id="c2") is None
+def test_own_agents_are_those_pinned_to_the_channel_alone() -> None:
+    assert isolation_owner(POLICY, ("local",)) == "c1"
+    assert isolation_owner(POLICY, ("roamer",)) is None, "pinned beyond the channel"
+    assert isolation_owner(POLICY, ("shared",)) is None, "unpinned"
+    assert isolation_owner(POLICY, ("local", "roamer")) is None, "every name counts"
+    sealed_only = POLICY.model_copy(update={"isolated_channel_ids": ()})
+    assert isolation_owner(sealed_only, ("local",)) is None, "a pin alone is no isolation"
 
 
 def test_isolated_location_counts_threads_under_the_channel() -> None:
-    isolation = _isolation()
-    assert isolation.isolated_channel("t1", "c1") == "c1", "a thread under c1"
-    assert isolation.isolated_channel("c2") is None
-    policy = TenantAccessPolicy(isolated_channel_ids=("c1",))
-    assert is_isolated(policy, channel_id="t1", parent_channel_id="c1")
-    assert not is_isolated(policy, channel_id="c2"), "other channels stay open"
+    assert is_isolated(POLICY, channel_id="t1", parent_channel_id="c1")
+    assert not is_isolated(POLICY, channel_id="c2"), "other channels stay open"
     assert not is_isolated(TenantAccessPolicy(), channel_id="c1"), "default policy isolates none"
 
 
-def test_crossing_keeps_own_agents_in_and_others_out() -> None:
-    isolation = _isolation()
-    assert not isolation.crosses("local", "c1"), "the channel's own agent, at home"
-    assert not isolation.crosses("local", "t1", "c1"), "a thread under it is inside"
-    assert isolation.crosses("local", "c2"), "its own agent never acts elsewhere"
-    assert isolation.crosses("local", None), "nor in a DM, which is outside every channel"
-    assert isolation.crosses("shared", "c1"), "inside, only its own agents act"
-    assert not isolation.crosses("shared", "c2") and not isolation.crosses("shared", None)
+def test_only_own_agents_answer_inside() -> None:
+    def refused(name: str, channel: str, *, setup: bool = False) -> bool:
+        return is_refused_by_isolation(
+            POLICY,
+            agent_names=(name,),
+            channel_id="t1",
+            parent_channel_id=channel,
+            is_setup_thread=setup,
+        )
+
+    assert not refused("local", "c1")
+    assert refused("shared", "c1") and refused("roamer", "c1")
+    assert not refused("daimon", "c1", setup=True), "a setup thread answers as the built-in"
+    assert not refused("shared", "c2"), "outside is the pin's to judge"
+
+
+def test_binding_refusals_keep_own_agents_in_and_others_out() -> None:
+    assert binding_refusal(POLICY, agent_names=("local",), channel_id="c1") is None
+    assert binding_refusal(POLICY, agent_names=("local",), channel_id="c2") == "agent_confined"
+    assert binding_refusal(POLICY, agent_names=("local",), channel_id=None) == "agent_confined"
+    assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c1") == (
+        "channel_needs_own_agent"
+    )
+    assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c2") is None
+    assert clear_refusal(POLICY, channel_id="c1") == "channel_isolated"
+    assert clear_refusal(POLICY, channel_id="c2") is None
 
 
 def _routine(agent: str, destination: str | None) -> RoutineRow:
@@ -144,34 +111,18 @@ def _routine(agent: str, destination: str | None) -> RoutineRow:
     )
 
 
-def test_routines_deliver_only_on_their_agents_side() -> None:
-    isolation = _isolation()
-    assert not isolation.routine_crosses(_routine("local", "c1"))
-    assert isolation.routine_crosses(_routine("local", "c2")), "own agent posting outside"
-    assert isolation.routine_crosses(_routine("local", None)), "its DM report is outside too"
-    assert isolation.routine_crosses(_routine("shared", "c1")), "outside agent posting inside"
-    assert not isolation.routine_crosses(_routine("shared", None))
-    assert isolation.keeps_routine_inside(_routine("local", "c1")), "never falls back to a DM"
-    assert not isolation.keeps_routine_inside(_routine("shared", "c2"))
+def test_a_routine_of_an_own_agent_or_into_the_channel_stays_inside() -> None:
+    assert keeps_routine_inside(POLICY, _routine("local", "c1")), "never falls back to a DM"
+    assert keeps_routine_inside(POLICY, _routine("shared", "c1"))
+    assert not keeps_routine_inside(POLICY, _routine("shared", "c2"))
 
 
-def test_only_a_live_dm_counts_toward_an_agents_channel() -> None:
-    def owner(*, source: str | None, bound_scope: str = "dm:1") -> str | None:
-        return build_channel_isolation(
-            {"c1"},
-            tenant=None,
-            channels=[_channel("c1", "local")],
-            default=DEFAULT,
-            thread_parent_channel_ids={},
-            dm_origins=[DmOrigin(channel_id="dm1", scope_id="dm:1", source_channel_id=source)],
-            dm_bindings=[("dm1", bound_scope, "local")],
-        ).channel_of("local")
-
-    assert owner(source="c1") == "c1", "a DM started from the channel is inside it"
-    assert owner(source=None) is None, "a live DM without a source counts as outside"
-    assert owner(source="c2", bound_scope="dm:old") == "c1", (
-        "a DM since moved elsewhere no longer answers, so it counts nowhere"
-    )
+def test_a_viewer_sees_only_its_side() -> None:
+    inside, outside = IsolationViewer(POLICY, "c1"), IsolationViewer(POLICY, None)
+    assert inside.sees("local") and not inside.sees("shared")
+    assert outside.sees("shared") and not outside.sees("local")
+    assert inside.sees_place("c1") and not inside.sees_place(None)
+    assert outside.sees_place("c2") and not outside.sees_place("c1")
 
 
 def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
@@ -191,22 +142,18 @@ def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
             ),
         ),
     )
-    inside = hide_across_isolation(answering, IsolationViewer(_isolation(), "c1"))
+    inside = hide_across_isolation(answering, IsolationViewer(POLICY, "c1"))
     assert [row.channel_id for row in inside.channel_overrides] == ["c1"]
     assert inside.deployment_default is None, "the shared fallback is across the line"
     assert [ref.thread_id for ref in inside.setup_threads] == ["t1"]
-    outside = hide_across_isolation(answering, IsolationViewer(_isolation(), None))
+    outside = hide_across_isolation(answering, IsolationViewer(POLICY, None))
     assert [row.channel_id for row in outside.channel_overrides] == ["c2"]
     assert outside.deployment_default == "daimon"
     assert [ref.thread_id for ref in outside.setup_threads] == ["t2"]
 
 
-async def test_loader_reads_the_cascade_and_handoff_threads(db_session: AsyncSession) -> None:
+async def test_thread_precheck_refuses_a_handed_thread_inside(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
-    assert (
-        await load_channel_isolation(db_session, tenant_id=tenant.id, default=DEFAULT)
-        is NO_ISOLATION
-    ), "no policy row means no isolation"
     await set_fields(
         db_session,
         scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
@@ -214,28 +161,31 @@ async def test_loader_reads_the_cascade_and_handoff_threads(db_session: AsyncSes
         agent_name="local",
         mode="agent",
     )
-    bindings: list[tuple[Literal["setup", "handoff"], str, str]] = [
-        ("handoff", "t1", "helper"),
-        ("setup", "t2", "daimon"),
-    ]
-    for kind, thread, name in bindings:
+    for thread, responder in (("t1", "shared"), ("t2", "local")):
         await create_binding(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            parent_channel_id="c1",
             thread_id=thread,
-            responder_ma_agent_id=f"agent_{name}",
-            responder_name=name,
-            kind=kind,
+            parent_channel_id="c1",
+            responder_ma_agent_id=f"agent_{responder}",
+            responder_name=responder,
+            kind="handoff",
         )
-    assert await list_handoff_parent_channel_ids(db_session, tenant_id=tenant.id) == {
-        "helper": ["c1"]
-    }, "setup conversations route nobody"
-    await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("c1",))
-    )
-    isolation = await load_channel_isolation(db_session, tenant_id=tenant.id, default=DEFAULT)
-    assert isolation.agent_channel_ids == {"local": "c1", "helper": "c1"}, (
-        "the channel default and the handed-over agent are local; the setup responder is not"
-    )
+
+    async def refused(thread: str) -> bool:
+        return await is_thread_turn_refused(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="c1",
+            thread_id=thread,
+            default=DEFAULT,
+        )
+
+    assert not await refused("t1"), "nothing isolated yet"
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=POLICY)
+    assert (await load_access_policy(db_session, tenant_id=tenant.id)) == POLICY
+    assert await refused("t1")
+    assert not await refused("t2")
+    assert not await refused("t3"), "an unbound thread answers as the channel's own agent"

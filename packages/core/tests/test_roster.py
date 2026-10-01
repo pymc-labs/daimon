@@ -188,7 +188,13 @@ async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel
             agent_name=agent,
         )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("chan-1",),
+            isolated_channel_ids=("chan-1",),
+            agent_channel_pins={"zulu": ("chan-1",)},
+        ),
     )
     default = DeploymentDefault()
 
@@ -201,11 +207,7 @@ async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel
         thread_id=None,
         default=default,
         viewer=await load_isolation_viewer(
-            db_session,
-            tenant_id=tenant.id,
-            default=default,
-            channel_id=channel_id,
-            is_admin=is_admin,
+            db_session, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
         ),
     )
 

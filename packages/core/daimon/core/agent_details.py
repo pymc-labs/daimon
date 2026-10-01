@@ -25,7 +25,6 @@ from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
     account_id_from_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -259,15 +258,9 @@ async def load_agent_details(
     """
     agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     viewer = await load_isolation_viewer(
-        session,
-        tenant_id=tenant_id,
-        default=deployment_default,
-        channel_id=channel_id,
-        is_admin=is_admin,
+        session, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
-    if viewer is not None and not viewer.sees(
-        agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
-    ):
+    if viewer is not None and not viewer.sees_agent(agent):
         raise DaimonError(
             "That agent is no longer available in this workspace. Choose another agent."
         )

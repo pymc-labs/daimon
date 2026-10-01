@@ -1,131 +1,86 @@
-"""Channel isolation: an isolated channel's own agents stay inside it.
+"""Channel isolation: a sealed channel whose own agents are pinned to it alone.
 
 A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`).
-C's *own agents* are those whose reach stays inside C
-(`daimon.core.agent_reach.AgentReach.stays_inside`): the channel default and
-handed-over threads under C, never the tenant default. A live DM counts as
-the channel it was started from, outside C without one; a superseded DM scope
-answers nowhere and counts nowhere. While C is isolated they may not be bound
-anywhere else, they are invisible from outside C, and from inside C only
-they are visible. A call is *inside C* when it runs in C or its threads, or
-when the agent executing it is C-local. Everything else is outside every
-isolated channel. A tenant that isolates nothing loads `NO_ISOLATION` and
-nothing changes.
+The marker sits on two existing controls: C is sealed, so its content reads
+only from inside it, and C's *own agents* are those pinned to C alone
+(`daimon.core.access_policy.isolation_owner`), so they answer nowhere else.
+The marker adds the rest: inside C only its own agents answer and are seen,
+outside C they are hidden, and their memory stays writable in C, unlike a
+plain seal. A tenant that isolates nothing reads its policy and nothing more.
 
-`build_channel_isolation` and the refusal rules are pure; `load_channel_isolation`
-is their shell. Admission, the scheduler and the routine posters enforce it at
-run time; the routing writes and the tools keep it from being set up wrong.
+Everything here is pure but `load_isolation_viewer` and `is_thread_turn_refused`;
+`daimon.core.channel_isolation_setup` turns isolation on and off.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.agent_reach import build_agent_reach
-from daimon.core.errors import DaimonError
-from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ScopeContext, TenantConfigRow
-from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
-from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.scoped_config_read import list_propagations_for_tenant, resolve
-from daimon.core.stores.thread_agent_bindings import (
-    list_dm_bindings,
-    list_handoff_parent_channel_ids,
+from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    is_outside_agent_pin,
+    isolated_channel_of,
+    isolation_owner,
 )
-from pydantic import BaseModel, ConfigDict
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.errors import DaimonError
+from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession
 
 BindingRefusal = Literal["agent_confined", "channel_needs_own_agent", "channel_isolated"]
 """Why a routing write would break isolation.
 
 `agent_confined`: the agent belongs to another isolated channel. `channel_needs_own_agent`:
-the target channel is isolated and the agent already answers elsewhere (or is built in).
+the target channel is isolated and the agent is not one of its own.
 `channel_isolated`: clearing an isolated channel's own agent would hand it to a shared one.
 """
 
 
-class ChannelIsolation(BaseModel):
-    """The tenant's isolated channels and the agents confined to each."""
+def is_refused_by_isolation(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+    is_setup_thread: bool = False,
+) -> bool:
+    """Whether a turn in an isolated channel is answered by an agent not its own.
 
-    model_config = ConfigDict(frozen=True)
-
-    isolated_channel_ids: frozenset[str] = frozenset()
-    agent_channel_ids: Mapping[str, str] = {}
-    """Agent name -> the one isolated channel it is local to."""
-    answering_agent_names: frozenset[str] = frozenset()
-    """Every agent that answers somewhere; the rest answer nowhere."""
-
-    @property
-    def is_active(self) -> bool:
-        return bool(self.isolated_channel_ids)
-
-    def channel_of(self, agent_name: str | None) -> str | None:
-        """The isolated channel `agent_name` is confined to, or None for a shared agent."""
-        return None if agent_name is None else self.agent_channel_ids.get(agent_name)
-
-    def isolated_channel(
-        self, channel_id: str | None, parent_channel_id: str | None = None
-    ) -> str | None:
-        """The isolated channel a location lies in (a thread counts as its parent)."""
-        for candidate in (parent_channel_id, channel_id):
-            if candidate is not None and candidate in self.isolated_channel_ids:
-                return candidate
-        return None
-
-    def is_visible(self, agent_name: str, *, inside_channel_id: str | None) -> bool:
-        """Visible from inside C only when C-local; from outside only when shared."""
-        return self.channel_of(agent_name) == inside_channel_id
-
-    def crosses(
-        self, agent_name: str, channel_id: str | None, parent_channel_id: str | None = None
-    ) -> bool:
-        """Whether `agent_name` acting at a place (None: a DM or no channel) crosses a line.
-
-        C's own agents act only inside C, and inside C only they act.
-        """
-        return self.channel_of(agent_name) != self.isolated_channel(channel_id, parent_channel_id)
-
-    def routine_crosses(self, row: RoutineRow) -> bool:
-        """Whether a routine delivers across a line.
-
-        One without a destination reports by DM, which is outside every channel.
-        """
-        return self.crosses(row.agent_name, routine_destination_channel(row))
-
-    def keeps_routine_inside(self, row: RoutineRow) -> bool:
-        """Whether a routine's result must stay in an isolated channel, so never goes by DM."""
-        return (
-            self.channel_of(row.agent_name) is not None
-            or self.isolated_channel(routine_destination_channel(row)) is not None
-        )
-
-    def binding_refusal(
-        self, agent_name: str, *, channel_id: str | None, is_daimon_managed: bool = False
-    ) -> BindingRefusal | None:
-        """Why routing `agent_name` at `channel_id` (None: the tenant default) is refused.
-
-        Pass a thread's parent channel for a thread binding. An isolated channel
-        takes only its own agents, or one that answers nowhere yet and so
-        becomes its own; a built-in agent never does.
-        """
-        target = self.isolated_channel(channel_id)
-        owner = self.channel_of(agent_name)
-        if owner is not None and owner != target:
-            return "agent_confined"
-        taken = is_daimon_managed or agent_name in self.answering_agent_names
-        if target is not None and owner != target and taken:
-            return "channel_needs_own_agent"
-        return None
-
-    def clear_refusal(self, *, channel_id: str) -> BindingRefusal | None:
-        return "channel_isolated" if channel_id in self.isolated_channel_ids else None
+    The reverse, an own agent answering elsewhere, is the pin's to refuse. A
+    setup thread answers as the built-in agent and is let through.
+    """
+    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
+    return (
+        inside is not None
+        and not is_setup_thread
+        and isolation_owner(policy, agent_names) != inside
+    )
 
 
-NO_ISOLATION = ChannelIsolation()
+def binding_refusal(
+    policy: TenantAccessPolicy, *, agent_names: tuple[str | None, ...], channel_id: str | None
+) -> BindingRefusal | None:
+    """Why routing the agent at `channel_id` (None: the tenant default) is refused.
+
+    Pass a thread's parent channel for a thread binding.
+    """
+    target = isolated_channel_of(policy, channel_id)
+    owner = isolation_owner(policy, agent_names)
+    if owner is not None and owner != target:
+        return "agent_confined"
+    if target is not None and owner != target:
+        return "channel_needs_own_agent"
+    return None
+
+
+def clear_refusal(policy: TenantAccessPolicy, *, channel_id: str) -> BindingRefusal | None:
+    return "channel_isolated" if channel_id in policy.isolated_channel_ids else None
 
 
 def routine_destination_channel(row: RoutineRow) -> str | None:
@@ -139,97 +94,74 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     return row.channel_id or row.destination_id.partition(":")[0]
 
 
+def keeps_routine_inside(policy: TenantAccessPolicy, row: RoutineRow) -> bool:
+    """Whether a routine's result must stay in an isolated channel, so never goes by DM."""
+    return (
+        isolation_owner(policy, (row.agent_name,)) is not None
+        or isolated_channel_of(policy, routine_destination_channel(row)) is not None
+    )
+
+
+def is_memory_hidden(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str,
+    parent_channel_id: str | None = None,
+) -> bool:
+    """Whether an agent's memory stays hidden at a place: outside its pin, or across a line."""
+    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
+    return isolation_owner(policy, agent_names) != inside or is_outside_agent_pin(
+        policy, agent_names=agent_names, channel_id=channel_id, parent_channel_id=parent_channel_id
+    )
+
+
 @dataclass(frozen=True)
 class IsolationViewer:
-    """What one reader, standing at a place, may see of an isolated tenant."""
+    """What one reader, standing at a place, may see of an isolated tenant.
 
-    isolation: ChannelIsolation
+    From inside isolated channel C only C's own agents are seen; from anywhere
+    else every agent but the isolated channels' own.
+    """
+
+    policy: TenantAccessPolicy
     inside_channel_id: str | None = None
 
-    def sees(self, agent_name: str) -> bool:
-        return self.isolation.is_visible(agent_name, inside_channel_id=self.inside_channel_id)
+    @property
+    def is_active(self) -> bool:
+        return bool(self.policy.isolated_channel_ids)
+
+    def sees_names(self, agent_names: tuple[str | None, ...]) -> bool:
+        return isolation_owner(self.policy, agent_names) == self.inside_channel_id
+
+    def sees(self, agent_name: str | None) -> bool:
+        """For a place that records only a routing name; prefer `sees_agent`."""
+        return self.sees_names((agent_name,))
+
+    def sees_agent(self, agent: BetaManagedAgentsAgent) -> bool:
+        return self.sees_names(agent_pin_names(agent.name, agent.metadata))
 
     def sees_place(self, channel_id: str | None) -> bool:
         """A channel (None: a tenant-wide place) on the reader's side of every line."""
-        return self.isolation.isolated_channel(channel_id) == self.inside_channel_id
+        return isolated_channel_of(self.policy, channel_id) == self.inside_channel_id
 
 
-def build_channel_isolation(
-    isolated_channel_ids: Collection[str],
-    *,
-    tenant: TenantConfigRow | None,
-    channels: Sequence[ChannelConfigRow],
-    default: DeploymentDefault,
-    thread_parent_channel_ids: Mapping[str, Collection[str]],
-    dm_origins: Sequence[DmOrigin] = (),
-    dm_bindings: Iterable[tuple[str, str, str]] = (),
-) -> ChannelIsolation:
-    isolated = frozenset(isolated_channel_ids)
-    if not isolated:
-        return NO_ISOLATION
-    dm_bindings = tuple(dm_bindings)
-    names = {row.agent_name for row in channels if row.agent_name} | set(thread_parent_channel_ids)
-    names |= {responder for _, _, responder in dm_bindings}
-    names |= {name for name in (tenant.agent_name if tenant else None, default.agent_name) if name}
-    confined: dict[str, str] = {}
-    answering: set[str] = set()
-    for name in sorted(names):
-        reach = build_agent_reach(
-            name,
-            tenant=tenant,
-            channels=channels,
-            default=default,
-            thread_parent_channel_ids=thread_parent_channel_ids.get(name, ()),
-            dm_origins=dm_origins,
-            dm_bindings=dm_bindings,
-        )
-        if reach.places or reach.thread_parent_channel_ids:
-            answering.add(name)
-        owner = next((c for c in reach.channel_ids if c in isolated), None)
-        if owner is not None and reach.stays_inside({owner}):
-            confined[name] = owner
-    return ChannelIsolation(
-        isolated_channel_ids=isolated,
-        agent_channel_ids=confined,
-        answering_agent_names=frozenset(answering),
-    )
+async def load_isolation_viewer(
+    session: AsyncSession, *, tenant_id: uuid.UUID, channel_id: str | None, is_admin: bool
+) -> IsolationViewer | None:
+    """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
-
-async def load_channel_isolation(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    default: DeploymentDefault,
-    policy: TenantAccessPolicy | None = None,
-    isolated_channel_ids: Collection[str] | None = None,
-) -> ChannelIsolation:
-    """Shell half: one policy read when nothing is isolated, the cascade when something is.
-
-    Pass `policy` when the caller already holds it, or `isolated_channel_ids`
-    to ask what isolating those would mean. An unreadable policy raises
-    `AccessPolicyUnreadable`, so callers refuse rather than fall open.
+    Admins see everything, and so does everyone while nothing is isolated.
     """
-    if isolated_channel_ids is None:
-        if policy is None:
-            policy = await load_access_policy(session, tenant_id=tenant_id)
-        isolated_channel_ids = policy.isolated_channel_ids
-    if not isolated_channel_ids:
-        return NO_ISOLATION
-    tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
-    return build_channel_isolation(
-        isolated_channel_ids,
-        tenant=tenant,
-        channels=channels,
-        default=default,
-        thread_parent_channel_ids=await list_handoff_parent_channel_ids(
-            session, tenant_id=tenant_id
-        ),
-        dm_origins=await list_dm_origins(session, tenant_id=tenant_id),
-        dm_bindings=await list_dm_bindings(session, tenant_id=tenant_id),
-    )
+    if is_admin:
+        return None
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    if not policy.isolated_channel_ids:
+        return None
+    return IsolationViewer(policy, isolated_channel_of(policy, channel_id))
 
 
-async def thread_turn_crosses(
+async def is_thread_turn_refused(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -238,13 +170,13 @@ async def thread_turn_crosses(
     thread_id: str,
     default: DeploymentDefault,
 ) -> bool:
-    """Whether a turn in `thread_id` under `channel_id` would be refused as `channel_isolated`.
+    """Whether admission would refuse a turn in `thread_id` for its pin or isolation.
 
-    Read from routing alone, with no agent lookup, so a gate can skip paid work
-    first; admission still decides. One policy read while nothing is isolated.
+    Read from routing and the policy alone, with no agent lookup, so a gate
+    can skip paid work first; admission still decides.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not policy.isolated_channel_ids:
+    if not (policy.agent_channel_pins or policy.isolated_channel_ids):
         return False
     context = ScopeContext(
         tenant_id=tenant_id, channel_id=channel_id, platform=platform, thread_id=thread_id
@@ -255,43 +187,31 @@ async def thread_turn_crosses(
         return False
     if config.agent_name is None:
         return False
-    isolation = await load_channel_isolation(
-        session, tenant_id=tenant_id, default=default, policy=policy
+    names = (config.agent_name,)
+    is_setup_thread = config.thread_binding_kind == "setup"
+    return (
+        not is_setup_thread
+        and is_outside_agent_pin(
+            policy, agent_names=names, channel_id=thread_id, parent_channel_id=channel_id
+        )
+    ) or is_refused_by_isolation(
+        policy,
+        agent_names=names,
+        channel_id=thread_id,
+        parent_channel_id=channel_id,
+        is_setup_thread=is_setup_thread,
     )
-    place = (thread_id, channel_id)
-    if config.thread_binding_kind == "setup" and isolation.isolated_channel(*place) is not None:
-        return False  # a setup thread inside answers as the built-in agent
-    return isolation.crosses(config.agent_name, *place)
-
-
-async def load_isolation_viewer(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    default: DeploymentDefault,
-    channel_id: str | None,
-    is_admin: bool,
-) -> IsolationViewer | None:
-    """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
-
-    Admins see everything, and so does everyone while nothing is isolated.
-    """
-    if is_admin:
-        return None
-    isolation = await load_channel_isolation(session, tenant_id=tenant_id, default=default)
-    if not isolation.is_active:
-        return None
-    return IsolationViewer(isolation, isolation.isolated_channel(channel_id))
 
 
 __all__ = [
-    "NO_ISOLATION",
     "BindingRefusal",
-    "ChannelIsolation",
     "IsolationViewer",
-    "build_channel_isolation",
-    "load_channel_isolation",
+    "binding_refusal",
+    "clear_refusal",
+    "is_memory_hidden",
+    "is_refused_by_isolation",
+    "is_thread_turn_refused",
+    "keeps_routine_inside",
     "load_isolation_viewer",
     "routine_destination_channel",
-    "thread_turn_crosses",
 ]

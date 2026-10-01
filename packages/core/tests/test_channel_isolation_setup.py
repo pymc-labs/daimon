@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
+from daimon.core import channel_isolation_setup
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.agent_fork import fork_agent
+from daimon.core.agent_fork import AgentCopy, fork_agent
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.channel_isolation_setup import (
     ChannelIsolationRefused,
+    IsolationChange,
     isolated_agent_name,
     set_channel_isolation,
 )
@@ -26,10 +29,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.routines import create_routine
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -73,120 +74,126 @@ async def _bind(session: AsyncSession, tenant_id: uuid.UUID, channel_id: str, ag
     )
 
 
-async def test_isolating_needs_the_channels_own_agent(
+async def _isolate(
+    client: AsyncAnthropic,
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    *,
+    isolated: bool = True,
+    **kwargs: Any,
+) -> IsolationChange:
+    return await set_channel_isolation(
+        client,
+        factory,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=channel_id,
+        isolated=isolated,
+        default=DEFAULT,
+        actor_account_id=None,
+        **kwargs,
+    )
+
+
+async def test_isolating_seals_and_pins_the_channels_own_agent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
-    client, _ = _client(tenant.id, ("local", False), ("shared", False), ("daimon", True))
+    client, _ = _client(
+        tenant.id, ("local", False), ("shared", False), ("daimon", True), ("roamer", False)
+    )
     await _bind(db_session, tenant.id, "c1", "local")
     await _bind(db_session, tenant.id, "c2", "shared")
     await _bind(db_session, tenant.id, "c3", "shared")
     await _bind(db_session, tenant.id, "c4", "daimon")
+    await _bind(db_session, tenant.id, "c6", "roamer")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"roamer": ("c6", "c7")}),
+    )
+    await db_session.commit()
 
-    async def isolate(channel_id: str) -> str | None:
+    async def refusal(channel_id: str) -> str | None:
         try:
-            await set_channel_isolation(
-                client,
-                db_session_factory,
-                tenant_id=tenant.id,
-                channel_id=channel_id,
-                isolated=True,
-                default=DEFAULT,
-                actor_account_id=None,
-            )
+            await _isolate(client, db_session_factory, tenant.id, channel_id)
         except ChannelIsolationRefused as exc:
             return exc.reason
         return None
 
-    assert await isolate("c5") == "no_channel_agent", "an unbound channel has no agent of its own"
-    assert await isolate("c2") == "shared_channel_agent", "shared answers in c3 too"
-    assert await isolate("c4") == "managed_channel_agent", "a built-in agent never belongs"
+    assert await refusal("c5") == "no_channel_agent", "an unbound channel has no agent of its own"
+    assert await refusal("c2") == "shared_channel_agent", "shared answers in c3 too"
+    assert await refusal("c4") == "managed_channel_agent", "a built-in agent never belongs"
+    assert await refusal("c6") == "pinned_elsewhere", "roamer is pinned to c7 too"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == (), "a refusal writes nothing"
-    assert await isolate("c1") is None, "c1's own agent answers only there"
-    assert (await load_access_policy(db_session, tenant_id=tenant.id)).isolated_channel_ids == (
-        "c1",
+    assert await refusal("c1") is None, "c1's own agent answers only there"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert (policy.isolated_channel_ids, policy.sealed_channel_ids) == (("c1",), ("c1",))
+    assert policy.agent_channel_pins["local"] == ("c1",), (
+        "the own agent is pinned in the same write"
     )
 
-    again = await set_channel_isolation(
-        client,
-        db_session_factory,
-        tenant_id=tenant.id,
-        channel_id="c1",
-        isolated=True,
-        default=DEFAULT,
-        actor_account_id=None,
-    )
+    again = await _isolate(client, db_session_factory, tenant.id, "c1")
     assert (again.changed, again.agent_name) == (False, "local"), "repeating is a no-op"
-    ended = await set_channel_isolation(
-        client,
-        db_session_factory,
-        tenant_id=tenant.id,
-        channel_id="c1",
-        isolated=False,
-        default=DEFAULT,
-        actor_account_id=None,
-    )
+    ended = await _isolate(client, db_session_factory, tenant.id, "c1", isolated=False)
     assert ended.changed, "ending isolation reports the change"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
-    assert policy.isolated_channel_ids == (), "ending isolation clears the id"
+    assert policy.isolated_channel_ids == (), "ending isolation drops the marker"
+    assert policy.sealed_channel_ids == ("c1",) and "local" in policy.agent_channel_pins, (
+        "the seal and the pin stay unless asked"
+    )
+    await _isolate(client, db_session_factory, tenant.id, "c1")
+    await _isolate(
+        client, db_session_factory, tenant.id, "c1", isolated=False, drop_seal_and_pins=True
+    )
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.sealed_channel_ids == () and policy.agent_channel_pins == {
+        "roamer": ("c6", "c7")
+    }, "asked, ending drops the seal and the channel's own pins"
 
 
-async def test_isolating_with_a_fork_binds_the_copy(
+async def test_isolating_with_a_fork_pins_the_copy(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
-    client, state = _client(tenant.id, ("shared", False), ("team-alpha", False))
+    client, _ = _client(tenant.id, ("shared", False), ("team-alpha", False))
     await _bind(db_session, tenant.id, "c1", "shared")
     await _bind(db_session, tenant.id, "c2", "shared")
-    forks: list[tuple[str, str]] = []
+    await db_session.commit()
 
-    async def fork(source: str, new_name: str) -> tuple[str, ...]:
-        forks.append((source, new_name))
-        agent = ma_agent(id="agent_fork", name=new_name, tenant_id=tenant.id)
-        state.agents[agent.id] = agent.model_dump(mode="json")
-        return ("shared/notes",)
-
-    change = await set_channel_isolation(
-        client,
-        db_session_factory,
-        tenant_id=tenant.id,
-        channel_id="c1",
-        isolated=True,
-        default=DEFAULT,
-        actor_account_id=None,
-        channel_label="Team Alpha",
-        fork=fork,
+    with pytest.raises(ChannelIsolationRefused) as refused:
+        await _isolate(client, db_session_factory, tenant.id, "c1")
+    assert refused.value.reason == "shared_channel_agent", "no copy unless asked"
+    change = await _isolate(
+        client, db_session_factory, tenant.id, "c1", channel_label="Team Alpha", fork=True
     )
 
-    assert forks == [("shared", "team-alpha-2")], "copies the agent answering here, uniquely named"
-    assert (change.agent_name, change.forked_from) == ("team-alpha-2", "shared")
-    assert change.dropped_skills == ("shared/notes",), "the skills left off are reported"
+    assert (change.agent_name, change.forked_from) == ("team-alpha-2", "shared"), (
+        "copies the agent answering here, uniquely named"
+    )
     scope = await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
     assert scope is not None and scope.agent_name == "team-alpha-2", "the copy answers in c1"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == ("c1",), "isolated in the same step"
+    assert policy.agent_channel_pins == {"team-alpha-2": ("c1",)}, "the copy is pinned, not shared"
+    again = await _isolate(client, db_session_factory, tenant.id, "c1", fork=True)
+    assert (again.changed, again.forked_from) == (False, None), "repeating never copies twice"
 
-    with pytest.raises(ChannelIsolationRefused) as refused:
-        await set_channel_isolation(
-            client,
-            db_session_factory,
-            tenant_id=tenant.id,
-            channel_id="c3",
-            isolated=True,
-            default=DEFAULT,
-            actor_account_id=None,
-            fork=fork,
-            fork_from="team-alpha-2",
+    with pytest.raises(DaimonError, match="pinned to specific channels"):
+        await _isolate(
+            client, db_session_factory, tenant.id, "c3", fork=True, fork_from="team-alpha-2"
         )
-    assert refused.value.reason == "agent_confined", "another channel's own agent isn't copied"
 
 
 async def test_a_copy_refused_after_the_fork_is_archived(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Work that starts crossing the line while the copy is made refuses under
-    the lock, and the copy no channel got is archived."""
+    """The copy starting to answer elsewhere while it is made refuses under the
+    lock, and the copy no channel got is archived."""
     tenant = await make_tenant(db_session)
     state = FakeMAState()
     shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
@@ -205,36 +212,18 @@ async def test_a_copy_refused_after_the_fork_is_archived(
     await _bind(db_session, tenant.id, "c2", "shared")
     await db_session.commit()
 
-    async def fork(source: str, new_name: str) -> tuple[str, ...]:
-        copy = ma_agent(id="agent_fork", name=new_name, tenant_id=tenant.id)
-        state.agents[copy.id] = copy.model_dump(mode="json")
+    async def fork_then_route(*args: Any, **kwargs: Any) -> AgentCopy:
+        copy = await fork_agent(*args, **kwargs)
         async with db_session_factory.begin() as session:
-            await create_binding(
-                session,
-                tenant_id=tenant.id,
-                platform="discord",
-                parent_channel_id="c1",
-                thread_id="t1",
-                responder_ma_agent_id="agent_0",
-                responder_name="shared",
-                kind="handoff",
-            )
-        return ()
+            await _bind(session, tenant.id, "c9", kwargs["new_name"])
+        return copy
 
+    monkeypatch.setattr(channel_isolation_setup, "fork_agent", fork_then_route)
     with pytest.raises(ChannelIsolationRefused) as refused:
-        await set_channel_isolation(
-            client,
-            db_session_factory,
-            tenant_id=tenant.id,
-            channel_id="c1",
-            isolated=True,
-            default=DEFAULT,
-            actor_account_id=None,
-            fork=fork,
-        )
+        await _isolate(client, db_session_factory, tenant.id, "c1", fork=True)
 
-    assert refused.value.reason == "work_crosses_line"
-    assert archived == ["agent_fork"], "the copy no channel got is archived"
+    assert refused.value.reason == "shared_channel_agent"
+    assert len(archived) == 1, "the copy no channel got is archived"
     scope = await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
     assert scope is not None and scope.agent_name == "shared", "the channel keeps its agent"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
@@ -271,60 +260,6 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
     await db_session.commit()
     with pytest.raises(DaimonError, match="pinned to specific channels"):
         await fork("team-beta")
-
-
-async def test_isolating_refuses_work_that_would_cross_the_line(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A thread under the channel handed to an outside agent, or an outside agent's
-    routine posting into it, must be cleared first; each is named."""
-    tenant = await make_tenant(db_session)
-    client, _ = _client(tenant.id, ("local", False), ("shared", False))
-    await _bind(db_session, tenant.id, "c1", "local")
-    await _bind(db_session, tenant.id, "c2", "shared")
-    await create_binding(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="c1",
-        thread_id="t1",
-        responder_ma_agent_id="agent_1",
-        responder_name="shared",
-        kind="handoff",
-    )
-    routine = await create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id="u1",
-        agent_id="agent_1",
-        agent_name="shared",
-        cron_expr="0 * * * *",
-        timezone_="UTC",
-        trigger_message="hi",
-        destination_kind="channel",
-        destination_id="c1",
-        channel_id="c1",
-    )
-    await db_session.commit()
-
-    with pytest.raises(ChannelIsolationRefused) as refused:
-        await set_channel_isolation(
-            client,
-            db_session_factory,
-            tenant_id=tenant.id,
-            channel_id="c1",
-            isolated=True,
-            default=DEFAULT,
-            actor_account_id=None,
-        )
-
-    assert refused.value.reason == "work_crosses_line"
-    assert refused.value.crossings == (
-        "thread t1 (handed to shared)",
-        f"routine {routine.id} (shared)",
-    ), "each crossing is named so an admin can clear it"
-    policy = await load_access_policy(db_session, tenant_id=tenant.id)
-    assert policy.isolated_channel_ids == (), "a refusal writes nothing"
 
 
 async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
