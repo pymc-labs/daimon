@@ -8,8 +8,11 @@ anything; `packages/adapters/teams/tests/test_boot_sweep.py` asserts that.
 
 The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
-keyed inside it; channel history and files need Microsoft Graph; and a dialog's
-password field cannot take a `.env` upload or a repository token. Removing the
+keyed inside it; a turn replays its channel thread through Microsoft Graph,
+but the agent's own channel-reading tools stay hidden, and files shared in a
+channel stay unreachable, because no team-scoped Graph permission reaches the
+SharePoint they live in; and a dialog's password field cannot take a `.env`
+upload or a repository token. Removing the
 app archives nothing. The `billing` card has no promo code surface: Teams
 admins redeem with the MCP tool `redeem_promo_code`. Channel budgets are
 Discord and Slack only, so the card shows no channel budget either. So are
@@ -30,6 +33,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 import yaml
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -45,6 +49,7 @@ from daimon.adapters.mcp.tools.credential_requests import (
     register_credential_request_tools,
 )
 from daimon.adapters.teams import card as teams_card
+from daimon.adapters.teams.attachments import ChannelMedia, InboundFile, prepare_attachments
 from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
@@ -122,7 +127,38 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     hidden |= {"send_direct_message"}
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
-    assert not teams & hidden, "these need Graph, a non-password input or Discord/Slack DMs"
+    assert not teams & hidden, (
+        "these need tool-side Graph reads, a non-password input or Discord/Slack DMs"
+    )
+
+
+def test_teams_asks_no_file_permission_so_channel_files_stay_unreachable() -> None:
+    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
+    granted = manifest["authorization"]["permissions"]["resourceSpecific"]
+    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group"], (
+        "channel messages only; if a file permission is added, replace this record"
+    )
+
+
+async def test_a_teams_channel_file_is_named_and_explained_never_fetched() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request for a channel file: {request.url.host}")
+
+    async def token() -> str:
+        return "t"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as http:
+        prepared = await prepare_attachments(
+            http,
+            [InboundFile("embedded_file", "file")],
+            bot_token=token,
+            service_url=None,
+            channel_media=ChannelMedia(file_names=("q3.xlsx",)),
+            graph_token=token,
+        )
+    assert (
+        prepared.notice == "I couldn't read `q3.xlsx` (files shared in channels need a 1:1 chat)."
+    ), "Teams channel files are unreachable on purpose; if they become readable, replace this"
 
 
 def test_the_teams_billing_card_has_no_promo_code_surface() -> None:

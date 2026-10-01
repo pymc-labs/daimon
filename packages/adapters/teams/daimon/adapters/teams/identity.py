@@ -46,7 +46,8 @@ class TeamsInbound:
     and routing key: the conversation, or the live setup conversation a
     personal chat was switched into. `channel_id` is the config-cascade
     channel: the channel for a thread, the chat itself for a DM. `user_id` is
-    the sender's Entra object id.
+    the sender's Entra object id. `team_id` is a channel's Bot Framework team
+    id; `team_group_id` its Entra group id, when the activity carries it.
     """
 
     kind: Literal["dm", "channel"]
@@ -60,6 +61,8 @@ class TeamsInbound:
     bot_name: str | None = None
     files: tuple[InboundFile, ...] = ()
     setup_thread_id: str | None = None
+    team_id: str | None = None
+    team_group_id: str | None = None
 
     @property
     def thread_id(self) -> str:
@@ -117,13 +120,16 @@ def parse_inbound(
     others = activity.model_copy(update={"text": text})
     text = (strip_mentions_text(others, StripMentionsTextOptions(tag_only=True)) or "").strip()
     files = parse_attachments(activity.attachments or [], personal=kind == "personal")
-    if not text and not files:
+    # A bare channel mention asks about the thread, which the turn replays.
+    if not text and not files and kind == "personal":
         return Refusal(TEXT_ONLY)
     if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
         return Refusal(INPUT_TOO_LONG)
 
+    team = channel_data.team if channel_data is not None else None
     if kind == "personal":
         conversation_id = channel_id = conversation.id
+        team = None
     else:
         conversation_id = _thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
@@ -138,6 +144,8 @@ def parse_inbound(
         service_url=service_url,
         bot_name=activity.recipient.name,
         files=files,
+        team_id=team.id if team is not None else None,
+        team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
     )
 
 

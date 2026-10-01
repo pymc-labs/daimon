@@ -18,7 +18,6 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
-from xml.sax.saxutils import escape, quoteattr
 
 import anthropic
 import structlog
@@ -31,6 +30,7 @@ from daimon.adapters.teams.commands import (
     CommandHandler,
     parse_command,
 )
+from daimon.adapters.teams.context import HistoryBlock, render_user_message
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -51,6 +51,7 @@ from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
@@ -151,31 +152,21 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "channel_protected": ("turn.skipped.channel_protected", None),
 }
 
+_NO_CONTEXT = (
+    "I can't read this channel's messages, so there's nothing for me to go on. "
+    "Write your question after the mention, or ask a team owner to reinstall the app "
+    "and accept its permission to read channel messages."
+)
+
+
+def _bare_mention(inbound: TeamsInbound) -> bool:
+    """A channel mention with no words or files: it asks about the thread."""
+    return inbound.kind == "channel" and not inbound.text.strip() and not inbound.files
+
+
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 # Builds a continuation turn's handoff notice from what the bind carried across.
 HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
-
-
-def _user_message(
-    controls: str, inbound: TeamsInbound, *, is_admin: bool, keys: str, prefix: str
-) -> str:
-    """Host facts, then the person's escaped words, shaped like Slack's context XML."""
-    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>'
-    query = (
-        f"<user_query author_id={quoteattr(inbound.user_id)} "
-        f'is_admin="{str(is_admin).lower()}">{escape(inbound.text)}</user_query>'
-    )
-    return "\n".join(
-        [
-            controls,
-            "<context>",
-            context,
-            *([keys] if keys else []),
-            "</context>",
-            "",
-            prefix + query,
-        ]
-    )
 
 
 def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
@@ -218,6 +209,7 @@ class TeamsApp:
         sender: TeamsSender,
         commands: Mapping[str, CommandHandler],
         bot_token: BotToken,
+        reader: ThreadReader | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -229,6 +221,8 @@ class TeamsApp:
         self._sender = TimedSender(sender)
         self._commands = commands
         self._bot_token = bot_token
+        # Channel history and media through Graph; None replays nothing.
+        self._reader = reader
         self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self.spawn)
         self.credentials = TeamsCredentialRequests(
             runtime=runtime,
@@ -383,7 +377,8 @@ class TeamsApp:
             # Type and reason only, never the text: these drops are otherwise invisible.
             conversation_type = activity.conversation.conversation_type
             if parsed.text is None:
-                log.info(
+                # Debug: with channel-message consent Teams delivers every channel post.
+                log.debug(
                     "teams.message.ignored",
                     conversation_type=conversation_type,
                     reason="not_mentioned",
@@ -706,6 +701,10 @@ class TeamsApp:
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
+        bare = _bare_mention(inbound)
+        if bare and self._reader is None:
+            await lifecycle.close_with_notice(_NO_CONTEXT)
+            return
         deadline = turn_deadline(now=datetime.now(UTC))
         try:
             prepared = await bind_session(
@@ -723,6 +722,14 @@ class TeamsApp:
             await lifecycle.close_with_notice(await self._refusal(error, admission.agent.name))
             if reraise:
                 raise
+            return
+
+        # The trigger and this turn's status card are not history.
+        skip = frozenset(filter(None, (inbound.activity_id, lifecycle.message_id)))
+        watermark = prepared.watermark if prepared.reused else None
+        history = await self._history(inbound, watermark=watermark, skip_ids=skip)
+        if bare and history is None:
+            await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
         summary: str | None = None
@@ -746,11 +753,15 @@ class TeamsApp:
             adopted.answer_prefix = lifecycle.answer_prefix
             return adopted
 
+        embedded = any(f.kind in ("embedded_image", "embedded_file") for f in inbound.files)
+        reader = self._reader
         attachments = await prepare_attachments(
             self.runtime.http_client,
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
+            channel_media=await reader.read_media(inbound) if reader and embedded else None,
+            graph_token=reader.token if reader else None,
         )
         if attachments.notice is not None:
             await self._say(inbound, attachments.notice)
@@ -777,16 +788,19 @@ class TeamsApp:
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
             )
-            message = _user_message(
+            render = functools.partial(
+                render_user_message,
                 controls,
                 inbound,
                 is_admin=self._role(inbound) is Role.ADMIN,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
             )
+            message = render(history=history)
 
             async def reseed() -> str:
-                return message
+                # A recreated session has seen nothing: replay the whole thread.
+                return render(history=await self._history(inbound, watermark=None, skip_ids=skip))
 
             outcome = await run_prepared_turn(
                 deps,
@@ -831,6 +845,13 @@ class TeamsApp:
             await self._say(
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
             )
+
+    async def _history(
+        self, inbound: TeamsInbound, *, watermark: str | None, skip_ids: frozenset[str]
+    ) -> HistoryBlock | None:
+        if self._reader is None:
+            return None
+        return await self._reader.read(inbound, watermark=watermark, skip_ids=skip_ids)
 
     async def _key_names(
         self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission

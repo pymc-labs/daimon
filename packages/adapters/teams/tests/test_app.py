@@ -239,7 +239,7 @@ async def test_a_channel_message_without_a_mention_is_dropped_with_a_log(
     reply.assert_not_awaited()
     assert {
         "event": "teams.message.ignored",
-        "log_level": "info",
+        "log_level": "debug",
         "conversation_type": "channel",
         "reason": "not_mentioned",
     } in logs, "a silent drop leaves the conversation type and why, never the text"

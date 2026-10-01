@@ -8,6 +8,7 @@ import httpx
 import pytest
 from daimon.adapters.teams.attachments import (
     MAX_ATTACHMENTS,
+    ChannelMedia,
     InboundFile,
     parse_attachments,
     prepare_attachments,
@@ -177,3 +178,34 @@ async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> No
         "`r.pdf` (files shared in channels need a 1:1 chat)."
     )
     assert prepared.prefix.count("[attachment]") == 2, "the agent hears about both"
+
+
+async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained() -> None:
+    """A hosted image is fetched with the Graph token from Graph alone."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=_png())
+
+    async def graph_token() -> str:
+        return "graph-token"
+
+    hosted = (
+        "https://graph.microsoft.com/v1.0/teams/g/channels/c/messages/1/hostedContents/h/$value"
+    )
+    media = ChannelMedia(image_urls=(hosted, "https://evil.example/hostedContents/h/$value"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        prepared = await prepare_attachments(
+            http,
+            [InboundFile("embedded_image", "image")],
+            bot_token=_bot_token,
+            service_url=SERVICE_URL,
+            channel_media=media,
+            graph_token=graph_token,
+        )
+    assert len(prepared.image_blocks) == 1, "the Graph-hosted image is inlined"
+    assert [(r.url.host, r.headers["authorization"]) for r in requests] == [
+        ("graph.microsoft.com", "Bearer graph-token")
+    ], "the off-Graph URL is refused before any request"
+    assert prepared.notice == "I couldn't read `image` (evil.example is not an allowed file host)."

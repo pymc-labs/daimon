@@ -108,8 +108,17 @@ def test_tenant_comparison_ignores_case() -> None:
     assert isinstance(inbound, TeamsInbound)
 
 
-def test_a_bare_mention_asks_for_text() -> None:
-    assert _parse(make_channel_activity(text="")) == Refusal(TEXT_ONLY)
+def test_a_bare_channel_mention_is_a_turn_over_the_thread() -> None:
+    """A mention with no words asks about the thread, which the turn replays."""
+    inbound = _parse(make_channel_activity(text=""))
+    assert isinstance(inbound, TeamsInbound), "a bare channel mention runs a turn"
+    assert inbound.text == ""
+    assert inbound.team_id is not None, "the team id is kept for the Graph lookup"
+
+
+def test_an_empty_personal_message_asks_for_text() -> None:
+    """A 1:1 chat has no thread to replay, so an empty message is refused."""
+    assert _parse(make_message_activity(text="")) == Refusal(TEXT_ONLY)
 
 
 def test_a_file_without_text_is_a_turn() -> None:

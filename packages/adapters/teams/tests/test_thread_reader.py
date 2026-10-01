@@ -1,0 +1,99 @@
+"""Which window a channel message replays, and failure that leaves the turn running."""
+
+from __future__ import annotations
+
+import dataclasses
+
+import httpx
+import structlog
+from daimon.adapters.teams.graph import GraphClient, TeamGroups
+from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.thread_reader import ThreadReader, root_id
+
+from .conftest import CHANNEL_ID, make_inbound
+
+GROUP = "11111111-1111-1111-1111-111111111111"
+ROOT = "1700000000001"
+
+
+async def _token() -> str:
+    return "graph-token"
+
+
+async def _no_lookup(team_id: str) -> str | None:
+    raise AssertionError("the activity named the group")
+
+
+def _reader(handler: httpx.MockTransport) -> ThreadReader:
+    graph = GraphClient(httpx.AsyncClient(transport=handler), _token)
+    return ThreadReader(graph, TeamGroups(_no_lookup), bot_app_id="bot")
+
+
+def _inbound(activity_id: str) -> TeamsInbound:
+    inbound = make_inbound("q", conversation=f"{CHANNEL_ID};messageid={ROOT}", kind="channel")
+    return dataclasses.replace(
+        inbound, channel_id=CHANNEL_ID, activity_id=activity_id, team_group_id=GROUP
+    )
+
+
+def _message(id: str) -> dict[str, object]:
+    return {"id": id, "body": {"contentType": "text", "content": f"m{id}"}}
+
+
+def test_root_id_reads_the_thread_root_or_none() -> None:
+    assert root_id(f"{CHANNEL_ID};messageid={ROOT}") == ROOT
+    assert root_id("a:personal-chat") is None
+
+
+async def test_a_mention_starting_a_thread_replays_the_channel() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"value": [_message(ROOT), _message("1699999999999")]})
+
+    block = await _reader(httpx.MockTransport(handler)).read(
+        _inbound(ROOT),
+        watermark=None,
+        skip_ids=frozenset(),
+    )
+    assert paths == [f"/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages"]
+    assert block is not None and block.tag == "channel_context"
+    assert block.attrs == {"count": "1"}, "the trigger post itself is not context"
+
+
+async def test_a_continuation_reads_only_the_delta_since_the_watermark() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"value": [_message("1700000000009"), _message("5")]})
+
+    block = await _reader(httpx.MockTransport(handler)).read(
+        _inbound("1700000000010"),
+        watermark="1700000000005",
+        skip_ids=frozenset(),
+    )
+    assert paths == [f"/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages/{ROOT}/replies"]
+    assert block is not None and block.tag == "thread_delta" and len(block.lines) == 1
+
+
+async def test_a_refused_read_logs_one_warning_without_content_and_returns_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"message": "secret thread text"}})
+
+    with structlog.testing.capture_logs() as logs:
+        block = await _reader(httpx.MockTransport(handler)).read(
+            _inbound("1700000000010"),
+            watermark=None,
+            skip_ids=frozenset(),
+        )
+    assert block is None, "the turn runs without history"
+    assert logs == [
+        {
+            "event": "teams.history.unavailable",
+            "log_level": "warning",
+            "status": 403,
+            "reason": "http error",
+        }
+    ]
