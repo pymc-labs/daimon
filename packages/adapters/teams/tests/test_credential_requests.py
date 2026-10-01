@@ -744,13 +744,13 @@ async def test_each_kind_opens_one_input_sized_for_what_it_takes(
     kind: str,
     multiline: bool,
 ) -> None:
-    """Values and files are multi-line; tokens stay masked."""
     """Values and pasted files can span lines; tokens are masked."""
     row = await _request(db_session_factory, account_id, kind=kind)
-    async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+    # An admin: a member is refused a repo bind on the shared default agent.
+    async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
         field = _field(await post_activity(service, _open(row.token)))
-    assert bool(field.get("isMultiline")) is multiline
-    assert (field.get("style") == "Password") is not multiline
+    assert bool(field.get("isMultiline")) is multiline, "values and files can span lines"
+    assert (field.get("style") == "Password") is not multiline, "a token is never shown"
 
 
 async def test_a_multi_line_env_value_is_stored_as_typed(
@@ -764,7 +764,7 @@ async def test_a_multi_line_env_value_is_stored_as_typed(
         await service.turns.drain(5)
     async with db_session_factory() as session:
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
-    assert file is not None and file.content == pem
+    assert file is not None and file.content == pem, "stored with its line breaks"
 
 
 async def _keys(db: async_sessionmaker[AsyncSession]) -> dict[str, str]:
@@ -790,6 +790,7 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
             await service.turns.drain(5)
 
     assert "No keys were saved" in json.dumps(bad) and not untouched, "form open, nothing spent"
+    assert "Paste a corrected file" in json.dumps(bad), "a dialog takes a paste, not an upload"
     assert not (saved or {}).get("task"), "the dialog closes"
     assert await _keys(db_session_factory) == {
         "ALPHA_KEY": "alpha-private",
@@ -797,10 +798,11 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
     }
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
-    assert spent is not None and spent.outcome == "applied"
-    assert "✅" in _edits(fake)[-1]
+    assert spent is not None and spent.outcome == "applied", "spent once, applied"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
-    assert "private" not in json.dumps([r.body for r in fake.requests]) + repr(logs)
+    sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert "private" not in sent, "no value reaches Teams or the logs"
 
 
 async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
@@ -818,8 +820,8 @@ async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
     assert await _keys(db_session_factory) == {"ALPHA_KEY": "the-value-in-use"}, "whole-file"
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
-    assert spent is not None and spent.outcome == "stale_replacement"
-    assert "ALPHA_KEY is already set" in _edits(fake)[-1]
+    assert spent is not None and spent.outcome == "stale_replacement", "spent, nothing written"
+    assert "ALPHA_KEY is already set" in _edits(fake)[-1], "the card names the held key"
     dispatch.assert_not_awaited()
 
 
@@ -842,26 +844,27 @@ async def test_a_repo_token_is_checked_then_binds_the_working_repo(
             await service.turns.drain(5)
 
     assert "cannot read o/r" in json.dumps(bad) and not untouched, "form open, nothing spent"
-    assert not (saved or {}).get("task")
-    assert access.await_args is not None and access.await_args.kwargs["pat"] == "ghp_right"
+    assert not (saved or {}).get("task"), "the dialog closes"
+    assert access.await_args is not None, "the token was checked"
+    assert access.await_args.kwargs["pat"] == "ghp_right", "checked as stored: stripped"
     async with db_session_factory() as session:
         binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
         spent = await peek_credential_request(session, token=row.token)
-    assert binding is not None and binding.repo_url == "o/r"
+    assert binding is not None and binding.repo_url == "o/r", "the working repo is bound"
     assert binding.default_branch == "release", "the branch the card was posted for"
-    assert binding.ma_secret_ref == f"inline-pat:{row.agent_id}" and binding.proof_kind == "pat"
-    assert spent is not None and spent.outcome == "applied"
-    assert "✅" in _edits(fake)[-1]
+    assert binding.ma_secret_ref == f"inline-pat:{row.agent_id}", "the agent's own token"
+    assert binding.proof_kind == "pat", "proved by the token check"
+    assert spent is not None and spent.outcome == "applied", "spent once, applied"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
     sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
-    assert "ghp_right" not in sent and "ghp_wrong" not in sent
+    assert "ghp_right" not in sent and "ghp_wrong" not in sent, "no token in Teams or logs"
 
 
 @pytest.mark.parametrize("kind", ["repo", "skill_repo"])
 async def test_a_member_cannot_give_a_managed_agent_a_repo_or_skills(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
 ) -> None:
-    """The attachment policy refuses a member before any write."""
     """Decided before the consume, as on Slack: nothing spent, the card says why."""
     row = await _request(db_session_factory, account_id, kind=kind)
     fake, access, sync = TeamsApiFake(), AsyncMock(return_value=True), AsyncMock()
@@ -874,14 +877,15 @@ async def test_a_member_cannot_give_a_managed_agent_a_repo_or_skills(
             await service.turns.drain(5)
 
     expected = module._SHARED_AGENT_SKILLS if kind == "skill_repo" else module._SHARED_AGENT  # pyright: ignore[reportPrivateUsage]
-    assert refused["task"]["value"] == expected
+    assert refused["task"]["value"] == expected, "the shared-agent refusal"
     access.assert_not_awaited()
     sync.assert_not_awaited()
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token=row.token)
         binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
-    assert live is not None and live.used_at is None and binding is None
-    assert "working repo was not changed" in _edits(fake)[-1]
+    assert live is not None and live.used_at is None, "the request is not spent"
+    assert binding is None, "nothing bound"
+    assert "working repo was not changed" in _edits(fake)[-1], "the card says why"
 
 
 def _imported() -> AsyncMock:
@@ -906,9 +910,10 @@ async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
             await post_activity(service, _submit(row.token, secret="ghp_skills"))
             await service.turns.drain(5)
 
-    assert sync.await_args is not None
-    assert (sync.await_args.kwargs["branch"], sync.await_args.kwargs["path"]) == ("main", "skills")
-    assert sync.await_args.kwargs["is_admin"] is True
+    assert sync.await_args is not None, "the import ran"
+    where = (sync.await_args.kwargs["branch"], sync.await_args.kwargs["path"])
+    assert where == ("main", "skills"), "from the branch and path the card was posted for"
+    assert sync.await_args.kwargs["is_admin"] is True, "under the submitter's live role"
     assert {s["skill_id"] for s in updates[-1]["skills"]} >= {"skill_01eda"}, "attached"
     async with db_session_factory() as session:
         binding = await get_binding(session, tenant_id=TENANT, agent_id=row.agent_id)
@@ -919,8 +924,8 @@ async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
             repo_url="https://github.com/o/skills",
         )
     assert binding is None, "the working repo does not change"
-    assert credential is not None and credential.proof_kind == "pat"
-    assert "✅" in _edits(fake)[-1]
+    assert credential is not None and credential.proof_kind == "pat", "the skill repo token"
+    assert "✅" in _edits(fake)[-1], "the card says it landed"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
 
 
@@ -941,6 +946,86 @@ async def test_a_skill_import_that_lands_nothing_is_not_reported_as_applied(
 
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
-    assert spent is not None and spent.outcome == "write_failed"
-    assert not updates and "✅" not in _edits(fake)[-1]
+    assert spent is not None and spent.outcome == "write_failed", "spent, not applied"
+    assert not updates, "nothing to attach"
+    assert "✅" not in _edits(fake)[-1], "the card does not claim it landed"
     d.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kind", ["repo", "skill_repo"])
+async def test_a_member_is_not_asked_for_a_repo_token_a_shared_agent_refuses(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
+) -> None:
+    """Slack gates a repo bind at the click, a skill import only at the submit."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    fake = TeamsApiFake()
+    async with _running(fake, _runtime(db_session_factory, managed=True)) as (service, _):
+        opened = await post_activity(service, _open(row.token))
+    if kind == "repo":
+        assert opened["task"]["value"] == module._SHARED_AGENT, "no form for a refused bind"  # pyright: ignore[reportPrivateUsage]
+    else:
+        assert "Skill repo only" in json.dumps(opened, ensure_ascii=False), "as Slack's form"
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+    assert live is not None and live.used_at is None, "a click spends nothing"
+    assert not _edits(fake), "the card stays as posted"
+
+
+@pytest.mark.parametrize("kind", ["repo", "skill_repo"])
+async def test_a_github_token_needs_encryption_keys(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, kind: str
+) -> None:
+    """Without keys the token would be stored plain, so the form refuses it."""
+    row = await _request(db_session_factory, account_id, kind=kind)
+    runtime = _admin_runtime(db_session_factory)
+    runtime = dataclasses.replace(
+        runtime, turn_deps=dataclasses.replace(runtime.turn_deps, fernet=None)
+    )
+    async with _running(TeamsApiFake(), runtime) as (service, _):
+        refused = await post_activity(service, _submit(row.token, secret="ghp_x"))
+    assert refused["task"]["value"] == module._UNCONFIGURED, "not set up"  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+    assert live is not None and live.used_at is None, "nothing spent"
+
+
+async def test_a_skill_repo_token_that_cannot_read_the_repo_spends_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """Checked before the consume, as the working repo's token is."""
+    row = await _request(db_session_factory, account_id, kind="skill_repo")
+    fake, sync = TeamsApiFake(), AsyncMock()
+    with (
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=False)),
+        patch.object(module, "run_skill_sync", sync),
+    ):
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, _):
+            bad = await post_activity(service, _submit(row.token, secret="ghp_wrong"))
+            await service.turns.drain(5)
+    assert "cannot read o/skills" in json.dumps(bad), "the form stays open with why"
+    sync.assert_not_awaited()
+    assert not _edits(fake), "the card stays as posted"
+
+
+async def test_a_failed_bind_spends_the_request_and_says_so_without_the_token(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """A write error can quote its parameters, so only its type is logged."""
+    row = await _request(db_session_factory, account_id, kind="repo")
+    fake = TeamsApiFake()
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
+        patch.object(module, "set_binding", AsyncMock(side_effect=RuntimeError("ghp_leak"))),
+    ):
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, dispatch):
+            await post_activity(service, _submit(row.token, secret="ghp_leak"))
+            await service.turns.drain(5)
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert spent is not None and spent.outcome == "write_failed", "spent, not applied"
+    assert "✅" not in _edits(fake)[-1], "the card does not claim it landed"
+    assert "repo_bound" not in repr(logs), "nothing is logged as bound"
+    sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert "ghp_leak" not in sent, "no token in Teams or logs"
+    dispatch.assert_not_awaited()

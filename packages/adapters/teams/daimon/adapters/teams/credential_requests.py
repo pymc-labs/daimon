@@ -97,6 +97,7 @@ from daimon.core.posted_controls.teams_card import (
     ADAPTIVE_CARD_TYPE,
     build_adaptive_card,
     card_for_request,
+    teams_wording,
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
@@ -251,9 +252,12 @@ def _title(row: CredentialRequestRow) -> str:
 
 def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
     """The private form for one request: the card's facts and one input. Never prefilled."""
-    body: list[CardElement] = [error_text(error)] if error else []
+    # One block per line: a TextBlock does not reliably break on a single newline.
+    body: list[CardElement] = [error_text(line) for line in (error or "").splitlines()]
     body.append(_secret_input(row.kind))
-    facts = card_for_request(row, state="requested").facts
+    facts = teams_wording(card_for_request(row, state="requested")).facts
+    if row.kind == "skill_repo":
+        facts = ("Skill repo only — the working repo does not change.", *facts)
     if row.kind in _REPO_KINDS:
         facts = (*facts, "A fine-grained token with read access to the repo.")
     body += [TextBlock(text=fact, is_subtle=True, size="Small", wrap=True) for fact in facts]
@@ -351,6 +355,16 @@ class TeamsCredentialRequests:
             return dialog_message(_MESSAGES[reason or "invalid"])
         if row.kind == "mcp_oauth":
             return await self._start_oauth(row, activity.service_url)
+        if row.kind == "repo":
+            # Gated at the click too, as on Slack: a member is not asked for a
+            # token a shared agent would refuse.
+            agent = await find_agent_by_derived_uuid(
+                self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            )
+            if agent is None:
+                return dialog_message(_AGENT_GONE)
+            if await self._attachment_refused(row, agent, "repo_bind", is_admin=actor.is_admin):
+                return dialog_message(_SHARED_AGENT)
         return credential_form(row)
 
     async def _start_oauth(
@@ -430,7 +444,7 @@ class TeamsCredentialRequests:
                 )
                 agent_name = row.target_name or "the agent"
                 rejected = render_env_import_rejected(
-                    err.rejection, err.problems, target_name=agent_name
+                    err.rejection, err.problems, target_name=agent_name, pasted=True
                 )
                 return credential_form(row, rejected)
         agent = await find_agent_by_derived_uuid(
@@ -842,7 +856,6 @@ class TeamsCredentialRequests:
             return
         await self._edit(consumed, "received", service_url)
         repo_url, branch, _path = split_skill_repo_target(consumed.target)
-        log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
         try:
             ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
             proof = RepoAccessProof(
@@ -866,6 +879,7 @@ class TeamsCredentialRequests:
             # Type only: a failed write can quote the token; the card says it did not land.
             log.warning("teams.credential.repo_write_failed", err_type=type(err).__name__)
             return await self._refuse(consumed, "target_unavailable", service_url)
+        log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
         change = ConfigurationChange(
             target_name=consumed.target_name or "this agent",
             kind="repo",
@@ -944,7 +958,12 @@ class TeamsCredentialRequests:
             agent_id=consumed.agent_id,
             outcomes=imported,
         )
-        log.info("teams.credential.skill_repo_attached", imported=len(imported), note=attach.note)
+        log.info(
+            "teams.credential.skill_repo_imported",
+            imported=len(imported),
+            attached=attach.attached,
+            note=attach.note,
+        )
         async with self._runtime.sessionmaker.begin() as session:
             outcome = "applied" if attach.attached else "write_failed"
             await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
