@@ -85,3 +85,67 @@ def test_install_log_redaction_quiets_httpx_and_is_idempotent() -> None:
     access = logging.getLogger("uvicorn.access")
     assert sum(isinstance(f, LogRedactionFilter) for f in access.filters) == 1
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+def test_json_logging_redacts_nested_fields_secret_names_and_object_reprs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = _canary()
+
+    class _Opaque:
+        def __repr__(self) -> str:
+            return f"Opaque(password={canary})"
+
+    configure_log_level("INFO")
+    structlog.get_logger("daimon.test").info(
+        "call.done",
+        detail={"inner": [{"access_token": canary}], "note": f"token={canary}"},
+        bot_token=canary,
+        obj=_Opaque(),
+        count=3,
+    )
+
+    out = capsys.readouterr().out
+    assert "call.done" in out and '"count": 3' in out
+    assert canary not in out
+
+
+def test_free_text_bare_query_keys_and_relative_targets_are_redacted() -> None:
+    from daimon.core.observability import redact_log_text
+
+    canary = _canary()
+    for text in (
+        f'127.0.0.1 - "GET /oauth/callback?code={canary}&state=x HTTP/1.1" 200',
+        f"redirect to /cb?{canary}",
+        f"https://h/p?{canary}&a=1",
+    ):
+        assert canary not in redact_log_text(text), text
+    assert redact_log_text("what? really?") == "what? really?"
+
+
+def test_rich_handler_tracebacks_are_redacted_and_carry_no_locals(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A library logger with its own rich handler (fastmcp's) can't bypass redaction."""
+    from rich.logging import RichHandler
+
+    text_canary, local_canary = _canary(), _canary()
+    logger = logging.getLogger("fastmcp.test_rich")
+    parent = logging.getLogger("fastmcp")
+    handler = RichHandler(rich_tracebacks=True, tracebacks_show_locals=True)
+    parent.addHandler(handler)
+    try:
+        install_log_redaction()
+        held_secret = local_canary  # noqa: F841 - a frame local that must not print
+        try:
+            raise RuntimeError(f"Authorization: Bearer {text_canary}")
+        except RuntimeError:
+            logger.exception("Error calling tool")
+    finally:
+        parent.removeHandler(handler)
+
+    out = capfd.readouterr()
+    logged = out.out + out.err
+    assert "Error calling tool" in logged
+    assert text_canary not in logged
+    assert local_canary not in logged

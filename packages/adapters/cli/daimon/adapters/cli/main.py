@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import importlib.metadata
+import sys
+import traceback
 
-import rich.traceback
 import typer
 from daimon.adapters.cli.commands.agents import agents_app
 from daimon.adapters.cli.commands.audit import audit_app
@@ -25,8 +26,11 @@ from daimon.adapters.cli.commands.smoke import smoke_command
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.run.command import run_command
+from daimon.core.observability import redact_text
 
-app = typer.Typer(help="Daimon CMA CLI")
+# Typer's pretty exceptions print frame locals and raw messages; unhandled
+# errors go through `main` instead, which prints a redacted traceback.
+app = typer.Typer(help="Daimon CMA CLI", pretty_exceptions_enable=False)
 app.add_typer(agents_app, name="agents")
 app.add_typer(backup_app, name="backup")
 app.add_typer(environments_app, name="environments")
@@ -50,7 +54,9 @@ app.command("smoke")(smoke_command)
 
 @app.callback()
 def root() -> None:
-    rich.traceback.install(show_locals=False)
+    # Unhandled exceptions are rendered by `main` (redacted, no locals); no
+    # rich traceback hook that would print raw messages.
+    return None
 
 
 @app.command("version")
@@ -59,5 +65,21 @@ def version_command() -> None:
     typer.echo(f"daimon {version}")
 
 
+def main() -> None:
+    """Console-script entry point: `daimon`.
+
+    An unhandled exception is printed as a redacted plain traceback (no frame
+    locals, credential text removed) and exits 1; Typer exits pass through.
+    """
+    try:
+        app()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as exc:
+        trace = "".join(traceback.format_exception(exc))
+        print(redact_text(trace), file=sys.stderr, end="")
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    app()
+    main()

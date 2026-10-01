@@ -236,6 +236,9 @@ _ADVERSARIAL = {
     "capability-paths": "/uploads/" * 7200,
     "path-segments": "/aB3" * 16000,
     "long-segment": "/" + "aB3" * 21000 + "x",
+    "long-run-one-escape": "a" * 64000 + "%41",
+    "encoded-runs": "%2Fuploads%2Fab" * 4300,
+    "encoded-words": "x%20" * 16000,
 }
 
 
@@ -391,6 +394,33 @@ def test_span_tags_and_plain_headers_are_scrubbed() -> None:
 
     assert canary not in repr(scrubbed)
     assert scrubbed is not None and "[redaction failed]" not in repr(scrubbed)
+
+
+def test_percent_encoded_capability_urls_in_headers_and_spans_are_scrubbed() -> None:
+    """Encoding is not protection: `/%75ploads/<token>` is the upload route."""
+    from urllib.parse import quote
+
+    from daimon.core.observability import _scrub_event  # pyright: ignore[reportPrivateUsage]
+
+    canary = "Ab3" + _canary().replace("-", "") + "Xy9"
+    once = quote(f"https://h/uploads/{canary}", safe="")
+    partly = f"https://h/%75ploads/%{ord(canary[0]):02X}{canary[1:]}"
+    twice = quote(quote(f"/slack/file/eyJ0.{canary}", safe=""), safe="")
+    event: dict[str, object] = {
+        "type": "transaction",
+        "request": {
+            "url": "https://h/ok",
+            "headers": {"Referer": partly, "X-Original-Url": once},
+        },
+        "spans": [{"op": "http.client", "description": f"GET {twice}", "data": {"url": partly}}],
+        "exception": {"values": [{"type": "E", "value": f"from {once} and {twice}"}]},
+    }
+
+    scrubbed = repr(_scrub_event(event, {}))  # pyright: ignore[reportArgumentType]
+
+    assert canary not in scrubbed
+    assert canary[1:] not in scrubbed
+    assert "[redaction failed]" not in scrubbed
 
 
 def _best_of_three(fn: Callable[[], object]) -> float:

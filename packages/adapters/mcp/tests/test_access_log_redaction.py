@@ -143,3 +143,63 @@ def test_slack_file_proxy_success_logs_no_file_token(
     assert token not in logged
     for part in token.split("."):
         assert part not in logged
+
+
+def test_failing_tool_traceback_in_the_real_app_is_redacted_and_has_no_locals(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """fastmcp logs tool exceptions through its own rich handler; that output is redacted."""
+    import json
+
+    from fastmcp import Client
+
+    text_canary, local_canary = secrets.token_hex(12), secrets.token_hex(12)
+    from fastmcp import FastMCP
+
+    # create_mcp_app installs the process-wide log redaction; a bare server on
+    # the same fastmcp loggers exercises fastmcp's own tool-error logging
+    # without the app's auth and middleware in the way.
+    _production_mcp_app()
+    mcp = FastMCP("redaction-probe")
+
+    @mcp.tool
+    def explode() -> str:
+        held_secret = local_canary  # noqa: F841 - a frame local that must not print
+        raise RuntimeError(json.dumps({"api_key": text_canary}))
+
+    async def _call() -> None:
+        async with Client(mcp) as client:
+            with contextlib.suppress(Exception):
+                await client.call_tool("explode", {})
+
+    asyncio.run(_call())
+
+    out = capfd.readouterr()
+    logged = out.out + out.err
+    assert "RuntimeError" in logged, "the tool failure was logged"
+    assert text_canary not in logged
+    assert local_canary not in logged
+
+
+def test_structlog_after_create_mcp_app_renders_redacted_json_without_locals(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    import structlog
+
+    text_canary, local_canary = secrets.token_hex(12), secrets.token_hex(12)
+    _production_mcp_app()
+    capfd.readouterr()
+
+    held_secret = local_canary  # noqa: F841 - a frame local that must not print
+    try:
+        raise RuntimeError(json.dumps({"client_secret": text_canary}))
+    except RuntimeError:
+        structlog.get_logger("daimon.test").exception("tool.failed", api_token=text_canary)
+
+    logged = capfd.readouterr().out
+    line = next(line for line in logged.splitlines() if "tool.failed" in line)
+    assert json.loads(line)["event"] == "tool.failed", "rendered by the JSON chain"
+    assert text_canary not in logged
+    assert local_canary not in logged

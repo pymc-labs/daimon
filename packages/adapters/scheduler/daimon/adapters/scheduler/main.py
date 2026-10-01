@@ -63,7 +63,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
-from daimon.core.observability import init_sentry
+from daimon.core.observability import init_sentry, install_log_redaction
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.routine_delivery import (
@@ -538,6 +538,7 @@ async def run(
     # takes effect for the whole process (OB-1; this entrypoint owns the call site
     # since 61 is unexecuted).
     configure_log_level(settings.log.level)
+    install_log_redaction()
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,

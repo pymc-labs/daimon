@@ -19,7 +19,7 @@ from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_log_level
-from daimon.core.observability import init_sentry
+from daimon.core.observability import init_sentry, install_log_redaction
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.web.async_client import AsyncWebClient
@@ -43,6 +43,7 @@ async def main() -> None:
         sys.exit(1)
     # Configure the JSON log chain BEFORE the first log line so it takes effect.
     configure_log_level(settings.log.level)
+    install_log_redaction()
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,

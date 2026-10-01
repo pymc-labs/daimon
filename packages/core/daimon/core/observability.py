@@ -49,7 +49,7 @@ import logging
 import re
 import traceback
 from typing import TYPE_CHECKING, Literal, cast
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import sentry_sdk
 import structlog
@@ -162,6 +162,8 @@ _NAME_VALUE = re.compile(
 # A command-line flag followed by its value as the next word: `--password x`.
 _FLAG_VALUE = re.compile(r"(?<!\S)-{1,2}([A-Za-z][A-Za-z0-9_-]{0,63})(\s+)(?=[^\s-])")
 _FLAG_NAME = re.compile(r"^-{1,2}([A-Za-z][A-Za-z0-9_.-]{0,63})$")
+# Characters that start a request target inside free text (`GET /x?y`).
+_TARGET_DELIMITER = re.compile(r"[\s\"'<(\[=,]")
 # Characters that end a URL query inside free text.
 _QUERY_END = re.compile(r"[\s#'\"<>]")
 # Form-encoded separators: `%26` (&) and `%3D` (=), also double-encoded
@@ -401,27 +403,28 @@ def _secret_value_spans(text: str, *, oauth: bool) -> list[tuple[int, int]]:
 
 
 def _redact_url_queries(text: str) -> str:
-    """Redact every value in each `scheme://…?query` found in free text.
+    """Redact the query of each URL or request target found in free text.
 
-    Anchored on `?` and searched backwards a bounded distance for `://`, so
-    the cost stays linear however the text repeats URL fragments.
+    Covers `scheme://…?query` and relative targets (`/path?query`, as in an
+    access-log line). Anchored on `?` and searched backwards a bounded
+    distance, so the cost stays linear however the text repeats fragments.
     """
     out: list[str] = []
     cursor = 0
     position = text.find("?")
     while position != -1:
-        scheme = text.rfind("://", max(cursor, position - 512), position)
-        if scheme != -1 and not any(c.isspace() for c in text[scheme:position]):
+        window_start = max(cursor, position - 512)
+        scheme = text.rfind("://", window_start, position)
+        is_url = scheme != -1 and not any(c.isspace() for c in text[scheme:position])
+        if not is_url:
+            delimiters = list(_TARGET_DELIMITER.finditer(text, window_start, position))
+            token_start = delimiters[-1].end() if delimiters else window_start
+            is_url = text.startswith("/", token_start) and position - token_start > 1
+        if is_url:
             end_match = _QUERY_END.search(text, position + 1, position + 8192)
             end = end_match.start() if end_match else min(len(text), position + 8192)
-            query = text[position + 1 : end]
             out.append(text[cursor : position + 1])
-            out.append(
-                "&".join(
-                    f"{part.split('=', 1)[0]}={_REDACTED}" if "=" in part else part
-                    for part in query.split("&")
-                )
-            )
+            out.append(_redact_query(text[position + 1 : end]))
             cursor = end
             position = text.find("?", end)
         else:
@@ -453,9 +456,45 @@ def _redact_secret_text(text: str) -> str:
             _event_text_budget.set(0)
             return _EVENT_BUDGET_MARKER
         _event_text_budget.set(remaining - len(text))
+    text = _redact_plain_text(text)
+    if "%" in text:
+        text = _redact_encoded_tokens(text)
+    return text
+
+
+# A whitespace-free run; only runs holding a percent escape are decoded. A
+# plain run match (no backtracking) keeps this linear in the text length.
+_TEXT_RUN = re.compile(r"[^\s\"'<>]+")
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _redact_encoded_tokens(text: str) -> str:
+    """Percent-encoding is not protection: look at each encoded run decoded.
+
+    Each run is decoded up to two levels and redacted as plain text; if that
+    finds anything, the whole run is replaced (its decoded form could end a
+    value early, so it isn't reused), otherwise the run is left as it was.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        run = match.group(0)
+        if not _PERCENT_ESCAPE.search(run):
+            return run
+        decoded = unquote(run)
+        if "%" in decoded:
+            decoded = unquote(decoded)
+        if decoded == run:
+            return run
+        return run if _redact_plain_text(decoded) == decoded else _REDACTED
+
+    return _TEXT_RUN.sub(_sub, text)
+
+
+def _redact_plain_text(text: str) -> str:
+    """The free-text rules on literal (not percent-decoded) text."""
     if "{" in text or "[" in text:
         text = _redact_embedded_structures(text)
-    if "://" in text and "?" in text:
+    if "?" in text and "/" in text:
         text = _redact_url_queries(text)
     if _FORM_ENCODED.search(text):
         # Form-encoded bodies: decode only the pair separators, so
@@ -526,7 +565,12 @@ def _redact_url(url: str) -> str:
     host = parts.hostname or ""
     if parts.port is not None:
         host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme, host, _redact_path_tokens(parts.path), "", ""))
+    # Match capability routes on the decoded path (two levels), as the server
+    # routes it: an encoded `/%75ploads/<token>` is the same capability.
+    path = unquote(parts.path)
+    if "%" in path:
+        path = unquote(path)
+    return urlunsplit((parts.scheme, host, _redact_path_tokens(path), "", ""))
 
 
 def _scrub_url_fields(data: dict[str, object]) -> None:
@@ -552,19 +596,58 @@ def redact_request_target(target: str) -> str:
     segments replaced, every query value redacted, fragment dropped."""
     without_fragment = target.split("#", 1)[0]
     path, separator, query = without_fragment.partition("?")
-    path = _redact_path_tokens(path)
+    path = _redact_target_path(path)
     return f"{path}?{_redact_query(query)}" if separator else path
 
 
-def redact_log_text(text: str) -> str:
-    """Free text safe to log: the same rules as Sentry exception text."""
+def _redact_target_path(path: str) -> str:
+    """Capability segments replaced; a percent-encoded path is judged decoded.
+
+    Encoding is not protection, but decoded text isn't reused either (a
+    decoded space or quote could end a value early): if the decoded view
+    holds anything to redact, the whole path is replaced.
+    """
+    decoded = unquote(path)
+    if "%" in decoded:
+        decoded = unquote(decoded)
+    if decoded == path:
+        return _redact_path_tokens(path)
+    tokens_redacted = _redact_path_tokens(decoded)
+    if _redact_secret_text(tokens_redacted) != tokens_redacted:
+        return "/" + _REDACTED
+    # Whole capability segments are replaced, so the decoded route is safe
+    # to keep; otherwise the original (encoded) path is unchanged.
+    return tokens_redacted if tokens_redacted != decoded else path
+
+
+def redact_text(text: str) -> str:
+    """The one redaction entry point for free text, shared by every sink:
+    Sentry hooks, structlog chains, stdlib/uvicorn/fastmcp log filters and CLI
+    error output."""
     return _redact_secret_text(text)
 
 
+def redact_field(name: str, value: object) -> object:
+    """The one redaction entry point for a named value (log field, context
+    entry): a secret-named field loses its value, anything else is redacted
+    inside, recursively."""
+    return _redact_log_field(name, value)
+
+
+# Kept for callers of the earlier name.
+redact_log_text = redact_text
+
+
 def _redact_query(query: str) -> str:
-    """Keep parameter names, redact every value."""
-    pairs = parse_qsl(query, keep_blank_values=True)
-    return urlencode([(name, _REDACTED) for name, _ in pairs], safe="[]")
+    """Keep parameter names, redact every value; a bare key (no `=`) can be a
+    credential itself, so it is redacted whole."""
+    parts: list[str] = []
+    for part in query.split("&"):
+        if not part:
+            continue
+        name, separator, _ = part.partition("=")
+        parts.append(f"{name}={_REDACTED}" if separator else _REDACTED)
+    return "&".join(parts)
 
 
 def _scrub_request(request: dict[str, object]) -> None:
@@ -749,7 +832,9 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
 
 _ACCESS_LOGGER = "uvicorn.access"
 # Loggers whose records can carry request targets or third-party URLs.
-_REDACTED_LOGGERS = ("", "uvicorn", "uvicorn.error", _ACCESS_LOGGER)
+# Includes libraries that log through their own, non-propagating handlers
+# (fastmcp prints tool-exception tracebacks with a RichHandler).
+_REDACTED_LOGGERS = ("", "uvicorn", "uvicorn.error", _ACCESS_LOGGER, "fastmcp", "mcp")
 # Outbound-request loggers that print full URLs at INFO.
 _QUIETED_LOGGERS = ("httpx", "httpcore")
 
@@ -770,18 +855,22 @@ class LogRedactionFilter(logging.Filter):
         ):
             args = list(record.args)
             if isinstance(args[2], str):
-                args[2] = redact_request_target(args[2])
+                args[2] = _redact_secret_text(redact_request_target(args[2]))
             record.args = tuple(args)
             return True
-        if record.exc_info and not record.exc_text:
-            record.exc_text = _redact_secret_text(
-                "".join(traceback.format_exception(*record.exc_info))
-            ).rstrip("\n")
         try:
             message = record.getMessage()
         except (TypeError, ValueError):
             return True
         redacted = _redact_secret_text(message)
+        if record.exc_info:
+            # Fold the traceback into the message as redacted text and drop
+            # exc_info: handlers like rich's render exc_info themselves (with
+            # frame locals) and would bypass any exc_text set here.
+            trace = "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
+            redacted = f"{redacted}\n{_redact_secret_text(trace)}"
+            record.exc_info = None
+            record.exc_text = None
         if redacted != message:
             record.msg = redacted
             record.args = None
@@ -789,19 +878,27 @@ class LogRedactionFilter(logging.Filter):
 
 
 def install_log_redaction() -> None:
-    """Redact uvicorn and root stdlib logging in this process; idempotent.
+    """Redact stdlib logging in this process (root, uvicorn, fastmcp and every
+    handler already attached anywhere); idempotent.
 
     Call after the server has configured logging (an app factory runs after
     uvicorn's own `dictConfig`). Filters go on the loggers and on every
     handler they already have, so propagated records are covered too.
     """
     redaction = LogRedactionFilter()
+    targets: list[logging.Filterer] = []
     for name in _REDACTED_LOGGERS:
         logger = logging.getLogger(name)
-        targets: list[logging.Filterer] = [logger, *logger.handlers]
-        for target in targets:
-            if not any(isinstance(f, LogRedactionFilter) for f in target.filters):
-                target.addFilter(redaction)
+        targets += [logger, *logger.handlers]
+    # Every handler any library has already attached, wherever it sits in
+    # the logger tree: a logger filter doesn't see records propagated from a
+    # child, but a handler filter sees every record that handler emits.
+    for existing in list(logging.Logger.manager.loggerDict.values()):
+        if isinstance(existing, logging.Logger):
+            targets += existing.handlers
+    for target in targets:
+        if not any(isinstance(f, LogRedactionFilter) for f in target.filters):
+            target.addFilter(redaction)
     for name in _QUIETED_LOGGERS:
         logger = logging.getLogger(name)
         logger.setLevel(max(logger.getEffectiveLevel(), logging.WARNING))
@@ -815,11 +912,28 @@ def redact_log_event(logger: WrappedLogger, method_name: str, event_dict: EventD
     """
     del logger, method_name
     for key, value in list(event_dict.items()):
-        if isinstance(value, str):
-            event_dict[key] = _redact_secret_text(value)
-        elif key == "exception":
-            event_dict[key] = _redact_value(value)
+        event_dict[key] = _redact_log_field(key, value)
     return event_dict
+
+
+_LOG_EXEMPT_FIELDS = frozenset({"event", "level", "timestamp", "logger", "exception"})
+
+
+def _redact_log_field(key: str, value: object) -> object:
+    """A secret-named field loses its value; anything else is redacted inside.
+
+    Values that JSON can't render are redacted as their repr, since that is
+    what the renderer would print.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if key not in _LOG_EXEMPT_FIELDS and _is_secret_name(key):
+        return _REDACTED
+    if isinstance(value, str):
+        return _redact_secret_text(value)
+    if isinstance(value, (dict, list, tuple)):
+        return _redact_value(cast("object", value))
+    return _redact_secret_text(repr(value))
 
 
 def _event_scrubber() -> EventScrubber:

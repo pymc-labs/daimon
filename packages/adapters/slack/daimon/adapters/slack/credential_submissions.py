@@ -521,6 +521,7 @@ async def run_env_credential_submission(
         log.error(
             "credential_request.env_write_failed", key_present=True, error_type=type(exc).__name__
         )
+        capture_exception_with_scope(exc)
         await post_ephemeral(
             client,
             thread_ts=thread_ts,
