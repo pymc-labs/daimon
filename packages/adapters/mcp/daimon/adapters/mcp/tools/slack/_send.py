@@ -93,7 +93,7 @@ async def _validate_channel_access(
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel = cast(dict[str, Any], info["channel"])
-        await check_channel_access(client, channel=channel, user_id=requester_id)
+        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
     except SlackApiError as err:
         mapped = map_slack_api_error(err)
         if mapped is None:

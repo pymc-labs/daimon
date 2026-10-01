@@ -116,7 +116,7 @@ async def _post_slack_credential_button_impl(  # pyright: ignore[reportUnusedFun
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         channel: dict[str, Any] = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        await check_channel_access(client, channel=channel, user_id=requester_id)
+        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
         await require_channel_writable(runtime, auth, channel_id=channel_id)
         sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,

@@ -24,6 +24,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
+    is_outside_agent_pin,
     is_write_protected,
 )
 from daimon.core.agent_pins import agent_pin_names
@@ -102,10 +103,10 @@ def _is_requesters_own_dm(channel_id: str) -> bool:
     return channel_id.startswith("D") or channel_id.startswith("a:")
 
 
-async def _executing_agent_pinned(
+async def _executing_agent_names(
     runtime: McpRuntime, auth: AuthIdentity, policy: TenantAccessPolicy
-) -> tuple[str, ...] | None:
-    """The executing agent's pinned channels, or None when it isn't pinned.
+) -> tuple[str | None, ...] | None:
+    """Every name the executing agent answers to, or None when no pin binds it.
 
     The executing agent is the turn's (``chat_agent_id``) or the agent key's
     (``agent_id``); an identity with neither is the operator, which no pin
@@ -119,11 +120,10 @@ async def _executing_agent_pinned(
     )
     if agent is None:
         raise ToolError(_PINNED_SEND_MSG)
-    pinned: list[str] = []
-    for name in agent_pin_names(agent.name, agent.metadata):
-        if name is not None and name in policy.agent_channel_pins:
-            pinned.extend(policy.agent_channel_pins[name])
-    return tuple(pinned) if pinned else None
+    names = agent_pin_names(agent.name, agent.metadata)
+    if not any(name is not None and name in policy.agent_channel_pins for name in names):
+        return None
+    return names
 
 
 async def _require_send_inside_pin(
@@ -136,16 +136,22 @@ async def _require_send_inside_pin(
 ) -> None:
     """Refuse a pinned executing agent's post outside its pinned channels.
 
-    The requester's own 1:1 DM with daimon is allowed: only they see it.
+    Same rule as admission (`is_outside_agent_pin`): outside the pin of ANY
+    name the agent answers to is refused. The requester's own 1:1 DM with
+    daimon is allowed: only they see it.
     """
     if _is_requesters_own_dm(channel_id):
         return
-    pinned = await _executing_agent_pinned(runtime, auth, policy)
-    if pinned is None:
+    names = await _executing_agent_names(runtime, auth, policy)
+    if names is None:
         return
-    if channel_id in pinned or (parent_channel_id is not None and parent_channel_id in pinned):
-        return
-    raise ToolError(_PINNED_SEND_MSG)
+    if is_outside_agent_pin(
+        policy,
+        agent_names=names,
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+    ):
+        raise ToolError(_PINNED_SEND_MSG)
 
 
 async def require_dm_recipient_allowed(
@@ -159,7 +165,7 @@ async def require_dm_recipient_allowed(
     if auth.chat_agent_id is None and auth.agent_id is None:
         return
     policy = await load_channel_policy(runtime, auth)
-    if await _executing_agent_pinned(runtime, auth, policy) is None:
+    if await _executing_agent_names(runtime, auth, policy) is None:
         return
     if recipient_id != auth.platform_user_id:
         raise ToolError(

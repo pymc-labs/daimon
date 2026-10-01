@@ -287,3 +287,24 @@ async def test_an_admin_never_reads_another_members_legacy_dm_scope(hub: _Hub) -
     assert "ses_dm" not in str(listed)
     events = await hub.call("list_events", handle="ses_dm")
     assert events.get("isError") and _TOPIC not in str(events)
+
+
+async def test_an_admin_never_reads_another_members_teams_personal_chat(hub: _Hub) -> None:
+    """Stamped or legacy, a Teams 1:1 chat is private: no admin reads it."""
+    hub.add_session(
+        "ses_teams_dm",
+        account=uuid.uuid4(),
+        daimon_channel="a:1personalchat",
+        daimon_thread="a:1personalchat",
+    )
+    hub.add_session("ses_teams_legacy", account=uuid.uuid4())
+    await _map_thread(hub, "ses_teams_legacy", "a:1personalchat")
+    hub.add_session("ses_slack_im", account=uuid.uuid4(), daimon_channel="D0SOMEONE")
+    await _as(hub, Role.ADMIN)
+
+    listed = await hub.call("list_my_sessions")
+    for handle in ("ses_teams_dm", "ses_teams_legacy", "ses_slack_im"):
+        assert handle not in str(listed)
+        events = await hub.call("list_events", handle=handle)
+        assert events.get("isError") and _TOPIC not in str(events), (handle, events)
+    assert hub.sent == []

@@ -1391,3 +1391,6 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     )
 
     assert isinstance(admission, Admission)
+    # Every DM-admitted session is stamped private (Teams personal chats too),
+    # so no admin reads it from the hub.
+    assert admission.private_dm_id == "dm-scope"

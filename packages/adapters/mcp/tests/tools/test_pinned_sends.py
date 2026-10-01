@@ -215,3 +215,210 @@ async def test_direct_messages_from_unpinned_agents_pass_and_unknown_agents_fail
     )
     with pytest.raises(ToolError, match="pinned to its own channels"):
         await require_dm_recipient_allowed(runtime, unknown, recipient_id="u2")
+
+
+class _FakeSlack:
+    """The Slack calls a card post and a send_message make, nothing else."""
+
+    def __init__(self, channel: dict[str, Any]) -> None:
+        self.channel = channel
+        self.posted: list[str] = []
+
+    async def conversations_info(self, *, channel: str) -> dict[str, Any]:
+        return {"channel": {**self.channel, "id": channel}}
+
+    async def users_info(self, *, user: str) -> dict[str, Any]:
+        return {"user": {"id": user}}
+
+    async def conversations_members(self, **_: Any) -> dict[str, Any]:
+        return {"members": [], "response_metadata": {}}
+
+    async def chat_postMessage(self, *, channel: str, **_: Any) -> Any:
+        self.posted.append(channel)
+        data = {"ts": "1700000000.000100", "message": {"user": "UBOT"}}
+        return type("_Resp", (dict,), {"data": data})(data)
+
+
+async def _slack_admin(
+    db: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any, im_user: str
+) -> tuple[McpRuntime, AuthIdentity, _FakeSlack]:
+    import dataclasses
+
+    from daimon.adapters.mcp.tools.slack import _credential_button, _send
+
+    runtime, tenant_id = await _runtime(db, sessionmaker, platform="slack", pin="C111")
+    auth = dataclasses.replace(
+        _turn(tenant_id, "slack"), platform_user_id="U1001", external_id="T1"
+    )
+    fake = _FakeSlack({"is_im": True, "user": im_user})
+
+    async def client(*_a: Any, **_k: Any) -> _FakeSlack:
+        return fake
+
+    monkeypatch.setattr(_credential_button, "slack_web_client", client)
+    monkeypatch.setattr(_send, "slack_web_client", client)
+    return runtime, auth, fake
+
+
+async def _post_card(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.adapters.mcp.tools.slack._credential_button import (
+        _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    return await _post_slack_credential_button_impl(
+        runtime,
+        auth,
+        channel_id=channel_id,
+        kind="env",
+        target="CRM_TOKEN",
+        token="tok",
+        agent_name="acme-project",
+        purpose="crm",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        responder_name="acme-project",
+    )
+
+
+async def test_a_pinned_agent_posts_a_credential_card_and_a_reply_in_the_admins_own_slack_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools.slack._send import (
+        _slack_send_message_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    runtime, auth, fake = await _slack_admin(
+        db_session, db_session_factory, monkeypatch, im_user="U1001"
+    )
+
+    await _post_card(runtime, auth, "D0ADMIN1")
+    await _slack_send_message_impl(
+        runtime, auth, channel_id="D0ADMIN1", content="done", attachments=None, file_handles=None
+    )
+
+    assert fake.posted == ["D0ADMIN1", "D0ADMIN1"]
+
+
+async def test_a_pinned_agent_never_posts_into_someone_elses_slack_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools.slack._send import (
+        _slack_send_message_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    runtime, auth, fake = await _slack_admin(
+        db_session, db_session_factory, monkeypatch, im_user="U1002"
+    )
+
+    with pytest.raises(ToolError):
+        await _post_card(runtime, auth, "D0OTHER1")
+    with pytest.raises(ToolError):
+        await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="D0OTHER1",
+            content="acme terms",
+            attachments=None,
+            file_handles=None,
+        )
+    assert fake.posted == []
+
+
+async def test_every_pinned_name_binds_the_send(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Outside the pin of ANY name the agent answers to is refused, as in admission."""
+    runtime, tenant_id = await _runtime(
+        db_session, db_session_factory, platform="slack", pin="C111"
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(
+            agent_channel_pins={"acme-project": ("C111",), "Acme Display": ("C222",)}
+        ),
+    )
+    await db_session.commit()
+    auth = _turn(tenant_id, "slack")
+
+    for channel in ("C111", "C222"):
+        with pytest.raises(ToolError, match="pinned to its own channels"):
+            await require_channel_writable(runtime, auth, channel_id=channel)
+
+
+async def _with_pins(
+    db: AsyncSession, tenant_id: uuid.UUID, pins: dict[str, tuple[str, ...]]
+) -> None:
+    await set_access_policy(
+        db, tenant_id=tenant_id, policy=TenantAccessPolicy(agent_channel_pins=pins)
+    )
+    await db.commit()
+
+
+@pytest.mark.parametrize("agent_key", [False, True], ids=["chat-turn", "agent-key"])
+async def test_overlapping_alias_pins_bind_the_slack_send_to_their_intersection(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    agent_key: bool,
+) -> None:
+    """Each name's pin must allow the target; a wider alias pin never adds a channel."""
+    import dataclasses
+
+    from daimon.adapters.mcp.tools.slack import _send
+
+    runtime, tenant_id = await _runtime(
+        db_session, db_session_factory, platform="slack", pin="C111"
+    )
+    await _with_pins(
+        db_session, tenant_id, {"Acme Display": ("C111",), "acme-project": ("C111", "C999")}
+    )
+    auth = dataclasses.replace(
+        _turn(tenant_id, "slack", agent_key=agent_key),
+        platform_user_id="U1001",
+        external_id="T1",
+    )
+    fake = _FakeSlack({"is_im": False, "is_private": False})
+
+    async def client(*_a: Any, **_k: Any) -> _FakeSlack:
+        return fake
+
+    monkeypatch.setattr(_send, "slack_web_client", client)
+
+    await _send._slack_send_message_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, channel_id="C111", content="ok", attachments=None, file_handles=None
+    )
+    with pytest.raises(ToolError, match="pinned to its own channels"):
+        await _send._slack_send_message_impl(  # pyright: ignore[reportPrivateUsage]
+            runtime,
+            auth,
+            channel_id="C999",
+            content="private acme terms",
+            attachments=None,
+            file_handles=None,
+        )
+    assert fake.posted == ["C111"]
+
+
+async def test_an_empty_stored_pin_fails_closed_for_sends_and_dms(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    import dataclasses
+
+    runtime, tenant_id = await _runtime(
+        db_session, db_session_factory, platform="slack", pin="C111"
+    )
+    await _with_pins(db_session, tenant_id, {"acme-project": ()})
+    auth = dataclasses.replace(_turn(tenant_id, "slack"), platform_user_id="U1001")
+
+    for channel in ("C111", "C999"):
+        with pytest.raises(ToolError, match="pinned to its own channels"):
+            await require_channel_writable(runtime, auth, channel_id=channel)
+    with pytest.raises(ToolError, match="only send a direct message to the person"):
+        await require_dm_recipient_allowed(runtime, auth, recipient_id="U1002")
+    await require_dm_recipient_allowed(runtime, auth, recipient_id="U1001")

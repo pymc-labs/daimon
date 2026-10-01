@@ -104,8 +104,20 @@ async def admin_readable_legacy_sessions(
         mapped = await thread_ids_for_sessions(
             db, tenant_id=auth.tenant_id, ma_session_ids=candidates
         )
-    # A DM scope ("dm:<uuid>") is a private conversation, never a channel one.
-    return {sid for sid, thread in mapped.items() if not thread.startswith("dm:")}
+    # A DM scope ("dm:<uuid>") or a Teams personal chat ("a:…") is a private
+    # conversation, never a channel one.
+    return {sid for sid, thread in mapped.items() if not _is_private_conversation(thread)}
+
+
+def _is_private_conversation(conversation_id: str) -> bool:
+    """A DM scope, a Slack IM (``D…``) or a Teams personal chat (``a:…``).
+
+    Sessions that ran there are private even without the private-DM stamp
+    (sessions created before every DM turn was stamped).
+    """
+    # Discord ids are numeric and Teams channels start "19:", so a leading
+    # "D" is only ever a Slack IM.
+    return conversation_id.startswith(("dm:", "a:", "D"))
 
 
 def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
@@ -126,6 +138,8 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
             _ADMIN_SEALED_MODE.get() == "read"
             and MA_METADATA_KEY_CHANNEL in metadata
             and MA_METADATA_KEY_PRIVATE_DM not in metadata
+            and not _is_private_conversation(str(metadata[MA_METADATA_KEY_CHANNEL]))
+            and not _is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
         )
     if MA_METADATA_KEY_PRIVATE_DM not in metadata:
         return True

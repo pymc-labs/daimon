@@ -313,6 +313,10 @@ async def admit_impl(
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
+        # Every DM-admitted session is private: the transcript tools never open
+        # it to anyone but its own execution grant, admins included. /dm
+        # replaces this with its execution-specific grant.
+        private_dm_id=(thread_id or channel_id) if is_dm else None,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

@@ -502,10 +502,15 @@ but them:
 | `fork_agent` of a pinned agent | refused | refused |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 
-Wherever a pinned agent runs, including an exempt admin turn, its channel
-sends (messages, replies, threads and posts, files and cards on Discord,
-Slack and Teams) reach only its pinned channels and threads under them, so its
-context never lands in another channel.
+On every turn, wherever a pinned agent runs (including an exempt admin turn
+and a member's turn inside its channel), its sends (messages, replies,
+threads and posts, files and cards on Discord, Slack and Teams) reach only:
+its pinned channels and threads under them; the requester's own 1:1 DM with
+daimon (a Slack IM whose user is the requester, or a Teams personal chat the
+requester is in); and direct messages to the requester. Its context never
+lands in another channel or another person's DM. A session that ran in a DM
+(a Slack IM, a Teams personal chat, or a `/dm` conversation) is private:
+admins never read it from the hub.
 
 Continuing a sealed channel conversation from the hub stays refused for admins
 because a follow-up would join the channel's own conversation, which the
