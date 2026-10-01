@@ -2669,10 +2669,19 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
     )
     await db_session.commit()
     client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
+        [
+            _ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id),
+            _ma_agent(agent_id="ag_clientb", name="clientb-project", tenant_id=tenant.id),
+        ]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id, is_admin=is_admin)
+    if is_admin:
+        # A chat turn's admin, executing as the channel's own (unpinned) agent:
+        # that turn's admission recorded the live role.
+        auth = dataclasses.replace(
+            auth, chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_clientb")
+        )
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:

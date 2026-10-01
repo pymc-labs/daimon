@@ -24,8 +24,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
+    is_outside_agent_pin,
     is_write_protected,
 )
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.turn_origins import get_active_origin
@@ -34,6 +37,11 @@ from fastmcp.exceptions import ToolError
 _PROTECTED_MSG = (
     "this channel is protected: the workspace does not let daimon post there. "
     "Tell the caller and offer to post somewhere else. Do not retry."
+)
+_PINNED_SEND_MSG = (
+    "this agent is pinned to its own channels, so it can only post in them (and "
+    "threads under them). Tell the caller and offer to post in one of its channels. "
+    "Do not retry."
 )
 _UNREADABLE_MSG = (
     "this workspace's access policy could not be read, so daimon won't read or post channels"
@@ -62,7 +70,15 @@ async def require_channel_writable(
     parent_channel_id: str | None = None,
     category_id: str | None = None,
 ) -> None:
-    """Raise ToolError when the tenant policy protects the target from agent writes."""
+    """Raise ToolError when the tenant policy protects the target from agent writes.
+
+    Every channel send path (messages, replies, thread and post creation, file
+    and card posts) calls this. Besides channel protection it holds a pinned
+    agent to its pin: wherever the turn was admitted -- including an admin's DM
+    or hub turn, which a pin exempts -- the agent may post only into its pinned
+    channels and threads under them, so its context never reaches another
+    channel.
+    """
     policy = await load_channel_policy(runtime, auth)
     if is_write_protected(
         policy,
@@ -71,6 +87,41 @@ async def require_channel_writable(
         category_id=category_id,
     ):
         raise ToolError(_PROTECTED_MSG)
+    if policy.agent_channel_pins:
+        await _require_send_inside_pin(
+            runtime, auth, policy, channel_id=channel_id, parent_channel_id=parent_channel_id
+        )
+
+
+async def _require_send_inside_pin(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    policy: TenantAccessPolicy,
+    *,
+    channel_id: str,
+    parent_channel_id: str | None,
+) -> None:
+    """Refuse a pinned executing agent's post outside its pinned channels.
+
+    The executing agent is the turn's (``chat_agent_id``) or the agent key's
+    (``agent_id``). An identity with neither is the operator, which no pin
+    binds. An agent that can't be resolved while pins exist fails closed.
+    """
+    executing = auth.chat_agent_id or auth.agent_id
+    if executing is None:
+        return
+    agent = await find_agent_by_derived_uuid(
+        runtime.client, tenant_id=auth.tenant_id, agent_id=executing
+    )
+    if agent is None:
+        raise ToolError(_PINNED_SEND_MSG)
+    if is_outside_agent_pin(
+        policy,
+        agent_names=agent_pin_names(agent.name, agent.metadata),
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+    ):
+        raise ToolError(_PINNED_SEND_MSG)
 
 
 class SealedChannelError(ToolError):

@@ -56,7 +56,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     billing_config: BillingConfig | None,
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
-    admin_exempt_from_pins: bool = False,
+    pin_exempt: bool = False,
 ) -> AuthIdentity:
     """Balance and cap gate for an already-resolved identity.
 
@@ -76,13 +76,14 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
     - Then, when ``agent_names`` is given and the tenant pins any agent,
       refuses a turn on a pinned agent. An MCP turn has no channel, so it is
-      outside every pin, exactly as a DM is in ``admit()``. Only a caller that
-      passes ``admin_exempt_from_pins`` (the hub, a person's own login, whose
-      reply reaches only them) and whose account's stored role is admin is
-      exempt; the JWT ``is_admin`` claim never counts, and agent-scoped keys
-      (agent chat) are never exempt. ``agent_names`` is called only when a
-      pin exists, so the agent lookup it may need costs nothing on unpinned
-      tenants.
+      outside every pin, exactly as a DM is in ``admit()``. The pin is a
+      security gate, not a billing one: it is enforced for no-platform bearer
+      and agent-key identities too, before the unbilled return below, with no
+      admin exemption. Only the hub passes ``pin_exempt``, after verifying
+      the caller is a workspace admin right now
+      (`daimon.adapters.mcp.tools._live_admin`); its reply reaches only them.
+      ``agent_names`` is called only when a pin exists, so the agent lookup it
+      may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``; either denial
       raises a ``TERMINAL ERROR:`` ``ToolError`` naming ``/billing`` and logs
       a deny event carrying only ids (tenant/user/tool/gate) — never prompt
@@ -99,7 +100,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
                 agent_id=str(auth.agent_id) if auth.agent_id is not None else None,
             ).finish(reason=reason)
 
-    if auth.platform_user_id is None:
+    if auth.platform_user_id is None and agent_names is None:
         return auth
 
     try:
@@ -109,25 +110,10 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     except AccessPolicyUnreadable as exc:
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
-    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not is_invoker_allowed(policy, external_user_id=auth.platform_user_id, is_admin=is_admin):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="invoker_policy",
-        )
-        refused(TerminationReason.ADMISSION_DENIED)
-        raise ToolError(
-            "TERMINAL ERROR: You aren't on this workspace's list of people who can "
-            "use daimon. A workspace admin can add you."
-        )
 
-    pin_exempt = admin_exempt_from_pins and account is not None and account.role is Role.ADMIN
     if (
         agent_names is not None
-        and not pin_exempt
+        and not (pin_exempt and auth.platform_user_id is not None)
         and policy.agent_channel_pins
         and is_outside_agent_pin(policy, agent_names=await agent_names(), channel_id=None)
     ):
@@ -143,6 +129,23 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
             "only runs in a conversation inside them, not from here. Talk to it in its "
             "channel."
+        )
+
+    if auth.platform_user_id is None:
+        return auth
+    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
+    if not is_invoker_allowed(policy, external_user_id=auth.platform_user_id, is_admin=is_admin):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="invoker_policy",
+        )
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(
+            "TERMINAL ERROR: You aren't on this workspace's list of people who can "
+            "use daimon. A workspace admin can add you."
         )
 
     if await is_over_balance(sessionmaker=sessionmaker, tenant_id=auth.tenant_id):

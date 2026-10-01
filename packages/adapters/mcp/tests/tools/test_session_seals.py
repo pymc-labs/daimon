@@ -21,7 +21,6 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools import hub
-from daimon.adapters.mcp.tools._session_access import admin_sealed_reads, caller_is_hub_admin
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
@@ -42,7 +41,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import set_role
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent, ma_session
@@ -421,61 +419,6 @@ async def test_hub_lists_no_sealed_conversation(world: _World) -> None:
     assert [s.id for s in listed] == ["ses_mine"]
 
 
-def _hub_auth(world: _World, **extra: Any) -> AuthIdentity:
-    """A hub caller: a person's own login, agent identity chosen per call."""
-    return AuthIdentity(
-        account_id=world.account_id,
-        tenant_id=world.tenant_id,
-        role=Role.USER,
-        platform=world.platform,
-        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
-        platform_user_id="u1",
-        **extra,
-    )
-
-
-async def test_an_admin_reads_and_continues_their_sealed_conversation_from_the_hub(
-    world: _World,
-) -> None:
-    """Admins are trusted: the hub's output reaches only the admin."""
-    await world.seal(_SEALED)
-    await set_role(world.db, world.account_id, Role.ADMIN)
-    await world.db.commit()
-    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
-    world.add_session("ses_mine")
-    runtime = world.runtime()
-    auth = _hub_auth(world)
-    ma = ma_agent(id=_AGENT, name="acme-project")
-
-    assert await caller_is_hub_admin(runtime, auth)
-    with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
-        listed = await hub._list_my_sessions_impl(runtime, auth, ma)  # pyright: ignore[reportPrivateUsage]
-        await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
-        await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
-    assert sorted(s.id for s in listed) == ["ses_acme", "ses_mine"]
-    assert world.sent, "the admin's follow-up reaches the session"
-
-
-async def test_admin_exemption_never_reaches_members_agent_keys_or_tokenless_callers(
-    world: _World,
-) -> None:
-    await world.seal(_SEALED)
-    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
-    runtime = world.runtime()
-
-    # A member over the hub.
-    assert not await caller_is_hub_admin(runtime, _hub_auth(world))
-    await set_role(world.db, world.account_id, Role.ADMIN)
-    await world.db.commit()
-    # A stored admin with no platform user (an operator token) or a chat turn.
-    assert not await caller_is_hub_admin(runtime, world.agent_key_auth())
-    assert not await caller_is_hub_admin(runtime, _hub_auth(world, chat_agent_id=uuid.uuid4()))
-    # Agent chat (agent keys) never enters the exemption, admins included.
-    with pytest.raises(ToolError, match="sealed channel"):
-        await _continue_turn_impl(runtime, world.agent_key_auth(), "ses_acme", "hi")
-    assert world.sent == [], "a refused follow-up must never reach the session"
-
-
 # --- a sealed turn can't open or drive another session -----------------------
 
 
@@ -713,3 +656,129 @@ async def test_unsealing_the_thread_keeps_the_parent_seal(world: _World) -> None
             await _list_session_events_impl(
                 world.runtime(), world.auth(), "ses_thread", None, None, None, origin
             )
+
+
+# --- a pin binds a signed bearer with no platform user too ------------------
+
+
+def _bearer_app(world: _World) -> Any:
+    return create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(_SECRET.decode()), public_url=HttpUrl("https://x/mcp")
+            ),
+            _env_file=None,  # type: ignore[call-arg]  # isolate from repo .env
+        ),
+        sessionmaker=world.sessionmaker,
+        anthropic=world.runtime().client,
+    )
+
+
+async def _bearer(world: _World, role: Role) -> str:
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+
+    tenant = await get_tenant(world.db, world.tenant_id)
+    assert tenant is not None
+    account = await make_account(world.db, tenant=tenant)
+    await set_role(world.db, account.id, role)
+    await world.db.commit()
+    world.add_session("ses_headless")
+    world.sessions["ses_headless"]["metadata"]["daimon_account"] = str(account.id)
+    return mint_jwt(
+        account_id=account.id,
+        secret=_SECRET,
+        now=dt.datetime.now(dt.UTC),
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+    )
+
+
+async def _pin(world: _World, agent: str) -> None:
+    await set_access_policy(
+        world.db,
+        tenant_id=world.tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={agent: (_SEALED,)}),
+    )
+    await world.db.commit()
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("continue_turn", {"handle": "ses_headless", "message": "run despite the pin"}),
+        ("ask", {"handle": "ses_headless", "message": "run despite the pin"}),
+    ],
+    ids=["continue_turn", "ask-resume"],
+)
+async def test_a_signed_bearer_with_no_platform_user_is_held_to_a_pin(
+    world: _World, role: Role, tool: str, arguments: dict[str, object]
+) -> None:
+    """No platform user skips billing, not security: the pin still applies, admins too."""
+    token = await _bearer(world, role)
+    await _pin(world, "acme-project")
+
+    result = await call_mcp_tool(_bearer_app(world), token=token, name=tool, arguments=arguments)
+
+    assert result["result"].get("isError"), result
+    assert "pinned this agent" in str(result)
+    assert world.sent == [], "a refused turn must never reach the session"
+
+
+async def test_a_signed_bearer_new_turn_on_a_pinned_agent_is_refused(world: _World) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    token = await _bearer(world, Role.ADMIN)
+    await _pin(world, "acme-project")
+    create = AsyncMock(side_effect=AssertionError("a pinned agent must not start"))
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        result = await call_mcp_tool(
+            _bearer_app(world), token=token, name="start_turn", arguments={"message": "hi"}
+        )
+
+    assert result["result"].get("isError") and "pinned this agent" in str(result), result
+    create.assert_not_awaited()
+
+
+async def test_a_signed_bearer_runs_an_unpinned_agent(world: _World) -> None:
+    token = await _bearer(world, Role.USER)
+    await _pin(world, "another-agent")
+
+    result = await call_mcp_tool(
+        _bearer_app(world),
+        token=token,
+        name="continue_turn",
+        arguments={"handle": "ses_headless", "message": "go"},
+    )
+
+    assert not result["result"].get("isError"), result
+    assert world.sent == ["ses_headless"]
+
+
+async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: _World) -> None:
+    from sqlalchemy import text
+
+    token = await _bearer(world, Role.USER)
+    await world.db.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) "
+            "VALUES (:t, CAST('{\"bogus\": true}' AS jsonb)) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET policy = EXCLUDED.policy"
+        ),
+        {"t": world.tenant_id},
+    )
+    await world.db.commit()
+
+    result = await call_mcp_tool(
+        _bearer_app(world),
+        token=token,
+        name="continue_turn",
+        arguments={"handle": "ses_headless", "message": "go"},
+    )
+
+    assert result["result"].get("isError"), result
+    assert world.sent == []

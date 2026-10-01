@@ -38,8 +38,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
-    admin_sealed_reads,
-    caller_is_hub_admin,
+    admin_sealed_access,
+    hub_caller_is_admin,
     session_belongs_to_caller,
     sessions_outside_seals,
 )
@@ -195,27 +195,37 @@ async def _list_my_sessions_impl(
         if _owned_by(session, auth):
             owned.append(session)
     # The hub runs outside every channel: sealed conversations stay hidden,
-    # except an admin's own (`admin_sealed_reads`), which reach only them.
+    # except a live admin's own when the hub reads them (`admin_sealed_access`).
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
 def register_hub_tools(
     mcp: FastMCP, runtime: McpRuntime, *, billing_config: BillingConfig | None
 ) -> None:
-    async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> AuthIdentity:
+    async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> tuple[AuthIdentity, bool]:
+        """Admit a hub turn; returns the identity and whether the caller is an admin.
+
+        One live-admin decision per call serves both the pin exemption and
+        sealed-session access.
+        """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
+        is_admin = await hub_caller_is_admin(runtime, auth)
 
         async def names() -> tuple[str | None, ...]:
             return agent_pin_names(agent)
 
-        return await _admit(
+        admitted = await _admit(
             auth,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name=tool_name,
             agent_names=names,
-            admin_exempt_from_pins=True,
+            pin_exempt=is_admin,
         )
+        return admitted, is_admin
+
+    async def _read_mode(auth: AuthIdentity) -> Literal["read"] | None:
+        return "read" if await hub_caller_is_admin(runtime, auth) else None
 
     @mcp.tool
     async def list_daimons(  # pyright: ignore[reportUnusedFunction]
@@ -249,8 +259,8 @@ def register_hub_tools(
         result to continue the same conversation. On timeout the error carries
         the handle; resume with it rather than asking again.
         """
-        auth = await _admitted(ctx, daimon_id, "ask")
-        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        auth, is_admin = await _admitted(ctx, daimon_id, "ask")
+        with admin_sealed_access("continue" if is_admin else None):
             if handle is not None:
                 await _verify_account_owns_session(runtime, auth, handle)
             return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
@@ -263,7 +273,7 @@ def register_hub_tools(
 
         Returns ``{"handle": ...}`` for polling with ``get_session``.
         """
-        auth = await _admitted(ctx, daimon_id, "start_turn")
+        auth, _ = await _admitted(ctx, daimon_id, "start_turn")
         return await _start_turn_impl(runtime, auth, message)
 
     @mcp.tool
@@ -271,8 +281,8 @@ def register_hub_tools(
         ctx: Context, daimon_id: str, handle: str, message: str
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting."""
-        auth = await _admitted(ctx, daimon_id, "continue_turn")
-        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        auth, is_admin = await _admitted(ctx, daimon_id, "continue_turn")
+        with admin_sealed_access("continue" if is_admin else None):
             await _verify_account_owns_session(runtime, auth, handle)
             return await _continue_turn_impl(runtime, auth, handle, message)
 
@@ -282,7 +292,7 @@ def register_hub_tools(
     ) -> SessionInfo:
         """Status of one session. Poll until ``idle`` before reading ``list_events``."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        with admin_sealed_access(await _read_mode(auth)):
             await _verify_account_owns_session(runtime, auth, handle)
             return await _get_session_impl(runtime, auth, handle)
 
@@ -297,7 +307,7 @@ def register_hub_tools(
     ) -> Page[SessionEventOut]:
         """A session's transcript. The daimon's reply is in ``agent.message`` events."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        with admin_sealed_access(await _read_mode(auth)):
             await _verify_account_owns_session(runtime, auth, handle)
             return await _list_events_impl(runtime, auth, handle, page, limit, order)
 
@@ -308,9 +318,12 @@ def register_hub_tools(
         """Sessions you started with this daimon, for resuming with ``handle``.
 
         Other people's conversations with the same daimon are not listed and
-        their handles are not accepted; nor, unless you are a workspace admin,
-        are conversations from a sealed channel, which can only be read from inside it.
+        their handles are not accepted; nor are conversations from a sealed
+        channel, which can only be read from inside it. A workspace admin also
+        sees everyone's channel conversations with this daimon, sealed ones
+        included, and can read them with ``get_session``/``list_events``, but
+        can't continue a sealed one from here.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
-        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        with admin_sealed_access(await _read_mode(auth)):
             return await _list_my_sessions_impl(runtime, auth, agent)

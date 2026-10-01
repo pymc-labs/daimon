@@ -63,7 +63,8 @@ structural, in two layers.
   admins. Any name that looks like an interpreter/tool control: a set of
   exact names, plus suffix and prefix classes (``*_OPTIONS``, ``*OPTS``,
   ``*_PATH``/``PATH``, ``*_COMMAND``, ``*STARTUP``, ``*RC``, ``*_PROXY``,
-  ``*_CONFIG``, ``*_PRELOAD``, ``LD_*``, ``GIT_*``, ``LC_*`` …) and the ones
+  ``*_CONFIG``, ``*_PRELOAD``, ``LD_*``, ``GIT_*`` except the four commit
+  identity names, ``LC_*`` …) and the ones
   that redirect an SDK's own traffic (``*_BASE_URL``, ``*_API_BASE``,
   ``*_ENDPOINT``, ``*_INDEX_URL``, ``*_REGISTRY*``).
 - **Member allowlist** (`env_name_member_writable`) — applied when a
