@@ -78,7 +78,13 @@ SOURCES: dict[str, tuple[str, ...]] = {
         f"{_LEARN}/bots/how-to/conversations/channel-and-group-conversations",
     ),
     "channel_thread_reply": (_CAPTURE,),
-    # The captured reply with a pasted image and a file, which a channel carries only in HTML.
+    # The captured reply with files uploaded to it: the activity carries only the text, and
+    # the files are `reference` attachments on Graph's copy of the message.
+    "channel_attachments_reply": (
+        _CAPTURE,
+        "https://learn.microsoft.com/en-us/graph/api/resources/chatmessageattachment",
+    ),
+    # The captured reply with a pasted image and a file marked in its HTML.
     "channel_media_reply": (
         _CAPTURE,
         "https://learn.microsoft.com/en-us/graph/api/resources/chatmessageattachment",
@@ -149,6 +155,7 @@ MESSAGES: dict[str, tuple[str, str, str, tuple[InboundFile, ...]]] = {
     ),
     "channel_mention": ("channel", THREAD_ID, "summarise this week's releases", ()),
     "channel_thread_reply": ("channel", THREAD_ID, "reply to thread", ()),
+    "channel_attachments_reply": ("channel", THREAD_ID, "describe these attachments", ()),
     "channel_media_reply": (
         "channel",
         THREAD_ID,

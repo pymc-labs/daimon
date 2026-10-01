@@ -131,9 +131,8 @@ consent above) a followed thread stays mention-only.
   with Teams' file consent card (the agent guidance describes this path); accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
-- **Channels.** Teams sends a channel message's pasted images and files only
-  inside its HTML, so the bot reads the message from Graph and passes its
-  images to the agent. Files live in the team's SharePoint site, which no
+- **Channels.** Teams sends the bot only a channel message's text, so the bot
+  reads each message it answers from Graph and passes its images to the agent. Files live in the team's SharePoint site, which no
   team-scoped permission reaches: they work only in teams whose site an admin
   granted (below). There, a shared file from that site (never another one)
   reaches the agent as a short-lived download link, and each file the agent

@@ -1,0 +1,64 @@
+{
+  "type": "message",
+  "channelId": "msteams",
+  "text": "<at>daimon</at> describe these attachments",
+  "id": "1700000000003",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/00000000-0000-0000-0000-000000000001/",
+  "channelData": {
+    "teamsChannelId": "19:channel-1@thread.tacv2",
+    "teamsTeamId": "19:team@thread.tacv2",
+    "channel": {
+      "id": "19:channel-1@thread.tacv2"
+    },
+    "team": {
+      "aadGroupId": "00000000-0000-0000-0000-000000007ea3",
+      "id": "19:team@thread.tacv2"
+    },
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "name": "Ada Lovelace",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "conversation": {
+    "id": "19:channel-1@thread.tacv2;messageid=1700000000001",
+    "isGroup": true,
+    "conversationType": "channel",
+    "tenantId": "00000000-0000-0000-0000-000000000001"
+  },
+  "entities": [
+    {
+      "mentioned": {
+        "id": "28:bot-client-id",
+        "name": "daimon"
+      },
+      "text": "<at>daimon</at>",
+      "type": "mention"
+    },
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Web",
+      "timezone": "America/Los_Angeles",
+      "type": "clientInfo"
+    }
+  ],
+  "textFormat": "plain",
+  "attachments": [
+    {
+      "contentType": "text/html",
+      "content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">daimon</span>&nbsp;describe these attachments</p>"
+    }
+  ],
+  "timestamp": "2025-10-08T17:33:01.4953744Z",
+  "localTimestamp": "2025-10-08T10:33:01.4953744-07:00",
+  "locale": "en-US",
+  "localTimezone": "America/Los_Angeles"
+}
