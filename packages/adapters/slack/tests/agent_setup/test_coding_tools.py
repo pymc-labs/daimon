@@ -35,6 +35,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_tenant
@@ -353,3 +354,76 @@ async def test_coding_tools_click_binds_a_token_minted_in_a_sealed_or_pinned_cha
     assert row is not None
     assert (row.platform, row.channel_id) == (("slack", bound) if bound else (None, None))
     assert (f"It runs in <#{_CHANNEL_ID}>" in rendered) is (bound is not None)
+
+
+@pytest.mark.parametrize(
+    ("policy", "pressed_in", "bound"),
+    [
+        (TenantAccessPolicy(agent_channel_pins={_AGENT_NAME: (_CHANNEL_ID,)}), _CHANNEL_ID, True),
+        (
+            TenantAccessPolicy(agent_channel_pins={_AGENT_NAME: ("C_ELSEWHERE",)}),
+            _CHANNEL_ID,
+            False,
+        ),
+        (TenantAccessPolicy(sealed_channel_ids=(_CHANNEL_ID,)), _CHANNEL_ID, False),
+        (TenantAccessPolicy(agent_channel_pins={_AGENT_NAME: (_CHANNEL_ID,)}), "C_OTHER", False),
+        (TenantAccessPolicy(), _CHANNEL_ID, False),
+    ],
+    ids=[
+        "own-agent",
+        "pinned-elsewhere",
+        "unpinned-in-sealed-channel",
+        "another-channel",
+        "unbound",
+    ],
+)
+async def test_coding_tools_click_lets_a_channel_admin_mint_only_bound_for_their_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    policy: TenantAccessPolicy,
+    pressed_in: str,
+    bound: bool,
+) -> None:
+    """A channel admin (listed by user id) mints for an agent pinned to their channel, bound there."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id=_CHANNEL_ID,
+        role_ids=(),
+        user_ids=(_USER_ID,),
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    runtime = _build_runtime(db_session_factory, tenant_id=tenant.id)
+
+    with AioResponsesMock() as mock:
+        mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=False), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        await handle_coding_tools_click(
+            runtime,
+            AsyncWebClient(token="xoxb-test"),
+            team_id=_TEAM_ID,
+            tenant_id=tenant.id,
+            agent_name=_AGENT_NAME,
+            channel_id=pressed_in,
+            user_id=_USER_ID,
+            trigger_id="TRIG",
+        )
+        posted = _ephemerals(mock)
+
+    assert len(posted) == 1, "one click, one ephemeral"
+    rendered = json.dumps(posted[0].get("blocks") or posted[0])
+    if not bound:
+        assert "workspace admin" in posted[0]["text"], "the refusal names who can do it"
+        assert "Bearer" not in rendered, "a refused channel admin mints nothing"
+        return
+    token = rendered.split("Authorization: Bearer ")[1].split("\\")[0].split(" ")[0]
+    claims = pyjwt.decode(token, "jwt-secret", algorithms=["HS256"])
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None, "a channel admin's mint writes a real token row"
+    assert (row.platform, row.channel_id) == ("slack", _CHANNEL_ID), (
+        "a channel admin's token is always bound to their channel"
+    )

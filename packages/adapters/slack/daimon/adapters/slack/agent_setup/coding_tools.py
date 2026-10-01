@@ -6,11 +6,13 @@ The Details view's 🧰 button posts an ephemeral carrying a per-agent MCP token
 shown exactly once: it is never logged, never written to channel history, and
 never leaves the ephemeral.
 
-Minting is admin-gated and the gate is re-resolved after the ack, never read
-from the rendered view: the button is visible to every member (hiding is not
-gating) and a member's click gets an explanation instead of silence. Revoking
-is limited to the account that minted the token. Pressed in a sealed channel,
-or in one the agent is pinned to, the token is bound to that channel
+Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, re-resolved after the
+ack and never read from the rendered view: a workspace admin, or a channel
+admin of every channel the agent is pinned to, whose token is always bound to
+one of them. The button is visible to every member (hiding is not gating) and
+a refused click gets an explanation instead of silence. Revoking is limited
+to the account that minted the token. Pressed in a sealed channel, or in one
+the agent is pinned to, the token is bound to that channel
 (`coding_token_channel`) and its calls run there.
 """
 
@@ -32,10 +34,11 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.authz import AgentRef, build_agent_ref
+from daimon.core.authz import AgentRef, Decision, build_agent_ref
+from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
-    coding_token_channel,
+    authorize_coding_token,
     coding_tool_config,
     mint_agent_mcp_token,
     token_jti,
@@ -66,7 +69,8 @@ TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 
 def _needs_admin_message(agent_name: str) -> str:
     return (
-        f"Minting an access token for {agent_name} needs a workspace admin. "
+        f"Minting an access token for {agent_name} needs a workspace admin, or channel "
+        "admin of every channel it is pinned to, pressed inside one of them. "
         "Ask an admin to open Details and use this button."
     )
 
@@ -165,16 +169,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    if not await resolve_is_admin(client, user_id=user_id):
-        log.info("slack.coding_tools.refused_non_admin", team_id=team_id, agent_name=agent_name)
-        await post_ephemeral(
-            client,
-            channel_id=channel_id or user_id,
-            user_id=user_id,
-            text=_needs_admin_message(agent_name),
-        )
-        return
-
+    is_admin = await resolve_is_admin(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -198,8 +193,12 @@ async def handle_coding_tools_click(
         return
 
     try:
-        bound_channel_id = await _bound_channel(
-            runtime, tenant_id=tenant_id, channel_id=channel_id or None, target=target
+        decision, bound_channel_id = await _authorize_mint(
+            runtime,
+            tenant_id=tenant_id,
+            channel_id=channel_id or None,
+            target=target,
+            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
         )
     except AccessPolicyUnreadable:
         await post_ephemeral(
@@ -207,6 +206,20 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=POLICY_UNREADABLE_REFUSAL,
+        )
+        return
+    if not decision:
+        log.info(
+            "slack.coding_tools.refused_non_admin",
+            team_id=team_id,
+            agent_name=agent_name,
+            reason=decision.reason,
+        )
+        await post_ephemeral(
+            client,
+            channel_id=channel_id or user_id,
+            user_id=user_id,
+            text=_needs_admin_message(agent_name),
         )
         return
     account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
@@ -230,6 +243,7 @@ async def handle_coding_tools_click(
         agent_name=agent_name,
         jti=str(jti),
         bound_channel_id=bound_channel_id,
+        is_server_admin=is_admin,
         # The token value itself is never logged.
     )
 
@@ -291,17 +305,29 @@ async def handle_revoke_token_click(
     await _respond(runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True)
 
 
-async def _bound_channel(
-    runtime: SlackRuntime, *, tenant_id: uuid.UUID, channel_id: str | None, target: RosterAgent
-) -> str | None:
-    """The channel a token minted here is bound to; the agent is read only under a pin."""
+async def _authorize_mint(
+    runtime: SlackRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str | None,
+    target: RosterAgent,
+    caller: ChannelAdminCaller,
+) -> tuple[Decision, str | None]:
+    """Whether the caller may mint here, and the channel the token is bound to.
+
+    Slack has no roles, so a channel admin is one listed by user id. The agent
+    is read only under a pin.
+    """
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        subject = await load_live_subject(
+            session, tenant_id=tenant_id, platform="slack", caller=caller
+        )
     agent = AgentRef.of(target.name)
     if channel_id is not None and policy.agent_channel_pins:
         ma_agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
-    return coding_token_channel(policy, agent=agent, channel_id=channel_id)
+    return authorize_coding_token(policy, subject=subject, agent=agent, channel_id=channel_id)
 
 
 async def _respond(
