@@ -135,6 +135,9 @@ async def _create_promo_code_impl(
         token = await lock_mcp_token(session, jti=auth.token_jti)
         if token is None:
             raise ToolError(f"This operator token is no longer registered. {_NOTHING}")
+        if token.revoked_at is not None:
+            # Revoked after the verifier admitted this call; the lock orders us after it.
+            raise ToolError(f"This operator token was revoked. {_NOTHING}")
         refusal = issue_refusal(
             max_issued_usd=token.max_issued_usd,
             issued_usd=token.issued_usd,

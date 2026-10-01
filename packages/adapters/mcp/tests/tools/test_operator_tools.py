@@ -34,7 +34,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
+from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import (
@@ -250,6 +250,23 @@ async def test_create_promo_code_counts_against_the_ceiling(
     assert [str(code.id) for code in codes] == [created.promo_code_id], (
         "a refused code is never stored"
     )
+
+
+async def test_create_promo_code_refuses_a_token_revoked_after_it_was_verified(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "promo:create")
+    async with committing_sessionmaker.begin() as session:
+        await revoke_mcp_token(session, jti=auth.token_jti or uuid.uuid4(), now=datetime.now(UTC))
+
+    with pytest.raises(ToolError, match="was revoked. Nothing was created"):
+        await _create_promo_code_impl(
+            _runtime(committing_sessionmaker), auth, amount_usd="5", kind="credit"
+        )
+
+    async with committing_sessionmaker() as session:
+        codes = await promo_codes.list_promo_codes(session)
+    assert codes == [], "a revoked token issues nothing"
 
 
 async def test_create_promo_code_without_a_ceiling_is_untracked(
