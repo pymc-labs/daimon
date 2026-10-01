@@ -1,7 +1,8 @@
 """Pure status-card state and Teams message builders. No I/O.
 
-The status card mirrors Slack's Block Kit card: phase title, elapsed time and
-the last five tools, a preview of the latest agent text, and a Cancel button.
+The status card says what Discord's and Slack's say, in the words of
+`daimon.core.turn.status_lines`: a Thinking or Working headline with the
+elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
 renders no code blocks, a message does.
 """
@@ -10,9 +11,15 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Literal
 
 from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.state import TurnState
+from daimon.core.turn.status_lines import (
+    format_draft,
+    format_headline,
+    format_tool_lines,
+    has_running_tool,
+)
 from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, ExecuteAction, TextBlock
 
@@ -25,72 +32,29 @@ INTERRUPTED_NOTICE = (
     "Nothing was lost on your side — message me again to retry."
 )
 CANCELLED_NOTICE = "Turn cancelled."
-_TRAIL_MAX = 5
-_PREVIEW_MAX_CHARS = 250
+TOOLS_DONE_NOTICE = "✅ Done."
 _FALLBACK_MAX_CHARS = 100
-_TITLES = {"thinking": "🧠 thinking", "tool_running": "⚙️ running tool"}
-
-Phase = Literal["thinking", "tool_running"]
 
 
 @dataclass(frozen=True, slots=True)
 class CardState:
-    """What the live status card shows. `update_*` return new instances."""
+    """What the live status card shows. `on_*` return new instances."""
 
-    agent_name: str
     started_at: float
-    phase: Phase = "thinking"
-    trail: tuple[str, ...] = ()
-    preview: str | None = None
-
-
-def on_thinking(state: CardState) -> CardState:
-    return dataclasses.replace(state, phase="thinking")
+    is_working: bool = False
+    tool_lines: tuple[str, ...] = ()
+    draft: str | None = None
 
 
 def on_message(state: CardState, text: str) -> CardState:
-    if not text:
-        return on_thinking(state)
-    preview = text if len(text) <= _PREVIEW_MAX_CHARS else text[:_PREVIEW_MAX_CHARS] + "…"
-    return dataclasses.replace(state, phase="thinking", preview=preview)
+    """The latest agent text becomes the draft; an empty one keeps the last."""
+    return dataclasses.replace(state, draft=format_draft(text)) if text else state
 
 
-def on_tool(state: CardState, name: str) -> CardState:
-    trail = (*state.trail, name)[-_TRAIL_MAX:]
-    return dataclasses.replace(state, phase="tool_running", trail=trail)
-
-
-def format_elapsed(seconds: int) -> str:
-    seconds = max(0, seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, rest = divmod(seconds, 60)
-    return f"{minutes}m {rest}s"
-
-
-def format_tokens(n: int) -> str:
-    if n < 1000:
-        return str(n)
-    return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
-
-
-def footer_text(
-    state: CardState,
-    *,
-    now: float,
-    tokens_in: int,
-    tokens_out: int,
-    cost: str | None,
-    balance: str | None = None,
-) -> str:
-    """`agent · 12s · 1.2k in / 300 out · $0.01 · $4.20 left`, the terminal summary line."""
-    parts = [
-        state.agent_name,
-        format_elapsed(int(now - state.started_at)),
-        f"{format_tokens(tokens_in)} in / {format_tokens(tokens_out)} out",
-    ]
-    parts += [part for part in (cost, balance) if part is not None]
-    return " · ".join(parts)
+def on_activity(state: CardState, turn: TurnState) -> CardState:
+    """Fold the turn's tool calls into the card: Working while one runs, else Thinking."""
+    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    return dataclasses.replace(state, is_working=has_running_tool(turn.content), tool_lines=lines)
 
 
 def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
@@ -98,16 +62,21 @@ def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:
-    """The live card. `cancel_key` routes a Cancel click to this turn."""
-    title = _TITLES[state.phase]
-    lines = [f"⏱️ {format_elapsed(int(now - state.started_at))}"]
-    lines += [f"⚙️ {tool}" for tool in state.trail]
-    body: list[CardElement] = [
-        TextBlock(text=title, weight="Bolder", wrap=True),
-        TextBlock(text="\n\n".join(lines), is_subtle=True, size="Small", wrap=True),
-    ]
-    if state.preview:
-        body.append(TextBlock(text=f"💬 {state.preview}", wrap=True))
+    """The live card. `cancel_key` routes a Cancel click to this turn.
+
+    A TextBlock renders no code fence and drops single line breaks, so the
+    tool lines are a monospace block with one paragraph each.
+    """
+    elapsed = now - state.started_at
+    headline = format_headline(
+        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: f"**{word}**"
+    )
+    body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
+    if state.tool_lines:
+        lines = "\n\n".join(state.tool_lines)
+        body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
+    if state.draft:
+        body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
     body.append(
         ActionSet(
             actions=[
@@ -120,10 +89,13 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
             ]
         )
     )
-    return _card(body, fallback=f"{title} …")
+    fallback = format_headline(
+        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
+    )
+    return _card(body, fallback=fallback)
 
 
-def termination_text(notice: TerminationNotice, *, footer: str) -> str:
+def termination_text(notice: TerminationNotice) -> str:
     """The notice as the ❌ card's text, under the Teams limit, request id kept.
 
     One paragraph per line: a card TextBlock drops single line breaks.
@@ -132,9 +104,8 @@ def termination_text(notice: TerminationNotice, *, footer: str) -> str:
     if (work := notice.work_line()) is not None:
         lines.append(work)
     lines += [notice.survived, f"Next: {notice.next_step}"]
-    rid = [f"Request id: {notice.request_id}"] if notice.request_id is not None else []
     # `fit_notice` joins the tail with one newline; the leading one makes it a paragraph.
-    tail = "\n" + "\n\n".join([*rid, footer])
+    tail = f"\nRequest id: {notice.request_id}" if notice.request_id is not None else None
     return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
@@ -148,10 +119,7 @@ def notice_card(text: str) -> MessageActivityInput:
     return _card([TextBlock(text=body, wrap=True)], fallback=fallback)
 
 
-def answer_message(text: str, *, footer: str | None) -> MessageActivityInput:
-    """One chunk of the answer. The last chunk carries the footer and feedback."""
+def answer_message(text: str, *, is_last: bool) -> MessageActivityInput:
+    """One chunk of the answer; the last carries the feedback buttons."""
     message = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
-    if footer is not None:
-        message.text = f"{text}\n\n*{footer}*"
-        message.add_feedback()
-    return message
+    return message.add_feedback() if is_last else message

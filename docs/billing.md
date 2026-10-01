@@ -462,9 +462,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord, Slack and Teams terminal reply footers show the remaining ledger balance
+The Discord and Slack terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
-without a tenant omit it.
+without a tenant omit it. Teams answers carry no usage footer.
 
 ## What you can see
 

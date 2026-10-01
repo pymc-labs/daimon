@@ -2,7 +2,7 @@
 
 Like Slack's: the card is posted before session setup, edited at most every
 five seconds, and replaced by the first answer chunk; overflow chunks follow,
-the last with the usage footer and feedback buttons. Teams streaming is unused:
+the last with the feedback buttons; no usage footer. Teams streaming is unused:
 it works only in personal chats and stops after two minutes. Cancel clicks
 route by `cancel_key` (the card intent id), carried from the first render.
 """
@@ -20,16 +20,11 @@ from typing import Protocol
 import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.adapters.teams import card
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.message_split import split_fenced
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
-from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
-from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -42,7 +37,6 @@ from daimon.core.turn.state import (
 from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -101,26 +95,21 @@ class TeamsTurnLifecycle:
         conversation_id: str,
         service_url: str | None,
         cancel_key: str,
-        agent_name: str,
-        model_id: str,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_id: str | None = None,
         request_id: Callable[[], str] = bound_request_id,
-        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
         alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._sender = sender
         self._request_id = request_id
-        self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
         self._alert_webhook_url = alert_webhook_url
         self._conversation_id = conversation_id
         self._service_url = service_url
         self._cancel_key = cancel_key
-        self._model_id = model_id
         self._clock = clock
-        self._state = card.CardState(agent_name=agent_name, started_at=clock())
+        self._state = card.CardState(started_at=clock())
         # Seeded by dead-session recovery so the retry edits the card the
         # person is already watching instead of posting a second one.
         self._message_id = adopt_message_id
@@ -133,8 +122,8 @@ class TeamsTurnLifecycle:
         # A continuity notice that belongs above the answer it explains.
         self.answer_prefix: str | None = None
         self.answer_prefix_applied = False
-        # The first answer message as sent (text, footer), for `prepend_revealed_answer`.
-        self._revealed: tuple[str, str | None] | None = None
+        # The first answer message as sent (text, is_last), for `prepend_revealed_answer`.
+        self._revealed: tuple[str, bool] | None = None
 
     @property
     def message_id(self) -> str | None:
@@ -173,62 +162,23 @@ class TeamsTurnLifecycle:
         return card.status_card(self._state, now=self._clock(), cancel_key=self._cancel_key)
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
-        # Local reducer only: the driver awaits this inline in its read loop.
-        kind: str = getattr(event, "type", "")
-        if kind == "agent.thinking":
-            self._state = card.on_thinking(self._state)
-        elif kind == "agent.tool_use":
-            self._state = card.on_tool(self._state, str(getattr(event, "name", "tool")))
-        elif kind == "agent.message":
-            parts: list[object] = getattr(event, "content", [])
-            text = "".join(str(getattr(p, "text", "")) for p in parts).strip()
-            self._state = card.on_message(self._state, text)
+        # Only the draft rides SSE: tool calls and the phase are read from the
+        # turn state on each render, which sees every tool kind.
+        if getattr(event, "type", "") != "agent.message":
+            return
+        parts: list[object] = getattr(event, "content", [])
+        text = "".join(str(getattr(p, "text", "")) for p in parts).strip()
+        self._state = card.on_message(self._state, text)
 
     async def on_render(self, state: TurnState) -> None:
         if self._terminal or self._message_id is None:
             return
+        self._state = card.on_activity(self._state, state)
         now = self._clock()
         if now - self._last_flush < _DEBOUNCE_S:
             return
         self._last_flush = now
         await self._send(self._status(), message_id=self._message_id)
-
-    async def _balance(self) -> str | None:
-        """A prepaid tenant's balance for the footer; None otherwise or on failure."""
-        if self._sessionmaker is None or self._tenant_id is None:
-            return None
-        try:
-            async with self._sessionmaker() as session:
-                balance = await tenant_ledger.get_prepaid_balance(
-                    session, tenant_id=self._tenant_id
-                )
-        except Exception:
-            log.warning("turn.balance_footer_failed", exc_info=True)
-            return None
-        return f"${balance:.2f} left" if balance is not None else None
-
-    async def _footer(self, state: TurnState) -> str:
-        totals = state.usage_totals
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=totals.input_tokens,
-            cache_creation_input_tokens=totals.cache_creation_input_tokens,
-            cache_read_input_tokens=totals.cache_read_input_tokens,
-            output_tokens=totals.output_tokens,
-            speed="standard",
-        )
-        tokens_in = (
-            totals.input_tokens
-            + totals.cache_creation_input_tokens
-            + totals.cache_read_input_tokens
-        )
-        return card.footer_text(
-            self._state,
-            now=self._clock(),
-            tokens_in=tokens_in,
-            tokens_out=totals.output_tokens,
-            cost=format_cost(cost_of(usage, MODEL_PRICING.get(self._model_id))),
-            balance=await self._balance(),
-        )
 
     async def close_with_notice(self, text: str) -> None:
         """Terminal render for adapter-side bailouts. Never raises on a send error."""
@@ -261,14 +211,13 @@ class TeamsTurnLifecycle:
         pass an answer nobody saw.
         """
         self._terminal = True
-        footer = await self._footer(state)
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
         try:
             if not answer:
                 tool_only = any(isinstance(b, ToolUseBlock) for b in state.content)
-                text = f"✅ {footer}" if tool_only else card.CANCELLED_NOTICE
+                text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
                 if tool_only and degraded is not None:
                     text = f"{degraded}\n\n{text}"
                 await self._close(text)
@@ -282,11 +231,12 @@ class TeamsTurnLifecycle:
             last = len(chunks) - 1
             current = self._message_id
             for index, chunk in enumerate(chunks):
-                message = card.answer_message(chunk, footer=footer if index == last else None)
+                is_last = index == last
+                message = card.answer_message(chunk, is_last=is_last)
                 if index == 0:
                     current = self._message_id = await self._edit(message, current)
                     replaced = self.card_closed = True
-                    self._revealed = (chunk, footer if last == 0 else None)
+                    self._revealed = (chunk, is_last)
                 else:
                     current = await self._send(message, message_id=None)
             self.final_message_id = current
@@ -323,18 +273,19 @@ class TeamsTurnLifecycle:
         """
         if self._revealed is None or self._message_id is None:
             return False
-        chunk, footer = self._revealed
+        chunk, is_last = self._revealed
         updated = f"{notice}\n\n{chunk}"
         if len(updated) > card.TEAMS_LIMIT:
             return False
+        message = card.answer_message(updated, is_last=is_last)
         try:
-            await self._edit(card.answer_message(updated, footer=footer), self._message_id)
+            await self._edit(message, self._message_id)
         except _TIMEOUTS:
             log.warning("teams.turn.answer_prefix_timed_out", exc_info=True)  # may have landed
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.answer_prefix_failed", exc_info=True)
             return False
-        self._revealed = (updated, footer)
+        self._revealed = (updated, is_last)
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
@@ -346,9 +297,8 @@ class TeamsTurnLifecycle:
                 key=f"spend_limit:{limit}",
                 message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
-        footer = await self._footer(state)
         label = state.error.message if state.error is not None else str(err)
-        text = f"❌ {label or 'error'} · {footer}"
+        text = f"❌ {label or 'error'}"
         reason = request_id = None
         # The notice is words on the ❌ card, never a reason not to close it:
         # if building it fails, the card falls back to the raw error.
@@ -359,7 +309,7 @@ class TeamsTurnLifecycle:
                 reason, state=state, request_id=request_id, error=err
             )
             if notice is not None:
-                text = card.termination_text(notice, footer=footer)
+                text = card.termination_text(notice)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         log.warning(

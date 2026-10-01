@@ -603,7 +603,6 @@ class TeamsApp:
                 asking_ma_agent_id=await self._asking_agent_id(continuation, tenant_id),
             )
 
-        agent = admission.agent
         # Committed before the post so a lost response still leaves a record.
         async with self.runtime.sessionmaker.begin() as session:
             intent = await create_turn_card_intent(
@@ -625,10 +624,7 @@ class TeamsApp:
                 conversation_id=inbound.conversation_id,
                 service_url=inbound.service_url,
                 cancel_key=cancel_key,
-                agent_name=agent.name,
-                model_id=agent.model.id,
                 adopt_message_id=adopt,
-                sessionmaker=self.runtime.sessionmaker,
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             )
