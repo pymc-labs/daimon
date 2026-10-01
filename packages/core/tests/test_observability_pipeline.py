@@ -130,3 +130,147 @@ def test_transaction_events_are_scrubbed_too(capturing_sentry: CapturingTranspor
 
     assert capturing_sentry.payloads, "the transaction was captured"
     assert canary not in capturing_sentry.rendered()
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda c: f"boot failed: SLACK_BOT_TOKEN={c}",
+        lambda c: f"env GITHUB_TOKEN={c} rejected",
+        lambda c: f"my_api_key={c}",
+        lambda c: f"DAIMON_DB_PASSWORD={c};",
+        lambda c: f"X_CLIENT_SECRET: {c}",
+        lambda c: f"password = {c}",
+        lambda c: f"header Authorization: Basic {c}",
+        lambda c: f"Authorization: token {c}",
+        lambda c: f"connect postgresql://daimon:{c}@db:5432/daimon failed",
+        lambda c: f"1 validation error: input_value='{c}', input_type=str",
+        lambda c: f"signing key={c}",
+    ],
+    ids=[
+        "prefixed-token",
+        "github-token",
+        "lower-api-key",
+        "prefixed-password",
+        "colon-secret",
+        "spaced-password",
+        "basic-auth",
+        "token-scheme",
+        "url-userinfo",
+        "pydantic-input",
+        "bare-key",
+    ],
+)
+def test_free_text_secret_shapes_never_reach_the_transport(
+    capturing_sentry: CapturingTransport, render: Callable[[str], str]
+) -> None:
+    canary = _canary()
+    try:
+        raise RuntimeError(render(canary))
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert capturing_sentry.payloads
+    assert canary not in capturing_sentry.rendered()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "max_tokens=4096 input_tokens=12 output_tokens=7",
+        "session_id=3f2a author=ada",
+        "exit code=1 state=done",
+    ],
+    ids=["token-counts", "ids-and-author", "code-and-state-in-prose"],
+)
+def test_ordinary_diagnostics_are_not_redacted(
+    capturing_sentry: CapturingTransport, text: str
+) -> None:
+    try:
+        raise RuntimeError(text)
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert text in capturing_sentry.rendered()
+
+
+def test_secret_tags_and_user_are_scrubbed(capturing_sentry: CapturingTransport) -> None:
+    canary = _canary()
+    sentry_sdk.set_tag("slack_bot_token", canary)
+    sentry_sdk.set_tag("note", f"token={canary}")
+    sentry_sdk.set_user({"id": "u1", "email": f"{canary}@example.invalid"})
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    assert capturing_sentry.payloads
+    assert canary not in capturing_sentry.rendered()
+
+
+_ADVERSARIAL = {
+    "unclosed-list-items": "[1," * 21000 + "]",
+    "openers": "{" * 64000,
+    "brackets": "[" * 32000 + "]" * 32000,
+    "quoted-key-no-close": '"token":\'' * 7000,
+    "quotes": "'" * 64000,
+    "pairs": "a=" * 32000,
+    "mixed": "{'a': [" * 9000,
+    "colon-pairs": "a: " * 21000,
+    "urls": "http://x" * 8000,
+    "urls-then-query": "http://x" * 8000 + "?a=1",
+    "url-query": ("http://h/" + "p" * 60 + "?") * 900,
+    "quoted-keys": "'k': " * 12000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
+def test_redaction_is_linear_on_adversarial_text(name: str) -> None:
+    """Scrubbing runs on the capturing thread (often the event loop): it must stay fast."""
+    import time
+
+    from daimon.core.observability import _redact_secret_text  # pyright: ignore[reportPrivateUsage]
+
+    text = _ADVERSARIAL[name]
+    started = time.perf_counter()
+    _redact_secret_text(text)
+    elapsed = time.perf_counter() - started
+
+    # ~100 ms target (each case runs in <=50 ms locally); headroom for loaded CI
+    # hosts. The previous scan took >60 s on the unclosed-list case.
+    assert elapsed < 0.25, f"{name}: {elapsed:.3f}s"
+
+
+def test_text_over_the_size_cap_is_truncated_and_still_redacted() -> None:
+    from daimon.core.observability import _redact_secret_text  # pyright: ignore[reportPrivateUsage]
+
+    canary = _canary()
+    out = _redact_secret_text(f"token={canary} " + "x" * 200_000)
+
+    assert canary not in out
+    assert len(out) < 70_000
+
+
+def test_a_scrubber_failure_sends_a_stripped_event_not_the_original(
+    monkeypatch: pytest.MonkeyPatch, capturing_sentry: CapturingTransport
+) -> None:
+    import daimon.core.observability as observability
+
+    def _explode(*args: object, **kwargs: object) -> object:
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(observability, "_drop_frame_vars", _explode)
+    canary = _canary()
+    try:
+        raise RuntimeError(f"token={canary}")
+    except RuntimeError as exc:
+        capture_exception_with_scope(exc)
+    sentry_sdk.flush()
+
+    rendered = capturing_sentry.rendered()
+    assert "redaction failed" in rendered
+    assert canary not in rendered
+    assert "RuntimeError" in rendered
