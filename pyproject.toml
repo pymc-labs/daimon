@@ -170,6 +170,7 @@ source_modules = [
     "daimon.core.session_compat",
     "daimon.core.session_preparation",
     "daimon.core.session_preparation_stages",
+    "daimon.core.session_seal",
     "daimon.core.session_snapshot",
     "daimon.core.session_update_ops",
     "daimon.core.sessions",
