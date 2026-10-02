@@ -31,6 +31,7 @@ from daimon.adapters.discord.agent_setup.routing_view import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment, SetupThreadRef
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -41,6 +42,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import ma_environment
@@ -478,6 +480,39 @@ async def test_an_admin_of_another_channel_is_refused_by_the_select(
         )
         is None
     ), "a grant on another channel writes nothing here"
+
+
+async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
+    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """In a sealed channel the select keeps unrestricted networking for server admins."""
+    tenant_id, account_id = await _seed(db_session_factory)
+    await _grant_channel(db_session_factory, tenant_id)
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(sealed_channel_ids=(str(CHANNEL_ID),)),
+        )
+    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
+    state = _state(account_id, is_admin=False, answering_map=AnsweringMap())
+    interaction = _interaction(admin=False)
+    view = await build_routing_view(
+        interaction, runtime=runtime, state=state, allowed_user_id=USER_ID
+    )
+    select = _select(view)
+    assert select is not None, "the channel admin still gets the select"
+
+    select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
+    await select.callback(interaction)
+
+    assert "sealed" in interaction.followup.send.call_args.args[0], "the refusal names the seal"
+    assert (
+        await get_scope(
+            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
+        )
+        is None
+    ), "the refused pick writes nothing"
 
 
 # ---------------------------------------------------------------------------

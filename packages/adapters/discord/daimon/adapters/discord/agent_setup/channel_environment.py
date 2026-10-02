@@ -2,8 +2,10 @@
 
 Server admins and this channel's admins get a select that runs the channel in
 one of the server's environments or hands it back to the default. What the
-panel rendered is a hint: the select re-checks the caller live, and the pick is
-checked against the environments that still exist before anything is written.
+panel rendered is a hint: the select re-checks the caller live through
+`authorize` (which keeps an unrestricted network out of a channel admin's
+reach in a sealed channel), and the pick is checked against the environments
+that still exist before anything is written.
 """
 
 from __future__ import annotations
@@ -14,25 +16,28 @@ from typing import Final
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_admins import is_channel_admin
+from daimon.core.authz import Subject
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
+    authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_refusal,
     build_set_environment_note,
     environment_option_value,
     list_environment_names,
+    may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
 )
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.channel_admins import get_channel_admins
 
 import discord
 
@@ -73,26 +78,34 @@ def panel_tenant_id(state: PanelState) -> uuid.UUID:
     return derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
 
 
-async def may_pick_environment(
+async def load_picker_subject(
     interaction: discord.Interaction, *, runtime: DiscordRuntime, state: PanelState, live: bool
-) -> bool:
-    """Server admin, or an admin of the panel's channel.
+) -> Subject:
+    """The caller as `authorize` sees them on this panel.
 
-    ``live`` reads Manage Server off the interaction instead of the panel state;
+    ``live`` reads Manage Server off the member instead of the panel state;
     clicks pass it, rendering does not. Anyone else costs one grant read.
     """
-    if is_guild_admin(interaction) if live else state.is_admin:  # pyright: ignore[reportArgumentType]  # only reads user/guild
-        return True
+    caller = channel_admin_caller(interaction.user)
+    if not live:
+        caller = caller.model_copy(update={"is_server_admin": state.is_admin})
     async with runtime.sessionmaker() as session:
-        grant = await get_channel_admins(
+        return await load_live_subject(
+            session, tenant_id=panel_tenant_id(state), platform="discord", caller=caller
+        )
+
+
+async def may_pick_environment(
+    subject: Subject, *, runtime: DiscordRuntime, state: PanelState
+) -> bool:
+    """Server admin, or an admin of the panel's channel."""
+    async with runtime.sessionmaker() as session:
+        return await may_pick_environment_in(
             session,
             tenant_id=panel_tenant_id(state),
-            platform="discord",
+            subject=subject,
             channel_id=str(state.channel_id),
         )
-    return grant is not None and is_channel_admin(
-        channel_admin_caller(interaction.user), grant=grant
-    )
 
 
 async def load_environment_picker(
@@ -105,7 +118,8 @@ async def load_environment_picker(
     answering_map = state.answering_map
     if not state.channel_id or answering_map is None:
         return None
-    if not await may_pick_environment(interaction, runtime=runtime, state=state, live=False):
+    subject = await load_picker_subject(interaction, runtime=runtime, state=state, live=False)
+    if not await may_pick_environment(subject, runtime=runtime, state=state):
         return None
     try:
         names = await list_environment_names(runtime.anthropic, tenant_id=panel_tenant_id(state))
@@ -121,11 +135,14 @@ async def load_environment_picker(
     )
 
 
-async def save_environment_choice(*, runtime: DiscordRuntime, state: PanelState, value: str) -> str:
+async def save_environment_choice(
+    *, runtime: DiscordRuntime, state: PanelState, subject: Subject, value: str
+) -> str:
     """Write the pick for the panel's channel and return what to tell the reader.
 
-    The caller has re-checked the caller live. A value no picker offers, or an
-    environment that no longer exists, writes nothing.
+    `subject` is the caller as just re-checked live. A value no picker offers,
+    an environment that no longer exists, or a pick `authorize` refuses writes
+    nothing.
     """
     tenant_id = panel_tenant_id(state)
     channel_id = str(state.channel_id)
@@ -133,6 +150,20 @@ async def save_environment_choice(*, runtime: DiscordRuntime, state: PanelState,
         name = parse_environment_option(value)
     except ValueError:
         return NOT_OFFERED_NOTE
+    async with runtime.sessionmaker() as session:
+        decision = await authorize_environment_pick(
+            session,
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            subject=subject,
+            channel_id=channel_id,
+            environment_name=name,
+            default=runtime.deployment_default,
+        )
+    if decision.reason == "sealed":
+        return build_sealed_network_refusal(environment_name=name)
+    if not decision:
+        return REFUSED_MESSAGE
     if name is not None and (
         await find_environment_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
         is None

@@ -31,6 +31,7 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
     REFUSED_MESSAGE,
     build_environment_select,
     load_environment_picker,
+    load_picker_subject,
     may_pick_environment,
     panel_tenant_id,
     save_environment_choice,
@@ -464,9 +465,10 @@ class RoutingView(PanelViewBase):
         """Save this channel's environment; who may is re-checked live first."""
         select = self.environment_select
         assert select is not None, "only the environment select has this callback"
-        if not await may_pick_environment(
+        subject = await load_picker_subject(
             interaction, runtime=self.runtime, state=self.state, live=True
-        ):
+        )
+        if not await may_pick_environment(subject, runtime=self.runtime, state=self.state):
             await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
             return
         await interaction.response.defer()
@@ -475,7 +477,7 @@ class RoutingView(PanelViewBase):
 
         try:
             note = await save_environment_choice(
-                runtime=self.runtime, state=self.state, value=select.values[0]
+                runtime=self.runtime, state=self.state, subject=subject, value=select.values[0]
             )
             self.state.answering_map = await load_answering_map_for(self.runtime, state=self.state)
             routing = await build_routing_view(
