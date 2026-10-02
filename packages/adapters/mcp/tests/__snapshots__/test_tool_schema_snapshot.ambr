@@ -2842,7 +2842,11 @@
       }),
     }),
     'list_environments': dict({
-      'description': 'List environments in the tenant pool. ``page`` is reserved for future pagination.',
+      'description': '''
+        List environments in the tenant pool. ``page`` is reserved for future pagination.
+        
+        Operator tokens need the ``tenant:read`` scope.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({

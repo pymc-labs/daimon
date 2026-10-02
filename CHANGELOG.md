@@ -97,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   role, which changes on the person's next platform turn, so `revoke-token` is
   the immediate stop and `set-token-scopes` narrows. Calls are rate limited
   (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`); calls, refusals and token changes
-  are audited. Channel budget, agent and admin tools take the scopes. New tools:
+  are audited. Channel budget, agent and admin tools take the scopes, and
+  `tenant:read` lists environments to pick for a channel. New tools:
   `get_tenant_summary` (with each channel's admins; `daimon channels list`
   prints the same) and, for `promo:create`,
   `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`

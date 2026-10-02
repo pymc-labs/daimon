@@ -36,6 +36,9 @@ from daimon.adapters.mcp.tools.channel_admins import (
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.environments import (
+    _list_environments_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
     _list_promo_codes_impl,  # pyright: ignore[reportPrivateUsage]
@@ -282,6 +285,14 @@ async def test_operator_without_the_scope_is_refused_by_the_tool_itself(
     _tenant, auth = await _operator(committing_sessionmaker, "promo:redeem")
     with pytest.raises(ToolError, match="does not have the tenant:read scope"):
         await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+
+async def test_list_environments_refuses_an_operator_without_tenant_read(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "channels:write")
+    with pytest.raises(ToolError, match="does not have the tenant:read scope"):
+        await _list_environments_impl(_runtime(committing_sessionmaker), auth, None)
 
 
 async def test_agent_default_tools_require_channels_write(
