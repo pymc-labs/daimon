@@ -30,15 +30,14 @@ from daimon.adapters.slack.agent_setup.submit import (
     run_new_agent_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core._models import AgentCreationChannel
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import get_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -384,7 +383,12 @@ async def test_run_new_agent_by_a_channel_admin_is_their_channels(
 ) -> None:
     """A channel admin's new agent is the channel's to set up; a member's is nobody's."""
     client_fake: Any = fake_slack_web_client
-    runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
+    ma = FakeMAState()
+    runtime = _build_runtime_with_db(
+        db_session_factory,
+        fernet_key=Fernet.generate_key().decode(),
+        anthropic_handler=make_fake_ma_handler(ma),
+    )
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
     async with db_session_factory.begin() as session:
         await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
@@ -412,9 +416,12 @@ async def test_run_new_agent_by_a_channel_admin_is_their_channels(
         model="claude-sonnet-4-6",
     )
 
+    [agent_id] = ma.agents
     async with db_session_factory() as session:
-        channels = (await session.scalars(select(AgentCreationChannel.channel_id))).all()
-    assert channels == ([_CHANNEL_ID] if grant else [])
+        channel = await get_creation_channel(
+            session, tenant_id=tenant_id, ma_agent_id=agent_id, platform="slack"
+        )
+    assert channel == (_CHANNEL_ID if grant else None)
 
 
 @pytest.mark.asyncio
