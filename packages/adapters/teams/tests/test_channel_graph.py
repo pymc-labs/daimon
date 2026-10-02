@@ -23,6 +23,7 @@ from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
+    AAD_OBJECT_ID,
     ENTRA_TENANT_ID,
     TEAM_GROUP_ID,
     TeamsApiFake,
@@ -30,6 +31,7 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
+    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -157,6 +159,9 @@ def _graph(
             return httpx.Response(200, content=_png(), headers={"Content-Type": "image/png"})
         if site and path in site:
             return httpx.Response(200, json=site[path])
+        if path.startswith(("/v1.0/sites/", "/v1.0/groups/")) or path.endswith("/filesFolder"):
+            # As captured without Sites.Selected: Graph denies the team's SharePoint.
+            return httpx.Response(403, json={"error": {"code": "accessDenied"}})
         return httpx.Response(404)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -209,10 +214,10 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     assert "Q3 release plan" in message and "the numbers are in the sheet" in message
     assert "describe these attachments</message>" not in message, "the trigger is not history"
     assert len(turn["image_blocks"] or []) == 1, "the hosted image becomes a vision block"
-    assert "[attachment] `q3.xlsx` was shared but can't be opened here." in message
-    assert "I couldn't read `q3.xlsx` (files shared in channels need a 1:1 chat)." in _texts(
-        teams_api_fake
-    ), "the person hears the file was not read"
+    assert (
+        "[attachment] `q3.xlsx` was shared but can't be opened: daimon has no access" in message
+    ), "the agent can tell the person why"
+    assert "q3.xlsx" not in _texts(teams_api_fake), "nothing is posted besides the answer"
     assert {r.url.host for r in seen} == {"graph.microsoft.com"}, "Graph only"
     assert all(r.headers["Authorization"] == "Bearer test-bot-token" for r in seen)
     lookups = [r for r in teams_api_fake.requests if "/v3/teams/" in r.url]
@@ -230,11 +235,40 @@ async def test_a_channel_reply_whose_activity_names_no_media_is_read_from_graph(
 
     message = turn["user_message"]
     assert len(turn["image_blocks"] or []) == 1, "the hosted image is found on Graph"
-    assert "[attachment] `q3.xlsx` was shared but can't be opened here." in message
-    assert "I couldn't read `q3.xlsx`" in _texts(teams_api_fake), "the person hears it"
+    assert "[attachment] `q3.xlsx` was shared but can't be opened: daimon has no access" in message
+    assert "q3.xlsx" not in _texts(teams_api_fake), "nothing is posted besides the answer"
     assert any(r.url.path == f"{CHANNEL_PATH}/{ROOT}/replies/{REPLY}" for r in seen), (
         "the mentioned message is read from Graph even with no markers in the activity"
     )
+
+
+@pytest.mark.parametrize("admin", [True, False])
+async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_sign_in(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """A card, once: the sign-in that grants the team's site goes to a daimon admin only."""
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    teams = teams_settings(admins=admins, public_url="https://teams.example")
+    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
+    with patched_turns():
+        async with running_service(runtime, teams_api_fake) as service:
+            for _ in range(2):
+                await post_activity(service, _load("channel_attachments_reply"))
+                await service.turns.drain(timeout=30)
+
+    offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
+    if not admin:
+        assert offers == [], "only a daimon admin is offered the sign-in"
+        return
+    [offer] = offers
+    assert "login.microsoftonline.com" in offer and "Sites.FullControl.All" in offer
+    assert "redirect_uri=https%3A%2F%2Fteams.example%2Foauth%2Fteams%2Ffiles%2Fcallback" in offer
+
+
+def _cards(fake: TeamsApiFake) -> list[str]:
+    return [json.dumps(r.body) for r in fake.activity_requests if r.body.get("attachments")]
 
 
 async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(
@@ -272,17 +306,17 @@ async def test_the_watermark_is_the_newest_message_read_not_the_bots_answer(
     )
 
 
-async def test_without_graph_the_turn_runs_and_the_person_hears_what_was_missed(
+async def test_without_graph_the_turn_runs_and_the_agent_hears_what_was_missed(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     [turn] = await _run(db_session_factory, teams_api_fake, _load("channel_media_reply"))
 
-    assert "thread_history" not in turn["user_message"], "no history when Graph refuses"
+    message = turn["user_message"]
+    assert "thread_history" not in message, "no history when Graph refuses"
     assert not turn["image_blocks"]
-    assert (
-        "I couldn't read a pasted image (I can't read this channel's messages), "
-        "a shared file (files shared in channels need a 1:1 chat)."
-    ) in _texts(teams_api_fake), "never a silent drop"
+    unread = "was shared but can't be opened: daimon could not read this channel message."
+    assert f"an image {unread}" in message and f"a file {unread}" in message, "never silent"
+    assert "couldn't read" not in _texts(teams_api_fake), "the answer explains it, not a notice"
 
 
 async def test_without_graph_the_agent_knows_a_channel_messages_media_went_unread(

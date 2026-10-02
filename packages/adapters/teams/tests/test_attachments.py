@@ -97,7 +97,6 @@ async def test_pasted_image_is_fetched_with_the_bot_token_and_inlined() -> None:
     assert prepared.image_blocks[0]["source"]["media_type"] == "image/png"  # type: ignore[index]
     assert requests[0].headers["authorization"] == "Bearer bot-token"
     assert "is attached as an image" in prepared.prefix, "the agent knows it was shared"
-    assert prepared.notice is None, "nothing to explain"
 
 
 @pytest.mark.parametrize(
@@ -120,9 +119,7 @@ async def test_bot_token_never_reaches_a_host_outside_bot_framework(url: str) ->
 
     assert all(r.url.host != "images.example.com" for r in requests), "no request off-host"
     assert prepared.image_blocks == []
-    assert prepared.notice is not None and "images.example.com is not an allowed file host" in (
-        prepared.notice
-    )
+    assert "images.example.com is not an allowed file host" in prepared.prefix
 
 
 async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
@@ -138,7 +135,6 @@ async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
         )
 
     assert DOWNLOAD_URL in prepared.prefix and "`report.pdf`" in prepared.prefix
-    assert prepared.notice is None
 
 
 async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() -> None:
@@ -174,11 +170,10 @@ async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> No
         )
 
     assert prepared.image_blocks == [], "an image past the pixel cap would end the session"
-    assert prepared.notice == (
-        f"I couldn't read `image` (larger than {MAX_VISION_IMAGE_DIMENSION}px), "
-        "`r.pdf` (files shared in channels need a 1:1 chat)."
+    assert f"`image` was not inlined (larger than {MAX_VISION_IMAGE_DIMENSION}px)" in (
+        prepared.prefix
     )
-    assert prepared.prefix.count("[attachment]") == 2, "the agent hears about both"
+    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in prepared.prefix
 
 
 async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained() -> None:
@@ -209,4 +204,4 @@ async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained()
     assert [(r.url.host, r.headers["authorization"]) for r in requests] == [
         ("graph.microsoft.com", "Bearer graph-token")
     ], "the off-Graph URL is refused before any request"
-    assert prepared.notice == "I couldn't read `image` (evil.example is not an allowed file host)."
+    assert "`image` was not inlined (evil.example is not an allowed file host)" in prepared.prefix

@@ -10,7 +10,9 @@ Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
 before daimon code runs; tokens from any other issuer (such as Entra ID) are
-refused with 401 first. The same listener serves `/healthz` and `/readyz`.
+refused with 401 first. The same listener serves `/healthz` and `/readyz`,
+and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
+(below); a reverse proxy in front must pass that path too.
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
 64 KiB are refused before parsing. The `teams` compose service (opt-in `teams`
 profile) publishes the port; the messaging endpoint must reach it.
@@ -118,7 +120,9 @@ A burst of replies is judged once, after the thread has been quiet for
 per hour. The turn runs as the burst's newest author and passes the same
 admission and billing gates as a mention, but posts only its answer: no
 status card or Cancel button, and every refusal, notice and error is only
-logged. Root posts are never judged, the bot's own and other bots' messages
+logged. No turn posts a status message of its own under its answer, as on
+Slack and Discord: what the person must hear rides on the answer, and only
+cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
 are ignored, and protected channels are skipped. Without Graph history (the
 consent above) a followed thread stays mention-only.
 
@@ -138,9 +142,9 @@ consent above) a followed thread stays mention-only.
   reaches the agent as a short-lived download link, and each file the agent
   writes is uploaded to the channel's Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
-  after an unprompted answer); a failed upload is named there instead.
-  Elsewhere, or when Graph refuses, the bot names a shared file and tells the
-  person it could not open it, and an output is logged
+  after an unprompted answer); a failed upload is only logged.
+  Elsewhere, or when Graph refuses, the agent is told the shared file's name
+  and why it could not be opened, for its answer to explain, and an output is logged
   (`teams.channel_output.skipped` or `.upload_failed`, no name or content) and
   dropped from the delivery listing; the agent's own copy stays in its
   workspace. The turn context tells the agent which case applies
@@ -160,32 +164,29 @@ needed.
 1. Entra portal → App registrations → the bot's app → API permissions → Add
    a permission → Microsoft Graph → Application permissions →
    `Sites.Selected` → Grant admin consent.
-2. Find the team's site id. The group id is in the team's link (team → ⋯ →
-   Get link to team → `groupId=`). As an admin in Graph Explorer:
-   `GET https://graph.microsoft.com/v1.0/groups/{group-id}/sites/root`, or by
-   URL, `GET https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Marketing`.
-   The `id` reads `contoso.sharepoint.com,{site-guid},{web-guid}`.
-3. Grant the app write on that site. The caller needs `Sites.FullControl.All`
-   (consent it in Graph Explorer as a SharePoint or global admin):
+2. Set `DAIMON_TEAMS__PUBLIC_URL` to the Teams service's public base URL
+   (the messaging endpoint without `/api/messages`). Same app →
+   Authentication → Add a platform → Web → redirect URI
+   `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
+3. When a daimon admin shares a file in a team whose site is not granted,
+   the bot posts an **Enable files** card (at most every 15 minutes per team).
+   A SharePoint or global admin clicks it and signs in once (the first in the
+   organisation must be a global admin, who consents for everyone); the Teams service
+   then grants the app write on that team's site, and its next message sees
+   the files.
 
-   ```http
-   POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
-   Content-Type: application/json
+Or grant a site by hand as a SharePoint or global admin holding
+`Sites.FullControl.All`:
 
-   {"roles": ["write"],
-    "grantedToIdentities": [{"application": {"id": "<DAIMON_TEAMS__CLIENT_ID>", "displayName": "daimon"}}]}
-   ```
+```http
+GET https://graph.microsoft.com/v1.0/groups/{group-id}/sites/root
+POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
 
-   Or in PowerShell:
+{"roles": ["write"],
+ "grantedToIdentities": [{"application": {"id": "<DAIMON_TEAMS__CLIENT_ID>", "displayName": "daimon"}}]}
+```
 
-   ```powershell
-   Connect-MgGraph -Scopes Sites.FullControl.All
-   $site = Invoke-MgGraphRequest GET "v1.0/groups/<group-id>/sites/root"
-   New-MgSitePermission -SiteId $site.id -BodyParameter @{
-     roles = @("write")
-     grantedToIdentities = @(@{ application = @{ id = "<DAIMON_TEAMS__CLIENT_ID>"; displayName = "daimon" } })
-   }
-   ```
+The group id is in the team's link (team → ⋯ → Get link to team → `groupId=`).
 
 Standard channels only: private and shared channels keep files in a site of
 their own, where outputs are not uploaded. Removing the site permission

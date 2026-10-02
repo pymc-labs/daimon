@@ -36,6 +36,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.sharepoint import SharePoint
+from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
@@ -286,6 +287,9 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
     teams_app.on_message_submit_feedback(handle_feedback)
     teams_app.on_file_consent(turns.outputs.handle_consent)
+    if settings.public_url is not None:
+        grant = callback_route(settings, runtime.http_client, on_granted=files.forget)
+        fastapi_app.add_api_route(CALLBACK_PATH, grant, methods=["GET"])
     return TeamsHttpService(
         app=fastapi_app,
         teams_app=teams_app,

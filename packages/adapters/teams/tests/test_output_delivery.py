@@ -178,10 +178,10 @@ async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     assert (info.content_type, info.content_url) == (FILE_INFO_CONTENT_TYPE, CONTENT_URL)
 
 
-async def test_declined_offer_deletes_the_file_and_says_so(
+async def test_declined_offer_deletes_the_file_and_posts_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Decline is explicit: the output is deleted and the person gets an acknowledgement."""
+    """Decline is explicit: the output is deleted, with no status message under the card."""
     harness = _harness(db_session_factory)
 
     await harness.delivery.sweep(make_inbound(), "sesn_1")
@@ -189,7 +189,7 @@ async def test_declined_offer_deletes_the_file_and_says_so(
     await harness.settle()
 
     assert harness.uploads == [] and harness.deletes == ["file_csv"]
-    assert harness.sender.activities[-1].text == "Okay, I won't send `data.csv`."
+    assert len(harness.sender.activities) == 1, "only the consent card"
 
 
 @pytest.mark.parametrize(
@@ -339,10 +339,10 @@ async def test_channel_links_go_in_one_message_when_the_answer_cannot_take_them(
     assert (message.text or "").count("](https://example.sharepoint.com/") == 2, "both files"
 
 
-async def test_a_refused_channel_upload_is_named_below_the_answer_logged_and_deleted(
+async def test_a_refused_channel_upload_is_only_logged_and_deleted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A 403 (grant removed) after `files="available"`: the answer says the file did not land."""
+    """A 403 (grant removed) after `files="available"`: logged, and nothing added to the thread."""
 
     def denied(_: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"code": "accessDenied"}})
@@ -357,10 +357,8 @@ async def test_a_refused_channel_upload_is_named_below_the_answer_logged_and_del
     with structlog.testing.capture_logs() as logs:
         await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
 
-    assert appended == ["I couldn't save `data.csv` to this channel's files."], (
-        "the lost file is named in the answer, not silently dropped"
-    )
-    assert harness.sender.sent == [], "the note rides on the answer, not a new message"
+    assert appended == [], "no status line below the answer"
+    assert harness.sender.sent == [], "nor a message of its own"
     failed = [e for e in logs if e["event"] == "teams.channel_output.upload_failed"]
     assert [(e["file_id"], e["status"]) for e in failed] == [("file_csv", 403)]
     assert harness.deletes == ["file_csv"], "the ledger entry goes, as on the skip path"
@@ -385,13 +383,20 @@ async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_
     assert harness.deletes == ["file_csv"], "the file was still saved to the channel's Files"
 
 
-async def test_oversize_output_in_a_dm_gets_the_limit_notice(
+async def test_oversize_output_in_a_dm_is_only_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The per-file cap is core's: no consent card, the notice, then delete."""
+    """The per-file cap is core's: no consent card, no note, a log line, then delete."""
     harness = _harness(db_session_factory, [_csv(size=21 * 1024 * 1024)])
+    appended: list[str] = []
 
-    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    async def append(text: str) -> bool:
+        appended.append(text)
+        return True
 
-    assert "over the 20 MiB delivery limit" in (harness.sender.activities[0].text or "")
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(), "sesn_1", append=append)
+
+    assert appended == [] and harness.sender.activities == [], "nothing posted"
+    assert any(e["event"] == "teams.output.oversize" for e in logs)
     assert harness.deletes == ["file_csv"]
