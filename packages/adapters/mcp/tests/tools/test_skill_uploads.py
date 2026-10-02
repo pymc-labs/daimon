@@ -9,6 +9,7 @@ import re
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,6 +21,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import skill_uploads
 from daimon.adapters.mcp.tools.skill_uploads import (
+    AddSkillResult,
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
@@ -34,6 +36,7 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.turn_origins import create_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent
@@ -348,49 +351,128 @@ async def test_a_discord_attachment_zip_is_previewed(
     assert json.loads(result.model_dump_json())["status"] == "preview"
 
 
-async def test_an_isolated_channels_agent_keeps_its_added_skill_inside_the_channel(
+async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncSession]) -> str:
+    """A verified setup-thread origin in ROOM, answered by the built-in ``shared``."""
+    now = datetime.now(UTC)
+    async with factory.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id="333333333333333333",
+            responder_ma_agent_id="agent_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id="agent_helper",
+            configuration_target_name="helper",
+            role=Role.USER,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+            is_setup=True,
+        )
+    return str(origin.id)
+
+
+async def test_an_isolated_channels_agent_takes_skills_only_from_inside_the_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """C's setup thread adds to C's own agent; nothing outside C reaches it, it reaches
+    nothing outside C, and its skill is listed only inside C."""
     world = await _world(db_session_factory)
+    for agent_id, name, metadata in (
+        ("agent_other", "other", {"daimon_account": str(world.account_id)}),
+        ("agent_shared", "shared", {"daimon_managed": "true"}),
+    ):
+        agent = ma_agent(id=agent_id, name=name, tenant_id=world.tenant_id, metadata=metadata)
+        world.state.agents[agent_id] = agent.model_dump(mode="json")
     async with db_session_factory.begin() as session:
-        await set_fields(
-            session,
-            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
-            tenant_id=world.tenant_id,
-            agent_name="helper",
-            mode="agent",
-        )
         await set_access_policy(
             session,
             tenant_id=world.tenant_id,
-            policy=TenantAccessPolicy(isolated_channel_ids=(ROOM,)),
+            policy=TenantAccessPolicy(
+                isolated_channel_ids=(ROOM,),
+                sealed_channel_ids=(ROOM,),
+                agent_channel_pins={"helper": (ROOM,)},
+            ),
         )
+    origin = await _setup_thread_origin(world, db_session_factory)
+
+    def member_run_by(agent_id: str) -> AuthIdentity:
+        return dataclasses.replace(
+            world.auth(admin=False, platform="discord"),
+            chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=agent_id),
+        )
+
+    async def add(auth: AuthIdentity, agent_name: str, **extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name=agent_name,
+            expected_ma_agent_id=f"agent_{agent_name}",
+            skill_md=_MD,
+            **extra,
+        )
+
+    setup = member_run_by("agent_shared")
+    preview = await add(setup, "helper", origin_context_id=origin)
+    added = await add(
+        setup, "helper", origin_context_id=origin, content_hash=preview.preview.content_hash
+    )
+    assert added.status == "added", "a member in C's setup thread adds to C's own agent"
+
+    with pytest.raises(ToolError, match="missing or changed"):
+        await add(setup, "helper")  # no origin: outside C
+    with pytest.raises(ToolError, match="missing or changed"):
+        await add(member_run_by("agent_other"), "helper")  # an agent outside C
+    with pytest.raises(ToolError, match="missing or changed"):
+        await add(member_run_by("agent_helper"), "other")  # C's agent reaching out
+
     inside = dataclasses.replace(
         world.auth(),
         chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
     )
-    with pytest.raises(ToolError, match="not found|no agent"):
-        await _add_skill_impl(
-            world.runtime,
-            world.auth(),
-            agent_name="helper",
-            expected_ma_agent_id=None,
-            skill_md=_MD,
-        )
-    preview = await _add_skill_impl(
-        world.runtime, inside, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
-    await _add_skill_impl(
-        world.runtime,
-        inside,
-        agent_name="helper",
-        expected_ma_agent_id=None,
-        skill_md=_MD,
-        content_hash=preview.preview.content_hash,
-    )
-
     assert [s.name for s in await _list_impl(world.runtime, inside)] == ["helper/notes"]
     assert await _list_impl(world.runtime, world.auth()) == [], "hidden outside the channel"
+
+
+async def test_a_pinned_agent_takes_a_chat_add_only_from_its_own_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The card's verified origin counts for the pin; without one a member is outside it."""
+    world = await _world(db_session_factory)
+    shared = ma_agent(
+        id="agent_shared",
+        name="shared",
+        tenant_id=world.tenant_id,
+        metadata={"daimon_managed": "true"},
+    )
+    world.state.agents["agent_shared"] = shared.model_dump(mode="json")
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": (ROOM,)}),
+        )
+    member = dataclasses.replace(
+        world.auth(admin=False, platform="discord"),
+        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_shared"),
+    )
+
+    async def preview(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            member,
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+            **extra,
+        )
+
+    with pytest.raises(ToolError, match="No card was posted"):
+        await preview()
+    origin = await _setup_thread_origin(world, db_session_factory)
+    assert (await preview(origin_context_id=origin)).status == "preview", "inside the pin"
 
 
 async def _preview_then_confirm(world: _World, auth: AuthIdentity, **source: Any):
@@ -491,7 +573,7 @@ async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
             responder_name="helper",
             kind="handoff",
         )
-    with pytest.raises(ToolError, match="a thread"):
+    with pytest.raises(ToolError, match="a bound thread"):
         await _add_skill_impl(
             world.runtime,
             world.auth(admin=False, platform="discord"),
