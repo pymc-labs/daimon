@@ -439,6 +439,41 @@ async def prepare_session_for_turn(
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
+    """Queue before the advisory-lock transaction checks out a connection."""
+    async with deps.preparation_gate.hold():
+        return await _prepare_session_for_turn_locked(
+            deps,
+            admission,
+            ops=ops,
+            tenant_id=tenant_id,
+            platform=platform,
+            external_user_id=external_user_id,
+            thread_id=thread_id,
+            session_account_id=session_account_id,
+            reuse_existing=reuse_existing,
+            capabilities=capabilities,
+            transfer=transfer,
+            deadline=deadline,
+            now=now,
+        )
+
+
+async def _prepare_session_for_turn_locked(
+    deps: TurnDeps,
+    admission: Admission,
+    *,
+    ops: SessionOps,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    thread_id: str,
+    session_account_id: uuid.UUID,
+    reuse_existing: bool,
+    capabilities: MaCapabilities = DEFAULT_MA_CAPABILITIES,
+    transfer: WorkspaceTransfer | None = None,
+    deadline: dt.datetime | None = None,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Find, refresh or replace this caller's session, then bind its recorder.
 
     Billing binds to the model the bound session actually runs — the fresh

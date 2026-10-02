@@ -11,9 +11,10 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -22,6 +23,7 @@ from daimon.core.config import McpSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -53,10 +55,20 @@ class TurnDeps:
     github_app_private_key: str | None
     public_url: str | None
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY
+    preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
     return secret.get_secret_value() if secret is not None else None
+
+
+def _preparation_limit(settings: Settings) -> int:
+    """Use the configured bound; tolerate incomplete settings mocks in adapter tests."""
+    configured: object = settings.database.preparation_concurrency
+    if isinstance(configured, int) and configured > 0:
+        return configured
+    pool_size = cast(object, settings.database.pool_size)
+    return max(1, pool_size // 2) if isinstance(pool_size, int) else 1
 
 
 def build_turn_deps(
@@ -86,4 +98,5 @@ def build_turn_deps(
         github_app_private_key=_reveal(github.app_private_key),
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,
+        preparation_gate=PreparationGate(_preparation_limit(settings)),
     )
