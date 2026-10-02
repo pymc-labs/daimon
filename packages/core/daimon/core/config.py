@@ -60,6 +60,17 @@ class DatabaseSettings(BaseModel):
             "Seconds to wait for a free Postgres connection before failing. Default 30 seconds."
         ),
     )
+    preparation_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum concurrent session preparations holding a Postgres advisory-lock "
+            "transaction per process. Unset uses half of pool_size (at least one), "
+            "leaving connections for preparation's nested queries and turn outcomes. "
+            "Keep this below pool_size so nested queries have headroom. Excess "
+            "preparations wait in memory instead of timing out in the DB pool."
+        ),
+    )
 
 
 class AnthropicSettings(BaseModel):

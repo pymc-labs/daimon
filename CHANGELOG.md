@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A Teams routine saved before its channel was recorded is placed in the channel its destination id names. Teams ids contain ":", which split the id at the wrong place, so such a routine was treated as outside its channel by the isolation and environment checks.
+- Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations.
 - Compatible session preparation releases its Postgres connection during vault I/O, and the detached turn outcome writer allows ten seconds for a busy pool before logging a failed write.
 
 ### Changed

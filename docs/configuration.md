@@ -143,6 +143,16 @@ the database connection budget.
 
 Seconds to wait for a free Postgres connection before failing. Default 30 seconds.
 
+### `DAIMON_DATABASE__PREPARATION_CONCURRENCY`
+
+`int | None` · optional · default unset
+
+Maximum concurrent session preparations holding a Postgres advisory-lock transaction per
+process. Unset uses half of pool_size (at least one), leaving connections for
+preparation's nested queries and turn outcomes. Keep this below pool_size so nested
+queries have headroom. Excess preparations wait in memory instead of timing out in the
+DB pool.
+
 ## Anthropic
 
 Read from `daimon.core.config.AnthropicSettings`. Prefix `DAIMON_ANTHROPIC__`.
