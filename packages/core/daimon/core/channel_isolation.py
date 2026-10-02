@@ -34,7 +34,7 @@ from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.errors import DaimonError
-from daimon.core.routine_delivery import delivery_target
+from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -89,22 +89,37 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     """The channel a routine delivers into (a thread's parent), or None without a destination.
 
     The saved `channel_id` is the destination's parent; a row saved before it
-    was recorded falls back to the destination id's channel part.
+    was recorded falls back to the channel its destination id carries, or the
+    id itself (a channel, or a Discord thread whose parent is unknown).
     """
     if row.destination_kind is None or row.destination_id is None:
         return None
-    return row.channel_id or row.destination_id.partition(":")[0]
+    if row.channel_id:
+        return row.channel_id
+    if row.destination_kind == "channel":
+        return row.destination_id
+    return _channel_in_thread_id(row.destination_id) or row.destination_id
 
 
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
     """A thread destination saved before its parent channel was recorded, whose id
-    doesn't carry it (a Discord thread; a Slack one is ``channel:ts``)."""
+    doesn't carry it (a Discord thread; a Slack one is ``channel:ts``, a Teams one
+    ``19:…;messageid=…``)."""
     return (
         row.destination_kind == "thread"
         and row.channel_id is None
         and row.destination_id is not None
-        and ":" not in row.destination_id
+        and _channel_in_thread_id(row.destination_id) is None
     )
+
+
+def _channel_in_thread_id(thread_id: str) -> str | None:
+    """The channel a thread id carries: Teams and Slack ids do, a Discord id doesn't."""
+    teams = teams_channel_of(thread_id)
+    if teams is not None:
+        return teams
+    channel, sep, _ = thread_id.partition(":")
+    return channel if sep and channel else None
 
 
 def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Place:
