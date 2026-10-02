@@ -304,8 +304,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in channels they run (instructions, skills, keys, MCP servers, repos)
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
-  admins. Slack and Teams grants are by member only. A routine or wake set up by someone
-  with more rights keeps the agent out of a channel admin's hands, and so do a
+  admins. Slack grants can also name user groups, and Teams grants a team,
+  whose owners they admit. A routine or wake set up by someone with more
+  rights keeps the agent out of a channel admin's hands, and so do a
   personal default, someone else's live session or routine in another channel
   or in no known one, and, for key, MCP server and skill repo changes,
   answering nowhere. Connecting a skill repo now counts an agent as shared
