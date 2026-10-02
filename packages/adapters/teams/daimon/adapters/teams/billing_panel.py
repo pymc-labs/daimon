@@ -3,18 +3,21 @@
 Mirrors Slack's `/billing`. A member sees their own spend and the balance; an
 admin also sees tenant totals, the top spenders and top-up buttons. A top-up
 click re-checks admin, creates a Stripe Checkout through the MCP server and
-replaces the card with an `Action.OpenUrl` to it.
+replaces the card with an `Action.OpenUrl` to it. While a promo code is
+redeemable, the admin view has a code box whose Redeem button submits it.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import cast
 
 import httpx
 import structlog
 from daimon.adapters.teams.card_actions import (
     FAILED,
+    Actor,
     button,
     card_actor,
     get_or_create_account,
@@ -42,6 +45,8 @@ from daimon.core.billing_panel import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.promo_codes import describe_refusal
+from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import (
@@ -51,6 +56,7 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenUrlAction,
+    TextInput,
 )
 
 log = structlog.get_logger()
@@ -62,7 +68,39 @@ NOT_CONFIGURED = (
     "Payments aren't configured for this organisation. "
     "Ask an operator about a manual credit top-up."
 )
+REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
+ENTER_CODE = "Enter a promo code."
+CODE_INPUT = "code"
 _TOP_SHOWN = 5
+
+
+def card_time(moment: datetime) -> str:
+    """A moment Teams shows in each reader's own timezone."""
+    iso = f"{moment.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}"
+    return f"{{{{DATE({iso}, SHORT)}}}} {{{{TIME({iso})}}}}"
+
+
+def _timed_credit(state: BillingPanelState) -> list[str]:
+    lines = [
+        f"⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {card_time(c.ends_at)}"
+        for c in state.timed_credit[:3]
+    ]
+    if len(state.timed_credit) > 3:
+        lines.append(f"⏳ {len(state.timed_credit) - 3} more timed credits")
+    return lines
+
+
+def redeemed_text(result: PromoRedeemed) -> str:
+    amount = f"**${result.amount_usd:,.2f}**"
+    if result.credit_ends_at is None:
+        return f"🎟️ Redeemed {amount} of credit. Balance: **${result.balance_usd:,.2f}**."
+    window = f"until {card_time(result.credit_ends_at)}"
+    if not result.granted and result.credit_starts_at is not None:
+        window = f"from {card_time(result.credit_starts_at)} {window}"
+    return (
+        f"🎟️ Redeemed {amount} of timed credit, usable {window}. "
+        "It is spent before other credit, and what is left then expires."
+    )
 
 
 def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
@@ -75,6 +113,7 @@ def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]
         heading("💸 Billing"),
         *text_lines(period_label(since), f"**You**{over}: {used}"),
         *text_lines(f"🏦 **Credit**: {balance} balance (top-ups are admin-only)"),
+        *text_lines(*_timed_credit(state)),
     ]
 
 
@@ -97,17 +136,27 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     if overflow:
         top.append(f"{overflow} more members")
     balance = fmt_usd(state.guild_balance_usd)
-    return [
+    body: list[CardElement] = [
         heading("💸 Billing · admin view"),
-        *text_lines(totals, f"🏦 **Credit**: {balance} balance", "🏆 **Top spenders**"),
-        *text_lines(*(top or ["no usage yet this period"]), "💳 **Top up credit**"),
+        *text_lines(totals, f"🏦 **Credit**: {balance} balance", *_timed_credit(state)),
+        *text_lines("🏆 **Top spenders**", *(top or ["no usage yet this period"])),
+        *text_lines("💳 **Top up credit**"),
         ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
     ]
+    if state.has_redeemable_promo_code:
+        code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
+        redeem = button(VERB, "🎟️ Redeem code", "redeem")
+        body += [*text_lines("🎟️ **Promo code**"), code, ActionSet(actions=[redeem])]
+    return body
 
 
-def panel_card(state: BillingPanelState, *, since: datetime) -> AdaptiveCard:
+def panel_card(
+    state: BillingPanelState, *, since: datetime, notice: str | None = None
+) -> AdaptiveCard:
     """The member view, or for an admin the tenant view with top-up buttons."""
     body = _admin_body(state, since) if state.is_admin else _member_body(state, since)
+    if notice is not None:
+        body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text="Billing")
 
 
@@ -141,7 +190,9 @@ class BillingPanel:
     ) -> AdaptiveCardInvokeResponse:
         return await guarded(self._act(ctx.activity), toast(FAILED), "teams.billing.failed")
 
-    async def _panel(self, tenant_id: uuid.UUID, user_id: str, is_admin: bool) -> AdaptiveCard:
+    async def _panel(
+        self, tenant_id: uuid.UUID, user_id: str, is_admin: bool, *, notice: str | None = None
+    ) -> AdaptiveCard:
         now = datetime.now(UTC)
         since = month_start(now)
         async with self._runtime.sessionmaker() as session:
@@ -153,13 +204,15 @@ class BillingPanel:
                 since=since,
                 now=now,
             )
-        return panel_card(state, since=since)
+        return panel_card(state, since=since, notice=notice)
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
             return toast(DENIED)
         data = activity.value.action.data
+        if data.get("op") == "redeem":
+            return await self._redeem(actor, str(cast(object, data.get(CODE_INPUT)) or ""))
         if data.get("op") != "topup":
             return replace_card(await self._panel(actor.tenant_id, actor.user_id, actor.is_admin))
         if not actor.is_admin:
@@ -180,3 +233,21 @@ class BillingPanel:
             capture_exception_with_scope(exc)
             return replace_card(text_card("💸 Billing", NOT_CONFIGURED, back=_back()))
         return replace_card(checkout_card(url, amount))
+
+    async def _redeem(self, actor: Actor, code: str) -> AdaptiveCardInvokeResponse:
+        """Redeem for a live admin; a refusal leaves the card, and the typed code, as it was."""
+        if not actor.is_admin:
+            return toast(REDEEM_ADMIN_ONLY)
+        if not code.strip():
+            return toast(ENTER_CODE)
+        result = await redeem_promo_code(
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            account_id=await get_or_create_account(self._runtime, actor),
+            code=code,
+            now=datetime.now(UTC),
+        )
+        if isinstance(result, PromoRedeemRefused):
+            return toast(describe_refusal(result.reason))
+        card = await self._panel(actor.tenant_id, actor.user_id, True, notice=redeemed_text(result))
+        return replace_card(card)

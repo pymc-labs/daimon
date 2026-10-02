@@ -16,9 +16,7 @@ has no file input, so a `.env` file is pasted rather than uploaded; and once a
 dialog closes nothing private reaches the requester, so a GitHub token is
 checked against its repo before the request is spent (Discord and Slack spend
 it first, then say so privately; the Teams adapter's credential tests assert
-the unspent request). Removing the app archives nothing. The `billing` card
-has no promo code surface: Teams admins redeem with the MCP tool
-`redeem_promo_code`. Channel budgets are Discord and Slack only, so the card shows no channel budget either. So are
+the unspent request). Removing the app archives nothing. Channel budgets are Discord and Slack only, so the card shows no channel budget either. So are
 channel admins: only the listed admins administer a Teams channel. A Teams
 answer carries no usage line (agent, time, tokens, cost, balance) where the
 finished Discord or Slack card has one; spend is on the `billing` card.
@@ -70,7 +68,6 @@ from daimon.core.channel_admins import ChannelAdminCaller, load_administered_cha
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.config import TeamsSettings
 from daimon.core.credential_requests import ENV_FILE_TARGET
-from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
@@ -171,30 +168,6 @@ async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched(
         )
     assert "`q3.xlsx` was shared but can't be opened: daimon has no access" in prepared.prefix, (
         "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
-    )
-
-
-def test_the_teams_billing_card_has_no_promo_code_surface() -> None:
-    """Even with a redeemable code and live timed credit, the card offers neither."""
-    now = datetime(2026, 5, 14, tzinfo=UTC)
-    state = BillingPanelState(
-        is_admin=True,
-        caller_user_id="u",
-        caller_spend=0.0,
-        caller_turns=0,
-        caller_cap=None,
-        guild_balance_usd=Decimal("10"),
-        guild_spend=0.0,
-        guild_turns=0,
-        guild_distinct_members=0,
-        member_rows=(),
-        over_cap_count=0,
-        timed_credit=(ActiveTimedCredit(remaining_usd=Decimal("5"), ends_at=now),),
-        has_redeemable_promo_code=True,
-    )
-    card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
-    assert "redeem" not in card.lower() and "timed credit" not in card.lower(), (
-        "Teams has no promo code UI on purpose; if it gains one, replace this record"
     )
 
 
