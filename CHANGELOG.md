@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Audit what members set up before the cross-agent fixes: `list_routines` as an admin for routines whose agent is not the one their destination channel answers with, and thread handoff bindings to agents from other projects. These keep working until removed.
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
+- Teams: run migration `0038_teams_parity` before deploying. The MCP server finds a team once the bot sees activity there, so a team the bot joined earlier is readable by channel tools after its next message.
 - Routines now run in their channel's environment, then the workspace default, instead of always the deployment default. A channel or workspace `environment_name` already set with `daimon config set` moves those routines onto it from their next fire; `daimon config unset` it first to keep them where they were.
 
 ### Added
@@ -77,6 +78,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_tenant_summary` (with each channel's admins) and, for `promo:create`,
   `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`
   tokens now expire and can be revoked. Run migration `0036_operator_tokens`.
+
+- **Teams reaches parity with Discord.** "Summarise this channel" works: the
+  channel tools (`list_channels`, `read_channel`, `read_thread`,
+  `get_message`, `list_threads`, `parse_link`, `search_messages`) read Teams
+  through Graph for anyone on the channel's roster, and a turn names only the
+  tools its platform has. Turns replay posts with their replies, earlier
+  images and files, senders, times and channel names, and say when history
+  could not be read. `send_direct_message`, channel budgets and channel
+  admins, files through `send_message`, `post_wizard` forms (Adaptive Cards)
+  and routine destinations work on Teams. A command typed in a channel is
+  answered in the 1:1 chat, `support` asks a person for help, completion
+  pings post the answer fresh with an @mention, admins redeem promo codes from
+  the `billing` card, the bot says hello when installed and forgets a team it
+  is removed from, and a restart finds channel cards whose post lost its id.
+
 - **Teams takes every private form Discord and Slack do.** A key value can
   span lines, `request_agent_key` without a key posts a `.env` form on Teams
   (the file is pasted, since a dialog has no file input), and repo and

@@ -210,7 +210,7 @@ or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
 budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
 with no row there is no limit, and nothing is created by default. It works
 the same with or without Stripe and for either funding mode. Budgets exist on
-Discord and Slack only; Teams has none.
+Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
@@ -375,9 +375,8 @@ many tenants may redeem it. Each tenant redeems a code at most once.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
-credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
-with the admin-only MCP tool `redeem_promo_code`, which is the only way on
-Teams: its `billing` card shows no promo codes. Refusals are one of
+credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
+`billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses
@@ -478,9 +477,11 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord and Slack terminal reply footers show the remaining ledger balance
-for prepaid tenants after the turn's debit. Operator-funded tenants and turns
-without a tenant omit it. Teams answers carry no usage footer.
+Discord and Slack status cards end on a summary of tokens, cost and, for
+prepaid tenants, the balance left after the turn's debit. The answer replaces
+the card (unless a completion ping posts it fresh), so the summary stays only
+above a pinged answer or on a turn with none; answers themselves carry no
+usage line on any platform. Teams cards show no summary.
 
 ## What you can see
 

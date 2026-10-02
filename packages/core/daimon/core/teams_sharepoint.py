@@ -18,11 +18,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import httpx
-from daimon.adapters.teams.attachments import is_sharepoint_host
-from daimon.adapters.teams.graph import (
+from daimon.core.teams_graph import (
     GRAPH_ROOT,
     GraphClient,
     GraphUnavailable,
+    is_sharepoint_host,
     path_segment,
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -226,6 +226,14 @@ class SharePoint:
         if found is None:
             raise GraphUnavailable("no library holds the file", status=200)
         return found
+
+
+def file_link(name: str, web_url: str | None) -> str:
+    """A markdown list line for a saved file, linked only when its URL is on SharePoint."""
+    label = name.replace("[", "\\[").replace("]", "\\]")
+    if web_url is None or not is_sharepoint_host(httpx.URL(web_url)):
+        return f"- {label}"
+    return f"- [{label}]({web_url.replace('(', '%28').replace(')', '%29')})"
 
 
 def _url(value: str) -> httpx.URL:

@@ -101,6 +101,25 @@ async def test_server_admin_sets_lists_and_clears_channel_admins(
     assert not again.changed, "clearing twice is a no-op"
 
 
+async def test_a_teams_admin_names_channel_admins_by_entra_id(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime, admin = (
+        _runtime(committing_sessionmaker),
+        _auth(tenant_id, admin=True, platform="teams"),
+    )
+    channel, user = "19:abc-1@thread.tacv2", "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+    result = await _set_channel_admins_impl(
+        runtime, admin, channel_id=channel, role_ids=[], user_ids=[user]
+    )
+    assert result.channel.user_ids == [user.lower()], "Entra ids fold to lower case"
+    with pytest.raises(ToolError, match="no roles"):
+        await _set_channel_admins_impl(
+            runtime, admin, channel_id=channel, role_ids=["r"], user_ids=[]
+        )
+
+
 async def test_channel_admin_tools_refuse_members_and_bad_ids(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

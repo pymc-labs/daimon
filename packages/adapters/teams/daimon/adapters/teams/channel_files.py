@@ -18,15 +18,13 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
-from daimon.adapters.teams.graph import GraphUnavailable, TeamGroups
-from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.sharepoint import DriveFolder, DriveItem, SharePoint
+from daimon.adapters.teams.identity import GENERAL_CHANNEL, TeamsInbound
+from daimon.core.teams_graph import GraphUnavailable, TeamGroups
+from daimon.core.teams_sharepoint import DriveFolder, DriveItem, SharePoint
 
 log = structlog.get_logger(__name__)
 
 RECHECK_S = 600.0
-# The General channel's Bot Framework id is the team's, and its folder this name.
-_GENERAL = "General"
 
 # Bot Framework team id -> {channel id: name}; the General channel's name is None.
 ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
@@ -140,7 +138,7 @@ class ChannelFiles:
         if team is None:
             raise GraphUnavailable("no team")
         if inbound.channel_id == team:
-            return _GENERAL
+            return GENERAL_CHANNEL
         if not (name := (await self._channel_names(team)).get(inbound.channel_id)):
             raise GraphUnavailable("channel not found")
         return name

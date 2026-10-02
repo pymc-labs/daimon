@@ -20,27 +20,36 @@ from daimon.adapters.teams import (
     routines_card,
     setup_card,
     tool_confirmation,
+    wizard,
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import CommandHandler
+from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import record_feedback
-from daimon.adapters.teams.graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.adapters.teams.help import send_help
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.installations import TeamInstalls
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
+from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.sharepoint import SharePoint
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
+from daimon.adapters.teams.support import VERB as SUPPORT_VERB
+from daimon.adapters.teams.support import SupportCommand
+from daimon.adapters.teams.support import enabled as support_enabled
 from daimon.adapters.teams.thread_reader import ThreadReader
+from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
+from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
+from daimon.core.teams_sharepoint import SharePoint
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
@@ -234,6 +243,13 @@ def create_teams_http_service(
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
+    installs = TeamInstalls(
+        runtime.sessionmaker,
+        groups,
+        tenant_id=derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id),
+        entra_tenant_id=settings.tenant_id,
+        alert_url=runtime.settings.ops.alert_webhook_url,
+    )
     files = ChannelFiles(SharePoint(graph, runtime.http_client), groups, channel_names)
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
@@ -252,6 +268,10 @@ def create_teams_http_service(
         "privacy": privacy.command,
         "billing": billing.command,
     }
+    direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
+    support = SupportCommand(runtime, direct) if support_enabled(runtime.settings) else None
+    if support is not None:
+        commands["support"] = support.command
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -260,6 +280,14 @@ def create_teams_http_service(
         bot_token=bot_token,
         reader=reader,
         channel_files=files,
+        installs=installs,
+        direct=direct,
+        routine_poster=make_teams_routine_poster(
+            runtime.sessionmaker,
+            direct,
+            tenant_id=installs.tenant_id,
+            dm_policies=runtime.settings.direct_message_policies,
+        ),
     )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
@@ -271,6 +299,8 @@ def create_teams_http_service(
             log.exception("teams.feedback.failed")
 
     teams_app.on_message(turns.handle_message)
+    teams_app.on_install_add(installs.on_install)
+    teams_app.on_install_remove(installs.on_uninstall)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
@@ -279,6 +309,12 @@ def create_teams_http_service(
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
+    wizards = TeamsWizards(
+        runtime, start_turn=turns.start_wizard_turn, draining=lambda: turns.draining
+    )
+    teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
+    if support is not None:
+        teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)

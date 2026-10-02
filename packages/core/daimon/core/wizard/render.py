@@ -2,10 +2,10 @@
 
 `to_screen` is the one place that decides what a wizard run currently looks
 like — head text, an optional image, an optional select, and button rows —
-without ever mentioning a Discord type. Both the Discord and (should one
-land) a second platform's renderer read a `Screen` and translate it into
-their own component tree; neither re-derives navigation, review, or
-submitted-screen behaviour, because that behaviour lives here and in
+without ever mentioning a Discord type. The Discord and Teams renderers
+read a `Screen` and translate it into their own component tree; neither
+re-derives navigation, review, or submitted-screen behaviour, because that
+behaviour lives here and in
 `daimon.core.wizard.apply`.
 
 Every action string this module emits is validated through

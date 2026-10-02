@@ -1,6 +1,6 @@
 """The tenant access policy as the channel tools see it.
 
-One write guard for Discord and Slack: each platform resolves its target to a
+One write guard for Discord, Slack and Teams: each platform resolves its target to a
 channel id (plus parent channel and category where it has them) and calls
 `require_channel_writable` after its own caller-permission check, so the
 policy never reveals a channel the caller could not see anyway. Protection

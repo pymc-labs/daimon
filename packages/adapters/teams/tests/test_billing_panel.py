@@ -9,12 +9,21 @@ import asyncio
 import json
 import uuid
 from contextlib import AbstractAsyncContextManager
+from decimal import Decimal
 
 import httpx
 import pytest
-from daimon.adapters.teams.billing_panel import ADMIN_ONLY, NOT_CONFIGURED, UNKNOWN_AMOUNT
+from daimon.adapters.teams.billing_panel import (
+    ADMIN_ONLY,
+    ENTER_CODE,
+    NOT_CONFIGURED,
+    REDEEM_ADMIN_ONLY,
+    UNKNOWN_AMOUNT,
+)
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
+from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.stores import promo_codes as promo_store
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -122,3 +131,33 @@ async def test_a_top_up_without_payments_says_so(
         response = await post_activity(service, _click("topup", amount="10"))
 
     assert NOT_CONFIGURED in json.dumps(response), "no billing routes mounted is not an error"
+
+
+async def _promo(db_factory: async_sessionmaker[AsyncSession], code: str) -> None:
+    async with db_factory.begin() as session:
+        await promo_store.insert_promo_code(
+            session,
+            code_hash=hash_promo_code(normalize_promo_code(code)),
+            terms=build_promo_code_terms(amount_usd=Decimal("10"), timed=False),
+        )
+
+
+async def test_an_admin_redeems_a_promo_code_from_the_card(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    await _promo(db_session_factory, "SPRING-2026")
+    async with _running(db_session_factory, teams_api_fake) as service:
+        member = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
+        admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+        forwarded = await post_activity(
+            service, _click("redeem", user=OTHER_AAD_OBJECT_ID, code="SPRING-2026")
+        )
+        empty = await post_activity(service, _click("redeem", code=" "))
+        wrong = await post_activity(service, _click("redeem", code="WRONG-CODE"))
+        redeemed = await post_activity(service, _click("redeem", code="spring-2026"))
+
+    assert '"op": "redeem"' in admin and '"op": "redeem"' not in member, "admins only"
+    assert forwarded["value"] == REDEEM_ADMIN_ONLY and empty["value"] == ENTER_CODE
+    assert isinstance(wrong["value"], str) and wrong["value"], "a refusal is said, the card kept"
+    card = json.dumps(redeemed, ensure_ascii=False)
+    assert "Redeemed **$10.00** of credit" in card and "admin view" in card

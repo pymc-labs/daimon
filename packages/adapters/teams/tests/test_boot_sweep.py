@@ -10,6 +10,7 @@ import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, mark_turn_active
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
@@ -79,3 +80,28 @@ async def test_markers_and_intents_are_interrupted_cleared_and_retired(
         open_intents = await list_recoverable_turn_card_intents(session, platform="teams")
     assert cleared is not None and cleared.active_turn_message_id is None, "marker cleared"
     assert open_intents == [], "every intent retires, failed edits and unposted cards too"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_card_whose_post_lost_its_id_is_found_and_interrupted(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    lost = await _intent(db_session, thread_id=THREAD_ID, message_id=None)
+    sender = FakeSender()
+    looked_up: list[uuid.UUID] = []
+
+    async def find_card(intent: TurnCardIntentRow) -> str | None:
+        looked_up.append(intent.id)
+        return "m-found"
+
+    await retire_orphaned_turns(
+        anthropic=AsyncMock(),
+        sessionmaker=db_session_factory,
+        sender=sender,
+        now=datetime.now(UTC),
+        find_card=find_card,
+    )
+    assert looked_up == [lost]
+    assert [(c, a.id) for c, a, _ in sender.sent] == [(THREAD_ID, "m-found")]
+    async with db_session_factory() as session:
+        assert await list_recoverable_turn_card_intents(session, platform="teams") == []

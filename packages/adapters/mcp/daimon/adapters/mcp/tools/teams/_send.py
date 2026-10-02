@@ -1,4 +1,6 @@
-"""Teams send_message, create_thread, the GitHub App link and credential cards.
+"""Teams send_message, create_thread, post_wizard, the GitHub App link and credential cards.
+
+Files go through `_files`: saved to a channel's Files, offered in a 1:1 chat.
 
 The bot is the sender, so a caller could otherwise speak through it in a
 conversation they cannot see: the requester's Entra id must be on the target's
@@ -19,7 +21,11 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.adapters.mcp.tools.teams._directory import split_thread
+from daimon.adapters.mcp.tools.teams._files import CHANNEL as _CHANNEL
+from daimon.adapters.mcp.tools.teams._files import MAX_FILES, post_files
 from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
@@ -27,6 +33,10 @@ from daimon.core.posted_controls import CardState, RefusalReason, card_for_reque
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of
+from daimon.core.wizard.render import to_screen
+from daimon.core.wizard.spec import WizardSpec
+from daimon.core.wizard.state import WizardState
+from daimon.core.wizard.teams_card import wizard_card
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 
@@ -108,18 +118,26 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     attachments: list[dict[str, str]] | None = None,
     file_handles: list[str] | None = None,
 ) -> TeamsMessageRow:
-    if attachments or file_handles:
-        # "Not available yet" read as a promise; say where Teams files do go.
-        raise ToolError(
-            "send_message posts text only on Teams. In a 1:1 chat, save the file under "
-            "/mnt/session/outputs and daimon offers it after your turn; a channel cannot "
-            "take files."
-        )
-    _check_text(content)
+    if attachments:
+        raise ToolError("attachments takes Discord CDN URLs; on Teams post files with file_handles")
+    if file_handles and len(file_handles) > MAX_FILES:
+        raise ToolError(f"max {MAX_FILES} files per message")
+    if content.strip() or not file_handles:
+        _check_text(content)
     conversation_id = _conversation_id(channel_id)
     client = await _authorize(runtime, auth, conversation_id)
+    staged = (
+        await staged_uploads(
+            file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
+        )
+        if file_handles
+        else []
+    )
     try:
-        activity_id = await client.send(conversation_id, content)
+        if staged:
+            activity_id = await post_files(runtime, auth, client, conversation_id, content, staged)
+        else:
+            activity_id = await client.send(conversation_id, content)
     except (httpx.HTTPError, ValueError) as err:
         raise _post_failed(err) from err
     return TeamsMessageRow(conversation_id=conversation_id, activity_id=activity_id, text=content)
@@ -141,6 +159,30 @@ async def _teams_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
     except (httpx.HTTPError, ValueError) as err:
         raise _post_failed(err) from err
     return TeamsMessageRow(conversation_id=thread_id, activity_id=activity_id, text=content)
+
+
+async def _post_teams_wizard_impl(  # pyright: ignore[reportUnusedFunction]  # used by tools/wizard.py
+    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str, spec: WizardSpec, short_id: str
+) -> tuple[str, str]:
+    """Post a form's first screen; returns (the conversation it lives in, its activity id).
+
+    A bare channel gets a new post, whose thread the form and its turn then live in.
+    """
+    if any(step.image_handle is not None for step in spec.steps):
+        raise ToolError("step images are Discord-only; describe the picture in the question")
+    conversation_id = _conversation_id(channel_id)
+    channel, root = split_thread(conversation_id)
+    is_channel = _CHANNEL.fullmatch(channel) is not None
+    if not (is_channel or conversation_id.startswith("a:")):
+        raise ToolError("a form goes in a channel, a thread or a 1:1 chat, not a group chat")
+    client = await _authorize(runtime, auth, conversation_id)
+    card = wizard_card(to_screen(spec, WizardState(short_id=short_id)))
+    try:
+        if is_channel and root is None:
+            return await client.create_thread_card(channel, card)
+        return conversation_id, await client.send_card(conversation_id, card)
+    except (httpx.HTTPError, ValueError) as err:
+        raise _post_failed(err) from err
 
 
 async def _post_teams_app_install_link_impl(  # pyright: ignore[reportUnusedFunction]  # used by tools/github_app.py

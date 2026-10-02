@@ -923,7 +923,9 @@ class SupportSettings(BaseModel):
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Channel id where human-support requests are posted. Unset (the "
+            "Channel id where human-support requests are posted: a Discord channel id, "
+            "or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests "
+            "reach a Discord channel only when the Discord bot token is also set. Unset (the "
             "default) disables the escalate affordance entirely — a request "
             "that reaches nobody is worse than no button at all. A channel "
             "rather than operator DMs: it survives one person's DMs being "
@@ -1044,7 +1046,9 @@ class Settings(BaseSettings):
             "Per-tenant completion notification policy, keyed by tenant UUID. "
             "True enables accepted/done reactions and posts the final answer as a fresh reply "
             "mentioning only the requester "
-            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "on Discord and Slack. On Teams it closes the status card and posts the answer "
+            "fresh, mentioning the requester in channels (Teams bots cannot react). "
+            "Missing/false preserves in-place delivery. "
             "Configure DAIMON_COMPLETION_PINGS as a JSON object."
         ),
     )

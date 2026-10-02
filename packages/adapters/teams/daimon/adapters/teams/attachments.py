@@ -29,7 +29,6 @@ from typing import Literal, cast
 import httpx
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
-from daimon.adapters.teams.graph import is_graph_url
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
@@ -40,6 +39,7 @@ from daimon.core.media.vision import (
     build_image_block,
     sniff_image_media_type,
 )
+from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -47,12 +47,6 @@ log = structlog.get_logger()
 
 MAX_ATTACHMENTS = 10
 _MAX_REDIRECTS = 3
-_SHAREPOINT_SUFFIXES = (
-    ".sharepoint.com",
-    ".sharepoint.us",
-    ".sharepoint-mil.us",
-    ".sharepoint.cn",
-)
 # Teams serves pasted images from the service URL's host or its media store.
 _MEDIA_STORE_SUFFIX = ".asm.skype.com"
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -133,10 +127,6 @@ class PreparedAttachments:
 
     image_blocks: list[BetaManagedAgentsImageBlockParam]
     prefix: str  # `[attachment]` lines, newline-terminated, for the user message
-
-
-def is_sharepoint_host(url: httpx.URL) -> bool:
-    return url.scheme == "https" and url.host.endswith(_SHAREPOINT_SUFFIXES)
 
 
 def _sharepoint_url(value: object) -> str | None:
@@ -252,6 +242,38 @@ def _resolve_embedded(
     return kept, []
 
 
+async def _inline_history(
+    http: httpx.AsyncClient,
+    urls: Sequence[str],
+    blocks: list[BetaManagedAgentsImageBlockParam],
+    graph_token: BotToken | None,
+) -> str:
+    """Append the history's images to `blocks`; the line that tells the agent so."""
+    inlined = 0
+    for url in urls:
+        try:
+            if len(blocks) >= MAX_VISION_IMAGES or graph_token is None:
+                raise FetchRefused("no room" if graph_token else "no Graph token")
+            data = await fetch_bytes(
+                http,
+                url,
+                is_allowed=is_graph_url,
+                token=await graph_token(),
+                max_bytes=MAX_VISION_IMAGE_BYTES,
+            )
+            blocks.append(image_block(data))
+            inlined += 1
+        except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
+            reason = str(err) if isinstance(err, FetchRefused) else type(err).__name__
+            log.warning("teams.attachment.skipped", kind="history_image", reason=reason)
+    missed = len(urls) - inlined
+    return (
+        f"[attachment] {inlined} image(s) from earlier messages are attached after the "
+        "person's own, in history order; `images_attached` on a replayed message counts its own."
+        + (f" {missed} could not be fetched, so the counts overstate." if missed else "")
+    )
+
+
 async def prepare_attachments(
     http: httpx.AsyncClient,
     files: Sequence[InboundFile],
@@ -261,11 +283,13 @@ async def prepare_attachments(
     channel: bool = False,
     channel_media: ChannelMedia | None = None,
     graph_token: BotToken | None = None,
+    history_images: Sequence[str] = (),
 ) -> PreparedAttachments:
     """Download what can be inlined; describe the rest. One bad file never aborts the turn.
 
     `channel_media` is the channel message as Graph sees it, or None when it
-    could not be read; `graph_token` authorises its hosted images.
+    could not be read; `graph_token` authorises its hosted images and the
+    replayed history's `history_images`, inlined after the message's own.
     """
     service_host = httpx.URL(service_url).host if service_url else None
     files, unnamed = _resolve_embedded(files, channel_media)
@@ -336,4 +360,6 @@ async def prepare_attachments(
                 lines.append(_link_line(file, reason))
                 continue
             lines.append(f"[attachment] pasted image `{file.name}` was not inlined ({reason}).")
+    if history_images:
+        lines.append(await _inline_history(http, history_images, blocks, graph_token))
     return PreparedAttachments(image_blocks=blocks, prefix="".join(f"{line}\n" for line in lines))

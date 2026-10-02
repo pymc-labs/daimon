@@ -10,6 +10,7 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +23,7 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channel_budgets_impl,  # pyright: ignore[reportPrivateUsage]
     _resolve_slack_channel,  # pyright: ignore[reportPrivateUsage]
+    _resolve_teams_channel,  # pyright: ignore[reportPrivateUsage]
     _set_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     origin_budget_channel,
 )
@@ -298,7 +300,7 @@ async def test_callers_without_a_chat_platform_are_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
-    with pytest.raises(ToolError, match="only for Discord servers and Slack workspaces"):
+    with pytest.raises(ToolError, match="only for Discord, Slack and Teams channels"):
         await _list_channel_budgets_impl(
             _runtime(committing_sessionmaker),
             _auth(tenant, account_id, admin=True, platform="cli"),
@@ -417,3 +419,43 @@ def _slack_client(
 
     monkeypatch.setattr(tool_module, "slack_web_client", fake_client)
     return client
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_a_teams_thread_resolves_to_its_channel_for_a_member_only(
+    monkeypatch: pytest.MonkeyPatch, member: bool
+) -> None:
+    channel = "19:c@thread.tacv2"
+    client = MagicMock()
+    client.is_member = AsyncMock(return_value=member)
+    located: list[str] = []
+
+    async def locate(runtime: McpRuntime, auth: AuthIdentity, _client: object, cid: str) -> object:
+        located.append(cid)
+        return SimpleNamespace(channel_id=cid)
+
+    monkeypatch.setattr(tool_module, "require_client", lambda runtime, auth: (client, "u-1"))
+    monkeypatch.setattr(tool_module, "locate_channel", locate)
+    resolve = _resolve_teams_channel(MagicMock(), MagicMock(), f"{channel};messageid=17")
+    if member:
+        assert await resolve == channel
+    else:
+        with pytest.raises(ToolError, match="not a member"):
+            await resolve
+    assert located == [channel], "a thread id is looked up as its channel"
+    client.is_member.assert_awaited_once_with(channel, "u-1")
+
+
+async def test_a_teams_clear_takes_the_threads_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    channel = "19:c@thread.tacv2"
+    async with committing_sessionmaker.begin() as session:
+        await make_channel_budget(session, tenant=tenant, channel_id=channel, platform="teams")
+    cleared = await _clear_channel_budget_impl(
+        _runtime(committing_sessionmaker),
+        _auth(tenant, account_id, admin=True, platform="teams"),
+        f"{channel};messageid=17",
+    )
+    assert (cleared.channel_id, cleared.cleared) == (channel, True)

@@ -40,7 +40,13 @@ from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TeamsSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    Settings,
+    SupportSettings,
+    TeamsSettings,
+)
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import new_resolver_cache
@@ -147,6 +153,7 @@ async def _exchange(
         patch.object(TokenManager, "get_bot_token", AsyncMock(return_value="parity-bot-token")),
         patch("daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock),
         patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock),
+        patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock),
     ):
         service = create_teams_http_service(
             settings=runtime.settings.teams, runtime=runtime, client=client
@@ -278,6 +285,7 @@ class TeamsDriver:
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")
         settings.tool_safety = OPEN_TOOL_SAFETY
+        settings.support = SupportSettings()
         anthropic = build_fake_anthropic(router.dispatch)
         default = _TURN_DEFAULT if turn else DeploymentDefault()
         resolver_cache = new_resolver_cache()

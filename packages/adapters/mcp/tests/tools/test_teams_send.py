@@ -237,8 +237,8 @@ async def test_send_message_fails_closed_on_transport_error() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"channel_id": _THREAD, "content": "x", "file_handles": ["h"]}, "/mnt/session/outputs"),
-        ({"channel_id": _THREAD, "content": "x", "attachments": [{"a": "b"}]}, "text only"),
+        ({"channel_id": _THREAD, "content": "x", "file_handles": ["h"] * 11}, "max 10 files"),
+        ({"channel_id": _THREAD, "content": "x", "attachments": [{"a": "b"}]}, "Discord CDN"),
         ({"channel_id": _THREAD, "content": "x" * 6_001}, "6,000-character"),
         ({"channel_id": _THREAD, "content": "  "}, "must not be empty"),
         ({"channel_id": "19:a/../b", "content": "x"}, "Teams conversation id"),
@@ -336,5 +336,6 @@ async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
     assert "teams-bound identity" in await call(
         "send_message", {"channel_id": _THREAD, "content": "hi"}
     )
+    assert "teams-bound identity" in await call("list_channels", {})
     # Untagged for Teams: hidden, so the registry does not know it.
-    assert "Unknown tool" in await call("list_channels", {})
+    assert "Unknown tool" in await call("rename_thread", {"thread_id": _THREAD, "name": "x"})

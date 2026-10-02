@@ -4,7 +4,9 @@ Thin adapter over `sweep_session_outputs`. In a 1:1 chat each file is offered
 with a FileConsentCard and the post defers, so the file stays listed until the
 person accepts (upload, then delete) or declines (delete). The card's context
 round-trips through the client, so it carries only a random token keyed to a
-server-side offer that is checked against the clicker and expires.
+server-side offer that is checked against the clicker and expires. A file the
+agent posted with send_message is offered by the MCP server instead, with a
+signed token (`daimon.core.teams_file_offers`); its bytes are a staged upload.
 
 In a channel each file is uploaded to the channel's Files folder through
 Graph (`channel_files`), and the links are edited in below the answer, or
@@ -31,10 +33,9 @@ from typing import Any, Protocol
 import anthropic
 import httpx
 import structlog
-from daimon.adapters.teams.attachments import FetchRefused, is_sharepoint_host
-from daimon.adapters.teams.card_actions import card_actor, submitted_fields
+from daimon.adapters.teams.attachments import FetchRefused
+from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
-from daimon.adapters.teams.graph import GraphUnavailable
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -47,6 +48,10 @@ from daimon.core.output_delivery import (
     download_output_file,
     sweep_session_outputs,
 )
+from daimon.core.stores.file_uploads import get_upload
+from daimon.core.teams_file_offers import FILE_CONSENT_CONTENT_TYPE, UPLOAD_KEY, verify_offer
+from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
+from daimon.core.teams_sharepoint import file_link
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,
@@ -59,7 +64,6 @@ from microsoft_teams.apps import ActivityContext
 
 log = structlog.get_logger()
 
-FILE_CONSENT_CONTENT_TYPE = "application/vnd.microsoft.teams.card.file.consent"
 FILE_INFO_CONTENT_TYPE = "application/vnd.microsoft.teams.card.file.info"
 OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
@@ -76,13 +80,6 @@ async def _log_channel_skip(file: SkippedFile) -> None:
 
 async def _log_skip(file: SkippedFile) -> None:
     log.info("teams.output.oversize", file_id=file.file_id, size_bytes=file.size_bytes)
-
-
-def _file_link(name: str, web_url: str | None) -> str:
-    label = name.replace("[", "\\[").replace("]", "\\]")
-    if web_url is None or not is_sharepoint_host(httpx.URL(web_url)):
-        return f"- {label}"
-    return f"- [{label}]({web_url.replace('(', '%28').replace(')', '%29')})"
 
 
 class Spawn(Protocol):
@@ -211,7 +208,7 @@ class TeamsOutputDelivery:
                     reason=err.reason,
                 )
                 return
-            links.append(_file_link(sanitize_title(item.name or name), item.web_url))
+            links.append(file_link(sanitize_title(item.name or name), item.web_url))
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -273,14 +270,19 @@ class TeamsOutputDelivery:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
             return
-        token = str(submitted_fields(activity.value.context).get("offer", ""))
+        fields = submitted_fields(activity.value.context)
+        service_url = ctx.conversation_ref.service_url
+        if UPLOAD_KEY in fields:
+            staged = self._staged(activity, actor, str(fields[UPLOAD_KEY]), service_url)
+            self._spawn(staged, name="teams.file-consent")
+            return
+        token = str(fields.get("offer", ""))
         offer = self._offers.get(token)
         if (
             offer is None
             or offer.expires_at <= self._clock()
             or (offer.user_id, offer.conversation_id) != (actor.user_id, actor.conversation_id)
         ):
-            service_url = ctx.conversation_ref.service_url
             say = self._say(activity.conversation.id, service_url, _EXPIRED)
             self._spawn(say, name="teams.file-consent")
             return
@@ -303,17 +305,7 @@ class TeamsOutputDelivery:
         """PUT the bytes to the upload session, delete the output, show the file."""
         client = self._runtime.anthropic
         try:
-            url = httpx.URL(info.upload_url or "")
-            if not is_sharepoint_host(url):
-                raise FetchRefused("upload URL is not on SharePoint")
-            content = await download_output_file(client, offer.file_id)
-            response = await self._runtime.http_client.put(
-                url,
-                content=content,
-                headers={"Content-Range": f"bytes 0-{len(content) - 1}/{len(content)}"},
-            )
-            if not response.is_success:
-                raise FetchRefused(f"upload failed with HTTP {response.status_code}")
+            await self._put(info, await download_output_file(client, offer.file_id))
         except (FetchRefused, anthropic.APIError, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
             # The output stays listed, so the next sweep offers it again.
             log.warning("teams.file_upload.failed", file_id=offer.file_id, error=type(err).__name__)
@@ -325,6 +317,54 @@ class TeamsOutputDelivery:
         await self._sender.send(
             offer.conversation_id, file_info_message(info), service_url=offer.service_url
         )
+
+    async def _put(self, info: FileUploadInfo, content: bytes) -> None:
+        """PUT `content` to the person's OneDrive upload session; `FetchRefused` on failure."""
+        url = httpx.URL(info.upload_url or "")
+        if not is_sharepoint_host(url):
+            raise FetchRefused("upload URL is not on SharePoint")
+        response = await self._runtime.http_client.put(
+            url,
+            content=content,
+            headers={"Content-Range": f"bytes 0-{len(content) - 1}/{len(content)}"},
+        )
+        if not response.is_success:
+            raise FetchRefused(f"upload failed with HTTP {response.status_code}")
+
+    async def _staged(
+        self,
+        activity: FileConsentInvokeActivity,
+        actor: Actor,
+        token: str,
+        service_url: str | None,
+    ) -> None:
+        """A file the agent posted with send_message: its offer is signed, its bytes staged."""
+        conversation = activity.conversation.id
+        teams = self._runtime.settings.teams
+        secret = teams.client_secret.get_secret_value() if teams else ""
+        offer = verify_offer(token, secret=secret, now=time.time()) if secret else None
+        if offer is None or (offer.user_id, offer.conversation_id) != (
+            actor.user_id,
+            actor.conversation_id,
+        ):
+            await self._say(conversation, service_url, _EXPIRED)
+            return
+        info = activity.value.upload_info
+        if activity.value.action != "accept" or info is None:
+            return  # Declined: the staged upload expires on its own.
+        async with self._runtime.sessionmaker() as session:
+            row = await get_upload(session, tenant_id=actor.tenant_id, handle_id=offer.handle_id)
+        if row is None or row.content is None:
+            await self._say(conversation, service_url, _EXPIRED)
+            return
+        try:
+            await self._put(info, row.content)
+        except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
+            log.warning("teams.file_upload.failed", handle_id=row.id, error=type(err).__name__)
+            name = row.display_filename
+            await self._say(conversation, service_url, _UPLOAD_FAILED.format(name=name))
+            return
+        await self._sender.send(conversation, file_info_message(info), service_url=service_url)
 
     async def _decline(self, offer: _Offer) -> None:
         await delete_output_file(

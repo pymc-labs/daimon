@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import structlog
-from daimon.adapters.teams.graph import GraphUnavailable
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import ThreadParticipationSettings
@@ -28,6 +27,7 @@ from daimon.core.participation_gates import (
     BATCH_MAX_QUIET_PERIODS,
     ParticipationGates,
 )
+from daimon.core.teams_graph import GraphUnavailable
 from daimon.core.thread_participation import ClassifierMessage, ParticipationMode
 
 log = structlog.get_logger()

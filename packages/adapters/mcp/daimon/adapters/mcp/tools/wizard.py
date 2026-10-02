@@ -25,7 +25,13 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord import (
+    PostedWizard,
+)
+from daimon.adapters.mcp.tools.discord import (
     _post_wizard_impl as _post_wizard_discord_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.teams._send import (
+    _post_teams_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.stores.wizard_session import create_wizard_session
 from daimon.core.wizard.expiry import derive_expires_at
@@ -52,7 +58,7 @@ async def _post_wizard_impl(
     channel_id: str,
 ) -> str:
     if auth.platform == "slack":
-        raise ToolError("post_wizard is not supported on Slack yet")
+        raise ToolError("post_wizard is not supported on Slack")
     if auth.platform_user_id is None:
         raise ToolError("post_wizard requires a platform-bound identity")
 
@@ -69,11 +75,17 @@ async def _post_wizard_impl(
     short_id = new_short_id()
 
     # Post before insert: a failed post must leave no stored row nobody can
-    # tap. `_post_wizard_discord_impl`'s ToolErrors already name the
+    # tap. The platform impls' ToolErrors already name the
     # channel/permission/handle problem, so they propagate unchanged.
-    posted = await _post_wizard_discord_impl(
-        runtime, auth, channel_id=channel_id, spec=spec, short_id=short_id
-    )
+    if auth.platform == "teams":
+        channel_id, message_id = await _post_teams_wizard_impl(
+            runtime, auth, channel_id=channel_id, spec=spec, short_id=short_id
+        )
+        posted = PostedWizard(message_id=message_id, image_urls={})
+    else:
+        posted = await _post_wizard_discord_impl(
+            runtime, auth, channel_id=channel_id, spec=spec, short_id=short_id
+        )
 
     rebuilt_steps = [
         step.model_copy(update={"image_url": posted.image_urls[step.image_handle]})
@@ -110,7 +122,7 @@ async def _post_wizard_impl(
 
 
 def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def post_wizard(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         prompt: str,
@@ -123,8 +135,9 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
         for the two choice kinds. A step may carry one finished image by
         passing the file-store handle returned by the image-generation tool —
-        never a URL, never a diagram source. Server channels and threads are
-        supported; direct messages are not. A form that exceeds a platform
+        never a URL, never a diagram source. Discord: server channels and
+        threads, not direct messages. Teams: a channel (the form starts a new
+        post), a thread or a 1:1 chat, with no step images. A form that exceeds a platform
         ceiling (too many steps, too many options, too long a question)
         raises an error naming the offending step — split the form into a
         shorter follow-up and retry.

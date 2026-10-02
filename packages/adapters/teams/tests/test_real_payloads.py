@@ -438,12 +438,20 @@ async def test_feedback_is_recorded_and_acknowledged_with_an_empty_body(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-@pytest.mark.parametrize(
-    "case", ["installation_add", "installation_remove", "members_added", "members_removed"]
-)
+@pytest.mark.parametrize("case", ["installation_remove", "members_added", "members_removed"])
 async def test_lifecycle_events_are_acknowledged_and_ignored(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
 ) -> None:
     response, turns = await _run(db_session_factory, teams_api_fake, case)
     assert response is None, "an empty 200"
     assert turns == [] and teams_api_fake.activity_requests == [], "nothing is posted"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_install_is_acknowledged_and_welcomed_in_the_selected_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    response, turns = await _run(db_session_factory, teams_api_fake, "installation_add")
+    assert response is None and turns == []
+    [welcome] = teams_api_fake.activity_requests
+    assert "/v3/conversations/19:channel-1@thread.tacv2/activities" in welcome.url

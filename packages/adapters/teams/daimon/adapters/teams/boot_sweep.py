@@ -3,15 +3,17 @@
 Managed Agents keeps running (and billing) a turn whose render loop died with
 its process. Before admitting a turn, this edits every known card to the
 interrupted notice, clears the turn markers, interrupts the orphaned MA
-sessions and retires the card intents. No late answer is delivered. Teams bots
-cannot read a conversation back, so an intent whose post never returned an id
-is retired with a log line, its card (if any) left frozen. Sends use the SDK's
+sessions and retires the card intents. No late answer is delivered. An intent
+whose post never returned an id is looked up by its Cancel key with `find_card`
+(Graph, so channel threads only); one not found is retired with a log line, its
+card (if any) left frozen. Sends use the SDK's
 default service URL. Single-process, like Slack's sweep: a live sibling's
 marker looks like a crash's leftover, so gate on an owner id before scaling out.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import structlog
@@ -19,6 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams import card
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.ma import interrupt_orphaned_session
+from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
     list_orphaned_turns,
@@ -30,6 +33,9 @@ from daimon.core.stores.turn_card_intents import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
+
+# A card intent whose post returned no id -> the card's message id, if it can be found.
+CardFinder = Callable[[TurnCardIntentRow], Awaitable[str | None]]
 
 
 async def _interrupt_card(sender: TeamsSender, *, conversation_id: str, message_id: str) -> None:
@@ -48,6 +54,7 @@ async def retire_orphaned_turns(
     sessionmaker: async_sessionmaker[AsyncSession],
     sender: TeamsSender,
     now: datetime,
+    find_card: CardFinder | None = None,
 ) -> None:
     """Interrupt every card, marker and MA turn the previous process left behind."""
     async with sessionmaker() as session:
@@ -79,13 +86,14 @@ async def retire_orphaned_turns(
         )
 
     for intent in intents:
-        if intent.message_id is None:
+        found = None
+        if intent.message_id is None and find_card is not None:
+            found = await find_card(intent)
+        if intent.message_id is None and found is None:
             log.info("teams.turn_card_intent.unposted", intent_id=str(intent.id))
-        elif intent.message_id not in edited:
+        elif (message_id := intent.message_id or found) and message_id not in edited:
             await _interrupt_card(
-                sender,
-                conversation_id=intent.channel_id or intent.thread_id,
-                message_id=intent.message_id,
+                sender, conversation_id=intent.channel_id or intent.thread_id, message_id=message_id
             )
         async with sessionmaker.begin() as session:
             await retire_turn_card_intent(

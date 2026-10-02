@@ -8,15 +8,19 @@ from xml.sax.saxutils import quoteattr
 
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.context import (
+    CHANNEL_REPLIES_PER_POST,
+    HISTORY_IMAGE_LIMIT,
+    Attached,
     channel_block,
     channel_media,
     classifier_window,
     delta_block,
-    html_to_text,
+    history_media,
     render_user_message,
     thread_block,
+    unavailable_block,
 )
-from daimon.adapters.teams.graph import GraphMessage, GraphPage
+from daimon.core.teams_graph import GraphMessage, GraphPage, html_to_text
 from daimon.core.thread_participation import ClassifierMessage
 
 from .conftest import make_inbound
@@ -127,27 +131,67 @@ def test_thread_and_delta_blocks_name_the_newest_message_read_even_when_skipped(
     page = GraphPage(value=[_msg("105"), _msg("104"), _msg("101")])
     thread = thread_block(_msg("100"), page, skip_ids=frozenset({"105"}), bot_app_id=BOT)
     delta = delta_block(page, after=104, skip_ids=frozenset({"105"}), bot_app_id=BOT)
-    channel = channel_block(page, skip_ids=frozenset(), bot_app_id=BOT)
+    channel = channel_block(page, skip_ids=frozenset(), bot_app_id=BOT, channel_id="c")
     assert thread.newest_id == delta.newest_id == "105", "skipped is still read"
     assert channel.newest_id is None, "other threads' posts say nothing about this thread"
 
 
 def test_channel_block_counts_posts_and_another_bots_post_is_not_self() -> None:
     posts = GraphPage(value=[_msg("200"), _bot("201", "<p>deploy done</p>", app_id="other")])
-    block = channel_block(posts, skip_ids=frozenset(), bot_app_id=BOT)
+    block = channel_block(posts, skip_ids=frozenset(), bot_app_id=BOT, channel_id="c")
     assert block.tag == "channel_context" and block.attrs == {"count": "2"}
     assert "is_self" not in block.lines[1], "only this bot's messages are self"
 
 
-def test_shared_files_render_as_unfetchable_names() -> None:
-    name = 'q3" <b>.xlsx'
-    file = {"contentType": "reference", "name": name}
+def test_shared_files_render_as_unfetchable_names_unless_resolved() -> None:
+    name, url = 'q3" <b>.xlsx', "https://contoso.sharepoint.com/q3.xlsx"
+    files = [
+        {"contentType": "reference", "name": name},
+        {"contentType": "reference", "name": "b", "contentUrl": url},
+    ]
     block = channel_block(
-        GraphPage(value=[_msg("300", "<p>numbers</p>", attachments=[file])]),
+        GraphPage(value=[_msg("300", "<p>numbers</p>", attachments=files)]),
         skip_ids=frozenset(),
         bot_app_id=BOT,
+        channel_id="c",
+        attached=Attached(images={"300": 2}, downloads={url: "https://dl.example/b"}),
     )
     assert f'<attachment name={quoteattr(name)} fetchable="false"/>' in block.lines
+    assert any('url="https://dl.example/b"' in line for line in block.lines)
+    assert 'images_attached="2"' in block.lines[0]
+
+
+def test_channel_block_replays_each_post_with_its_newest_replies() -> None:
+    """What "summarize this channel" needs: the discussion lives in the replies."""
+    replies = [_msg(str(1000 + i), f"<p>r{i}</p>", replyToId="200") for i in range(12)]
+    post = _msg("200", "<p>plan</p>", replies=replies)
+    block = channel_block(
+        GraphPage(value=[post, _msg("100", "<p>older</p>")]),
+        skip_ids=frozenset(),
+        bot_app_id=BOT,
+        channel_id="19:c@thread.tacv2",
+    )
+    text = "\n".join(block.lines)
+    assert text.index(">older<") < text.index(">plan<") < text.index(">r2<"), "posting order"
+    assert ">r0<" not in text and ">r11<" in text, f"the newest {CHANNEL_REPLIES_PER_POST} kept"
+    assert block.attrs == {"count": str(2 + CHANNEL_REPLIES_PER_POST)}
+    assert 'thread_id="19:c@thread.tacv2;messageid=200" more_replies="true"' in block.lines[1]
+    assert 'thread_id="19:c@thread.tacv2;messageid=200"' in block.lines[-1]
+
+
+def test_history_media_picks_the_newest_images_and_names_files() -> None:
+    def image(root: str, reply: str) -> str:
+        path = f"/v1.0/teams/g/channels/c/messages/{root}/replies/{reply}/hostedContents"
+        return f"https://graph.microsoft.com{path}/aWQ9eA==/$value"
+
+    file = {"contentType": "reference", "name": "a.pdf", "contentUrl": "https://s/a.pdf"}
+    messages = [
+        _msg(str(i), f'<img src="{image("100", str(i))}">', replyToId="100", attachments=[file])
+        for i in range(101, 101 + HISTORY_IMAGE_LIMIT + 2)
+    ]
+    images, files = history_media(messages, group_id="g", channel_id="c")
+    assert sorted(images) == [m.id for m in messages[-HISTORY_IMAGE_LIMIT:]], "newest first"
+    assert len(files) == len(messages)
 
 
 def test_render_user_message_escapes_history_inside_the_untrusted_envelope() -> None:
@@ -217,3 +261,33 @@ def test_classifier_window_is_the_newest_readable_messages_before_the_burst() ->
         ClassifierMessage(author_name="daimon", content="deploy done", is_bot=False),
         ClassifierMessage(author_name="daimon", content="Releases ship Thursdays.", is_bot=True),
     ], "oldest first, burst and deleted posts left out, only this bot counts as the bot"
+
+
+def test_a_channel_turn_names_the_sender_time_channel_and_team() -> None:
+    inbound = dataclasses.replace(
+        make_inbound("hi", kind="channel"),
+        user_name="Ada <L>",
+        timestamp="2026-10-02T09:00:00+00:00",
+        channel_name="Research",
+        channel_type="standard",
+        team_name="Labs",
+    )
+    message = render_user_message(
+        "<controls/>", inbound, is_admin=False, keys="", prefix="", history=None
+    )
+    assert 'name="Research" type="standard" team_name="Labs"' in message
+    assert '<user_query author_name="Ada &lt;L&gt;"' in message
+    assert 'timestamp="2026-10-02T09:00:00+00:00"' in message
+
+
+def test_unread_history_is_marked_so_the_agent_does_not_guess() -> None:
+    message = render_user_message(
+        "<controls/>",
+        make_inbound("summarize this channel", kind="channel"),
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=unavailable_block("http error"),
+    )
+    assert '<history status="unavailable" reason="http error"' in message
+    assert "untrusted" not in message

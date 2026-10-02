@@ -68,6 +68,16 @@ def test_channel_mention_keys_on_the_thread_and_strips_the_bot_mention() -> None
     assert inbound.text == "fit a model"
 
 
+def test_a_channel_message_carries_its_time_and_names_general_by_name() -> None:
+    payload = make_channel_activity(conversation_id="19:team@thread.tacv2")
+    payload["timestamp"] = "2026-10-02T09:00:00Z"
+    payload["channelData"]["team"]["name"] = "Labs"  # type: ignore[index]
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.timestamp == "2026-10-02T09:00:00+00:00"
+    assert (inbound.channel_name, inbound.team_name) == ("General", "Labs")
+
+
 def test_channel_root_post_becomes_its_own_thread() -> None:
     inbound = _parse(make_channel_activity(conversation_id=CHANNEL_ID, activity_id="1700000000009"))
     assert isinstance(inbound, TeamsInbound)

@@ -42,7 +42,7 @@ class ChannelAdmins:
 
     channel_id: str
     role_ids: list[str]
-    """Discord role ids; always empty on Slack, which has no roles."""
+    """Discord role ids; always empty on Slack and Teams, which have no roles here."""
     user_ids: list[str]
 
 
@@ -67,7 +67,7 @@ class SetChannelAdminsResult:
 
 def _platform(auth: AuthIdentity) -> str:
     if auth.platform not in CHANNEL_ADMIN_PLATFORMS:
-        raise ToolError("Channel admins exist only on Discord and Slack.")
+        raise ToolError("Channel admins exist only on Discord, Slack and Teams.")
     return auth.platform
 
 
@@ -170,9 +170,9 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
 
-        Ids are the platform's own: Discord role and user ids, Slack user ids (Slack
-        has no roles, so ``role_ids`` must be empty there). ``channel_id`` MUST be the
-        parent channel's id, never a thread's.
+        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
+        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
+        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
         """
         return await _set_channel_admins_impl(
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids

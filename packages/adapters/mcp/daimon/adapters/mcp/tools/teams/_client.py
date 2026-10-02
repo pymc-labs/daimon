@@ -1,13 +1,15 @@
-"""Bot Framework REST client for Teams: token, send, cards, thread, membership.
+"""Bot Framework REST client for Teams: token, send, cards, thread, membership, teams.
 
-Plain httpx, so the MCP process needs no Teams SDK. The token comes from the
-client-credentials flow against the deployment's one Entra tenant and is cached
-until shortly before it expires. Every request carries its own timeout.
+Plain httpx, so the MCP process needs no Teams SDK. Tokens come from the
+client-credentials flow against the deployment's one Entra tenant, one per
+scope (Bot Framework, and Graph for `graph_token`), each cached until shortly
+before it expires. Every request carries its own timeout.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Callable, Mapping
 
@@ -15,11 +17,17 @@ import httpx
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
+from daimon.core.teams_file_offers import UploadOffer, sign_offer
+from daimon.core.teams_graph import GRAPH_SCOPE
 from pydantic import BaseModel, Field
 
 _CONVERSATIONS_URL = f"{SERVICE_URL}/v3/conversations"
+_TEAMS_URL = f"{SERVICE_URL}/v3/teams"
 _SCOPE = "https://api.botframework.com/.default"
 _TIMEOUT_S = 15.0
+# Channel lists change rarely; a short cache keeps one read tool call to one listing.
+_CHANNELS_TTL_S = 300.0
+_PATH_ID = re.compile(r"[\w:@.;=+-]+")
 _REFRESH_MARGIN_S = 300.0
 # Teams' "AI generated" label, as the SDK's `add_ai_generated` renders it.
 _AI_LABEL = {
@@ -45,8 +53,38 @@ class _Conversation(BaseModel):
     activity_id: str = Field(default="", alias="activityId")
 
 
-class _Member(BaseModel):
+class TeamsMember(BaseModel):
+    """A roster entry: `id` is the Bot Framework id (`29:…`) a 1:1 chat is opened with."""
+
+    id: str = ""
+    name: str | None = None
     aad_object_id: str | None = Field(default=None, alias="aadObjectId")
+    user_role: str | None = Field(default=None, alias="userRole")
+
+
+class TeamDetails(BaseModel):
+    id: str
+    name: str | None = None
+    aad_group_id: str | None = Field(default=None, alias="aadGroupId")
+
+
+class TeamChannel(BaseModel):
+    """One channel of a team. General has no name; `type` is standard, private or shared."""
+
+    id: str
+    name: str | None = None
+    type: str | None = None
+
+
+class _Channels(BaseModel):
+    conversations: list[TeamChannel] = Field(default_factory=list[TeamChannel])
+
+
+def _id(value: str) -> str:
+    """A Teams id for a URL path; anything that could leave its segment is refused."""
+    if not _PATH_ID.fullmatch(value) or ".." in value:
+        raise ValueError("not a Teams id")
+    return value
 
 
 def _message(text: str) -> dict[str, object]:
@@ -77,35 +115,55 @@ class TeamsBotClient:
         self._client_secret = client_secret
         self._tenant_id = tenant_id
         self._clock = clock
-        self._token: tuple[str, float] | None = None
+        self._tokens: dict[str, tuple[str, float]] = {}
+        self._channels: dict[str, tuple[list[TeamChannel], float]] = {}
         self._lock = asyncio.Lock()
 
-    async def _bearer(self) -> str:
+    @property
+    def tenant_id(self) -> str:
+        """The deployment's Entra tenant."""
+        return self._tenant_id
+
+    async def _bearer(self, scope: str = _SCOPE) -> str:
         async with self._lock:
-            if self._token is None or self._clock() >= self._token[1]:
+            cached = self._tokens.get(scope)
+            if cached is None or self._clock() >= cached[1]:
                 response = await self._http.post(
                     f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token",
                     data={
                         "grant_type": "client_credentials",
                         "client_id": self._client_id,
                         "client_secret": self._client_secret,
-                        "scope": _SCOPE,
+                        "scope": scope,
                     },
                     timeout=_TIMEOUT_S,
                 )
                 response.raise_for_status()
                 token = _Token.model_validate_json(response.content)
-                expires_at = self._clock() + token.expires_in - _REFRESH_MARGIN_S
-                self._token = (token.access_token, expires_at)
-            return self._token[0]
+                cached = (token.access_token, self._clock() + token.expires_in - _REFRESH_MARGIN_S)
+                self._tokens[scope] = cached
+            return cached[0]
+
+    async def graph_token(self) -> str:
+        """An app-only Microsoft Graph token, for `daimon.core.teams_graph.GraphClient`."""
+        return await self._bearer(GRAPH_SCOPE)
+
+    @property
+    def http(self) -> httpx.AsyncClient:
+        return self._http
 
     async def _request(
-        self, method: str, path: str, body: dict[str, object] | None = None
+        self,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        *,
+        base: str = _CONVERSATIONS_URL,
     ) -> httpx.Response:
         async def attempt() -> httpx.Response:
             response = await self._http.request(
                 method,
-                f"{_CONVERSATIONS_URL}{path}",
+                f"{base}{path}",
                 json=body,
                 headers={"Authorization": f"Bearer {await self._bearer()}"},
                 timeout=_TIMEOUT_S,
@@ -135,25 +193,85 @@ class TeamsBotClient:
 
     async def create_thread(self, channel_id: str, text: str) -> tuple[str, str]:
         """Start a new post in a channel; returns (thread conversation id, activity id)."""
+        return await self.create_thread_with(channel_id, _message(text))
+
+    async def create_thread_card(
+        self, channel_id: str, card: Mapping[str, object]
+    ) -> tuple[str, str]:
+        """`create_thread` with one Adaptive Card as the post."""
+        return await self.create_thread_with(channel_id, _card_message(card))
+
+    async def create_thread_with(
+        self, channel_id: str, activity: dict[str, object]
+    ) -> tuple[str, str]:
         body: dict[str, object] = {
             "isGroup": True,
             "channelData": {"channel": {"id": channel_id}},
-            "activity": _message(text),
+            "activity": activity,
             "tenantId": self._tenant_id,
         }
         created = _Conversation.model_validate_json((await self._request("POST", "", body)).content)
         return created.id, created.activity_id
 
-    async def is_member(self, conversation_id: str, aad_object_id: str) -> bool:
-        """Whether this Entra user is on the conversation's roster; 403/404 mean no."""
+    async def get_member(self, conversation_id: str, aad_object_id: str) -> TeamsMember | None:
+        """This Entra user's roster entry in the conversation, or None (403/404) if absent."""
         try:
-            response = await self._request("GET", f"/{conversation_id}/members/{aad_object_id}")
+            response = await self._request(
+                "GET", f"/{_id(conversation_id)}/members/{_id(aad_object_id)}"
+            )
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (403, 404):
-                return False
+                return None
             raise
-        member = _Member.model_validate_json(response.content)
-        return (member.aad_object_id or "").lower() == aad_object_id.lower()
+        member = TeamsMember.model_validate_json(response.content)
+        if (member.aad_object_id or "").lower() != aad_object_id.lower():
+            return None
+        return member
+
+    async def is_member(self, conversation_id: str, aad_object_id: str) -> bool:
+        """Whether this Entra user is on the conversation's roster; 403/404 mean no."""
+        return await self.get_member(conversation_id, aad_object_id) is not None
+
+    async def get_team(self, team_id: str) -> TeamDetails | None:
+        """A team by its Bot Framework id (its General channel's id); None if not found."""
+        try:
+            response = await self._request("GET", f"/{_id(team_id)}", base=_TEAMS_URL)
+        except httpx.HTTPStatusError as err:
+            if err.response.status_code in (400, 403, 404):
+                return None
+            raise
+        return TeamDetails.model_validate_json(response.content)
+
+    async def list_team_channels(self, team_id: str) -> list[TeamChannel]:
+        """The team's channels the bot can see, General included (unnamed)."""
+        response = await self._request("GET", f"/{_id(team_id)}/conversations", base=_TEAMS_URL)
+        return _Channels.model_validate_json(response.content).conversations
+
+    async def team_channels(self, team_id: str, *, fresh: bool = False) -> list[TeamChannel]:
+        """`list_team_channels`, cached for a few minutes; `fresh` skips the cache."""
+        cached = self._channels.get(team_id)
+        if fresh or cached is None or self._clock() >= cached[1]:
+            cached = (await self.list_team_channels(team_id), self._clock() + _CHANNELS_TTL_S)
+            self._channels[team_id] = cached
+        return cached[0]
+
+    async def open_personal_chat(self, member_id: str) -> str:
+        """The 1:1 chat with a roster member (`29:…`); Teams refuses if they lack the app."""
+        body: dict[str, object] = {
+            "isGroup": False,
+            "members": [{"id": member_id}],
+            "tenantId": self._tenant_id,
+            "channelData": {"tenant": {"id": self._tenant_id}},
+        }
+        return _Conversation.model_validate_json((await self._request("POST", "", body)).content).id
+
+    async def send_activity(self, conversation_id: str, activity: dict[str, object]) -> str:
+        """Post a prepared activity; returns its id."""
+        return await self._send(conversation_id, activity)
+
+    def file_offer_token(self, offer: UploadOffer) -> str:
+        """A consent-card token the adapter verifies with the same client secret."""
+        return sign_offer(offer, secret=self._client_secret, now=time.time())
 
 
 def build_teams_client(settings: TeamsSettings) -> TeamsBotClient:
