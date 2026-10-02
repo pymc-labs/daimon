@@ -6,8 +6,9 @@ its own, so a channel can keep the agent it has and run it with the packages
 one team needs. Server admins set any channel's environment or the tenant
 default; a channel admin sets the channels they run, except an environment
 with unrestricted networking in a sealed channel (`authorize`'s
-SET_CHANNEL_ENVIRONMENT). A scope with no environment of its own falls
-through, so nothing changes until one is set.
+SET_CHANNEL_ENVIRONMENT): any network beyond package managers and the
+agent's MCP servers (`has_open_network`). A scope with no environment of its
+own falls through, so nothing changes until one is set.
 
 The sentences and the setup panels' picker live here so the chat tools and
 both panels say and offer the same. Only the select's length differs by
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from anthropic import AsyncAnthropic
@@ -102,7 +104,7 @@ def build_sealed_network_refusal(*, environment_name: str | None) -> str:
     return (
         f"This channel is sealed, and {what} unrestricted network access, so only a server "
         "admin can make that change here. Nothing changed. Pick an environment with limited "
-        "networking, or ask a server admin."
+        "networking and no allowed hosts, or ask a server admin."
     )
 
 
@@ -204,13 +206,17 @@ async def list_environment_names(client: AsyncAnthropic, *, tenant_id: uuid.UUID
 
 
 def has_open_network(environment: BetaEnvironment) -> bool:
-    """Anything but a cloud environment on limited networking.
+    """Any network beyond package managers and the agent's MCP servers.
 
+    Only a cloud environment on limited networking with no allowed hosts is
+    closed: an allowed host is somewhere a sealed channel's content could go.
     A self-hosted environment's network is its host's, unknown here, so it
     counts as open.
     """
     config = environment.config
-    return config.type != "cloud" or config.networking.type != "limited"
+    if config.type != "cloud" or config.networking.type != "limited":
+        return True
+    return bool(config.networking.allowed_hosts)
 
 
 async def may_pick_environment_in(
@@ -232,6 +238,28 @@ async def may_pick_environment_in(
     )
 
 
+@dataclass(frozen=True)
+class EnvironmentPick:
+    """A decided pick, with the environment it sets looked up once.
+
+    The network rule and the write both use `environment`, so an environment
+    created or replaced under the same name in between can't slip past the rule.
+    """
+
+    decision: Decision
+    environment: BetaEnvironment | None = None
+    """The environment being set; None on a clear or a refusal."""
+    missing: bool = False
+    """A set naming no environment of the tenant: nothing to write."""
+
+    @property
+    def environment_name(self) -> str | None:
+        """The name to store: the looked-up environment's own; None on a clear."""
+        if self.environment is None:
+            return None
+        return self.environment.metadata.get(MA_METADATA_KEY_NAME)
+
+
 async def authorize_environment_pick(
     session: AsyncSession,
     client: AsyncAnthropic,
@@ -241,17 +269,21 @@ async def authorize_environment_pick(
     channel_id: str | None,
     environment_name: str | None,
     default: DeploymentDefault,
-) -> Decision:
+    thread_id: str | None = None,
+) -> EnvironmentPick:
     """Whether `subject` may set `channel_id`'s environment to `environment_name`.
 
     None clears it, leaving the channel on the workspace or deployment
-    default, which then decides the network rule. Environments are looked up
-    only when that rule is what decides: a channel admin in a sealed channel.
-    One missing at set time is allowed here for the caller's own not-found
-    refusal; a missing default counts as open.
+    default, which then decides the network rule; a missing default counts
+    as open. A set looks its environment up once, after the admin check, and
+    one that doesn't exist is `missing`. `thread_id` is a thread under
+    `channel_id` the pick names, so a seal on that thread counts.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    place = Place(channel_id=channel_id)
+    place = Place(
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id if thread_id is not None else None,
+    )
 
     def decide(*, open_network: bool) -> Decision:
         return authorize(
@@ -262,19 +294,63 @@ async def authorize_environment_pick(
             open_network=open_network,
         )
 
-    decision = decide(open_network=True)
-    if decision or decision.reason != "sealed":
-        return decision
-    name = environment_name
-    if name is None:
-        fallback = await resolve(
-            session, context=ScopeContext(tenant_id=tenant_id, channel_id=None), default=default
+    gate = decide(open_network=False)
+    if not gate:
+        return EnvironmentPick(decision=gate)
+    if environment_name is not None:
+        environment = await find_environment_by_daimon_tag(
+            client, tenant_id=tenant_id, name=environment_name
         )
-        name = fallback.environment_name or "default"
-    environment = await find_environment_by_daimon_tag(client, tenant_id=tenant_id, name=name)
-    if environment is None:
-        return decide(open_network=environment_name is None)
-    return decide(open_network=has_open_network(environment))
+        if environment is None:
+            return EnvironmentPick(decision=gate, missing=True)
+        decision = decide(open_network=has_open_network(environment))
+        return EnvironmentPick(decision=decision, environment=environment if decision else None)
+    if decide(open_network=True):
+        return EnvironmentPick(decision=gate)
+    fallback = await resolve(
+        session, context=ScopeContext(tenant_id=tenant_id, channel_id=None), default=default
+    )
+    environment = await find_environment_by_daimon_tag(
+        client, tenant_id=tenant_id, name=fallback.environment_name or "default"
+    )
+    return EnvironmentPick(
+        decision=decide(open_network=environment is None or has_open_network(environment))
+    )
+
+
+SEALED_OPEN_NETWORK_WARNING: Final = (
+    "This channel runs an environment with open network; a server admin should confirm "
+    "or change it."
+)
+"""Sealing a channel whose own pick may predate the seal's network rule."""
+
+
+async def sealed_network_warning(
+    session: AsyncSession,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    default: DeploymentDefault,
+) -> str | None:
+    """The warning for sealing `channel_id` while its own environment has an open network.
+
+    A pick made before the seal skipped the network rule, and who made it is
+    not recorded, so a channel's own open pick is unconfirmed. The workspace
+    and deployment defaults are a server admin's or operator's. One that no
+    longer exists can't run, so isn't warned of.
+    """
+    resolved = await resolve(
+        session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
+    )
+    if resolved.environment_name_tier != "channel" or resolved.environment_name is None:
+        return None
+    environment = await find_environment_by_daimon_tag(
+        client, tenant_id=tenant_id, name=resolved.environment_name
+    )
+    if environment is None or not has_open_network(environment):
+        return None
+    return SEALED_OPEN_NETWORK_WARNING
 
 
 async def save_scope_environment(
@@ -315,6 +391,8 @@ async def save_scope_environment(
 __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
     "NOT_OFFERED_NOTE",
+    "SEALED_OPEN_NETWORK_WARNING",
+    "EnvironmentPick",
     "EnvironmentPicker",
     "authorize_environment_pick",
     "build_archive_environment_note",
@@ -331,4 +409,5 @@ __all__ = [
     "parse_environment_option",
     "plan_environment_picker",
     "save_scope_environment",
+    "sealed_network_warning",
 ]

@@ -12,7 +12,6 @@ default.
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -26,13 +25,13 @@ from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.channel_environments import (
+    EnvironmentPick,
     authorize_environment_pick,
     build_clear_environment_note,
     build_sealed_network_refusal,
     build_set_environment_note,
     save_scope_environment,
 )
-from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -57,10 +56,19 @@ def _scope_label(channel_id: str | None) -> str:
     return f"channel:{channel_id}" if channel_id is not None else "workspace"
 
 
+@dataclass(frozen=True)
+class _Target:
+    """Where an environment is stored (None: the workspace default), and the
+    Discord thread under it the caller named, whose own seal counts."""
+
+    channel_id: str | None
+    thread_id: str | None = None
+
+
 async def _environment_channel(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, *, lenient: bool = False
-) -> str | None:
-    """The channel an environment is stored under; None is the workspace default.
+) -> _Target:
+    """The channel an environment is stored under.
 
     A thread id resolves to its parent: Slack's `<channel>:<thread ts>` by
     splitting, a Discord thread through a lookup that also checks the caller
@@ -68,7 +76,7 @@ async def _environment_channel(
     deleted channel's pick can still be cleared.
     """
     if channel_id is None:
-        return None
+        return _Target(None)
     target = channel_id.strip()
     if auth.platform == "slack":
         target = target.partition(":")[0].strip()
@@ -76,17 +84,18 @@ async def _environment_channel(
         raise ToolError(
             "channel_id is empty. Omit it for the workspace default, or pass the channel's id."
         )
-    if auth.platform == "slack":
-        return target
     if auth.platform != "discord":
-        return target
+        return _Target(target)
     if not target.isdigit():
         raise ToolError(f"{target!r} is not a Discord channel id")
     if lenient:
-        with contextlib.suppress(ToolError):
-            return await resolve_visible_channel(runtime, auth, target)
-        return target
-    return await resolve_visible_channel(runtime, auth, target)
+        try:
+            parent = await resolve_visible_channel(runtime, auth, target)
+        except ToolError:
+            return _Target(target)
+    else:
+        parent = await resolve_visible_channel(runtime, auth, target)
+    return _Target(parent, target if parent != target else None)
 
 
 _NEEDS_ADMIN: str = (
@@ -100,34 +109,41 @@ async def _require_pick_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
-    channel_id: str | None,
+    target: _Target,
     environment_name: str | None,
-) -> None:
-    """Raise ``ToolError`` unless the caller may leave the scope on `environment_name`."""
+) -> EnvironmentPick:
+    """The decided pick; raise ``ToolError`` unless the caller may leave the scope on it."""
     require_scope(auth, "channels:write")
-    if channel_id is None and auth.is_operator:
+    if target.channel_id is None and auth.is_operator:
         raise ToolError("An operator token changes only a channel's environment; pass channel_id.")
     async with runtime.session_factory() as session:
         try:
-            decision = await authorize_environment_pick(
+            pick = await authorize_environment_pick(
                 session,
                 runtime.client,
                 tenant_id=auth.tenant_id,
                 subject=mcp_subject(auth, is_admin=auth.is_admin),
-                channel_id=channel_id,
+                channel_id=target.channel_id,
+                thread_id=target.thread_id,
                 environment_name=environment_name,
                 default=runtime.deployment_default,
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-    if decision.reason == "sealed":
+    if pick.decision.reason == "sealed":
         raise ToolError(
             build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."
         )
-    if not decision:
-        if channel_id is None:
+    if not pick.decision:
+        if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
         raise ToolError(_NEEDS_ADMIN)
+    if pick.missing:
+        raise ToolError(
+            f"No environment named '{environment_name}' exists in this workspace. Nothing was "
+            "changed. Use list_environments to pick an existing one, or create_environment first."
+        )
+    return pick
 
 
 async def _set_channel_environment_impl(
@@ -137,31 +153,25 @@ async def _set_channel_environment_impl(
     environment_name: str,
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
-    channel_id = await _environment_channel(runtime, auth, channel_id)
-    name = environment_name.strip()
-    await _require_pick_allowed(runtime, auth, channel_id=channel_id, environment_name=name)
-    environment = await find_environment_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=name
+    target = await _environment_channel(runtime, auth, channel_id)
+    pick = await _require_pick_allowed(
+        runtime, auth, target=target, environment_name=environment_name.strip()
     )
-    if environment is None:
-        raise ToolError(
-            f"No environment named '{name}' exists in this workspace. Nothing was changed. "
-            "Use list_environments to pick an existing one, or create_environment first."
-        )
+    name = pick.environment_name or environment_name.strip()
     async with runtime.session_factory.begin() as session:
         previous = await save_scope_environment(
             session,
             tenant_id=auth.tenant_id,
-            channel_id=channel_id,
+            channel_id=target.channel_id,
             environment_name=name,
             actor_account_id=auth.account_id,
         )
     return ChannelEnvironmentResult(
-        scope=_scope_label(channel_id),
+        scope=_scope_label(target.channel_id),
         environment_name=name,
         previous_environment_name=previous,
         changed=previous != name,
-        note=build_set_environment_note(environment_name=name, channel=channel_id),
+        note=build_set_environment_note(environment_name=name, channel=target.channel_id),
     )
 
 
@@ -171,8 +181,9 @@ async def _clear_channel_environment_impl(
     *,
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
-    channel_id = await _environment_channel(runtime, auth, channel_id, lenient=True)
-    await _require_pick_allowed(runtime, auth, channel_id=channel_id, environment_name=None)
+    target = await _environment_channel(runtime, auth, channel_id, lenient=True)
+    await _require_pick_allowed(runtime, auth, target=target, environment_name=None)
+    channel_id = target.channel_id
     async with runtime.session_factory.begin() as session:
         previous = await save_scope_environment(
             session,

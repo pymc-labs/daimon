@@ -32,7 +32,6 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
-from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.stores.identity import get_or_create_platform_principal
 
 log = structlog.get_logger()
@@ -130,7 +129,7 @@ async def save_environment_choice(
     except ValueError:
         return NOT_OFFERED_NOTE
     async with runtime.sessionmaker() as session:
-        decision = await authorize_environment_pick(
+        pick = await authorize_environment_pick(
             session,
             runtime.anthropic,
             tenant_id=tenant_id,
@@ -139,15 +138,14 @@ async def save_environment_choice(
             environment_name=name,
             default=runtime.deployment_default,
         )
-    if decision.reason == "sealed":
+    if pick.decision.reason == "sealed":
         return build_sealed_network_refusal(environment_name=name)
-    if not decision:
+    if not pick.decision:
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
-    if name is not None and (
-        await find_environment_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
-        is None
-    ):
+    if name is not None and pick.missing:
         return build_missing_environment_note(name)
+    # The environment the network rule judged, not a second lookup by name.
+    name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id

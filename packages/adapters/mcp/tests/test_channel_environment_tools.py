@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import uuid
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -30,7 +32,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -498,6 +500,59 @@ async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
     await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
     cleared = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
     assert cleared.changed, "onto a limited workspace default the channel admin may clear"
+
+
+async def test_a_channel_admin_pick_looks_its_environment_up_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """A name missing when the network rule runs is refused, even if it appears before the write.
+
+    Otherwise an open environment created under that name in between would
+    land in a sealed channel without the rule ever judging it.
+    """
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id)
+    appeared = [
+        ma_environment(id="env_late", name="late", tenant_id=tenant_id).model_dump(mode="json")
+    ]
+    listings: list[int] = []
+
+    def environments(_request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        listings.append(1)
+        return list_response([] if len(listings) == 1 else appeared)
+
+    router = MARouter()
+    router.add("GET", r"/v1/environments", environments)
+    runtime = dataclasses.replace(runtime, client=build_fake_anthropic(router.dispatch))
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+    member = await _verified(runtime, _auth(tenant_id, account_id))
+
+    with pytest.raises(ToolError, match="No environment named 'late'"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="late", channel_id=CHANNEL
+        )
+    assert len(listings) == 1, "the pick looks the environment up once"
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "a pick of a missing environment writes nothing"
+
+
+async def test_a_sealed_discord_thread_keeps_its_channel_network_closed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The environment covers every thread under a channel, so a seal on one thread counts."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open")
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant_id, THREAD)
+    member = await _verified(runtime, _auth(tenant_id, account_id))
+
+    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="open", channel_id=THREAD
+        )
 
 
 async def test_an_operator_token_needs_channels_write_and_a_channel(
