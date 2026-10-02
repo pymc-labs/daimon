@@ -228,6 +228,9 @@ class MintOperatorTokenModal(discord.ui.Modal):
         if secret is None:
             await interaction.response.send_message(NOT_CONFIGURED, ephemeral=True)
             return
+        # Acknowledged before the mint: a slow mint and audit write must not
+        # outlast the interaction and leave a live token nobody was shown.
+        await interaction.response.defer()
         try:
             async with view.runtime.sessionmaker.begin() as session:
                 minted = await mint_panel_operator_token(
@@ -244,7 +247,7 @@ class MintOperatorTokenModal(discord.ui.Modal):
             await view.audit(
                 interaction, op="operator_token_mint", outcome="denied", reason="scopes"
             )
-            await interaction.response.send_message(f"{exc}. Nothing was minted.", ephemeral=True)
+            await interaction.followup.send(f"{exc}. Nothing was minted.", ephemeral=True)
             return
         await view.audit(
             interaction,
@@ -254,9 +257,8 @@ class MintOperatorTokenModal(discord.ui.Modal):
             jti=minted.jti,
         )
         log.info("agent_setup.operator_token.minted", jti=str(minted.jti))  # never the token
-        # Show the token before the panel swap: a swap that fails (an expired
-        # interaction, an HTTP error) must not leave a live token nobody saw.
-        await interaction.response.defer()
+        # Show the token before the panel swap: a swap that fails (an HTTP
+        # error) must not leave a live token nobody saw.
         await interaction.followup.send(
             f"```\n{minted.token}\n```\nScopes: {', '.join(sorted(minted.scopes))}. Expires "
             f"{minted.expires_at.date().isoformat()}. This is the one time it is shown.",

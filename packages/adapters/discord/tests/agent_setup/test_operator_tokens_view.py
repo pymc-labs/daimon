@@ -141,6 +141,21 @@ async def test_the_token_is_shown_even_when_the_panel_swap_fails(
     )
 
 
+async def test_an_interaction_that_expired_mints_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Acknowledged before the mint: a token is never made that can't be shown."""
+    view = await _view(db_session_factory)
+    admin = _interaction(admin=True)
+    admin.response.defer.side_effect = discord.NotFound(MagicMock(status=404), "expired")
+    with pytest.raises(discord.NotFound):
+        await _modal(view, ["tenant:read"]).on_submit(admin)
+    async with db_session_factory() as session:
+        assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC)) == [], (
+            "no live token nobody saw"
+        )
+
+
 async def test_a_member_cannot_mint_or_open_the_mint_form(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -167,6 +182,6 @@ async def test_the_panel_never_mints_the_deployment_promo_scope(
     view = await _view(db_session_factory)
     admin = _interaction(admin=True)
     await _modal(view, ["promo:create"]).on_submit(admin)
-    assert "mint-operator-token" in admin.response.send_message.call_args.args[0]
+    assert "mint-operator-token" in admin.followup.send.call_args.args[0]
     async with db_session_factory() as session:
         assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC)) == []
