@@ -403,9 +403,15 @@ async def _turn_one(
         )
         from daimon.core.stores.turn_outcomes import list_for_tenant
 
-        async with sm() as session:
-            outcomes = await list_for_tenant(session, tenant_id, limit=20)
-        outcome = next((row for row in outcomes if row.started_at >= started_at), None)
+        outcome = None
+        for attempt in range(10):
+            async with sm() as session:
+                outcomes = await list_for_tenant(session, tenant_id, limit=20)
+            outcome = next((row for row in outcomes if row.started_at >= started_at), None)
+            if outcome is not None:
+                break
+            if attempt < 9:
+                await asyncio.sleep(0.2)
         if outcome is not None:
             result.status = str(outcome.reason)
             result.input_tokens = outcome.input_tokens
@@ -612,7 +618,9 @@ async def _discord_watch(
     deadline = time.monotonic() + 300
     outcome_seen = False
     while time.monotonic() < deadline:
-        await asyncio.sleep(2)
+        # At 100 pre-created threads, two-second polling alone would consume
+        # Discord's 50-request/second global bot allowance.
+        await asyncio.sleep(4 if existing_thread_id else 2)
         if result.thread_id is None:
             response = await rest.client.get(f"/channels/{message_id}")
             if response.status_code == 200:
@@ -780,17 +788,8 @@ async def _discord_phase(
         print(
             f"Discord channels: {len(channels)}; tenant cap: {args.discord_concurrency}", flush=True
         )
-        results: list[DiscordResult] = []
-        for index in range(args.discord_turns):
-            while len(tasks) >= args.discord_concurrency:
-                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                results.extend(task.result() for task in done)
-            spent = await _debits(sm, list(previous)) - baseline
-            if not budget_allows(spent, args.max_usd):
-                print(
-                    f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}", flush=True
-                )
-                break
+
+        async def launch(index: int) -> DiscordResult:
             if args.discord_precreated:
                 channel_id, tenant_id = precreated[index]
             else:
@@ -815,24 +814,34 @@ async def _discord_phase(
                 },
             )
             assert isinstance(posted, dict)
-            message_id = str(posted["id"])
-            tasks.add(
-                asyncio.create_task(
-                    _discord_watch(
-                        rest,
-                        sm,
-                        tenant_id,
-                        channel_id,
-                        message_id,
-                        started,
-                        created_threads,
-                        existing_thread_id=channel_id if args.discord_precreated else None,
-                    )
-                )
+            return await _discord_watch(
+                rest,
+                sm,
+                tenant_id,
+                channel_id,
+                str(posted["id"]),
+                started,
+                created_threads,
+                existing_thread_id=channel_id if args.discord_precreated else None,
             )
-            await asyncio.sleep(1 / max(1, len(channels)))
-        if tasks:
+
+        results: list[DiscordResult] = []
+        for batch_start in range(0, args.discord_turns, args.discord_concurrency):
+            spent = await _debits(sm, list(previous)) - baseline
+            if not budget_allows(spent, args.max_usd):
+                print(
+                    f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}", flush=True
+                )
+                break
+            tasks = {
+                asyncio.create_task(launch(index))
+                for index in range(
+                    batch_start,
+                    min(batch_start + args.discord_concurrency, args.discord_turns),
+                )
+            }
             results.extend(await asyncio.gather(*tasks))
+            tasks.clear()
         created_threads.update(row.thread_id for row in results if row.thread_id)
         for row in results:
             print(
