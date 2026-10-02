@@ -3523,3 +3523,39 @@ async def test_start_turn_decides_again_inside_session_create(db_session_factory
         await _start_turn_impl(runtime, _auth(), "Say hello", recheck=recheck)
     assert created == []
     assert sends == []
+
+
+async def test_start_turn_refuses_a_bound_keys_session_sealed_inside_session_create(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A seal saved during create_session's vault/env work leaves no session: its
+    stamp and memory mount were decided on the seal read before that work."""
+    await _seal_tenant(db_session_factory, sealed=())
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    created: list[str] = []
+
+    async def create_with_inner_work(*args: object, **kwargs: Any) -> object:
+        async with db_session_factory() as session, session.begin():
+            await set_access_policy(
+                session,
+                tenant_id=_TENANT_ID,
+                policy=TenantAccessPolicy(sealed_channel_ids=("c-1",)),
+            )
+        await kwargs["before_create"]()
+        created.append("ses_test001")
+        return ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+
+    with (
+        patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create_with_inner_work),
+        pytest.raises(ToolError, match="sealed or unsealed while it was starting"),
+    ):
+        await _start_turn_impl(runtime, _bound_auth("c-1"), "hi")
+    assert created == [], "no session is created under a stale seal stamp"

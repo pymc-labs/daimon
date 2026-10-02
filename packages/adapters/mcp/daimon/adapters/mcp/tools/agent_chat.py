@@ -245,6 +245,11 @@ _SEALED_SINCE_START_MSG = (
     "messages under the seal. Start a new one with start_turn. Tell the caller."
 )
 
+_SEAL_CHANGED_DURING_START_MSG = (
+    "this conversation's channel was sealed or unsealed while it was starting. "
+    "Call start_turn again."
+)
+
 
 async def _bound_seal(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:
     """The seal a channel-bound key's turn runs under now: its channel, when sealed.
@@ -498,6 +503,14 @@ async def _start_turn_impl(
             await recheck()
         seal = await _bound_seal(runtime, auth)
 
+        async def before_create() -> None:
+            if recheck is not None:
+                await recheck()
+            # The stamp and memory mount were decided on the seal read above;
+            # a seal change during the work below would leave them stale.
+            if await _bound_seal(runtime, auth) != seal:
+                raise ToolError(_SEAL_CHANGED_DURING_START_MSG)
+
         session = await create_session(
             runtime.client,
             agent=ma_agent,
@@ -517,8 +530,9 @@ async def _start_turn_impl(
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
             # Vault, repo-token and env work run first: decide again right
-            # before the session exists, so a pin landing meanwhile leaves none.
-            before_create=recheck,
+            # before the session exists, so a pin or seal landing meanwhile
+            # leaves none.
+            before_create=before_create,
         )
 
     if (observation := current_outcome.get()) is not None:
