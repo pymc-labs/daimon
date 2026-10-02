@@ -44,6 +44,11 @@ UNPLACED_RUN_REASON: Final[str] = (
 )
 """Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
 
+NOT_HELD_REASON: Final[str] = (
+    "was not made for, pinned to or given to the channels this caller administers by a server admin"
+)
+"""Refusal wording for a local agent that is not the channel admin's, after its name."""
+
 
 def channel_admin_caller(auth: AuthIdentity) -> ChannelAdminCaller:
     """The caller as channel admin grants see them. An agent credential is nobody."""
@@ -159,12 +164,12 @@ async def require_bindable_as_channel_default(
         ):
             return
     raise ToolError(
-        f"'{agent_name}' answers in channels this caller does not administer, has other "
-        "people's conversations or routines whose channel is unknown, or runs unattended for "
-        "someone with wider rights, so only a workspace or server admin can "
-        "make it this channel's default. A channel admin may "
-        "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
-        "or one that answers only in their channels. Nothing was changed. Do not retry."
+        f"'{agent_name}' was not made for or pinned to the channels this caller administers, "
+        "answers in channels they do not administer, has other people's conversations or "
+        "routines whose channel is unknown, or runs unattended for someone with wider rights, "
+        "so only a workspace or server admin can make it this channel's default. A channel "
+        "admin may pick a built-in agent, the workspace default, or an agent made for or "
+        "pinned to their channels that answers nowhere else. Nothing was changed. Do not retry."
     )
 
 
@@ -206,6 +211,8 @@ async def require_admin_for_reachable_agent(
             )
         elif facts.has_unplaced_run:
             why = UNPLACED_RUN_REASON
+        elif facts.is_local_to_caller_channels:
+            why = NOT_HELD_REASON
         else:
             why = (
                 "is currently a default agent here and answers or runs outside the channels "

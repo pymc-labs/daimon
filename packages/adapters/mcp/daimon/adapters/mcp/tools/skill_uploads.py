@@ -226,7 +226,8 @@ async def require_skill_change(
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
     A built-in agent is refused; a server admin may change any other; a
-    channel admin one that answers and runs only in their channels; anyone one
+    channel admin one of theirs that answers and runs only in their channels
+    (`daimon.core.authz.channel_admin_holds`); anyone one
     nobody else uses, read as widely as a key change
     (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
     """
@@ -247,6 +248,8 @@ async def require_skill_change(
         why = "runs unattended (a routine or queued wake) for someone with wider rights"
     elif facts.has_unplaced_run:
         why = reachability.UNPLACED_RUN_REASON
+    elif facts.is_local_to_caller_channels:
+        why = reachability.NOT_HELD_REASON
     else:
         why = (
             "is used beyond this caller (a default, a bound thread, or someone else's "

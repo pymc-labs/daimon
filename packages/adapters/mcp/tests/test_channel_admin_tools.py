@@ -26,6 +26,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -176,13 +177,24 @@ async def test_channel_admin_sets_only_their_own_channels_default(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
 
+    with pytest.raises(ToolError, match="was not made for or pinned to"):
+        await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    async with committing_sessionmaker.begin() as session:
+        await record_creation_channel(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id="agent_helper",
+            platform="discord",
+            channel_id=CHANNEL,
+        )
     await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     row = await get_scope(
         db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
     )
     assert row is not None and row.agent_name == "helper", (
-        "the channel admin set its channel's agent"
+        "the channel admin set its channel's agent, one made for it"
     )
+    assert not row.agent_name_set_by_admin, "a channel admin's binding is not a server admin's"
     with pytest.raises(ToolError, match="admin of that channel"):
         await propagation._set_agent_default_impl(runtime, member, "helper", OTHER_CHANNEL)  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(ToolError, match="requires a workspace or server admin"):
@@ -230,6 +242,19 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
+    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+            set_by_admin=True,
+        )
     await require_admin_for_reachable_agent(
         runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
     )
@@ -270,6 +295,7 @@ async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
@@ -307,7 +333,7 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     )
     member = _auth(tenant_id)
 
-    with pytest.raises(ToolError, match="does not administer"):
+    with pytest.raises(ToolError, match="was not made for or pinned to"):
         await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
@@ -362,6 +388,7 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
@@ -419,6 +446,7 @@ async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     agent = ma_agent(
         id="agent_helper",
