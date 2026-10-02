@@ -141,20 +141,42 @@ async def test_a_failing_notifier_never_raises_and_no_notifier_claims_nothing(
     await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=None, **args)
     sent: list[BudgetNotice] = []
 
-    async def failing(notice: BudgetNotice) -> int:
-        sent.append(notice)
-        raise RuntimeError("platform down")
-
     async def landed(notice: BudgetNotice) -> int:
         sent.append(notice)
         return 1
 
-    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=failing, **args)
     await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=landed, **args)
     await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=landed, **args)
-    assert [n.recipient_ids for n in sent] == [("u-admin",), ("u-admin",)], (
-        "a failed notice frees the window for the next refusal; a delivered one holds it"
+    assert [n.recipient_ids for n in sent] == [("u-admin",)], (
+        "no notifier leaves the window free; a delivered notice holds it"
     )
+
+
+@pytest.mark.parametrize("cut_short", ["raises", "times_out"])
+async def test_a_notice_cut_short_mid_send_keeps_the_window(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    cut_short: str,
+) -> None:
+    """Some DMs may have landed before the error, so a retry would send them again."""
+    monkeypatch.setattr(channel_budget_notice, "NOTICE_TIMEOUT_S", 0.2)
+    tenant = await _spent_channel(db_session)
+    await db_session.commit()
+    args = {"tenant_id": tenant.id, "platform": "discord", "channel_id": "chan-1", "now": _NOW}
+    calls: list[BudgetNotice] = []
+
+    async def partial(notice: BudgetNotice) -> int:
+        calls.append(notice)
+        if cut_short == "raises":
+            raise RuntimeError("connection reset after the first DM")
+        await asyncio.sleep(30)
+        return 1
+
+    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=partial, **args)
+    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=partial, **args)
+
+    assert len(calls) == 1, "the next refusal does not send the notice again"
 
 
 async def test_a_notice_no_admin_received_frees_the_window(

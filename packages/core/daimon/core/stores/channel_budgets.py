@@ -145,7 +145,7 @@ async def claim_exhausted_notice(session: AsyncSession, *, budget_id: uuid.UUID,
 async def release_exhausted_notice(
     session: AsyncSession, *, budget_id: uuid.UUID, key: str
 ) -> None:
-    """Undo `claim_exhausted_notice` for window ``key`` when no admin got the notice.
+    """Undo `claim_exhausted_notice` for window ``key`` when nobody was sent the notice.
 
     Matching on ``key`` leaves a newer window's claim, or a reset, alone.
     """

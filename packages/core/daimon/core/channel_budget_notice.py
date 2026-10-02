@@ -157,6 +157,7 @@ async def _claim_and_send(
     group_members: GroupMembersFor | None,
 ) -> None:
     notice: BudgetNotice | None = None
+    sending = returned = False
     delivered = 0
     try:
         # One bound for everything: the claim, the live group lookups and the DMs.
@@ -174,11 +175,14 @@ async def _claim_and_send(
                 notice, recipient_ids=await notice_recipients(sessionmaker, notice, members)
             )
             if notice.recipient_ids:
+                sending = True
                 delivered = await notifier(notice)
+                returned = True
     finally:
-        # Otherwise the window stays claimed and no admin hears of it until
-        # the budget is raised or reset.
-        if notice is not None and not delivered:
+        # Freed when nobody was sent anything, so a later refusal tries again.
+        # Kept when the notifier timed out or raised: some DMs may have landed,
+        # and freeing it would send them again on every refusal.
+        if notice is not None and not delivered and (returned or not sending):
             async with sessionmaker() as session, session.begin():
                 await release_exhausted_notice(
                     session, budget_id=notice.budget_id, key=notice.window_key
