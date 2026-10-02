@@ -30,6 +30,7 @@ PanelOp = Literal[
     "isolation",
     "channel_admins",
     "environment",
+    "channel_skills",
     "coding_token_mint",
     "coding_token_revoke",
     "promo_redeem",

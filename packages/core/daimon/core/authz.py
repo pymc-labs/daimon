@@ -30,8 +30,9 @@ policy. Two limits to check when adding a rule:
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
 grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
-and READ_SESSION. SET_CHANNEL_BUDGET is the counter-example: money stays with
-server admins, so a grant never counts there.
+and READ_SESSION. SET_CHANNEL_BUDGET and SET_CHANNEL_SKILLS are the
+counter-examples: money and what a shared agent may do stay with server
+admins, so a grant never counts there.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -185,6 +186,8 @@ class Action(StrEnum):
     ARCHIVE_ISOLATION_COPY = "archive_isolation_copy"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
+    # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
+    SET_CHANNEL_SKILLS = "set_channel_skills"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -705,9 +708,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
         return _deny("admin_required")
-    if req.action is Action.SET_CHANNEL_BUDGET:
-        # Money stays with server admins; an admin's own agent key keeps the
-        # budget rights it always had.
+
+    if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
+        # Money, and what a shared agent may do, stay with server admins; an
+        # admin's own agent key keeps the rights it always had.
         return ALLOW if subject.is_admin else _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:

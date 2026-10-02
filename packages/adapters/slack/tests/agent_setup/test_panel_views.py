@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CHANNEL_ADMINS,
+    ACTION_CHANNEL_SKILLS,
     ACTION_CODING_TOOLS,
     ACTION_END_ISOLATION,
     ACTION_EXPAND_CONNECTIONS,
@@ -62,6 +63,7 @@ from daimon.core.stores.domain import (
     AgentFileRow,
     AgentRepoBindingRow,
     ChannelAdminsRow,
+    ChannelSkillRow,
     McpTokenRow,
 )
 from daimon.testing import ma_agent
@@ -1121,6 +1123,7 @@ def _routing(
     isolation: ChannelIsolationStatus | None = None,
     channel_id: str = _CHANNEL_ID,
     operator_tokens: list[McpTokenRow] | None = None,
+    channel_skills: list[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
     return build_routing_view(
         _answering_map(),
@@ -1134,7 +1137,30 @@ def _routing(
         channel_admins=channel_admins,
         isolation=isolation,
         operator_tokens=operator_tokens,
+        channel_skills=channel_skills,
     )
+
+
+def test_routing_view_lists_channel_skills_with_edit_for_admins_in_a_channel_only() -> None:
+    row = ChannelSkillRow(
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        channel_id=_CHANNEL_ID,
+        skill_id="skill_1",
+        version="v1",
+        name="pdf-tools",
+        owner_agent_name=None,
+        added_by_account_id=None,
+        added_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    view = _routing(channel_admins=[], channel_skills=[row])
+    assert ACTION_CHANNEL_SKILLS in set(_action_ids(view))
+    assert any("`pdf-tools`" in t for t in _texts(view))
+    assert ACTION_CHANNEL_SKILLS not in set(_action_ids(_routing(channel_admins=None))), (
+        "members never see the entry"
+    )
+    dm = _routing(channel_admins=[], channel_skills=[], channel_id="D0123456")
+    assert ACTION_CHANNEL_SKILLS not in set(_action_ids(dm)), "a DM has no channel skills"
 
 
 def test_routing_view_lists_operator_tokens_with_mint_and_revoke_without_secrets() -> None:

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 107 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 110 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -125,6 +125,16 @@ Channel protection tool: protect or seal one channel, or lift either.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+
+## `channel_skills`
+
+Channel skill tools: extra skills one channel's turns run with.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `add_channel_skill` | admin only, operator tokens with channels:write | Add a skill to whatever agent answers in one channel, there only. |
+| `list_channel_skills` | admin only, operator tokens with tenant:read | List the extra skills a channel's turns run with, on top of its agent's. |
+| `remove_channel_skill` | admin only, operator tokens with channels:write | Remove an extra skill from a channel, by id or name. |
 
 ## `channels`
 

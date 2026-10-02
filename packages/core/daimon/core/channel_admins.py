@@ -25,8 +25,8 @@ from typing import Final
 import structlog
 from daimon.core.authz import Subject, build_subject
 from daimon.core.errors import DaimonError
-from daimon.core.stores.accounts import get_account
-from daimon.core.stores.channel_admins import list_channel_admins
+from daimon.core.stores.accounts import get_account, list_platform_user_ids
+from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -285,6 +285,31 @@ async def load_stored_subject(
     )
 
 
+async def channel_admin_user_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str, limit: int
+) -> list[str] | None:
+    """Who a message to `channel_id`'s admins reaches, or None when it has no grant.
+
+    The grant's users, plus members whose stored roles or groups match a
+    granted one, as of their last chat turn; sorted, at most `limit`.
+    """
+    grant = await get_channel_admins(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+    if grant is None or not (grant.user_ids or grant.role_ids):
+        return None
+    found = await list_platform_user_ids(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        limit=limit,
+        user_ids=grant.user_ids,
+        role_ids=grant.role_ids,
+    )
+    # A granted user who never spoke to the bot has no account yet.
+    return sorted({*found, *grant.user_ids})[:limit]
+
+
 __all__ = [
     "CHANNEL_ADMIN_PLATFORMS",
     "GROUP_MEMBERS_TTL_S",
@@ -296,6 +321,7 @@ __all__ = [
     "GroupMembersCache",
     "InvalidChannelAdminIds",
     "administered_channel_ids",
+    "channel_admin_user_ids",
     "fit_lines",
     "fold_mentions",
     "is_channel_admin",

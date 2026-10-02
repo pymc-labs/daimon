@@ -56,6 +56,7 @@ from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_to
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
 from daimon.adapters.mcp.tools.channel_isolation import register_channel_isolation_tools
 from daimon.adapters.mcp.tools.channel_protection import register_channel_protection_tools
+from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
@@ -392,6 +393,7 @@ def create_mcp_app(
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
     register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
 

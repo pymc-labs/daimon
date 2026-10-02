@@ -378,9 +378,14 @@ def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -
         state, runtime=_make_runtime(), allowed_user_id=42, lines=_lines(3), server_default=None
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
-    assert labels == {"◀ Back", "Channel admins", "Isolation", "🔑 Operator tokens", "Done"}, (
-        "a server admin is also offered Channel admins, Isolation and Operator tokens"
-    )
+    assert labels == {
+        "◀ Back",
+        "Channel admins",
+        "Isolation",
+        "🔑 Operator tokens",
+        "Channel skills",
+        "Done",
+    }, "a server admin is also offered Channel admins, Isolation, Operator tokens and skills"
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:

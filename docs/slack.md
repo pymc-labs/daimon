@@ -106,6 +106,11 @@ once.
   owns the channel; then every workspace's requests are posted with that one's token.
   The bot must be a member of the channel.
 
+- **Channels with their own admins** (Discord too): the request goes to those
+  admins by DM instead, then to the server admins when none could be reached, and
+  to the escalation channel only when no DM landed. The asker never gets their own
+  request, and each DM follows the workspace's direct message policy.
+
 Who may ask: anyone who could start a turn in that thread (the invoker allowlist and
 channel protection, checked on click and again on send). External Slack Connect
 members are refused. A protected escalation channel refuses the post; the request

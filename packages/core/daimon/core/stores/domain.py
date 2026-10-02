@@ -87,6 +87,23 @@ class ChannelAdminsRow(BaseModel):
     updated_at: datetime
 
 
+class ChannelSkillRow(BaseModel):
+    """One extra skill a channel's sessions run with, at the version it was added at."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    skill_id: str
+    version: str
+    name: str
+    owner_agent_name: str | None
+    """The agent the skill was uploaded to, or None for a workspace library skill."""
+    added_by_account_id: uuid.UUID | None
+    added_at: datetime
+
+
 class CliPrincipalRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

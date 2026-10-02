@@ -35,6 +35,9 @@ agent:
   - Channel admins, on Who answers where, pushes the form naming this
     channel's admins, submitted in channel_admins.py. Workspace admins only,
     re-checked live on the click and on the submission.
+  - Channel skills, on Who answers where, pushes the form adding or removing
+    this channel's extra skills, submitted in channel_skills.py. Workspace
+    admins only, re-checked live on the click and on the submission.
   - This channel's environment, on Who answers where, saves the pick through
     channel_environment.py. Workspace admins and this channel's admins,
     re-checked live on the pick.
@@ -127,6 +130,7 @@ from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
+from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -137,6 +141,9 @@ log = structlog.get_logger()
 OPERATOR_TOKENS_NEED_ADMIN_MESSAGE = "Only a workspace admin can mint or revoke operator tokens."
 CHANNEL_ADMINS_NEED_ADMIN_MESSAGE = (
     "Only a workspace admin can name a channel's admins. Nothing changed."
+)
+CHANNEL_SKILLS_NEED_ADMIN_MESSAGE = (
+    "Only a workspace admin can change a channel's skills. Nothing changed."
 )
 
 
@@ -284,6 +291,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
+        panel_views.ACTION_CHANNEL_SKILLS,
         panel_views.ACTION_OPERATOR_MINT,
         panel_views.ACTION_OPERATOR_REVOKE,
         panel_views.ACTION_ENVIRONMENT,
@@ -437,6 +445,13 @@ async def load_routing_view(
             if is_admin and meta.channel_id
             else None
         )
+        channel_skills = (
+            await list_channel_skills(
+                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
+            )
+            if is_admin and meta.channel_id
+            else None
+        )
         attributions = await resolve_attributions(
             session, tenant_id=tenant_id, account_ids=_answering_map_account_ids(answering_map)
         )
@@ -483,6 +498,7 @@ async def load_routing_view(
         environment_picker=environment_picker,
         isolation=isolation,
         operator_tokens=operator_tokens,
+        channel_skills=channel_skills,
     )
 
 
@@ -745,6 +761,36 @@ async def _dispatch_panel_action(
                 user_ids=grant.user_ids if grant else (),
                 group_ids=grant.role_ids if grant else (),
                 groups=groups,
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_CHANNEL_SKILLS:
+        if not is_admin or not meta.channel_id:
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="channel_skills",
+                outcome="denied",
+                reason="needs_admin",
+            )
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=CHANNEL_SKILLS_NEED_ADMIN_MESSAGE,
+            )
+            return
+        async with runtime.sessionmaker() as session:
+            rows = await list_channel_skills(
+                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
+            )
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_channel_skills_form(
+                meta=meta.with_view("channel_skills", root_view_id=view_id), rows=rows
             ),
         )
         return
