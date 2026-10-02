@@ -144,6 +144,7 @@ async def run_add_skill_submission(
             channel_id=meta.channel_id,
             user_id=user_id,
             caller_account_id=actor.account_id,
+            agent=agent,
         )
 
     async def recheck(fresh: BetaManagedAgentsAgent) -> None:

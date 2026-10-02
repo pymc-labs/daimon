@@ -223,6 +223,7 @@ async def refuse_unless_allowed_for_agent_name(
     user_id: str,
     thread_ts: str | None = None,
     caller_account_id: uuid.UUID | None = None,
+    agent: BetaManagedAgentsAgent | None = None,
 ) -> bool:
     """Decide `operation` against the agent the panel calls `agent_name`.
 
@@ -230,13 +231,17 @@ async def refuse_unless_allowed_for_agent_name(
     module docstring — it is decided as an unmanaged target, which leaves the
     reachability read as the only thing standing between a member and the
     write. `caller_account_id` leaves the caller's own live sessions out of
-    the sharing read; None counts them.
+    the sharing read; None counts them. `agent`, when the caller holds a fresh
+    read, is decided as it is rather than looked up again by name.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
         return False
 
-    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
+    if agent is None:
+        agent = await find_agent_by_daimon_tag(
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+        )
     facts = await gather_target_facts(
         runtime,
         operation=operation,

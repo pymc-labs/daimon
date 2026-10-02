@@ -125,11 +125,13 @@ class _World:
         self.skills: list[dict[str, Any]] = []
         self.created: list[str] = []
 
-    def put_agent(self, *, system: bool = False, **metadata: str) -> None:
+    def put_agent(
+        self, *, system: bool = False, name: str = "helper", id: str = "ag_helper", **metadata: str
+    ) -> None:
         owner = {} if system else {"daimon_account": str(uuid.uuid4())}
         agent = ma_agent(
-            id="ag_helper",
-            name="helper",
+            id=id,
+            name=name,
             tenant_id=self.tenant_id,
             metadata={**owner, **metadata},
         )
@@ -326,3 +328,35 @@ async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattache
     assert len(world.created) == 1, "uploaded before the change"
     assert world.state.agents["ag_helper"]["skills"] == [], "but never attached"
     assert _told(client) == [MANAGED_AGENT_MESSAGE]
+
+
+async def test_the_attach_rechecks_the_fresh_agent_not_a_lookup_by_its_old_name(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Renamed during the upload to the workspace default's name while a new agent takes
+    the old one: the fresh copy is shared, whatever the name now finds."""
+    world = await _world(db_session_factory)
+    world.put_agent()
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=world.tenant_id),
+            tenant_id=world.tenant_id,
+            agent_name="helper-renamed",
+            mode="agent",
+        )
+    upload = world._skills  # pyright: ignore[reportPrivateUsage]
+
+    def upload_then_rename(request: httpx.Request) -> httpx.Response:
+        response = upload(request)
+        if request.method == "POST":
+            world.put_agent(name="helper-renamed")
+            world.put_agent(id="ag_newcomer")
+        return response
+
+    world._skills = upload_then_rename  # type: ignore[method-assign]  # swap the fake mid-run
+    client = await world.run(monkeypatch)
+
+    assert len(world.created) == 1, "uploaded before the rename"
+    assert world.state.agents["ag_helper"]["skills"] == [], "but never attached"
+    assert _told(client) == [NEEDS_ADMIN_SKILL_MESSAGE], "and the refusal is posted once"
