@@ -58,8 +58,8 @@ Commands answer in the 1:1 chat, since their replies can carry account
 details and Teams has no message only its sender sees. One typed in a channel
 is answered in the sender's 1:1 chat, opened if needed, with a short pointer
 in the channel; `new` there says each post is its own conversation. A message
-is a command only when it is the bare word (or `memory /<path>`, `support
-<note>`); anything longer goes to the agent. None of them runs an agent turn.
+is a command only when it is the bare word (or `memory /<path>`); anything
+longer goes to the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |
@@ -70,7 +70,7 @@ is a command only when it is the bare word (or `memory /<path>`, `support
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month and recent credit grants; admins also see totals, top spenders and top-ups, and redeem promo codes. |
-| `support <note>` | Ask a person for help, spending one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
+| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -94,7 +94,7 @@ turn in a thread gets the root post and its newest 50 replies, a later turn
 only the replies newer than the last message it read, and a mention that starts a
 thread the channel's 25 most recently active posts, each with its newest 10
 replies. One page is read per turn, marked `truncated` when there is more.
-Each message carries its sender, time and channel name. System events, deleted
+Each message carries its sender and time, and the turn names its channel. System events, deleted
 posts and the bot's own cards are left out; mentions read as `@name`. The
 newest 4 images in the replay are passed to the agent, and up to 10 shared
 files get a download link where channel files work (below). When Graph cannot
@@ -255,9 +255,9 @@ A routine's destination can be a channel or a thread
 (`<channel>;messageid=<root>`). Its creator must still be on the channel's
 roster; when they are not, or the post fails, the result goes to their 1:1
 chat if the direct-message policy allows. With completion pings on
-(`DAIMON_COMPLETION_PINGS`), a channel turn's card closes with "Done. The
-answer is below." and the answer is posted fresh, @mentioning the asker, so
-Teams notifies them; bots cannot react. Teams renders markdown tables
+(`DAIMON_COMPLETION_PINGS`), the answer is posted as a new message (in a
+channel, @mentioning the asker) so Teams notifies, and the card then reads
+"Done. The answer is below."; bots cannot react. Teams renders markdown tables
 natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
 
 ### Capacity

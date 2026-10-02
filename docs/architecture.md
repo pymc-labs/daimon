@@ -1008,9 +1008,9 @@ Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
 entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
-continuity notices and feedback target the new answer. A Teams channel turn closes its
-card on "Done. The answer is below." and posts the answer fresh with an @mention; bots
-cannot react there.
+continuity notices and feedback target the new answer. Teams posts the answer fresh (with
+an @mention in a channel), then sets its card to "Done. The answer is below."; bots cannot
+react there.
 
 ### Routine dispatch
 
