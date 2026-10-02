@@ -31,6 +31,8 @@ def _notice() -> BudgetNotice:
         recipient_ids=("U1", "U2", "U3"),
         budget_line="$2.00 of $2.00 (total)",
         monthly=False,
+        budget_id=uuid.uuid4(),
+        window_key="window",
     )
 
 
@@ -51,7 +53,8 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     client.chat_postMessage = AsyncMock()
     resolve = AsyncMock(return_value=client)
     with patch.object(budget_notice, "resolve_web_client", resolve):
-        await budget_notice.slack_budget_notifier(runtime)(_notice())
+        delivered = await budget_notice.slack_budget_notifier(runtime)(_notice())
+        assert delivered == 1, "only a DM that landed counts"
 
     resolve.assert_awaited_once_with(runtime, team_id="T1")
     assert [c.kwargs["users"] for c in client.conversations_open.await_args_list] == ["U1", "U2"]

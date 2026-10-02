@@ -45,8 +45,11 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
         recipient_ids=("aad-1", "aad-2", "aad-3"),
         budget_line="$1.00 of $1.00 (monthly)",
         monthly=True,
+        budget_id=uuid.uuid4(),
+        window_key="window",
     )
-    await teams_budget_notifier(runtime, direct)(notice)
+    delivered = await teams_budget_notifier(runtime, direct)(notice)
+    assert delivered == 1, "only a DM that landed counts"
 
     direct.post.assert_awaited_once()
     chat, text = direct.post.await_args.args

@@ -234,7 +234,8 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   channel has none, at most ten people, on Discord, Slack and Teams
   (`daimon.core.channel_budget_notice`). A monthly budget's window is the
   month; any other budget's is the budget itself. Setting or raising the
-  budget re-arms it (`channel_budgets.exhausted_notice_key`). It follows the
+  budget re-arms it (`channel_budgets.exhausted_notice_key`), and so does a
+  notice no admin received, so a later refusal tries again. It follows the
   tenant's DM policy, never changes the refusal, and is off for a tenant set
   to `false` in `DAIMON_BUDGET_NOTICES`. Refusals of MCP turns, media calls
   and routines send none.

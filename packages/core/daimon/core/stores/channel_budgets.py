@@ -140,3 +140,17 @@ async def claim_exhausted_notice(session: AsyncSession, *, budget_id: uuid.UUID,
     )
     result = cast(CursorResult[Any], await session.execute(stmt))
     return result.rowcount > 0
+
+
+async def release_exhausted_notice(
+    session: AsyncSession, *, budget_id: uuid.UUID, key: str
+) -> None:
+    """Undo `claim_exhausted_notice` for window ``key`` when no admin got the notice.
+
+    Matching on ``key`` leaves a newer window's claim, or a reset, alone.
+    """
+    await session.execute(
+        update(ChannelBudget)
+        .where(ChannelBudget.id == budget_id, ChannelBudget.exhausted_notice_key == key)
+        .values(exhausted_notice_key=None, updated_at=ChannelBudget.updated_at)
+    )

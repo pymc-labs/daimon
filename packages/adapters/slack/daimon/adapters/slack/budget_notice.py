@@ -19,21 +19,24 @@ log = structlog.get_logger()
 def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
     """DM each recipient the DM policy allows; a failed DM skips that one."""
 
-    async def send(notice: BudgetNotice) -> None:
+    async def send(notice: BudgetNotice) -> int:
         client = await resolve_web_client(runtime, team_id=notice.workspace_id)
         if client is None:
-            return
+            return 0
         text = notice.text(f"<#{notice.channel_id}>")
         policy = runtime.settings.direct_message_policies.get(
             notice.tenant_id, DirectMessagePolicy()
         )
+        delivered = 0
         for user_id in notice.allowed_recipients(policy):
             try:
                 opened = await client.conversations_open(users=user_id)  # pyright: ignore[reportUnknownMemberType]
                 channel = cast("dict[str, str]", opened["channel"])["id"]
                 await client.chat_postMessage(channel=channel, text=text)  # pyright: ignore[reportUnknownMemberType]
+                delivered += 1
             except SlackApiError as exc:
                 log.info("channel_budget.notice_undelivered", error=str(exc))
+        return delivered
 
     return send
 

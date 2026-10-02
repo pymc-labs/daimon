@@ -19,9 +19,10 @@ log = structlog.get_logger()
 def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetNotifier:
     """Message each recipient the DM policy allows who is on the channel's team roster."""
 
-    async def send(notice: BudgetNotice) -> None:
+    async def send(notice: BudgetNotice) -> int:
         policies = runtime.settings.direct_message_policies
         text = notice.text(f"Channel `{notice.channel_id}`")
+        delivered = 0
         for user_id in notice.allowed_recipients(
             policies.get(notice.tenant_id, DirectMessagePolicy())
         ):
@@ -29,8 +30,10 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
                 member = await direct.member(notice.channel_id, user_id)
                 if member is not None:
                     await direct.post(await direct.open_chat(member), text)
+                    delivered += 1
             except TEAMS_SEND_ERRORS as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)
+        return delivered
 
     return send
 

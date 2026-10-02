@@ -130,15 +130,40 @@ async def test_a_failing_notifier_never_raises_and_no_notifier_claims_nothing(
     await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=None, **args)
     sent: list[BudgetNotice] = []
 
-    async def failing(notice: BudgetNotice) -> None:
+    async def failing(notice: BudgetNotice) -> int:
         sent.append(notice)
         raise RuntimeError("platform down")
 
+    async def landed(notice: BudgetNotice) -> int:
+        sent.append(notice)
+        return 1
+
     await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=failing, **args)
-    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=failing, **args)
-    assert [n.recipient_ids for n in sent] == [("u-admin",)], (
-        "the first notifier call is this window's, and its failure is swallowed"
+    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=landed, **args)
+    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=landed, **args)
+    assert [n.recipient_ids for n in sent] == [("u-admin",), ("u-admin",)], (
+        "a failed notice frees the window for the next refusal; a delivered one holds it"
     )
+
+
+async def test_a_notice_no_admin_received_frees_the_window(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _spent_channel(db_session)
+    await db_session.commit()
+    args = {"tenant_id": tenant.id, "platform": "discord", "channel_id": "chan-1", "now": _NOW}
+    calls: list[BudgetNotice] = []
+
+    async def none_landed(notice: BudgetNotice) -> int:
+        calls.append(notice)
+        return 0
+
+    await notify_budget_exhausted(sessionmaker=db_session_factory, notifier=none_landed, **args)
+    async with db_session_factory() as session:
+        assert await _claim(session, tenant) is not None, (
+            "a notice whose DMs all failed leaves the window unclaimed"
+        )
+    assert len(calls) == 1, "the notifier ran once"
 
 
 def test_the_dm_policy_filters_recipients() -> None:
@@ -150,6 +175,8 @@ def test_the_dm_policy_filters_recipients() -> None:
         recipient_ids=("a", "b"),
         budget_line="",
         monthly=False,
+        budget_id=uuid.uuid4(),
+        window_key="window",
     )
     allow_b = DirectMessagePolicy(mode="allowlist", recipient_ids=["b"])
     assert notice.allowed_recipients(allow_b) == ("b",)

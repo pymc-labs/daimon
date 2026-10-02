@@ -36,6 +36,8 @@ def _notice() -> BudgetNotice:
         recipient_ids=("1", "2", "3"),
         budget_line="$5.00 of $5.00 (monthly)",
         monthly=True,
+        budget_id=uuid.uuid4(),
+        window_key="window",
     )
 
 
@@ -49,7 +51,8 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
         return dms[str(user_id)]
 
     policy = DirectMessagePolicy(mode="allowlist", recipient_ids=["1", "2"])
-    await discord_budget_notifier(_runtime({_TENANT: policy}), open_dm)(_notice())
+    delivered = await discord_budget_notifier(_runtime({_TENANT: policy}), open_dm)(_notice())
+    assert delivered == 1, "only a DM that landed counts"
 
     dms["1"].send.assert_awaited_once()
     text = dms["1"].send.await_args.args[0]

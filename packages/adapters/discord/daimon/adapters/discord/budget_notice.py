@@ -22,17 +22,20 @@ OpenDm = Callable[[int, int], Awaitable[discord.abc.Messageable]]
 def discord_budget_notifier(runtime: DiscordRuntime, open_dm: OpenDm) -> BudgetNotifier:
     """DM each recipient the DM policy allows who is still a human member of the guild."""
 
-    async def send(notice: BudgetNotice) -> None:
+    async def send(notice: BudgetNotice) -> int:
         policies = runtime.settings.direct_message_policies
         text = notice.text(f"<#{notice.channel_id}>")
+        delivered = 0
         for user_id in notice.allowed_recipients(
             policies.get(notice.tenant_id, DirectMessagePolicy())
         ):
             try:
                 dm = await open_dm(int(notice.workspace_id), int(user_id))
                 await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
+                delivered += 1
             except (discord.HTTPException, LookupError, ValueError) as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)
+        return delivered
 
     return send
 
