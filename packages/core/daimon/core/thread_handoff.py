@@ -135,6 +135,7 @@ log = structlog.get_logger(__name__)
 
 # Stands in for a seal that couldn't be read: a session MA wouldn't return,
 # or sessions nobody looked up. Inside no place, so it reads as sealed.
+# This sentinel is in-memory only; it must never be persisted as a seal.
 _UNREAD_SEAL = "\x00unread-session-seal"
 
 
@@ -176,14 +177,14 @@ async def recorded_thread_sessions(
             facts = SessionFacts(seal_ids=frozenset({_UNREAD_SEAL}))
         else:
             facts = session_facts(ma_session.metadata, owned=True)
-        async with sessionmaker.begin() as db:
-            await record_session_seals(
-                db,
-                tenant_id=tenant_id,
-                ma_session_id=row.ma_session_id,
-                seals=facts.seal_ids,
-                channel_id=facts.channel,
-            )
+            async with sessionmaker.begin() as db:
+                await record_session_seals(
+                    db,
+                    tenant_id=tenant_id,
+                    ma_session_id=row.ma_session_id,
+                    seals=facts.seal_ids,
+                    channel_id=facts.channel,
+                )
         recorded.append(RecordedSession(account_id=row.account_id, facts=facts))
     return tuple(recorded)
 

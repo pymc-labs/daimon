@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
 from daimon.core.access_policy import TenantAccessPolicy
@@ -27,6 +28,7 @@ from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
+from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
 from daimon.core.thread_handoff import (
     HandoffCaller,
     HandoffDestination,
@@ -585,3 +587,59 @@ async def test_a_purge_of_the_binding_creators_account_and_a_switch_never_deadlo
     binding = await _binding(factory, tenant.id)
     assert binding is not None and binding.responder_ma_agent_id == "agt_research"
     assert binding.creator_account_id is None, "the purge committed before the switch wrote"
+
+
+@pytest.mark.parametrize("seal_ids", [None, frozenset(), frozenset({"C1"})])
+async def test_channel_admin_switch_refuses_unread_session_without_persisting_sentinel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    seal_ids: frozenset[str] | None,
+) -> None:
+    tenant = await _seed(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    await _grant_c1(db_session_factory, tenant.id)
+    async with db_session_factory.begin() as session:
+        row = await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C1",
+            thread_id="T1",
+            account_id=account.id,
+            ma_session_id="sess_unread",
+            ma_agent_id="agt_daimon",
+            seal_ids=seal_ids,
+        )
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_unread",
+        lambda _r, _m: httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "unavailable"}},
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    client.max_retries = 0
+    outcome = await switch_thread_on_request(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=ChannelAdminCaller(platform_user_id="U1"),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+    )
+    assert not outcome.switched
+    assert "sealed" in outcome.text
+    assert await _binding(db_session_factory, tenant.id) is None
+    async with db_session_factory() as session:
+        unchanged = await get_thread_session_by_id(session, id=row.id)
+    assert unchanged is not None
+    assert unchanged.seal_ids == (None if seal_ids is None else tuple(sorted(seal_ids)))

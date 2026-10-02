@@ -624,6 +624,7 @@ async def _prepare_session_for_turn_locked(
         await _heal_lineage(deps, db, row=row)
 
         handed_over = False
+        source_exists = True
         recorded: SessionSnapshot | None = None
         try:
             identity = await check_session_agent(
@@ -638,6 +639,7 @@ async def _prepare_session_for_turn_locked(
             handed_over = True
             recorded = row.effective_config
         else:
+            source_exists = identity.session_exists
             if identity.session_exists:
                 recorded = await recorded_snapshot(
                     deps.anthropic, deps.sessionmaker, existing=row, observed=identity.observed
@@ -741,10 +743,22 @@ async def _prepare_session_for_turn_locked(
             # it itself from here; otherwise the new agent starts with nothing.
             carry = not handed_over or await _destination_may_carry(deps, admission, row)
             async with session_mutation_fence(deps.sessionmaker, row.ma_session_id):
-                try:
-                    observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
-                except anthropic_pkg.NotFoundError:
-                    observed = None
+                observed = None
+                if source_exists:
+                    try:
+                        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                    except anthropic_pkg.NotFoundError:
+                        pass
+                    except anthropic_pkg.APIError as error:
+                        log.warning(
+                            "session_preparation.replacement_source_unreadable",
+                            session_id=row.ma_session_id,
+                            error=type(error).__name__,
+                        )
+                        return PreparationBusy(
+                            pending_reasons=decision.reasons,
+                            retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
+                        )
                 if observed is not None and observed.status not in ("idle", "terminated"):
                     raise SessionBusyError(
                         pending_reasons=("session_active",),

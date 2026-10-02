@@ -164,6 +164,7 @@ class _Transport:
         self.calls: list[tuple[str, str]] = []
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
+        self.retrieve_error: int | None = None
         _register(self.state, _agent())
 
     @property
@@ -177,6 +178,18 @@ class _Transport:
         def _record(request: httpx.Request) -> httpx.Response:
             self.calls.append((request.method, request.url.path))
             path = request.url.path
+            if (
+                self.retrieve_error is not None
+                and request.method == "GET"
+                and path in {f"/v1/sessions/{sid}" for sid in self.state.sessions}
+            ):
+                return httpx.Response(
+                    self.retrieve_error,
+                    json={
+                        "type": "error",
+                        "error": {"type": "api_error", "message": "unavailable"},
+                    },
+                )
             if (
                 request.method == "POST"
                 and path.startswith("/v1/sessions/")
@@ -2605,3 +2618,65 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         await asyncio.gather(
             sending, *([replacing] if replacing is not None else []), return_exceptions=True
         )
+
+
+@pytest.mark.parametrize("status", [400, 429, 500])
+@pytest.mark.parametrize("reason", ["model", "memory_access"])
+async def test_replacement_retries_when_source_status_is_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    status: int,
+    reason: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    deps.anthropic.max_retries = 0
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    changed = (
+        replace(admission, agent=_agent(model_id="claude-opus-5"))
+        if reason == "model"
+        else replace(admission, memory_read_only=True)
+    )
+    _register(transport.state, changed.agent)
+    transport.retrieve_error = status
+    busy = await _prepare(deps, changed, tenant=tenant, account=account)
+    assert isinstance(busy, PreparationBusy)
+    assert busy.pending_reasons == (reason,)
+    assert busy.retry_after > _NOW
+    live = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert live is not None and live.ma_session_id == first.ma_session_id
+    assert transport.creates == 1
+    transport.retrieve_error = None
+    retried = await _prepare(deps, changed, tenant=tenant, account=account, now=busy.retry_after)
+    assert isinstance(retried, PreparedTurn)
+    assert retried.ma_session_id != first.ma_session_id
+
+
+async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            account_id=account.id,
+            ma_session_id="sess_missing",
+        )
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = replace(_admission(account=account), memory_read_only=True)
+    result = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(result, PreparedTurn)
+    assert result.ma_session_id != "sess_missing"
+    assert len(transport.paths("GET", "/v1/sessions/sess_missing")) == 1
