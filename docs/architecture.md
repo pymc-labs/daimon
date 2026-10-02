@@ -503,8 +503,9 @@ default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
 (`Place.setup_thread`) still answers as the built-in agent. C's own agents
 post nowhere outside C, not even the requester's DM, and send no direct
-messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`), whose prompts
-would answer outside C. Admission, `reauthorize` and the scheduler's
+messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`, also refused
+for any call whose verified turn origin is in C, such as its setup thread),
+whose prompts would answer outside C. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is

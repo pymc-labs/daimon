@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An isolated channel's content no longer leaves through new agents or timers.**
   An isolated channel's own agent, wherever it runs and through any of its
   coding-tool tokens, could call `create_agent`, and the new agent answered
-  outside the channel with whatever prompt was written into it. Such calls are
-  now refused (`channel_isolated`), admins included. `list_timers` also showed
+  outside the channel with whatever prompt was written into it. Such calls, and
+  `create_agent` from the channel's setup thread, are now refused
+  (`channel_isolated`), admins included. `list_timers` also showed
   the notes of timers set in an isolated channel from anywhere; they now list
   only inside that channel, as its routines do.
 - A run of an isolated channel's own agent from the hub or a DM, which only admins and that channel's admins may make, is now gated by and charged to that channel's budget, so closing the channel with a $0 budget stops those runs too.

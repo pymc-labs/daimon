@@ -541,6 +541,12 @@ async def test_the_setup_thread_is_held_to_its_channel(
     )
     assert routine.agent_name == "local", "C's agent is scheduled into C from its setup thread"
 
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="what C's room said")
+    with pytest.raises(ToolError, match="creates no agents"):
+        await _create_agent_impl(runtime, builtin, spec, origin_id)
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert "notes-bot" not in names, "a new agent would carry the setup thread's text out of C"
+
 
 def _key(world: _World, *, bound: str | None) -> AuthIdentity:
     """An agent key of C's own agent, minted in C (``bound``) or anywhere else."""
