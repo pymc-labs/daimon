@@ -4,8 +4,10 @@ The environment resolves over the same tiers as the agent (channel, then the
 tenant default, then the deployment default; see `daimon.core.scope`) but on
 its own, so a channel can keep the agent it has and run it with the packages
 one team needs. Server admins set any channel's environment or the tenant
-default; a channel admin sets the channels they run. A scope with no
-environment of its own falls through, so nothing changes until one is set.
+default; a channel admin sets the channels they run, except an environment
+with unrestricted networking in a sealed channel (`authorize`'s
+SET_CHANNEL_ENVIRONMENT). A scope with no environment of its own falls
+through, so nothing changes until one is set.
 
 The sentences and the setup panels' picker live here so the chat tools and
 both panels say and offer the same. Only the select's length differs by
@@ -19,11 +21,23 @@ from collections.abc import Sequence
 from typing import Final
 
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaEnvironment
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.defaults.ma_index import list_environments_by_tenant
+from daimon.core.authz import Action, Decision, Place, Subject, authorize
+from daimon.core.defaults.ma_index import (
+    find_environment_by_daimon_tag,
+    list_environments_by_tenant,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.scope import ChannelScopeRef, ConfigTier, TenantScopeRef
-from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.scope import (
+    ChannelScopeRef,
+    ConfigTier,
+    DeploymentDefault,
+    ScopeContext,
+    TenantScopeRef,
+)
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +89,20 @@ def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
     return (
         f"{_scope_phrase(channel)} no longer picks an environment; from the next message "
         "it falls through to the next tier."
+    )
+
+
+def build_sealed_network_refusal(*, environment_name: str | None) -> str:
+    """Why a channel admin's pick in a sealed channel was refused; None is a clear."""
+    what = (
+        f"the {environment_name} environment has"
+        if environment_name is not None
+        else "the default it would fall back to has"
+    )
+    return (
+        f"This channel is sealed, and {what} unrestricted network access, so only a server "
+        "admin can make that change here. Nothing changed. Pick an environment with limited "
+        "networking, or ask a server admin."
     )
 
 
@@ -175,6 +203,80 @@ async def list_environment_names(client: AsyncAnthropic, *, tenant_id: uuid.UUID
     return sorted(names, key=str.casefold)
 
 
+def has_open_network(environment: BetaEnvironment) -> bool:
+    """Anything but a cloud environment on limited networking.
+
+    A self-hosted environment's network is its host's, unknown here, so it
+    counts as open.
+    """
+    config = environment.config
+    return config.type != "cloud" or config.networking.type != "limited"
+
+
+async def may_pick_environment_in(
+    session: AsyncSession, *, tenant_id: uuid.UUID, subject: Subject, channel_id: str | None
+) -> bool:
+    """Whether `subject` may pick `channel_id`'s environment at all (None: the workspace's).
+
+    The network rule depends on the pick, so `authorize_environment_pick`
+    decides it once one is made.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    return bool(
+        authorize(
+            policy,
+            subject=subject,
+            action=Action.SET_CHANNEL_ENVIRONMENT,
+            place=Place(channel_id=channel_id),
+        )
+    )
+
+
+async def authorize_environment_pick(
+    session: AsyncSession,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    subject: Subject,
+    channel_id: str | None,
+    environment_name: str | None,
+    default: DeploymentDefault,
+) -> Decision:
+    """Whether `subject` may set `channel_id`'s environment to `environment_name`.
+
+    None clears it, leaving the channel on the workspace or deployment
+    default, which then decides the network rule. Environments are looked up
+    only when that rule is what decides: a channel admin in a sealed channel.
+    One missing at set time is allowed here for the caller's own not-found
+    refusal; a missing default counts as open.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    place = Place(channel_id=channel_id)
+
+    def decide(*, open_network: bool) -> Decision:
+        return authorize(
+            policy,
+            subject=subject,
+            action=Action.SET_CHANNEL_ENVIRONMENT,
+            place=place,
+            open_network=open_network,
+        )
+
+    decision = decide(open_network=True)
+    if decision or decision.reason != "sealed":
+        return decision
+    name = environment_name
+    if name is None:
+        fallback = await resolve(
+            session, context=ScopeContext(tenant_id=tenant_id, channel_id=None), default=default
+        )
+        name = fallback.environment_name or "default"
+    environment = await find_environment_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    if environment is None:
+        return decide(open_network=environment_name is None)
+    return decide(open_network=has_open_network(environment))
+
+
 async def save_scope_environment(
     session: AsyncSession,
     *,
@@ -214,14 +316,18 @@ __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
     "NOT_OFFERED_NOTE",
     "EnvironmentPicker",
+    "authorize_environment_pick",
     "build_archive_environment_note",
     "build_clear_environment_note",
     "build_environment_resolution_note",
     "build_missing_environment_note",
+    "build_sealed_network_refusal",
     "build_set_environment_note",
     "environment_choices",
     "environment_option_value",
+    "has_open_network",
     "list_environment_names",
+    "may_pick_environment_in",
     "parse_environment_option",
     "plan_environment_picker",
     "save_scope_environment",
