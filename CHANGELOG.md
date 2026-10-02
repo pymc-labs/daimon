@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An isolated channel's content no longer leaves through new agents or timers.**
+  An isolated channel's own agent, wherever it runs and through any of its
+  coding-tool tokens, could call `create_agent`, and the new agent answered
+  outside the channel with whatever prompt was written into it. Such calls are
+  now refused (`channel_isolated`), admins included. `list_timers` also showed
+  the notes of timers set in an isolated channel from anywhere; they now list
+  only inside that channel, as its routines do.
 - A run of an isolated channel's own agent from the hub or a DM, which only admins and that channel's admins may make, is now gated by and charged to that channel's budget, so closing the channel with a $0 budget stops those runs too.
 - A Teams routine saved before its channel was recorded is placed in the channel its destination id names. Teams ids contain ":", which split the id at the wrong place, so such a routine was treated as outside its channel by the isolation and environment checks.
 - Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations as `prep_gate`.

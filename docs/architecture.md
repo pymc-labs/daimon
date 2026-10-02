@@ -490,7 +490,8 @@ default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
 (`Place.setup_thread`) still answers as the built-in agent. C's own agents
 post nowhere outside C, not even the requester's DM, and send no direct
-messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
+messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`), whose prompts
+would answer outside C. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
@@ -513,8 +514,8 @@ token for C, or when its chat turn's agent is one of C's; an agent key is
 never inside by its agent alone. The roster, agent and key tools take the
 turn's `origin_context_id` for this. From outside, C's agents are missing from
 `list_agents` and every by-name lookup, from handoff destinations,
-`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines and
-routines posting into C; inside C only C's agents show. For members the
+`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines,
+routines posting into C and timers set in C; inside C only C's agents show. For members the
 setup panel's roster, details and Who answers where are filtered the same way
 at the panel's location, and `/memory` hides an agent wherever it may not
 run; server admins see everything. Server admins are exempt in their own DM
