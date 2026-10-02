@@ -78,8 +78,13 @@ async def require_channel_writable(
     parent_channel_id: str | None = None,
     category_id: str | None = None,
     origin: Place | None = None,
+    policy: TenantAccessPolicy | None = None,
+    agent: AgentRef | None = None,
 ) -> None:
     """Raise ToolError when the tenant policy forbids this post (`authorize(POST)`).
+
+    Tidy supplies a policy loaded under the shared policy-write lock and agent facts
+    resolved before locking; supplying both avoids network I/O in the guard.
 
     Every channel send path (messages, replies, thread and post creation, file
     and card posts) calls this. Besides channel protection it holds a pinned
@@ -93,7 +98,7 @@ async def require_channel_writable(
     turn's verified place (`turn_origin_place`): a call from inside an isolated
     channel posts only there, and one from its setup thread may post into it.
     """
-    policy = await load_channel_policy(runtime, auth)
+    policy = policy if policy is not None else await load_channel_policy(runtime, auth)
     place = Place(
         channel_id=channel_id,
         parent_channel_id=parent_channel_id,
@@ -108,7 +113,7 @@ async def require_channel_writable(
         raise ToolError(_PROTECTED_MSG)
     if not policy.isolated_channel_ids and (place.own_dm or not policy.agent_channel_pins):
         return
-    agent = await _executing_agent(runtime, auth, policy)
+    agent = agent if agent is not None else await _executing_agent(runtime, auth, policy)
     decision = authorize(
         policy, subject=subject, action=Action.POST, agent=agent, place=place, origin=origin
     )

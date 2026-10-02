@@ -176,6 +176,8 @@ skills:
   - type: custom
     skill_id: file-handling
   - type: custom
+    skill_id: channel-tidy
+  - type: custom
     skill_id: marimo_notebooks
   - type: custom
     skill_id: workspace-setup

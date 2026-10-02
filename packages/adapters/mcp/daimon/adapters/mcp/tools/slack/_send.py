@@ -27,6 +27,7 @@ from typing import Any, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -170,6 +171,19 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=thread_ts
     )
+    await record_agent_posts(
+        runtime,
+        auth,
+        platform="slack",
+        posts=[
+            PostRecord(
+                channel_id=target_channel_id,
+                message_id=str(resp["ts"]),
+                thread_ts=thread_ts,
+                content=content,
+            )
+        ],
+    )
     message = cast(dict[str, Any], resp.get("message") or {})
     response_thread_ts = message.get("thread_ts")
     response_user_id = message.get("user")
@@ -213,6 +227,14 @@ async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=None
+    )
+    await record_agent_posts(
+        runtime,
+        auth,
+        platform="slack",
+        posts=[
+            PostRecord(channel_id=target_channel_id, message_id=str(resp["ts"]), content=content)
+        ],
     )
     message = cast(dict[str, Any], resp.get("message") or {})
     response_thread_ts = message.get("thread_ts")

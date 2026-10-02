@@ -2322,6 +2322,14 @@ class SecurityAuditEvent(Base):
             "outcome IN ('allowed', 'denied', 'error')", name="ck_security_audit_outcome"
         ),
         Index("ix_security_audit_tenant_time", "tenant_id", "occurred_at", "id"),
+        # Only the channel tidy tools set turn_ref; their limit counts read this.
+        Index(
+            "ix_security_audit_tidy",
+            "tenant_id",
+            "agent_id",
+            "occurred_at",
+            postgresql_where=text("turn_ref IS NOT NULL"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -2341,6 +2349,56 @@ class SecurityAuditEvent(Base):
     token_kind: Mapped[str | None] = mapped_column(Text)
     token_jti: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     scope: Mapped[str | None] = mapped_column(Text)
+    # Set only by the channel tidy tools: which message an edit or delete
+    # touched, a keyed HMAC of the text it replaced, and the turn it ran in.
+    target_channel_id: Mapped[str | None] = mapped_column(Text)
+    target_message_id: Mapped[str | None] = mapped_column(Text)
+    content_hmac: Mapped[str | None] = mapped_column(Text)
+    turn_ref: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentPostedMessage(Base):
+    """A message or thread an agent posted through the channel tools.
+
+    Written at send time by `send_message` and `create_thread`; the channel
+    tidy tools edit or delete only what this table says the calling agent
+    posted. Holds ids and a keyed HMAC of the text, never the text itself.
+    `channel_id` is where the message lives (a Discord thread id for a
+    message in a thread); a Discord thread is its own row with
+    `kind='thread'`, the parent channel as `channel_id` and the thread id as
+    `message_id`.
+    """
+
+    __tablename__ = "agent_posted_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "message_id",
+            name="uq_agent_posted_messages_target",
+        ),
+        CheckConstraint("kind IN ('message', 'thread')", name="ck_agent_posted_messages_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_channel_id: Mapped[str | None] = mapped_column(Text)
+    thread_ts: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    content_hmac: Mapped[str | None] = mapped_column(Text)
+    posted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DirectMessagePolicy(Base):

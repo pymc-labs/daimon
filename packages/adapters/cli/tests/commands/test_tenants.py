@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from io import StringIO
 from typing import cast
@@ -777,7 +778,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
     release = asyncio.Event()
     second_lock_started = asyncio.Event()
     original_load = tenants_mod.load_access_policy
-    original_lock = tenants_mod.lock_access_policy
+    original_transaction = tenants_mod.policy_write_transaction
     calls = 0
 
     async def held_load(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
@@ -789,13 +790,15 @@ async def test_concurrent_policy_edits_preserve_both_fields(
             await release.wait()
         return policy
 
-    async def observed_lock(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    @asynccontextmanager
+    async def observed_transaction(factory, *, tenant_id):
         if loaded.is_set():
             second_lock_started.set()
-        await original_lock(session, tenant_id=tenant_id)
+        async with original_transaction(factory, tenant_id=tenant_id) as session:
+            yield session
 
     monkeypatch.setattr(tenants_mod, "load_access_policy", held_load)
-    monkeypatch.setattr(tenants_mod, "lock_access_policy", observed_lock)
+    monkeypatch.setattr(tenants_mod, "policy_write_transaction", observed_transaction)
     first = asyncio.create_task(
         tenants_access_policy_set(
             rt=rt,
