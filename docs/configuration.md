@@ -348,6 +348,15 @@ and the features that read it are inactive while it is.
 
 Discord bot token. Required to run the Discord adapter.
 
+### `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S`
+
+`float` · optional · default `3.0`
+
+Seconds after an admitted opening mention before replying in the parent channel that its
+Discord thread is still opening. Includes thread naming and Discord rate-limit waits.
+Set to 0 to reply immediately. The notice is edited with a thread link or retry guidance
+when creation finishes.
+
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
 `int` · optional · default `3`

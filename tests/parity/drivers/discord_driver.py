@@ -314,6 +314,7 @@ class DiscordDriver:
         settings.github.oauth_scopes = ()
         discord_settings = MagicMock()
         discord_settings.max_concurrent_turns_per_tenant = 100
+        discord_settings.thread_open_notice_after_s = 3.0
         discord_settings.bot_display_name = "daimon"
         settings.discord = discord_settings
         settings.thread_naming = ThreadNamingSettings(enabled=False)

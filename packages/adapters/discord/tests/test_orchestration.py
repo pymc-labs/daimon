@@ -78,6 +78,7 @@ def _make_runtime(
     settings.billing.signup_credit = Decimal("0")
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
+    discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
@@ -248,6 +249,41 @@ async def _setup_workspace_and_config(
 
 class TestNewThreadCreation:
     """Channel mentions create threads and run turns."""
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_thread_create_failure_releases_admission_counters(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        assert runtime.settings.discord is not None
+        runtime.settings.discord.thread_open_notice_after_s = 0
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        notice = MagicMock(spec=discord.Message)
+        notice.edit = AsyncMock()
+        message.reply = AsyncMock(return_value=notice)  # pyright: ignore[reportAttributeAccessIssue]
+        message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        notice.edit.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            content="I couldn't open your chat. Please try mentioning me again."
+        )
+        assert bot._inflight == {}  # pyright: ignore[reportPrivateUsage]
+        assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+        assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -1704,6 +1740,7 @@ class TestResolverSelfHeal:
         settings.billing.signup_credit = Decimal("0")
         discord_settings = MagicMock()
         discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
+        discord_settings.thread_open_notice_after_s = 3.0
         settings.discord = discord_settings
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
@@ -1836,6 +1873,7 @@ class TestResolverSelfHeal:
         settings.billing.signup_credit = Decimal("0")
         discord_settings = MagicMock()
         discord_settings.max_concurrent_turns_per_tenant = 100
+        discord_settings.thread_open_notice_after_s = 3.0
         settings.discord = discord_settings
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()

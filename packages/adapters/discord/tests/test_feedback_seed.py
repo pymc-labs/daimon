@@ -138,6 +138,7 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
     settings.billing.signup_credit = Decimal("0")
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
+    discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
     anthropic = build_stub_anthropic(resolved_agent_env_router().dispatch)
     resolver_cache = new_resolver_cache()

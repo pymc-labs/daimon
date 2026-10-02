@@ -1,6 +1,7 @@
 """Process health windows count transport attempts and emit bounded snapshots."""
 
 import asyncio
+import logging
 import uuid
 from unittest.mock import Mock
 
@@ -13,6 +14,7 @@ from daimon.core.runtime_health import (
     log_health_once,
     runtime_health,
     take_anthropic_window,
+    take_discord_ratelimit_window,
     track_turn,
 )
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
@@ -80,6 +82,46 @@ async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch
         assert set(fields["loop_lag_ms"]) == {"max", "p95"}
         await log_health_once("test", engine, [4.0, 8.0], lambda: (0, None))
         assert logger.info.call_args.kwargs["loop_lag_ms"] == {"max": 8.0, "p95": 8.0}
+    finally:
+        await engine.dispose()
+
+
+async def test_discord_429_routes_and_window_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    take_discord_ratelimit_window()
+    logger = Mock()
+    monkeypatch.setattr("daimon.core.runtime_health.structlog.get_logger", lambda: logger)
+    engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
+    http_logger = logging.getLogger("discord.http")
+    warning = "We are being rate limited. %s %s responded with 429. Retrying in %.2f seconds."
+    try:
+        async with runtime_health("discord", engine, 0):
+            http_logger.warning(42)  # Non-string log messages must not break the request path.
+            http_logger.warning(
+                warning, "POST", "https://discord.com/api/v10/channels/1/messages/2/threads", 4.0
+            )
+            http_logger.warning(
+                warning, "POST", "https://discord.com/api/v10/channels/1/messages/3/threads", 7.0
+            )
+            http_logger.warning(
+                warning, "POST", "https://discord.com/api/v10/channels/1/messages", 2.0
+            )
+            http_logger.warning(
+                warning, "PATCH", "https://discord.com/api/v10/channels/1/messages/2", 3.0
+            )
+            http_logger.warning(
+                warning, "DELETE", "https://discord.com/api/v10/channels/1/messages/2", 1.0
+            )
+            await log_health_once("discord", engine, [], lambda: (0, None))
+            assert logger.info.call_args.kwargs["discord_ratelimits"] == {
+                "thread_create": {"count": 2, "max_retry_s": 7.0},
+                "message_send": {"count": 1, "max_retry_s": 2.0},
+                "message_edit": {"count": 1, "max_retry_s": 3.0},
+                "other": {"count": 1, "max_retry_s": 1.0},
+            }
+            await log_health_once("discord", engine, [], lambda: (0, None))
+            assert logger.info.call_args.kwargs["discord_ratelimits"] == {}
+        await log_health_once("mcp", engine, [], lambda: (0, None))
+        assert "discord_ratelimits" not in logger.info.call_args.kwargs
     finally:
         await engine.dispose()
 

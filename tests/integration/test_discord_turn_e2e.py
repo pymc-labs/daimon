@@ -59,6 +59,7 @@ def _make_runtime(
     settings.crypto.keys = []  # no crypto keys → fernet=None → no repo injection
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
+    discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
 
     anthropic = build_fake_anthropic(router.dispatch)
