@@ -20,7 +20,7 @@ from decimal import Decimal, InvalidOperation
 from typing import get_args
 
 from daimon.core.errors import DaimonError
-from daimon.core.stores.channel_budgets import get_channel_budget
+from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,6 +65,13 @@ class ChannelBudgetStatus:
     @property
     def is_exceeded(self) -> bool:
         return self.is_active and self.spent_usd >= self.budget.limit_usd
+
+    @property
+    def percent_used(self) -> int:
+        """Spend as a whole percentage of the limit; a limit of 0 reads as 100."""
+        if self.budget.limit_usd <= 0:
+            return 100
+        return int(self.spent_usd / self.budget.limit_usd * 100)
 
 
 def _parse_usd(value: str) -> Decimal:
@@ -173,6 +180,35 @@ async def load_budget_status(
     )
     return ChannelBudgetStatus(
         budget=budget, spent_usd=spent, is_active=is_budget_active(budget, now=now)
+    )
+
+
+def rank_by_percent_used(
+    statuses: list[ChannelBudgetStatus],
+) -> list[ChannelBudgetStatus]:
+    """Active budgets first, each group by the share of its limit spent, highest first. Pure."""
+    return sorted(
+        statuses,
+        key=lambda s: (
+            not s.is_active,
+            -(s.spent_usd / s.budget.limit_usd if s.budget.limit_usd > 0 else Decimal("Infinity")),
+            s.budget.channel_id,
+        ),
+    )
+
+
+async def list_channel_budget_statuses(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str | None, now: datetime
+) -> list[ChannelBudgetStatus]:
+    """Every budget of the tenant (on `platform`, if given) with its spend, by
+    `rank_by_percent_used`."""
+    budgets = await list_channel_budgets(session, tenant_id=tenant_id)
+    return rank_by_percent_used(
+        [
+            await load_budget_status(session, budget, now=now)
+            for budget in budgets
+            if platform is None or budget.platform == platform
+        ]
     )
 
 

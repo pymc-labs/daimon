@@ -10,11 +10,15 @@ The shared figures and the snapshot read are covered in core's test_billing_pane
 
 from __future__ import annotations
 
+import dataclasses
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from daimon.core.billing_panel import BillingPanelState, MemberRow, load_billing_snapshot
+from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -240,3 +244,44 @@ async def test_handle_billing_command_replaces_loading_modal_with_error_on_failu
     assert "Database error" in text
     assert "xoxb-leak" not in text, "bound parameters must never reach the modal"
     assert "rid:" in text
+
+
+def test_the_admin_view_lists_channel_budgets_and_the_member_view_does_not() -> None:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    budgets: list[ChannelBudgetStatus] = []
+    for index in range(7):
+        budget = ChannelBudgetRow(
+            id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            platform="slack",
+            channel_id=f"C{index}",
+            limit_usd=Decimal("10"),
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+            set_by_account_id=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        budgets.append(
+            ChannelBudgetStatus(budget=budget, spent_usd=Decimal(9 - index), is_active=True)
+        )
+    admin = str(
+        build_billing_container(
+            dataclasses.replace(_make_admin_state(), channel_budgets=tuple(budgets)),
+            now=_NOW,
+            since=_SINCE,
+        )
+    )
+    assert "<#C0>: $9.00 of $10.00 (monthly) · 90% used" in admin
+    assert "<#C4>" in admin and "<#C5>" not in admin, "only the five most used"
+    assert "2 more channel budgets" in admin
+    member = str(
+        build_billing_container(
+            dataclasses.replace(_make_member_state(), channel_budgets=tuple(budgets)),
+            now=_NOW,
+            since=_SINCE,
+        )
+    )
+    assert "Channel budgets" not in member, "a member sees no other channel"

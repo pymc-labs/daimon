@@ -50,3 +50,5 @@ class BillingPanelState:
     channel_budget: ChannelBudgetStatus | None = None
     # Some promo code is redeemable now (admin view only); gates the redeem button
     has_redeemable_promo_code: bool = False
+    # Every channel budget, by share of its limit spent (admin view only)
+    channel_budgets: tuple[ChannelBudgetStatus, ...] = ()

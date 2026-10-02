@@ -230,7 +230,9 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are admin-only. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`.
+shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
+lists the five most used budgets on that platform (active ones first, by
+share of the limit spent) with a count of the rest.
 
 What a budget does not cover:
 

@@ -15,7 +15,12 @@ from decimal import Decimal
 import httpx
 import structlog
 from daimon.core.billing import month_start as month_start
-from daimon.core.channel_budget import ChannelBudgetStatus, get_channel_budget_status
+from daimon.core.channel_budget import (
+    ChannelBudgetStatus,
+    describe_budget,
+    get_channel_budget_status,
+    list_channel_budget_statuses,
+)
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_jwt
@@ -39,6 +44,8 @@ log = structlog.get_logger(__name__)
 # Any other amount is refused: each must match a configured Stripe price.
 TOPUP_AMOUNTS = (10, 25, 50, 100)
 MEMBER_CAP = 25
+# Channel budgets the admin view lists, most used first.
+CHANNEL_BUDGETS_SHOWN = 5
 # Per-turn cost assumed while a tenant has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
 
@@ -73,6 +80,8 @@ class BillingPanelState:
     has_redeemable_promo_code: bool = False
     # The invoking channel's budget (both views); None when it has none.
     channel_budget: ChannelBudgetStatus | None = None
+    # Every channel budget, by share of its limit spent (admin view only); empty for a member
+    channel_budgets: tuple[ChannelBudgetStatus, ...] = ()
 
 
 def member_label(user_id: str) -> str:
@@ -109,6 +118,7 @@ async def load_billing_snapshot(
 
     ``now`` is when live timed promo credit and the budget window are measured.
     With ``platform`` and ``channel_id``, the state carries that channel's budget.
+    An admin also gets every channel budget, most used first.
     """
     state = BillingPanelState(
         is_admin=False,
@@ -164,11 +174,26 @@ async def load_billing_snapshot(
         member_rows=tuple(rows[:MEMBER_CAP]),
         over_cap_count=max(0, len(rows) - MEMBER_CAP),
         has_redeemable_promo_code=await _has_redeemable_promo_code_or_false(session, now=now),
+        channel_budgets=tuple(
+            await list_channel_budget_statuses(
+                session, tenant_id=tenant_id, platform=platform, now=now
+            )
+        ),
     )
 
 
 def fmt_usd(value: float | Decimal) -> str:
     return f"${value:,.2f}"
+
+
+def channel_budget_line(status: ChannelBudgetStatus, *, label: str) -> str:
+    """`#team-a: $4.00 of $5.00 (monthly) · 80% used`, with the platform's channel ``label``."""
+    return f"{label}: {describe_budget(status)} · {status.percent_used}% used"
+
+
+def more_channel_budgets(state: BillingPanelState) -> int:
+    """Budgets past the first ``CHANNEL_BUDGETS_SHOWN``, for an "N more" line."""
+    return max(0, len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN)
 
 
 def period_label(since: datetime) -> str:

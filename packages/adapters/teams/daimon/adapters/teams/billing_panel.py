@@ -32,14 +32,17 @@ from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
+    CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
     BillingPanelState,
     caller_line,
+    channel_budget_line,
     create_checkout,
     estimate_turns,
     fmt_usd,
     load_billing_snapshot,
     month_start,
+    more_channel_budgets,
     period_label,
     spend_over_cap,
 )
@@ -117,6 +120,19 @@ def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]
     ]
 
 
+def _channel_budgets(state: BillingPanelState) -> list[str]:
+    """The admin view's channel budgets, most used first; nothing when there are none."""
+    if not state.channel_budgets:
+        return []
+    lines = ["📊 **Channel budgets**"] + [
+        channel_budget_line(status, label=f"Channel `{status.budget.channel_id}`")
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    if more := more_channel_budgets(state):
+        lines.append(f"{more} more channel budgets")
+    return lines
+
+
 def _topup(amount: int, state: BillingPanelState) -> Action:
     turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
     return button(VERB, f"${amount} · ≈{turns:,} turns", "topup", amount=str(amount))
@@ -139,6 +155,7 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     body: list[CardElement] = [
         heading("💸 Billing · admin view"),
         *text_lines(totals, f"🏦 **Credit**: {balance} balance", *_timed_credit(state)),
+        *text_lines(*_channel_budgets(state)),
         *text_lines("🏆 **Top spenders**", *(top or ["no usage yet this period"])),
         *text_lines("💳 **Top up credit**"),
         ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
@@ -203,6 +220,7 @@ class BillingPanel:
                 is_admin=is_admin,
                 since=since,
                 now=now,
+                platform="teams",
             )
         return panel_card(state, since=since, notice=notice)
 

@@ -36,6 +36,7 @@ from daimon.adapters.discord.billing_panel.state import (
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.billing_panel import CHANNEL_BUDGETS_SHOWN, channel_budget_line
 from daimon.core.channel_budget import describe_budget
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -103,6 +104,20 @@ def _channel_budget_lines(state: BillingPanelState) -> list[str]:
     return [f"-# this channel: {describe_budget(state.channel_budget)}"]
 
 
+def _channel_budgets_lines(state: BillingPanelState) -> list[str]:
+    """The admin view's channel budgets, most used first; nothing when there are none."""
+    if not state.channel_budgets:
+        return []
+    lines = ["", "📊 **Channel budgets**"] + [
+        f"-# {channel_budget_line(status, label=f'<#{status.budget.channel_id}>')}"
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    more = len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN
+    if more > 0:
+        lines.append(f"-# {more} more channel budgets")
+    return lines
+
+
 def estimate_turns(
     amount_usd: float,
     *,
@@ -168,6 +183,7 @@ def build_billing_container(
             credit_line,
             *_timed_credit_lines(state),
             *_channel_budget_lines(state),
+            *_channel_budgets_lines(state),
             "",
             "🏆 **Top spenders**",
         ]
