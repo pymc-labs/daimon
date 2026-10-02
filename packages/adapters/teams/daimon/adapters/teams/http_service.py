@@ -26,7 +26,6 @@ from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.feedback import record_feedback
-from daimon.adapters.teams.graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.memory import show_memory
@@ -41,6 +40,7 @@ from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
+from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import MessageSubmitActionInvokeActivity

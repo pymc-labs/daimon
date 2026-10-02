@@ -15,13 +15,13 @@ import pytest
 import structlog
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.channel_files import ChannelFiles
-from daimon.adapters.teams.graph import GraphClient, TeamGroups
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
     FILE_INFO_CONTENT_TYPE,
     TeamsOutputDelivery,
 )
 from daimon.adapters.teams.sharepoint import SharePoint
+from daimon.core.teams_graph import GraphClient, TeamGroups
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from microsoft_teams.api import Attachment, FileConsentCard, FileConsentInvokeActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

@@ -16,7 +16,7 @@ from daimon.adapters.teams.context import (
     render_user_message,
     thread_block,
 )
-from daimon.adapters.teams.graph import GraphMessage, GraphPage
+from daimon.core.teams_graph import GraphMessage, GraphPage
 from daimon.core.thread_participation import ClassifierMessage
 
 from .conftest import make_inbound

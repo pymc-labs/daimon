@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 from daimon.adapters.teams.attachments import is_sharepoint_host
-from daimon.adapters.teams.graph import (
+from daimon.core.teams_graph import (
     GRAPH_ROOT,
     GraphClient,
     GraphUnavailable,

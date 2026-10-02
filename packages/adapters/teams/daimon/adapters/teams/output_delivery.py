@@ -34,7 +34,6 @@ import structlog
 from daimon.adapters.teams.attachments import FetchRefused, is_sharepoint_host
 from daimon.adapters.teams.card_actions import card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
-from daimon.adapters.teams.graph import GraphUnavailable
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -47,6 +46,7 @@ from daimon.core.output_delivery import (
     download_output_file,
     sweep_session_outputs,
 )
+from daimon.core.teams_graph import GraphUnavailable
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,

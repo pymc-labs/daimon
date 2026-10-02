@@ -29,7 +29,6 @@ from typing import Literal, cast
 import httpx
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
-from daimon.adapters.teams.graph import is_graph_url
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
@@ -40,6 +39,7 @@ from daimon.core.media.vision import (
     build_image_block,
     sniff_image_media_type,
 )
+from daimon.core.teams_graph import is_graph_url
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 

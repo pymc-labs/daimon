@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from daimon.adapters.teams.graph import GraphClient, GraphUnavailable, TeamGroups
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
 
 GROUP = "11111111-1111-1111-1111-111111111111"
 CHANNEL = "19:channel-1@thread.tacv2"
@@ -52,6 +52,22 @@ async def test_list_replies_reads_one_page_with_the_token_and_marks_more() -> No
     assert request.headers["Authorization"] == "Bearer graph-token"
     assert [m.id for m in page.value] == ["102", "101"]
     assert page.next_link is not None, "more replies exist, so the caller can mark truncation"
+
+
+async def test_channel_posts_expand_their_replies_and_a_next_link_stays_on_graph() -> None:
+    seen: list[httpx.Request] = []
+    post = {**_message("100"), "replies": [_message("101")], "replies@odata.nextLink": "x"}
+    client = _client(lambda _: httpx.Response(200, json={"value": [post]}), seen)
+    page = await client.list_channel_messages(GROUP, CHANNEL, top=5, expand_replies=True)
+    assert seen[0].url.params["$expand"] == "replies"
+    assert [r.id for r in page.value[0].replies] == ["101"]
+    assert page.value[0].replies_next_link == "x", "a post with more replies says so"
+    await client.next_page(
+        "https://graph.microsoft.com/v1.0/teams/x/channels/y/messages?$skiptoken=1"
+    )
+    assert seen[1].url.params["$skiptoken"] == "1", "the link is followed as given"
+    with pytest.raises(GraphUnavailable, match="not a Graph URL"):
+        await client.next_page("https://attacker.example/next")
 
 
 async def test_get_message_addresses_a_reply_under_its_root() -> None:

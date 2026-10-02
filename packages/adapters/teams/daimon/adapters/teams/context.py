@@ -19,8 +19,8 @@ from xml.sax.saxutils import escape, quoteattr
 
 import httpx
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
-from daimon.adapters.teams.graph import GraphMessage, GraphPage, is_graph_url
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.teams_graph import GraphMessage, GraphPage, is_graph_url
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 

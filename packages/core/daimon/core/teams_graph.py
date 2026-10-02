@@ -1,14 +1,14 @@
-"""Microsoft Graph access for a team, app-only: the piece other Graph reads extend.
+"""Microsoft Graph access for a team, app-only, for the Teams adapter and the MCP server.
 
-Three parts: the app token (MSAL, behind `GraphToken`, caches it per scope),
+Three parts: the app token (behind `GraphToken`, cached per scope by its owner),
 `TeamGroups` (the team's Entra group id Graph addresses it by, looked up once
 per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
-message reads here; `sharepoint` sends its file calls through `send`. Each
-read is one page: a long thread is marked truncated rather than paged inside a
-turn. Any failure (no consent, throttling, a timeout, an
-odd body) raises `GraphUnavailable`, whose fields carry no message content.
+message reads here; the adapter's `sharepoint` sends its file calls through
+`send`. Each read is one page; `next_page` follows a page's `next_link`. Any
+failure (no consent, throttling, a timeout, an odd body) raises
+`GraphUnavailable`, whose fields carry no message content.
 """
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ class GraphAttachment(_Model):
     content_type: str | None = None
     name: str | None = None
     content_url: str | None = None
+    #: A card's JSON, as a string.
+    content: str | None = None
 
 
 class GraphMessage(_Model):
@@ -76,9 +78,15 @@ class GraphMessage(_Model):
     message_type: str = "message"
     created_date_time: str | None = None
     deleted_date_time: str | None = None
+    reply_to_id: str | None = None
+    subject: str | None = None
+    web_url: str | None = None
     sender: GraphSender | None = Field(default=None, alias="from")
     body: GraphBody = Field(default_factory=GraphBody)
     attachments: list[GraphAttachment] = Field(default_factory=list[GraphAttachment])
+    #: Set only by `list_channel_messages(expand_replies=True)`, in Graph's order.
+    replies: list[GraphMessage] = Field(default_factory=list["GraphMessage"])
+    replies_next_link: str | None = Field(default=None, alias="replies@odata.nextLink")
 
 
 class GraphPage(_Model):
@@ -148,16 +156,22 @@ class GraphClient:
         return _parse(GraphPage, await self._get(url, top=top))
 
     async def list_channel_messages(
-        self, group_id: str, channel_id: str, *, top: int = MAX_PAGE
+        self, group_id: str, channel_id: str, *, top: int = MAX_PAGE, expand_replies: bool = False
     ) -> GraphPage:
-        """The `top` most recently active root posts, without their replies."""
+        """The `top` most recently active root posts; with `expand_replies`, their replies."""
         url = f"{self._channel(group_id, channel_id)}/messages"
-        return _parse(GraphPage, await self._get(url, top=top))
+        extra = {"$expand": "replies"} if expand_replies else {}
+        return _parse(GraphPage, await self._get(url, top=top, extra=extra))
 
-    async def _get(self, url: str, *, top: int | None = None) -> object:
-        return await self.send(
-            "GET", url, params={"$top": str(min(top, MAX_PAGE))} if top else None
-        )
+    async def next_page(self, next_link: str) -> GraphPage:
+        """The page a `next_link` names; refused unless it is a Graph URL."""
+        return _parse(GraphPage, await self.send("GET", next_link))
+
+    async def _get(
+        self, url: str, *, top: int | None = None, extra: Mapping[str, str] | None = None
+    ) -> object:
+        params = {**({"$top": str(min(top, MAX_PAGE))} if top else {}), **(extra or {})}
+        return await self.send("GET", url, params=params or None)
 
     async def send(
         self,
@@ -170,7 +184,8 @@ class GraphClient:
         timeout: float = GRAPH_TIMEOUT_S,
     ) -> object:
         """One Graph call: `body` as JSON or `content` as bytes; the JSON reply."""
-        target = httpx.URL(url, params=params)
+        # `params=None` would drop a query already in `url`, such as a next link's.
+        target = httpx.URL(url, params=params) if params else httpx.URL(url)
         if not is_graph_url(target):
             raise GraphUnavailable("not a Graph URL")
         try:

@@ -7,9 +7,9 @@ import dataclasses
 import httpx
 import pytest
 import structlog
-from daimon.adapters.teams.graph import GraphClient, GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.thread_reader import ThreadReader, root_id
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
 
 from .conftest import CHANNEL_ID, make_inbound
 

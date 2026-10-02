@@ -13,7 +13,6 @@ import httpx
 import pytest
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import RECHECK_S, ChannelFiles
-from daimon.adapters.teams.graph import GraphClient, GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.sharepoint import (
     SIMPLE_UPLOAD_MAX,
@@ -21,6 +20,7 @@ from daimon.adapters.teams.sharepoint import (
     DriveFolder,
     SharePoint,
 )
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
 
 from .conftest import make_inbound
 

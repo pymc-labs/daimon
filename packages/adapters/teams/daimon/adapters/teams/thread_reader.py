@@ -21,8 +21,8 @@ from daimon.adapters.teams.context import (
     delta_block,
     thread_block,
 )
-from daimon.adapters.teams.graph import GraphClient, GraphToken, GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.teams_graph import GraphClient, GraphToken, GraphUnavailable, TeamGroups
 from daimon.core.thread_participation import ClassifierMessage
 
 log = structlog.get_logger(__name__)

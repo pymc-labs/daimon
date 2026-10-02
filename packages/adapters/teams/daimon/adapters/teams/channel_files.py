@@ -18,9 +18,9 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
-from daimon.adapters.teams.graph import GraphUnavailable, TeamGroups
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.sharepoint import DriveFolder, DriveItem, SharePoint
+from daimon.core.teams_graph import GraphUnavailable, TeamGroups
 
 log = structlog.get_logger(__name__)
 
