@@ -336,5 +336,6 @@ async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
     assert "teams-bound identity" in await call(
         "send_message", {"channel_id": _THREAD, "content": "hi"}
     )
+    assert "teams-bound identity" in await call("list_channels", {})
     # Untagged for Teams: hidden, so the registry does not know it.
-    assert "Unknown tool" in await call("list_channels", {})
+    assert "Unknown tool" in await call("rename_thread", {"thread_id": _THREAD, "name": "x"})

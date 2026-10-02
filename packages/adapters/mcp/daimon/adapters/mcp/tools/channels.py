@@ -1,16 +1,16 @@
 """Shared channel MCP tools with per-platform dispatch.
 
 One registration serves every platform: ``auth.platform == "slack"`` routes to
-``tools/slack/`` impls, ``"teams"`` (send_message and create_thread only) to
-``tools/teams/``, anything else to ``tools/discord/`` impls (which raise their
-own identity errors for non-discord callers). Slack-unsupported tools raise a
-uniform ToolError.
+``tools/slack/`` impls, ``"teams"`` to ``tools/teams/``, anything else to
+``tools/discord/`` impls (which raise their own identity errors for non-discord
+callers). Slack-unsupported tools raise a uniform ToolError.
 """
 
 from __future__ import annotations
 
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import load_read_policy
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.direct_messages import DirectMessageResult, send_direct_message_impl
 from daimon.adapters.mcp.tools.discord import (
@@ -58,6 +58,24 @@ from daimon.adapters.mcp.tools.slack._send import (
     _slack_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.teams._models import (
+    TeamsChannelResult,
+    TeamsChannelRow,
+    TeamsParsedLink,
+    TeamsReadMessage,
+    TeamsSearchResult,
+    TeamsThreadResult,
+    TeamsThreadRow,
+)
+from daimon.adapters.mcp.tools.teams._read import (
+    _teams_get_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_list_threads_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_parse_link_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_read_channel_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_read_thread_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.teams._send import (
     TeamsMessageRow,
     _teams_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
@@ -69,6 +87,19 @@ from fastmcp.exceptions import ToolError
 
 def _slack_unsupported(tool_name: str) -> ToolError:
     raise ToolError(f"{tool_name} is not supported on Slack yet")
+
+
+async def _read_policy(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> ChannelReadPolicy:
+    # Teams reads a private or shared channel only from inside it, so its
+    # origin is resolved even when nothing is sealed.
+    return await load_read_policy(
+        runtime,
+        auth,
+        origin_context_id=origin_context_id,
+        resolve_without_seals=auth.platform == "teams",
+    )
 
 
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -89,17 +120,24 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), recipient_id=recipient_id, content=content
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def list_channels(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-    ) -> list[ChannelRow] | list[SlackChannelRow]:
-        """List channels in this server/workspace that you can view."""
+    ) -> list[ChannelRow] | list[SlackChannelRow] | list[TeamsChannelRow]:
+        """List channels in this server/workspace that you can view.
+
+        Teams: the channels of every team daimon is in that you belong to,
+        with each channel's team. A team appears once daimon has seen activity
+        in it since being added.
+        """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             return await _slack_list_channels_impl(runtime, auth)
+        if auth.platform == "teams":
+            return await _teams_list_channels_impl(runtime, auth)
         return await _list_channels_impl(runtime, auth)
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def read_channel(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -107,23 +145,39 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         before: str | None = None,
         cursor: str | None = None,
         origin_context_id: str | None = None,
-    ) -> ReadChannelResult | SlackChannelResult:
+    ) -> ReadChannelResult | SlackChannelResult | TeamsChannelResult:
         """Read channel messages, oldest-first, with pagination metadata.
 
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
         cursor to fetch the next page; at most 15 messages are returned.
+        Teams: channel_id is the channel (parent_channel_id in turn_controls);
+        returns up to 50 posts with their replies, ordered by latest activity;
+        pass next_cursor as cursor for less recently active posts. A 1:1 chat
+        cannot be read back.
 
         A channel the workspace sealed is readable only from a conversation
-        inside it: pass this turn's origin_context_id when reading one.
+        inside it: pass this turn's origin_context_id when reading one. On
+        Teams that also holds for private and shared channels.
         """
         auth = await _auth(ctx)
-        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
         # MCP clients often send "" for an optional param they mean to omit —
         # treat it as absent, not as the wrong platform's cursor.
         before = before or None
         cursor = cursor or None
+        if auth.platform == "teams":
+            if before is not None:
+                raise ToolError("before is Discord-only — pass cursor to paginate on Teams")
+            return await _teams_read_channel_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                limit=limit,
+                cursor=cursor,
+                read_policy=read_policy,
+            )
         if auth.platform == "slack":
             if before is not None:
                 raise ToolError("before is Discord-only — pass cursor to paginate on Slack")
@@ -146,26 +200,43 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             read_policy=read_policy,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def read_thread(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         thread_id: str,
         limit: int = 50,
         before: str | None = None,
         origin_context_id: str | None = None,
-    ) -> ReadThreadResult | SlackThreadResult:
+        cursor: str | None = None,
+    ) -> ReadThreadResult | SlackThreadResult | TeamsThreadResult:
         """Read messages from a thread, oldest-first.
 
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
         before is rejected — Slack threads read one page of at most 15 messages
         from the thread root, and has_more=true means the newest replies were
-        not returned. Threads under a sealed channel need origin_context_id,
-        as read_channel does.
+        not returned. Teams: thread_id is <channel>;messageid=<root> (thread_id
+        in turn_controls); returns the root and the newest 50 replies; pass
+        next_cursor as cursor for older ones. cursor is Teams-only. Threads
+        under a sealed channel need origin_context_id, as read_channel does.
         """
         auth = await _auth(ctx)
-        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
         before = before or None
+        cursor = cursor or None
+        if auth.platform == "teams":
+            if before is not None:
+                raise ToolError("before is Discord-only — pass cursor to paginate on Teams")
+            return await _teams_read_thread_impl(
+                runtime,
+                auth,
+                thread_id=thread_id,
+                limit=limit,
+                cursor=cursor,
+                read_policy=read_policy,
+            )
+        if cursor is not None:
+            raise ToolError("cursor is Teams-only on read_thread")
         if auth.platform == "slack":
             if before is not None:
                 raise ToolError("before is Discord-only — slack read_thread has no pagination")
@@ -181,19 +252,29 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             read_policy=read_policy,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def get_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
         message_id: str,
         origin_context_id: str | None = None,
-    ) -> MessageRow | SlackMessageRow:
+    ) -> MessageRow | SlackMessageRow | TeamsReadMessage:
         """Fetch a single message by channel and message id (Slack: the message ts).
 
-        Sealed channels need origin_context_id, as read_channel does.
+        Teams: a reply is addressed under its thread, channel_id
+        <channel>;messageid=<root>; a post by its channel. Sealed channels
+        need origin_context_id, as read_channel does.
         """
         auth = await _auth(ctx)
-        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
+        if auth.platform == "teams":
+            return await _teams_get_message_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                read_policy=read_policy,
+            )
         if auth.platform == "slack":
             return await _slack_get_message_impl(
                 runtime,
@@ -210,21 +291,26 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             read_policy=read_policy,
         )
 
-    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def list_threads(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
         origin_context_id: str | None = None,
-    ) -> list[ThreadRow]:
+    ) -> list[ThreadRow] | list[TeamsThreadRow]:
         """List active and archived public threads for a channel.
 
-        Archived private threads are not listed. Sealed channels need
-        origin_context_id, as read_channel does.
+        Archived private threads are not listed. Teams: every post is a
+        thread; lists the 50 most recently active with their reply counts.
+        Sealed channels need origin_context_id, as read_channel does.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("list_threads")
-        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
+        if auth.platform == "teams":
+            return await _teams_list_threads_impl(
+                runtime, auth, channel_id=channel_id, read_policy=read_policy
+            )
         return await _list_threads_impl(
             runtime, auth, channel_id=channel_id, read_policy=read_policy
         )
@@ -320,11 +406,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, auth, display_name=display_name or None, avatar_url=avatar_url or None
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def parse_link(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         url: str,
-    ) -> ParsedLink | SlackParsedLink:
+    ) -> ParsedLink | SlackParsedLink | TeamsParsedLink:
         """Extract IDs from a channel or message link.
 
         Discord: supports discord.com, ptb.discord.com, and
@@ -338,10 +424,16 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         message ts, and thread_ts when the link is a reply. Try
         read_thread(thread_id=f"{channel_id}:{thread_ts or message_ts}")
         first; if that fails, use get_message(channel_id, message_ts).
+
+        Teams: supports teams.microsoft.com/l/channel/... and /l/message/...
+        links (teams.cloud.microsoft too). A message link returns its
+        thread_id for read_thread and get_message.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             return _slack_parse_link_impl(url)
+        if auth.platform == "teams":
+            return _teams_parse_link_impl(url)
         return _parse_link_impl(url, caller_guild_id=auth.external_id)
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
@@ -425,7 +517,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     _VALID_AUTHOR_TYPES = frozenset({"user", "bot", "webhook"})
     _VALID_HAS = frozenset({"image", "video", "file", "sticker", "embed", "link", "poll", "sound"})
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def search_messages(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         content: str | None = None,
@@ -437,7 +529,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         limit: int = 25,
         offset: int = 0,
         origin_context_id: str | None = None,
-    ) -> SearchResult | SlackSearchResult:
+    ) -> SearchResult | SlackSearchResult | TeamsSearchResult:
         """Search messages with server-side filters.
 
         Limit caps at 25 per page — paginate with offset. When the search is
@@ -447,11 +539,31 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
         Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Teams: Microsoft has no message search for apps, so this scans the
+        most recently active posts (and their replies) of up to 10 channels
+        for content; only content, channel_ids, author_ids (Entra ids) and
+        limit are supported, and complete=false says the scan stopped short.
         Hits in sealed channels are withheld unless origin_context_id places
         this turn inside that channel; scoping to one from outside is refused.
         """
         auth = await _auth(ctx)
-        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
+        if auth.platform == "teams":
+            if content is None:
+                raise ToolError("teams search requires a content query")
+            if any((author_types, mentions, has, offset)):
+                raise ToolError(
+                    "teams search supports only content, channel_ids, author_ids and limit"
+                )
+            return await _teams_search_messages_impl(
+                runtime,
+                auth,
+                content=content,
+                channel_ids=channel_ids,
+                author_ids=author_ids,
+                limit=limit,
+                read_policy=read_policy,
+            )
         if auth.platform == "slack":
             if content is None:
                 raise ToolError("slack search requires a content query")
