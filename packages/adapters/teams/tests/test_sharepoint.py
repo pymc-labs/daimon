@@ -14,13 +14,13 @@ import pytest
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import RECHECK_S, ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.sharepoint import (
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
+from daimon.core.teams_sharepoint import (
     SIMPLE_UPLOAD_MAX,
     UPLOAD_CHUNK,
     DriveFolder,
     SharePoint,
 )
-from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
 
 from .conftest import make_inbound
 

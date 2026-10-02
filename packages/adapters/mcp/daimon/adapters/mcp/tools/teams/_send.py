@@ -1,5 +1,7 @@
 """Teams send_message, create_thread, the GitHub App link and credential cards.
 
+Files go through `_files`: saved to a channel's Files, offered in a 1:1 chat.
+
 The bot is the sender, so a caller could otherwise speak through it in a
 conversation they cannot see: the requester's Entra id must be on the target's
 roster (the channel's, for a thread), and any failure to confirm that refuses
@@ -19,7 +21,9 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.adapters.mcp.tools.teams._files import MAX_FILES, post_files
 from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
@@ -108,18 +112,26 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     attachments: list[dict[str, str]] | None = None,
     file_handles: list[str] | None = None,
 ) -> TeamsMessageRow:
-    if attachments or file_handles:
-        # "Not available yet" read as a promise; say where Teams files do go.
-        raise ToolError(
-            "send_message posts text only on Teams. In a 1:1 chat, save the file under "
-            "/mnt/session/outputs and daimon offers it after your turn; a channel cannot "
-            "take files."
-        )
-    _check_text(content)
+    if attachments:
+        raise ToolError("attachments takes Discord CDN URLs; on Teams post files with file_handles")
+    if file_handles and len(file_handles) > MAX_FILES:
+        raise ToolError(f"max {MAX_FILES} files per message")
+    if content.strip() or not file_handles:
+        _check_text(content)
     conversation_id = _conversation_id(channel_id)
     client = await _authorize(runtime, auth, conversation_id)
+    staged = (
+        await staged_uploads(
+            file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
+        )
+        if file_handles
+        else []
+    )
     try:
-        activity_id = await client.send(conversation_id, content)
+        if staged:
+            activity_id = await post_files(runtime, auth, client, conversation_id, content, staged)
+        else:
+            activity_id = await client.send(conversation_id, content)
     except (httpx.HTTPError, ValueError) as err:
         raise _post_failed(err) from err
     return TeamsMessageRow(conversation_id=conversation_id, activity_id=activity_id, text=content)

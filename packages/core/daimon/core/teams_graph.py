@@ -5,7 +5,7 @@ Three parts: the app token (behind `GraphToken`, cached per scope by its owner),
 per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
-message reads here; the adapter's `sharepoint` sends its file calls through
+message reads here; `teams_sharepoint` sends its file calls through
 `send`. Each read is one page; `next_page` follows a page's `next_link`. Any
 failure (no consent, throttling, a timeout, an odd body) raises
 `GraphUnavailable`, whose fields carry no message content.
@@ -30,6 +30,7 @@ GRAPH_ROOT = f"https://{GRAPH_HOST}/v1.0"
 MAX_PAGE = 50
 # History is a nicety; a slow Graph must not hold the turn long.
 GRAPH_TIMEOUT_S = 10.0
+_SHAREPOINT_SUFFIXES = (".sharepoint.com", ".sharepoint.us", ".sharepoint-mil.us", ".sharepoint.cn")
 
 #: Attachment types of a file shared in a message.
 FILE_ATTACHMENT_TYPES = frozenset(
@@ -106,6 +107,10 @@ class GraphPage(_Model):
 
 def is_graph_url(url: httpx.URL) -> bool:
     return url.scheme == "https" and url.host == GRAPH_HOST
+
+
+def is_sharepoint_host(url: httpx.URL) -> bool:
+    return url.scheme == "https" and url.host.endswith(_SHAREPOINT_SUFFIXES)
 
 
 def skiptoken_of(next_link: str | None) -> str | None:

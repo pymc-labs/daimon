@@ -17,6 +17,7 @@ import httpx
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
+from daimon.core.teams_file_offers import UploadOffer, sign_offer
 from daimon.core.teams_graph import GRAPH_SCOPE
 from pydantic import BaseModel, Field
 
@@ -256,6 +257,10 @@ class TeamsBotClient:
     async def send_activity(self, conversation_id: str, activity: dict[str, object]) -> str:
         """Post a prepared activity; returns its id."""
         return await self._send(conversation_id, activity)
+
+    def file_offer_token(self, offer: UploadOffer) -> str:
+        """A consent-card token the adapter verifies with the same client secret."""
+        return sign_offer(offer, secret=self._client_secret, now=time.time())
 
 
 def build_teams_client(settings: TeamsSettings) -> TeamsBotClient:

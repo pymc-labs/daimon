@@ -237,8 +237,8 @@ async def test_send_message_fails_closed_on_transport_error() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"channel_id": _THREAD, "content": "x", "file_handles": ["h"]}, "/mnt/session/outputs"),
-        ({"channel_id": _THREAD, "content": "x", "attachments": [{"a": "b"}]}, "text only"),
+        ({"channel_id": _THREAD, "content": "x", "file_handles": ["h"] * 11}, "max 10 files"),
+        ({"channel_id": _THREAD, "content": "x", "attachments": [{"a": "b"}]}, "Discord CDN"),
         ({"channel_id": _THREAD, "content": "x" * 6_001}, "6,000-character"),
         ({"channel_id": _THREAD, "content": "  "}, "must not be empty"),
         ({"channel_id": "19:a/../b", "content": "x"}, "Teams conversation id"),

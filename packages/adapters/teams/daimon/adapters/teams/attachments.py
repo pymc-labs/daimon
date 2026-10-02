@@ -39,7 +39,7 @@ from daimon.core.media.vision import (
     build_image_block,
     sniff_image_media_type,
 )
-from daimon.core.teams_graph import is_graph_url
+from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -47,12 +47,6 @@ log = structlog.get_logger()
 
 MAX_ATTACHMENTS = 10
 _MAX_REDIRECTS = 3
-_SHAREPOINT_SUFFIXES = (
-    ".sharepoint.com",
-    ".sharepoint.us",
-    ".sharepoint-mil.us",
-    ".sharepoint.cn",
-)
 # Teams serves pasted images from the service URL's host or its media store.
 _MEDIA_STORE_SUFFIX = ".asm.skype.com"
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -133,10 +127,6 @@ class PreparedAttachments:
 
     image_blocks: list[BetaManagedAgentsImageBlockParam]
     prefix: str  # `[attachment]` lines, newline-terminated, for the user message
-
-
-def is_sharepoint_host(url: httpx.URL) -> bool:
-    return url.scheme == "https" and url.host.endswith(_SHAREPOINT_SUFFIXES)
 
 
 def _sharepoint_url(value: object) -> str | None:

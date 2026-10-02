@@ -460,19 +460,14 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         paragraphs above together or you will conclude, wrongly, that you
         should hand a file back "in your reply" and silently deliver nothing.
 
-        ``attachments=[{url, filename}]`` fetches over https, restricted to
-        Discord's own CDN hosts — an arbitrary external URL will be refused
-        (<=25 MiB each). ``file_handles=[handle_id, ...]`` references any
-        file daimon is already holding — this is how you post a file
-        you produced yourself, not only output from a built-in tool. Any
-        tool that stores a file and returns a handle works here (e.g.
-        ``create_file_upload_url``, ``generate_audio``, ``generate_image``).
-        To post a file you made in your sandbox, call
+        ``file_handles=[handle_id, ...]`` references a file daimon is
+        holding: to post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
-        returns — never base64 a file into a tool argument. Combined
-        cap of 10 attachments per message. Both FILES paragraphs are
-        Discord-only for now — Slack file posting needs a scope this
-        install does not have, and Teams file posting is not built yet.
+        returns — never base64 a file into a tool argument. Discord also
+        takes ``attachments=[{url, filename}]``, fetched over https from
+        Discord's own CDN hosts only (<=25 MiB each). Combined cap of 10
+        files per message. Slack takes no files: that needs a scope this
+        install does not have.
 
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
@@ -482,8 +477,13 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Teams: ``channel_id`` is a conversation id — ``thread_id`` from
         turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
-        ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
-        6,000 characters, and you must be a member of that conversation.
+        ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
+        characters, and you must be a member of that conversation. In a
+        channel, files are saved to its Files tab and the message links
+        them; that needs the team's SharePoint site granted to daimon, and
+        a private or shared channel takes none. In a 1:1 chat each file
+        is a card the person accepts to save it to their OneDrive; content
+        may be empty when sending files. A group chat takes no files.
         Channels the workspace marked protected, and threads under them,
         refuse every post — tell the caller rather than retrying elsewhere
         unasked.

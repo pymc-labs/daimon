@@ -36,7 +36,6 @@ from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.sharepoint import SharePoint
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import TeamsSettings
@@ -44,6 +43,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
+from daimon.core.teams_sharepoint import SharePoint
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
