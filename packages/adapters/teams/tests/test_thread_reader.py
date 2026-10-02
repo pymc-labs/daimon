@@ -171,3 +171,34 @@ async def test_a_reseed_keeps_the_images_already_inlined() -> None:
         _inbound("1700000000010"), watermark=None, skip_ids=frozenset(), images={}
     )
     assert again is not None and again.image_urls == () and not again.attached.images
+
+
+async def test_a_card_whose_post_lost_its_id_is_found_by_its_cancel_key() -> None:
+    other = "22222222-2222-2222-2222-222222222222"
+    paths: list[str] = []
+
+    def reply(id: str, app: str, marker: str) -> dict[str, object]:
+        content = f'{{"data": {{"action": "cancel_turn", "turn": "{marker}"}}}}'
+        attachment = {"contentType": "application/vnd.microsoft.card.adaptive", "content": content}
+        return {**_message(id), "from": {"application": {"id": app}}, "attachments": [attachment]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if other in request.url.path:
+            return httpx.Response(404)
+        replies = [
+            reply("9", "someone-else", "k1"),
+            reply("8", "bot", "k0"),
+            reply("7", "bot", "k1"),
+        ]
+        return httpx.Response(200, json={"value": replies})
+
+    found = await _reader(httpx.MockTransport(handler)).find_card(
+        f"{CHANNEL_ID};messageid={ROOT}", "k1", group_ids=[other, GROUP]
+    )
+    assert found == "7", "only the bot's own card with that key"
+    assert len(paths) == 2, "a team that does not hold the channel is skipped"
+    assert (
+        await _reader(httpx.MockTransport(handler)).find_card("a:chat", "k1", group_ids=[GROUP])
+        is None
+    ), "a 1:1 chat cannot be read back"

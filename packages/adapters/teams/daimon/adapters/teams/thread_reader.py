@@ -194,3 +194,32 @@ class ThreadReader:
         if self._files is None or not media.files:
             return media
         return await self._files.resolve(media, group_id=group)
+
+    async def find_card(
+        self, conversation_id: str, marker: str, *, group_ids: Sequence[str]
+    ) -> str | None:
+        """The bot's newest reply in a channel thread whose card holds `marker`, if any.
+
+        A thread's team is not recorded with it, so each installed team is tried.
+        """
+        root = root_id(conversation_id)
+        if root is None:
+            return None
+        channel = conversation_id.partition(";")[0]
+        for group in group_ids:
+            try:
+                replies = await self._graph.list_replies(group, channel, root)
+            except GraphUnavailable:
+                continue
+            for message in replies.value:
+                app = message.sender.application if message.sender is not None else None
+                if (
+                    app is not None
+                    and app.id == self._bot_app_id
+                    and any(
+                        marker in (attachment.content or "") for attachment in message.attachments
+                    )
+                ):
+                    return message.id
+            return None
+        return None

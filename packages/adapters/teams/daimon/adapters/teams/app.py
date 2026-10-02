@@ -89,7 +89,8 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
-from daimon.core.stores.domain import Role, TaskContinuationRow
+from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
+from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -363,6 +364,7 @@ class TeamsApp:
                     sessionmaker=self.runtime.sessionmaker,
                     sender=self._sender,
                     now=datetime.now(UTC),
+                    find_card=self._find_card,
                 )
                 return
             except Exception:
@@ -641,6 +643,18 @@ class TeamsApp:
             channel_name=None,
             channel_type=None,
             team_name=None,
+        )
+
+    async def _find_card(self, intent: TurnCardIntentRow) -> str | None:
+        """A channel card whose post returned no id, found by its Cancel key."""
+        if self._reader is None:
+            return None
+        async with self.runtime.sessionmaker() as session:
+            teams = await list_teams_installations(session, tenant_id=intent.tenant_id)
+        return await self._reader.find_card(
+            intent.channel_id or intent.thread_id,
+            intent.id.hex,
+            group_ids=[team.group_id for team in teams],
         )
 
     async def _turn_cap(self, tenant_id: uuid.UUID) -> int:
