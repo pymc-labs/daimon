@@ -386,12 +386,22 @@ async def db_clean(
     try:
         yield
     finally:
-        from daimon.core.channel_budget_notice import drain_budget_notices
-        from daimon.core.turn.outcomes import drain_outcomes
-
-        await drain_outcomes()
-        await drain_budget_notices()
+        await _drain_background_tasks()
         _last_db_test = item.nodeid
+
+
+async def _drain_background_tasks() -> None:
+    """Await the turn outcomes and budget notices a test left running.
+
+    They write through the test's sessionmaker, so they must finish before its
+    connection is rolled back and returned: one still running then breaks the
+    connection for every later test in the worker.
+    """
+    from daimon.core.channel_budget_notice import drain_budget_notices
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    await drain_budget_notices()
 
 
 @asynccontextmanager
@@ -436,6 +446,7 @@ async def db_session(
         try:
             yield session
         finally:
+            await _drain_background_tasks()
             await session.close()
             await conn.rollback()
 
