@@ -285,6 +285,8 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-Group chats, reactions, `/dm` conversations, and files in channels whose site
-is not granted or in private and shared channels. Removing the app does not
+Group chats, reactions, `/dm` conversations, files in channels whose site is
+not granted or in private and shared channels, and coding-tool tokens minted by
+a channel admin (one must be minted inside their channel, and panels live in
+the 1:1 chat). Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

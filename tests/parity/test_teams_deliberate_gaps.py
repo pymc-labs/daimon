@@ -7,23 +7,25 @@ lost its id only in a channel thread; in a 1:1 chat that intent retires
 untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
 
 The rest follows from what a Teams bot can do (see `docs/teams.md`): there is
-no message only its sender sees, so a command typed in a channel is answered
-in the 1:1 chat and the manifest offers commands there only; the 1:1 chat has
-no threads, so a setup conversation is keyed inside it; files in a channel
-work only once a tenant admin grants the app the team's SharePoint site
-(`Sites.Selected`), because no team-scoped permission reaches it; a dialog has
-no file input, so a `.env` file is pasted rather than uploaded; and once a
-dialog closes nothing private reaches the requester, so a GitHub token is
-checked against its repo before the request is spent (Discord and Slack spend
-it first, then say so privately; the Teams adapter's credential tests assert
-the unspent request). Removing the app from a team forgets that team and
-archives no tenant: a deployment serves one organisation. A bot cannot react,
-so a completion ping is an @mention alone and human support is the `support`
-command; a post_wizard form has no step images. Thread participation shares
-Discord's gates (`test_thread_participation_platforms.py`) but needs Graph, so
-without the consent a followed thread stays mention-only; and where Discord's
-unprompted card appears once there is output, Teams posts only the answer, so
-there is no running card or Cancel button.
+no message only its sender sees, so a command typed in a channel is answered in
+the 1:1 chat and the manifest offers commands there only; the 1:1 chat has no
+threads, so a setup conversation is keyed inside it, and since panels live
+there a channel admin cannot mint a coding-tool token, which must be minted
+inside their channel; files in a channel work only once a tenant admin grants
+the app the team's SharePoint site (`Sites.Selected`), because no team-scoped
+permission reaches it; a dialog has no file input, so a `.env` file is pasted
+rather than uploaded; and once a dialog closes nothing private reaches the
+requester, so a GitHub token is checked against its repo before the request is
+spent (Discord and Slack spend it first, then say so privately; the Teams
+adapter's credential tests assert the unspent request). Removing the app from a
+team forgets that team and archives no tenant: a deployment serves one
+organisation. A bot cannot react, so a completion ping is an @mention alone and
+human support is the `support` command; a post_wizard form has no step images.
+Thread participation shares Discord's gates
+(`test_thread_participation_platforms.py`) but needs Graph, so without the
+consent a followed thread stays mention-only; and where Discord's unprompted
+card appears once there is output, Teams posts only the answer, so there is no
+running card or Cancel button.
 
 No platform parametrization, no database -- this is a scope check.
 """
