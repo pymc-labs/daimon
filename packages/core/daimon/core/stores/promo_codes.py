@@ -210,6 +210,7 @@ def _grant_select(*conditions: ColumnElement[bool]) -> Select[Any]:
             PromoCode.credit_ends_at,
             PromoRedemption.granted_at,
             PromoRedemption.expired_at,
+            PromoRedemption.expired_usd,
         )
         .join(PromoCode, PromoCode.id == PromoRedemption.promo_code_id)
         .where(PromoCode.kind == "timed", *conditions)
@@ -264,6 +265,28 @@ async def lock_due_expiries(
     return await _grants(session, stmt)
 
 
+async def lock_due_reconciles(
+    session: AsyncSession,
+    *,
+    closed_by: datetime,
+    limit: int,
+    exclude: Collection[uuid.UUID] = (),
+) -> list[TimedPromoGrantRow]:
+    """Expired timed redemptions that removed credit, closed by ``closed_by``, not reconciled."""
+    stmt = (
+        _grant_select(
+            PromoRedemption.expired_usd > 0,
+            PromoRedemption.reconciled_at.is_(None),
+            PromoCode.credit_ends_at <= closed_by,
+            PromoRedemption.id.not_in(exclude),
+        )
+        .order_by(PromoCode.credit_ends_at, PromoRedemption.id)
+        .limit(limit)
+        .with_for_update(of=PromoRedemption, skip_locked=True)
+    )
+    return await _grants(session, stmt)
+
+
 async def list_timed_grants(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[TimedPromoGrantRow]:
@@ -291,4 +314,14 @@ async def mark_expired(
         update(PromoRedemption)
         .where(PromoRedemption.id == redemption_id, PromoRedemption.expired_at.is_(None))
         .values(expired_at=expired_at, expired_usd=expired_usd)
+    )
+
+
+async def mark_reconciled(
+    session: AsyncSession, *, redemption_id: uuid.UUID, reconciled_at: datetime
+) -> None:
+    await session.execute(
+        update(PromoRedemption)
+        .where(PromoRedemption.id == redemption_id, PromoRedemption.reconciled_at.is_(None))
+        .values(reconciled_at=reconciled_at)
     )

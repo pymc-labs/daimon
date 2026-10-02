@@ -36,10 +36,17 @@ from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_timer_seed,
     render_timer_target_changed,
+    render_wake_target_changed,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
-from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
+from daimon.core.stores.credential_requests import get_credential_request_by_idempotency_key
+from daimon.core.stores.domain import (
+    ChatPlatform,
+    ContinuationReason,
+    CredentialRequestRow,
+    TaskContinuationRow,
+)
 from daimon.core.stores.task_continuations import (
     claim_continuation as _claim_continuation_row,
 )
@@ -52,6 +59,7 @@ from daimon.core.stores.task_continuations import (
 from daimon.core.stores.task_continuations import (
     settle_continuation as _settle_continuation_row,
 )
+from daimon.core.stores.thread_sessions import get_thread_session_at
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -66,7 +74,9 @@ __all__ = [
     "check_wake_responder",
     "claim_continuation",
     "decide_continuation",
+    "load_asking_agent_id",
     "record_continuation",
+    "record_input_continuation",
     "sanitize_requested_work",
     "settle_continuation",
 ]
@@ -119,7 +129,7 @@ class ContinuationRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     tenant_id: uuid.UUID
-    platform: Literal["discord", "slack"]
+    platform: ChatPlatform
     parent_channel_id: str
     thread_id: str
     requester_account_id: uuid.UUID
@@ -148,15 +158,18 @@ class ContinuationDecision(BaseModel):
 
 
 class ResponderChanged(DaimonError):
-    """A timer is due, but a different agent answers its thread now.
+    """A wake is due, but a different agent answers its thread now.
 
     Raised by an adapter after `admit()` and before anything is posted or
-    bound, so the timer never runs under an agent it was not set with.
+    bound, so a wake never runs under an agent it was not queued for.
     `message` is the person-facing notice to post in the thread.
     """
 
-    def __init__(self, *, target_name: str, current_name: str) -> None:
-        self.message = render_timer_target_changed(target_name, current_name)
+    def __init__(
+        self, *, target_name: str, current_name: str, reason: ContinuationReason = "timer"
+    ) -> None:
+        render = render_timer_target_changed if reason == "timer" else render_wake_target_changed
+        self.message = render(target_name, current_name)
         super().__init__(self.message)
 
 
@@ -167,21 +180,59 @@ def check_wake_responder(
     target_name: str,
     admitted_ma_agent_id: str,
     admitted_name: str,
+    asking_ma_agent_id: str | None = None,
 ) -> None:
-    """Refuse a timer whose thread is now answered by a different agent.
+    """Refuse a wake whose thread is now answered by an agent it was not queued for.
 
     A timer can wait up to 90 days while a thread's routing changes, and its
     note is the old agent's own brief; running it as whoever answers now
-    would hand one agent another's work. Handoffs and private-input
-    continuations are not checked here: they run moments after they are
-    queued, against the agent their own flow just bound.
+    would hand one agent another's work. Agent reach also counts a wake
+    against the agent it names, so a handoff runs only as its destination.
+    A private input resumes the agent that asked, which in a setup
+    conversation or for another agent's key is not the key's agent, so it
+    may also run as `asking_ma_agent_id` (`load_asking_agent_id`): the agent
+    that asked, while the requester's live session is still with it.
     """
-    if reason == "timer" and admitted_ma_agent_id != target_ma_agent_id:
-        raise ResponderChanged(target_name=target_name, current_name=admitted_name)
+    if admitted_ma_agent_id == target_ma_agent_id:
+        return
+    if reason == "private_input_applied" and admitted_ma_agent_id == asking_ma_agent_id:
+        return
+    raise ResponderChanged(target_name=target_name, current_name=admitted_name, reason=reason)
+
+
+async def load_asking_agent_id(
+    session: AsyncSession, row: TaskContinuationRow, *, live_ma_agent_id: str | None
+) -> str | None:
+    """The agent an applied private input may resume besides its target, or None.
+
+    The asking agent is the one the requester's session in the thread ran
+    when the input was asked for, and it counts only while their live
+    session (`live_ma_agent_id`) is still with it. A thread rerouted or handed
+    off since then moved them to another agent, which never asked; a request
+    row erased since leaves nothing to tell, so neither resumes.
+    """
+    if row.reason != "private_input_applied" or live_ma_agent_id is None:
+        return None
+    request = await get_credential_request_by_idempotency_key(
+        session, idempotency_key=row.idempotency_key
+    )
+    if request is None:
+        return None
+    asked = await get_thread_session_at(
+        session,
+        tenant_id=row.tenant_id,
+        platform=row.platform,
+        thread_id=row.thread_id,
+        account_id=row.requester_account_id,
+        at=request.created_at,
+    )
+    if asked is None or asked.ma_agent_id != live_ma_agent_id:
+        return None
+    return live_ma_agent_id
 
 
 def build_input_continuation(
-    row: CredentialRequestRow, *, platform: Literal["discord", "slack"]
+    row: CredentialRequestRow, *, platform: ChatPlatform
 ) -> ContinuationRequest | None:
     """The continuation a consumed private-input request owes, or None.
 
@@ -244,6 +295,41 @@ async def record_continuation(
             idempotency_key=request.idempotency_key,
             requested_work=request.requested_work,
         )
+
+
+async def record_input_continuation(
+    session: AsyncSession,
+    row: CredentialRequestRow,
+    *,
+    platform: ChatPlatform,
+    carries_work: bool = True,
+) -> bool:
+    """Queue the turn a spent private-input request owes, in the caller's transaction.
+
+    The continuation commits with the write it belongs to, so a value never
+    lands without its follow-up nor a follow-up without its value. False when
+    the row can address no continuation (`build_input_continuation` is None).
+    `carries_work=False` records the row for the trail alone: a partial write
+    must not resume work, and `decide_continuation` skips a row with no work.
+    """
+    request = build_input_continuation(row, platform=platform)
+    if request is None:
+        return False
+    await _record_continuation_row(
+        session,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        parent_channel_id=request.parent_channel_id,
+        thread_id=request.thread_id,
+        requester_account_id=request.requester_account_id,
+        requester_external_user_id=request.requester_external_user_id,
+        target_ma_agent_id=request.target_ma_agent_id,
+        target_name=request.target_name,
+        reason=request.reason,
+        idempotency_key=request.idempotency_key,
+        requested_work=request.requested_work if carries_work else None,
+    )
+    return True
 
 
 async def claim_continuation(

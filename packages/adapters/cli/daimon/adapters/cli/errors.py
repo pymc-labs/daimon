@@ -18,6 +18,7 @@ from typing import Any
 import typer
 from anthropic import APIError
 from daimon.core.errors import DaimonError
+from daimon.core.observability import redact_text
 from rich.console import Console
 
 
@@ -25,8 +26,10 @@ def run_cli(coro: Coroutine[Any, Any, None], *, console: Console) -> None:
     try:
         asyncio.run(coro)
     except APIError as err:
-        console.print(f"[red]✗ upstream: {err}[/red]")
+        # Untrusted message: redact credential text, and render as literal
+        # text (markup=False) so it can't inject Rich markup.
+        console.print(f"✗ upstream: {redact_text(str(err))}", style="red", markup=False)
         raise typer.Exit(code=1) from err
     except DaimonError as err:
-        console.print(f"[red]✗ {err}[/red]")
+        console.print(f"✗ {redact_text(str(err))}", style="red", markup=False)
         raise typer.Exit(code=1) from err

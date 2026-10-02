@@ -11,11 +11,13 @@ import structlog
 from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_isolation import load_channel_isolation
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_isolation import is_memory_hidden
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import ScopeContext
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -41,7 +43,7 @@ async def _resolve_store(
     """Resolve (agent_name, memory_store_id) for the invoking channel.
 
     Returns None when the channel has no configured agent, the agent has no
-    memory store yet, or channel isolation hides the agent from here. Raises
+    memory store yet, or its pin or channel isolation hides it from here. Raises
     DaimonError when the configured agent doesn't exist on the MA side.
     """
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
@@ -58,23 +60,23 @@ async def _resolve_store(
             channel_id=str(interaction.channel_id),
         )
         config = await resolve_config(session, context=scope, default=runtime.deployment_default)
-        isolation = await load_channel_isolation(
-            session, tenant_id=tenant_id, default=runtime.deployment_default
-        )
+        policy = await load_access_policy(session, tenant_id=tenant_id)
     if config.agent_name is None:
-        return None
-    channel = interaction.channel
-    parent = channel.parent_id if isinstance(channel, discord.Thread) else None
-    inside = isolation.isolated_channel(
-        str(interaction.channel_id), str(parent) if parent is not None else None
-    )
-    if not isolation.is_visible(config.agent_name, inside_channel_id=inside):
         return None
     agent = await find_agent_by_daimon_tag(
         runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
     )
     if agent is None:
         raise DaimonError(f"Configured agent **{config.agent_name}** not found.")
+    channel = interaction.channel
+    parent = channel.parent_id if isinstance(channel, discord.Thread) else None
+    if is_memory_hidden(
+        policy,
+        agent_names=(config.agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        channel_id=str(interaction.channel_id),
+        parent_channel_id=str(parent) if parent is not None else None,
+    ):
+        return None
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     async with runtime.sessionmaker() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)

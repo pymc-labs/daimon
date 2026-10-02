@@ -4,13 +4,11 @@ Covers:
 - do_propagate persists agent_name at the scope (set_fields); second call returns prior name
 - do_unpropagate clears the agent_name (unset_fields)
 - mask_tail covers the full-length and short-string cases
-- fork_agent copies no credential or repo binding (mirrors Discord)
 - delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from collections.abc import Callable
@@ -29,16 +27,12 @@ from daimon.adapters.slack.agent_setup.write import (
     do_propagate,
     do_unpropagate,
     load_agent_inline_pat,
-    mask_tail,
     owner_repo_from_url,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
@@ -47,7 +41,6 @@ from daimon.testing.ma import (
     FakeMemoryStoreState,
     NotHandled,
     build_fake_anthropic,
-    build_stub_anthropic,
     combine_handlers,
     make_archive_agent_handler,
     make_fake_ma_handler,
@@ -77,26 +70,6 @@ async def _seed_account(session: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUI
     assert tenant_row is not None, "_seed_account requires a tenant seeded via _seed_tenant"
     account = await make_account(session, tenant=tenant_row)
     return account.id
-
-
-# ---------------------------------------------------------------------------
-# mask_tail (pure, no DB)
-# ---------------------------------------------------------------------------
-
-
-def test_mask_tail_returns_last4_chars_when_secret_is_long_enough() -> None:
-    result = mask_tail("ghp_abcd1234")
-    assert result == "****1234", "mask_tail should render ****<last4> for secrets >= 4 chars"
-
-
-def test_mask_tail_returns_four_stars_when_secret_is_shorter_than_four_chars() -> None:
-    result = mask_tail("xy")
-    assert result == "****", "mask_tail should return **** for secrets shorter than 4 chars"
-
-
-def test_mask_tail_returns_four_stars_for_empty_string() -> None:
-    result = mask_tail("")
-    assert result == "****", "mask_tail should return **** for empty string"
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +309,7 @@ async def test_do_unpropagate_clears_agent_name_at_scope(
 
 
 # ---------------------------------------------------------------------------
-# fork_agent / delete_agent — core.agent_lifecycle repoint (mirrors Discord)
+# delete_agent — core.agent_lifecycle repoint (mirrors Discord)
 # ---------------------------------------------------------------------------
 
 
@@ -370,130 +343,6 @@ def _agent_dict(
         tools=[],
         system=None,
     ).model_dump(mode="json")
-
-
-def _fork_handler(
-    *,
-    source_payload: dict[str, Any],
-    fork_id: str,
-    fork_name: str,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    created: list[dict[str, Any]],
-) -> Callable[[httpx.Request], httpx.Response]:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return httpx.Response(200, json={"data": [source_payload], "next_page": None})
-        if request.method == "GET" and request.url.path == f"/v1/agents/{source_payload['id']}":
-            return httpx.Response(200, json=source_payload)
-        if request.method == "POST" and request.url.path == "/v1/agents":
-            created.append(json.loads(request.content))
-            return httpx.Response(
-                200,
-                json=_agent_dict(
-                    id_=fork_id, name=fork_name, tenant_id=tenant_id, account_id=account_id
-                ),
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
-
-    return handler
-
-
-def _runtime_with_db(
-    anthropic: Any,
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet_key: str,
-) -> SlackRuntime:
-    """Build a SlackRuntime with a real sessionmaker + crypto keys for fork/delete tests."""
-    settings = MagicMock()
-    settings.mcp.public_url = None
-    settings.crypto.keys = (MagicMock(get_secret_value=lambda: fernet_key),)
-    settings.github.oauth_scopes = ("repo", "read:user")
-    return SlackRuntime(
-        settings=settings,
-        anthropic=anthropic,
-        sessionmaker=sessionmaker,
-        billing_config=None,
-        http_client=MagicMock(),
-        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        deployment_default=DeploymentDefault(),
-    )
-
-
-async def test_fork_agent_copies_no_credential_or_repo_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A fork starts credential-less: the source's PAT and repo binding stay behind."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_FORK_CRED")
-    tenant_id = tenant.id
-    account_id = await _seed_account(db_session, tenant_id)
-
-    source_payload = _agent_dict(
-        id_="ag_src_cred", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_cred")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_cred")
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_source_token_xxxx1234"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=("repo", "read:user"),
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_cred",
-        fork_name="myfork",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_name="source",
-        new_name="myfork",
-        account_id=account_id,
-    )
-
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "the fork must not hold the source's GitHub token"
-    async with db_session_factory() as s:
-        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
-            "the fork must not inherit the source's repo binding"
-        )
 
 
 async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:

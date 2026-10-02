@@ -1,8 +1,8 @@
-"""Channel isolation clicks from Who answers where: isolate, isolate with a copy, or end.
+"""Channel isolation clicks from Who answers where: isolate, with a copy, end, or lift.
 
 Workspace admins only, re-checked by the dispatcher. The rules live in
-`daimon.core.channel_isolation_setup`; this module supplies Slack's fork and
-channel name and words the outcome.
+`daimon.core.channel_isolation_setup`; this module supplies Slack's channel
+name and words the outcome.
 """
 
 from __future__ import annotations
@@ -12,33 +12,18 @@ from typing import Any, Literal, cast
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_fork import fork_agent
+from daimon.core.authz import build_subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.channel_isolation_setup import set_channel_isolation
 from daimon.core.errors import DaimonError
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-IsolationChoice = Literal["isolate", "copy", "end"]
+IsolationChoice = Literal["isolate", "copy", "end", "lift"]
+"""`lift` ends isolation and lifts the channel's seal and dedicated pins too."""
 
 ISOLATION_NEED_ADMIN_MESSAGE = "Only a workspace admin can isolate a channel. Nothing changed."
-
-
-def _fork(runtime: SlackRuntime, tenant_id: uuid.UUID) -> ForkAgent:
-    public_url = runtime.settings.mcp.public_url
-
-    async def fork(source: str, new_name: str) -> None:
-        await fork_agent(
-            runtime.anthropic,
-            runtime.sessionmaker,
-            tenant_id=tenant_id,
-            source_name=source,
-            new_name=new_name,
-            public_url=str(public_url) if public_url is not None else None,
-        )
-
-    return fork
 
 
 async def _channel_name(client: AsyncWebClient, channel_id: str) -> str | None:
@@ -72,24 +57,33 @@ async def change_isolation(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id
         )
     copy = choice == "copy"
+    public_url = runtime.settings.mcp.public_url
     try:
         change = await set_channel_isolation(
             runtime.anthropic,
             runtime.sessionmaker,
             tenant_id=tenant_id,
+            platform="slack",
             channel_id=channel,
-            isolated=choice != "end",
+            isolated=choice in ("isolate", "copy"),
             default=runtime.deployment_default,
             actor_account_id=actor.account_id,
             channel_label=await _channel_name(client, channel) if copy else None,
-            fork=_fork(runtime, tenant_id) if copy else None,
+            fork=copy,
+            public_url=str(public_url) if public_url is not None else None,
+            drop_seal_and_pins=choice == "lift",
+            # Only a workspace admin reaches the isolation buttons.
+            subject=build_subject(is_admin=True, platform_user_id=user_id),
         )
     except DaimonError as exc:  # a refusal, or a copy that can't be made
         return f"{exc} Nothing changed."
     if not change.isolated:
-        return f"<#{channel}> is open again."
+        return f"<#{channel}> is no longer isolated. {change.end_warning}"
     name = escape_mrkdwn(change.agent_name or "")
     if change.forked_from is not None:
         source = escape_mrkdwn(change.forked_from)
-        return f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
-    return f"<#{channel}> is isolated. *{name}* answers only there."
+        said = f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
+    else:
+        said = f"<#{channel}> is isolated. *{name}* answers only there."
+    notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)
+    return " ".join([said, *(escape_mrkdwn(note) for note in notes if note)])

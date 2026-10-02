@@ -23,7 +23,7 @@ from daimon.core.defaults.ma_index import (
     find_environments_by_daimon_tag,
     list_environments_by_tenant,
 )
-from daimon.core.defaults.metadata import build_metadata
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, build_metadata
 from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
@@ -97,12 +97,24 @@ async def _create_environment_impl(
     # set_channel_environment, which is gated. So
     # the gate here bought no isolation while blocking the ordinary onboarding
     # ask -- "make me an agent that can run pymc" -- for every non-admin.
-    # Matches create_agent / fork_agent, which are ungated for the same reason.
+    # Matches create_agent, which is ungated for the same reason (fork_agent is
+    # admin-only: a fork would copy a live agent's prompt and connectors).
     await _reject_environment_name_collision(runtime, auth, spec.name)
     payload = spec.model_dump(exclude_none=True)
     payload["metadata"] = build_metadata(tenant_id=auth.tenant_id, name=spec.name)
     ma_env = await runtime.client.beta.environments.create(**payload)
     return EnvironmentInfo.from_ma(ma_env)
+
+
+def _reject_managed_environment(env: BetaEnvironment, *, refusal: str) -> None:
+    """Refuse chat edits of a defaults-managed environment, admins included.
+
+    A chat edit never restamps the reconciler's spec hash, so the drift would
+    survive every later `defaults apply`; archiving one strands every seeded
+    agent scoped onto it.
+    """
+    if env.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        raise ToolError(f"environment '{env.name}' is managed by defaults; {refusal}")
 
 
 async def _update_environment_impl(
@@ -121,6 +133,10 @@ async def _update_environment_impl(
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None:
         raise ToolError(f"environment '{name}' not found")
+    _reject_managed_environment(
+        env,
+        refusal="chat tools cannot modify it. Use create_environment to make a new one instead.",
+    )
     updated = await runtime.client.beta.environments.update(env.id, **patch)
     return EnvironmentInfo.from_ma(updated)
 
@@ -146,6 +162,10 @@ async def _archive_environment_impl(
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None:
         raise ToolError(f"environment '{name}' not found")
+    _reject_managed_environment(
+        env,
+        refusal="built-in agents run in it, so chat tools cannot archive it. Nothing changed.",
+    )
     await runtime.client.beta.environments.archive(env.id)
     async with runtime.session_factory.begin() as session:
         cleared = await clear_environment_references(

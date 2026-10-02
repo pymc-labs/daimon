@@ -314,7 +314,7 @@ async def _refuse_shared(
     if others:
         raise SkillIngestError(
             f"'{name}' on {agent_name} is also attached to {', '.join(others[:3])}, which "
-            "shares it through a fork, so a new version would change that agent too. Add "
+            "would get the new version too. Add "
             f"this under a new name (e.g. {name}-2)."
         )
 
@@ -330,8 +330,9 @@ async def _refuse_mount_clash(
 ) -> None:
     """Refuse before uploading when a skill already on the agent mounts at `name`.
 
-    A fork keeps its parent's agent-scoped skills, so `{parent}/name` would
-    sit beside this agent's `{agent}/name` and break its sessions.
+    Forks now drop agent-scoped skills (`copy_agent`), but one attached by id,
+    or kept by an older fork, as `{other}/name` would sit beside this agent's
+    `{agent}/name` and break its sessions.
     """
     bodies: dict[str, str] = {}
     for row in await list_skills_strict(client):

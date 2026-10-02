@@ -18,8 +18,7 @@ from daimon.core.channel_admins import (
 )
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.direct_messages import DmOrigin
-from daimon.core.stores.domain import ChannelAdminsRow
-from daimon.core.stores.routines import RoutineCreator
+from daimon.core.stores.domain import ChannelAdminsRow, UnattendedRequester
 
 TENANT = uuid.uuid4()
 SNOWFLAKE = "123456789012345678"
@@ -105,7 +104,7 @@ def _channel(channel_id: str, agent: str) -> ChannelConfigRow:
 def test_agent_reach_is_local_only_inside_the_given_channels() -> None:
     default = DeploymentDefault(agent_name="daimon")
     reach = build_agent_reach(
-        "helper",
+        ("helper",),
         tenant=None,
         channels=[_channel("c1", "helper"), _channel("c2", "other")],
         default=default,
@@ -116,37 +115,39 @@ def test_agent_reach_is_local_only_inside_the_given_channels() -> None:
     assert not reach.is_local_to({"c1"}, platform_user_id="u1"), "c3 is outside"
 
     tenant = TenantConfigRow(tenant_id=TENANT, agent_name="helper")
-    wide = build_agent_reach("helper", tenant=tenant, channels=[], default=default)
+    wide = build_agent_reach(("helper",), tenant=tenant, channels=[], default=default)
     assert wide.is_tenant_wide, "the tenant default is tenant-wide"
     assert not wide.is_local_to({"c1"}, platform_user_id="u1"), "tenant-wide is never local"
-    fallthrough = build_agent_reach("daimon", tenant=None, channels=[], default=default)
+    fallthrough = build_agent_reach(("daimon",), tenant=None, channels=[], default=default)
     assert not fallthrough.is_local_to({"c1"}, platform_user_id="u1"), (
         "the deployment default is tenant-wide"
     )
 
 
-def test_only_a_stronger_creators_routine_makes_an_agent_not_local() -> None:
+def test_only_a_stronger_requesters_unattended_run_makes_an_agent_not_local() -> None:
     default = DeploymentDefault(agent_name="daimon")
     grants = [_grant("c1", users=("u1", "co")), _grant("c2", roles=("r9",))]
 
-    def local(creator: RoutineCreator) -> bool:
+    def local(creator: UnattendedRequester) -> bool:
         reach = build_agent_reach(
-            "helper",
+            ("helper",),
             tenant=None,
             channels=[_channel("c1", "helper")],
             default=default,
-            routine_creators=[creator],
+            unattended_requesters=[creator],
             grants=grants,
         )
         return reach.is_local_to({"c1"}, platform_user_id="u1")
 
-    assert local(RoutineCreator(platform_user_id="u1")), "the caller's own routine"
-    assert local(RoutineCreator(platform_user_id="member")), "a plain member's gains nothing"
-    assert local(RoutineCreator(platform_user_id="co")), "a co-admin of c1 holds no more"
-    assert not local(RoutineCreator(platform_user_id="boss", is_admin=True)), (
-        "a server admin's routine would run the caller's edits with admin rights"
+    assert local(UnattendedRequester(platform_user_id="u1")), "the caller's own run"
+    assert local(UnattendedRequester(platform_user_id="member")), (
+        "a member's run carries only their own reach"
     )
-    assert not local(RoutineCreator(platform_user_id="other", role_ids=("r9",))), (
+    assert local(UnattendedRequester(platform_user_id="co")), "a co-admin of c1 holds no more"
+    assert not local(UnattendedRequester(platform_user_id="boss", is_admin=True)), (
+        "a server admin's run would carry the caller's edits with admin rights"
+    )
+    assert not local(UnattendedRequester(platform_user_id="other", role_ids=("r9",))), (
         "so would one by c2's admin, granted by role"
     )
 
@@ -156,16 +157,16 @@ def test_agent_reach_counts_a_dm_as_the_channel_it_started_from() -> None:
     live = DmOrigin(channel_id="dm1", scope_id="dm:live", source_channel_id="c1")
     legacy = DmOrigin(channel_id="dm2", scope_id="dm:legacy", source_channel_id=None)
     reach = build_agent_reach(
-        "helper",
+        ("helper",),
         tenant=None,
         channels=[_channel("dm1", "helper"), _channel("dm2", "helper"), _channel("dm3", "helper")],
         default=default,
         dm_origins=[live, legacy],
         dm_bindings=[
-            ("dm1", "dm:live", "helper"),
-            ("dm1", "dm:old", "helper"),
-            ("dm3", "dm:gone", "helper"),
-            ("dm2", "dm:legacy", "other"),
+            ("dm1", "dm:live", "helper", "agent_1"),
+            ("dm1", "dm:old", "helper", "agent_1"),
+            ("dm3", "dm:gone", "helper", "agent_1"),
+            ("dm2", "dm:legacy", "other", "agent_2"),
         ],
     )
     assert reach.channel_ids == {"c1", "dm2"}, (
@@ -173,3 +174,24 @@ def test_agent_reach_counts_a_dm_as_the_channel_it_started_from() -> None:
         "and a replaced or moved-away DM scope not at all"
     )
     assert not reach.is_local_to({"c1"}, platform_user_id="u1"), "dm2's source is unknown"
+
+
+def test_runs_count_by_their_channel_and_an_unrouted_agent_is_local_to_nobody() -> None:
+    default = DeploymentDefault(agent_name="daimon")
+
+    def reach(*runs: str | None):
+        return build_agent_reach(
+            ("helper",), tenant=None, channels=[], default=default, run_channel_ids=runs
+        )
+
+    nowhere = reach()
+    assert not nowhere.is_local_to({"c1"}, platform_user_id="u1"), "answering nowhere is not local"
+    assert nowhere.may_move_into({"c1"}, platform_user_id="u1"), "but it may be bound there"
+    assert reach("c1").is_local_to({"c1"}, platform_user_id="u1"), "a run in c1 is c1's"
+    assert not reach("c2").is_local_to({"c1"}, platform_user_id="u1"), "a run in c2 is not"
+    unplaced = reach("c1", None)
+    assert unplaced.has_unplaced_run and unplaced.channel_ids == {"c1"}, (
+        "an unknown channel is recorded apart from the known ones"
+    )
+    assert not unplaced.is_local_to({"c1"}, platform_user_id="u1"), "it could be anywhere"
+    assert not unplaced.may_move_into({"c1"}, platform_user_id="u1"), "nor bound from c1"

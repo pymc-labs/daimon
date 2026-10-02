@@ -18,18 +18,21 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
+from daimon.core.authz import Subject
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
     list_agents_by_tenant,
 )
-from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
     MA_METADATA_KEY_SPEC_HASH,
     build_metadata,
 )
@@ -429,7 +432,10 @@ async def agents_archive(
 
 @agents_app.command(
     "fork",
-    help=("Create a new MA agent seeded from the source's content and a local row pointing at it."),
+    help=(
+        "Copy an agent under a new name. The copy holds no MCP credentials and no skill "
+        "scoped to another agent; the skills left off are named."
+    ),
 )
 def agents_fork_command(
     ctx: typer.Context,
@@ -476,34 +482,21 @@ async def agents_fork(
     source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
-    source_ma = await rt.anthropic.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params = {k: params[k] for k in _CREATE_FIELDS if k in params}
-    fork_params["name"] = dst
-    fork_params["metadata"] = build_metadata(
-        tenant_id=tenant_id,
-        name=dst,
-        account_id=derive_guild_account_uuid(tenant_id),
-    )
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
-    # Add daimon-mcp server + toolset BOTH halves — MA validates that every
-    # server in mcp_servers is referenced by some mcp_toolset tool (400 otherwise).
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        public_url,
+    copy = await copy_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        source=source,
+        new_name=dst,
+        public_url=public_url,
+        # The CLI is the deployment operator.
+        subject=Subject(is_admin=True),
     )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    await rt.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
+    if copy.dropped_skills:
+        left_off = ", ".join(copy.dropped_skills)
+        console.print(f"[yellow]Left off skills scoped to another agent: {left_off}[/yellow]")
 
 
 class _BackfillRow(BaseModel):
@@ -787,6 +780,11 @@ async def agents_rekey(
             managed=(agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"),
             spec_hash=agent.metadata.get(MA_METADATA_KEY_SPEC_HASH),
         )
+        # A report reader's link to its source agent is what holds it to the
+        # source's pins; a re-key must not drop it.
+        for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
+            if key in agent.metadata:
+                new_meta[key] = agent.metadata[key]
         await rt.anthropic.beta.agents.update(
             agent.id,
             version=agent.version,

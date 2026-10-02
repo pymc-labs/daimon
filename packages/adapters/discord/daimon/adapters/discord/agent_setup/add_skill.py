@@ -3,8 +3,9 @@
 The skill becomes the agent's own copy; the shared library and the built-in
 agents are never touched. A server admin may add to any agent they could edit,
 a channel admin to one that answers only in their channels, anyone to one that
-answers nowhere. The button, the submit and the Add click each re-check that
-live, and Add re-reads the agent itself.
+nobody else uses (read as widely as a key change). The button, the submit and
+the Add click each re-check that live; Add re-reads the agent first, so every
+name it carries counts.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import anthropic
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.hydrate import load_details_for
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -22,6 +24,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -54,8 +57,8 @@ ADD_SKILL_LABEL: Final = "➕ Add skill"
 ADD_LABEL: Final = "Add"
 CANCEL_LABEL: Final = "Cancel"
 BUILT_IN_MESSAGE: Final = (
-    "This is a starting agent and can't be changed directly. "
-    "Ask me to fork it, then add the skill to the fork."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 _SHOWN_FILES: Final = 15
 _PATH_CHARS: Final = 80
@@ -63,9 +66,9 @@ _PATH_CHARS: Final = 80
 
 def needs_admin_message(agent_name: str) -> str:
     return (
-        f"Others use {agent_name} (a channel or server default, a thread, or someone else's "
-        f"routine or queued task), so adding a skill needs {ADMIN_NOUN} or an admin of every "
-        "channel it answers in."
+        f"Others use {agent_name} (a default, a thread, or someone else's routine or "
+        f"conversation), so adding a skill needs {ADMIN_NOUN} or an admin of every channel "
+        "it answers in."
     )
 
 
@@ -75,21 +78,29 @@ async def skill_change_refusal(
     runtime: DiscordRuntime,
     state: PanelState,
     agent: RosterAgent,
+    ma_agent: BetaManagedAgentsAgent | None = None,
 ) -> str | None:
-    """Why the caller may not change this agent's skills right now, or None."""
+    """Why the caller may not change this agent's skills right now, or None.
+
+    Pass the re-read `ma_agent` for the final check, so its routing name counts.
+    """
     if agent.is_built_in:
         return BUILT_IN_MESSAGE
     caller = channel_admin_caller(interaction.user)
+    names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))
     async with runtime.sessionmaker() as session:
         facts = await load_target_facts(
             session,
             "skill_add",
             tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id)),
             platform="discord",
-            agent_name=agent.name,
+            agent_names=names,
+            ma_agent_id=agent.ma_agent_id,
             default=runtime.deployment_default,
             caller=caller,
             is_daimon_managed=False,
+            caller_account_id=state.account_id,
+            caller_platform_user_id=str(interaction.user.id),
         )
     if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
         return None
@@ -257,15 +268,18 @@ class SkillPreviewView(PanelViewBase):
         name, preview = self.agent.name, self.bundle.preview
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
         try:
-            refusal = await skill_change_refusal(
-                interaction, runtime=self.runtime, state=self.state, agent=self.agent
-            )
-            agent = None
+            agent = await self.runtime.anthropic.beta.agents.retrieve(self.agent.ma_agent_id)
+            refusal = _stamp_refusal(agent.metadata, tenant_id=str(tenant_id), name=name)
             if refusal is None:
-                agent = await self.runtime.anthropic.beta.agents.retrieve(self.agent.ma_agent_id)
-                refusal = _stamp_refusal(agent.metadata, tenant_id=str(tenant_id), name=name)
-            if refusal is not None or agent is None:
-                await interaction.followup.send(refusal or BUILT_IN_MESSAGE, ephemeral=True)
+                refusal = await skill_change_refusal(
+                    interaction,
+                    runtime=self.runtime,
+                    state=self.state,
+                    agent=self.agent,
+                    ma_agent=agent,
+                )
+            if refusal is not None:
+                await interaction.followup.send(refusal, ephemeral=True)
                 return
             result = await add_agent_skill(
                 self.runtime.anthropic,

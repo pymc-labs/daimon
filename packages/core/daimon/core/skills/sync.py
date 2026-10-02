@@ -14,11 +14,22 @@ Matching is by CANONICAL tenant-prefixed display_title (``{t8}-{name}``),
 produced via :func:`~daimon.core.defaults.metadata.tenant_scoped_display_title`
 with ``agent_name=None`` (seeded/registry shape). This ensures stack-B skills
 are tenant-isolated and distinct across guilds sharing one MA Workspace.
+
+Seeded skills (`defaults/skills/**`) share that exact title shape, so a
+same-named import would push a new version onto the seeded skill. The
+reconciler's fingerprint would still match the defaults tree and skip it on
+every later `defaults apply`, making the overwrite permanent. Those names are
+refused instead.
+
+Any other library skill may already be attached to agents that answer for
+everyone, so only an admin import may push a new version onto it. A member's
+same-named import is refused and must be renamed.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -32,11 +43,25 @@ from daimon.core.skills.discover import DiscoveredSkill
 _log = structlog.get_logger(__name__)
 
 
+class _ImportRefusedError(DaimonError):
+    """A deliberate refusal; `refusal` is the reason as the person who asked reads it."""
+
+    def __init__(self, error: str, *, refusal: str) -> None:
+        super().__init__(error)
+        self.refusal = refusal
+
+
+def _rename_hint(name: str) -> str:
+    return f"Rename it in the repo (e.g. {name}-2), then ask again to import."
+
+
 async def sync_skills(
     client: AsyncAnthropic,
     skills: list[DiscoveredSkill],
     *,
     tenant_id: uuid.UUID,
+    seeded_skill_names: frozenset[str],
+    is_admin: bool,
 ) -> list[ResourceOutcome]:
     """Create or update each skill in *skills* on MA.
 
@@ -58,11 +83,18 @@ async def sync_skills(
 
     Any exception raised while processing a single skill is caught; a
     ``FAILED`` outcome is recorded and the batch continues with the next skill.
+    A skill named in ``seeded_skill_names`` is recorded as ``FAILED`` without
+    touching MA, and so is a non-admin import that matches an existing library
+    skill (see the module docstring).
 
     Args:
         client: Anthropic SDK client for MA API calls.
         skills: Discovered skills to sync.
         tenant_id: Owning tenant — determines the canonical title prefix.
+        seeded_skill_names: This tenant's seeded skill names
+            (``list_seeded_skill_names``), which an import may not reuse.
+        is_admin: Whether the importer may push a new version onto an existing
+            library skill.
 
     Returns:
         One :class:`~daimon.core.defaults.report.ResourceOutcome` per input
@@ -70,11 +102,40 @@ async def sync_skills(
     """
     outcomes: list[ResourceOutcome] = []
     for skill in skills:
+        if skill.spec.name in seeded_skill_names:
+            _log.warning("sync.seeded_skill_refused", name=skill.spec.name)
+            outcomes.append(
+                ResourceOutcome(
+                    kind="skill",
+                    name=skill.spec.name,
+                    action=Action.FAILED,
+                    error=(
+                        f"skill name {skill.spec.name!r} belongs to a default skill and "
+                        f"cannot be replaced by an import. Rename the skill (e.g. "
+                        f"{skill.spec.name}-2) and re-sync."
+                    ),
+                    refusal=(
+                        f"`{skill.spec.name}` is a default skill's name. "
+                        f"{_rename_hint(skill.spec.name)}"
+                    ),
+                )
+            )
+            continue
         try:
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=skill.spec.name)
             ma_match = await find_skill_by_display_title(client, canonical, on_truncation="raise")
             pkg = build_skill_zip(skill.skill_dir, name=skill.spec.name)
             try:
+                if ma_match is not None and not is_admin:
+                    raise _ImportRefusedError(
+                        f"skill name {skill.spec.name!r} is already taken in this library, "
+                        f"and only an admin can replace it. Rename the skill (e.g. "
+                        f"{skill.spec.name}-2) and re-sync.",
+                        refusal=(
+                            f"`{skill.spec.name}` is already in this library, and only an "
+                            f"admin can replace it. {_rename_hint(skill.spec.name)}"
+                        ),
+                    )
                 if ma_match is not None:
                     with pkg.path.open("rb") as fh:
                         await client.beta.skills.versions.create(
@@ -94,11 +155,15 @@ async def sync_skills(
                         client, tenant_id=tenant_id, name=skill.spec.name, agent_name=None
                     )
                     if conflict is not None:
-                        raise DaimonError(
+                        raise _ImportRefusedError(
                             f"skill name {skill.spec.name!r} is already taken by "
                             f"{conflict.display_title!r} — the two would mount at the same "
                             f"path on an agent. Rename the skill (e.g. "
-                            f"{skill.spec.name}-2) and re-sync."
+                            f"{skill.spec.name}-2) and re-sync.",
+                            refusal=(
+                                f"`{skill.spec.name}` would share a path on an agent with "
+                                f"another skill. {_rename_hint(skill.spec.name)}"
+                            ),
                         )
                     with pkg.path.open("rb") as fh:
                         created = await client.beta.skills.create(
@@ -123,6 +188,23 @@ async def sync_skills(
                     name=skill.spec.name,
                     action=Action.FAILED,
                     error=str(err),
+                    refusal=err.refusal if isinstance(err, _ImportRefusedError) else None,
                 )
             )
     return outcomes
+
+
+def summarize_failed_imports(outcomes: Sequence[ResourceOutcome]) -> str | None:
+    """One person-facing line on the skills that did not import, or None.
+
+    Only a deliberate refusal is explained; any other error stays in the logs,
+    since provider error bodies do not belong on a channel-visible card.
+    """
+    failed = [outcome for outcome in outcomes if outcome.action is Action.FAILED]
+    if not failed:
+        return None
+    first = failed[0]
+    reason = first.refusal or f"`{first.name}` (upload failed)."
+    others = len(failed) - 1
+    tail = f" {others} more did not import either." if others else ""
+    return f"Not imported: {reason}{tail}"

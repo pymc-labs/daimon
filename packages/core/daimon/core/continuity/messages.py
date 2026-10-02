@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Final, Literal
 
-from daimon.core.env_file import EnvProblem, EnvRejection
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, EnvProblem, EnvRejection
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "render_responder_changed_without_handoff",
     "render_timer_seed",
     "render_timer_target_changed",
+    "render_wake_target_changed",
     "render_unexpected_loss",
     "render_unsaved_work_question",
 ]
@@ -176,8 +177,10 @@ def _render_skill_removed(target_name: str, skill: str | None) -> str:
 
 
 def _render_skills_bulk_added(change: ConfigurationChange) -> str:
-    if change.detail is not None:
-        raise ValueError("kind='skills_bulk' does not use detail; it names no single skill")
+    """`detail` is an optional closing line: why skills did not import or attach.
+
+    `saved` means the skills reached the library but not the target agent.
+    """
     if change.count is None:
         raise ValueError("kind='skills_bulk' requires count")
     if change.count < 1:
@@ -190,17 +193,23 @@ def _render_skills_bulk_added(change: ConfigurationChange) -> str:
             [
                 f"Your GitHub token is saved for {target_name}.",
                 "The skills did not import.",
-                f"Ask me to add skills from {change.repo} again to retry.",
+                change.detail or f"Ask me to add skills from {change.repo} again to retry.",
             ]
         )
     noun = "skill" if change.count == 1 else "skills"
     pronoun = "it" if change.count == 1 else "them"
-    return "\n".join(
-        [
+    if change.availability == "saved":
+        lines = [
+            f"{change.count} {noun} imported from {change.repo}, but not added to {target_name}."
+        ]
+    else:
+        lines = [
             f"{change.count} {noun} added to {target_name} from {change.repo}.",
             f"It can use {pronoun} from your next message here.",
         ]
-    )
+    if change.detail is not None:
+        lines.append(change.detail)
+    return "\n".join(lines)
 
 
 def _render_mcp_connected(
@@ -333,12 +342,24 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
 
 
 #: Per-line reason for a rejected `.env` upload, one phrase per rejection kind.
-#: ``{name}`` is filled only where the parser knows the name is a valid key
-#: name; a value is never available to these templates.
+#: ``{name}`` is filled only where the problem carries a name, which the parser
+#: sets only for a syntactically valid identifier — including a reserved or
+#: member-refused one, whose NAME is safe to show; a value is never available
+#: to these templates. The member refusal lists `MEMBER_SECRET_SUFFIX_HINT`,
+#: the same suffixes the policy accepts.
 _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
     "syntax": "I could not read this line.",
     "bad_name": "the name here is not usable as a key name.",
+    "reserved_name": "{name} is reserved: it changes how the agent's tools run.",
+    "not_credential_name": (
+        "{name} is not a secret name a member can add. Use a name ending in "
+        + MEMBER_SECRET_SUFFIX_HINT
+        + ". An admin can add identity, account, region, path and URL names."
+    ),
     "duplicate_name": "{name} is set more than once.",
+    "alias_pair": (
+        "{name} is read by the same tool as another key in this file; keep only one of them."
+    ),
     "value_too_large": "{name} is too long.",
     "too_many_entries": "{name} is past the number of keys I can take at once.",
     "file_too_large": "this line could not be read.",
@@ -353,7 +374,15 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
     "empty": "There are no keys in the file.",
     "syntax": "I could not read the file.",
     "bad_name": "The names in the file are not usable as key names.",
+    "reserved_name": "The file sets a reserved name that changes how the agent's tools run.",
+    "not_credential_name": (
+        "A name in the file is not a secret name a member can add. Member keys must "
+        "end in "
+        + MEMBER_SECRET_SUFFIX_HINT
+        + "; an admin can add identity, account, region, path and URL names."
+    ),
     "duplicate_name": "The same name is set more than once.",
+    "alias_pair": "The file sets two names one tool reads as the same credential.",
     "value_too_large": "One of the keys is too long.",
     "too_many_entries": "There are more keys in the file than I can take at once.",
 }
@@ -363,7 +392,11 @@ _ENV_NAMES_SHOWN: Final[int] = 8
 
 
 def render_env_import_rejected(
-    rejection: EnvRejection, problems: Sequence[EnvProblem], *, target_name: str
+    rejection: EnvRejection,
+    problems: Sequence[EnvProblem],
+    *,
+    target_name: str,
+    pasted: bool = False,
 ) -> str:
     """Tell the person their uploaded file was rejected whole, and why.
 
@@ -381,7 +414,8 @@ def render_env_import_rejected(
             lines.append(f"…and {remaining} more.")
     else:
         lines.append(_ENV_FILE_REASONS[rejection])
-    lines.append("Nothing was changed. Upload a corrected file.")
+    # Teams dialogs take a paste, having no file input.
+    lines.append(f"Nothing was changed. {'Paste' if pasted else 'Upload'} a corrected file.")
     return "\n".join(lines)
 
 
@@ -446,7 +480,7 @@ def render_fresh_start(target_name: str) -> str:
         [
             "Starting fresh from your next message here.",
             "Leaves behind: this task's working files and unfinished work.",
-            f"Keeps: everything already posted in this thread, and {target_name}'s saved memory, "
+            f"Keeps: everything already posted here, and {target_name}'s saved memory, "
             "keys and connections.",
             "Nothing is removed until the new workspace is ready.",
         ]
@@ -461,7 +495,7 @@ def render_preparation_failed(target_name: str) -> str:
             "started this message.",
             "What was saved is still saved.",
             "Your task, decisions and working files are unchanged.",
-            "Mention me again to retry.",
+            "Ask again to retry.",
         ]
     )
 
@@ -469,11 +503,9 @@ def render_preparation_failed(target_name: str) -> str:
 def render_unexpected_loss(transfer_kind: Literal["transcript", "history"]) -> str:
     """Tell the person their workspace was lost and describe what was recovered."""
     if transfer_kind == "transcript":
-        recovered_line = (
-            "I have this thread's conversation and the files that were saved to your task."
-        )
+        recovered_line = "I have this conversation and the files that were saved to your task."
     else:
-        recovered_line = "I have what was posted in this thread, but not the earlier conversation."
+        recovered_line = "I have what was posted here, but not the earlier conversation."
     return "\n".join(
         [
             "I lost the workspace this task was running in and started a new one.",
@@ -502,6 +534,16 @@ def render_current_work_must_finish(target_name: str, *, handoff: bool) -> str:
     )
 
 
+def render_access_changed_try_again() -> str:
+    """Tell the person a seal landed while their turn was being prepared, so it didn't run."""
+    return "\n".join(
+        [
+            "This channel's access settings changed while I was getting ready.",
+            "Send your message again and I'll answer under the new settings.",
+        ]
+    )
+
+
 def render_responder_changed_without_handoff(
     *, new_responder: str, owner: str, channel: str
 ) -> str:
@@ -512,7 +554,7 @@ def render_responder_changed_without_handoff(
             f"belongs to {owner}.",
             f'Say "have {new_responder} take over this task" and I\'ll move the conversation and '
             "working files across.",
-            f"Or start a new thread to begin fresh with {new_responder}.",
+            f"Or start a new conversation to begin fresh with {new_responder}.",
         ]
     )
 
@@ -527,7 +569,7 @@ def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str])
             "from the old workspace."
         )
     else:
-        base = "Only what was posted in this thread came across."
+        base = "Only what was posted here came across."
     lines = [base]
     if lost:
         lines.append("Not carried: " + ", ".join(lost) + ".")
@@ -544,12 +586,22 @@ def render_timer_seed(note: str, *, set_at: datetime) -> str:
     )
 
 
+def render_wake_target_changed(target_name: str, current_name: str) -> str:
+    """Tell the person queued work did not run because another agent answers here now."""
+    return "\n".join(
+        [
+            f"Work here was queued for {target_name}, but {current_name} answers here now.",
+            "It did not run.",
+            "Ask again and the current agent will pick it up.",
+        ]
+    )
+
+
 def render_timer_target_changed(target_name: str, current_name: str) -> str:
     """Tell the person a timer did not run because another agent answers here now."""
     return "\n".join(
         [
-            f"A reminder here was set with {target_name}, but {current_name} answers in this "
-            "thread now.",
+            f"A reminder here was set with {target_name}, but {current_name} answers here now.",
             "It did not run.",
             "Ask again and I'll set it with the current agent.",
         ]

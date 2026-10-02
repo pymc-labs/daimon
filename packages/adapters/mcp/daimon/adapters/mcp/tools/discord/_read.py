@@ -76,13 +76,13 @@ def _sealed_thread_named(
 ) -> str | None:
     """The thread a THREAD_CREATED system message names, if the policy withholds
     it: its content is the thread's name, which is content too. A notice whose
-    thread can't be told is withheld whenever anything is sealed or isolated."""
+    thread can't be told is withheld whenever anything is sealed."""
     if message.type is not discord.MessageType.thread_created:
         return None
     reference = message.reference
     thread_id = reference.channel_id if reference is not None else None
     if thread_id is None:
-        return "" if read_policy.restricts_any else None
+        return "" if read_policy.policy.sealed_channel_ids else None
     return None if read_policy.allows(str(thread_id), parent_id) else str(thread_id)
 
 

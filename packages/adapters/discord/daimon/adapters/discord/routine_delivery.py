@@ -23,7 +23,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import structlog
-from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Place, Subject, Surface, authorize
+from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -172,19 +174,28 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         policy = cleared
+        keep_inside = keeps_routine_inside(policy, row)
+
+        async def fallback(reason: str) -> DeliveryOutcome:
+            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+                return DeliveryOutcome(status="skipped", note=reason)
+            return await _dm_fallback(row, reason, tenant.external_id)
+
         target = delivery_target(row, platform="discord")
         if target is None or not target.channel_id.isdigit():
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         try:
             channel = await fetch_channel(int(target.channel_id))
         except discord.HTTPException:
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         placement = await _placement(channel, fetch_channel)
         if placement is None or str(placement[2]) != tenant.external_id:
             # Not a text channel or thread, its parent is unknown, or it is in
             # another guild.
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         parent_channel_id, category_id, _guild_id, permission_source = placement
+        # The parent is known now, also for a thread saved without it.
+        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id)
         creator = row.created_by_user_id
         if (
             creator is None
@@ -196,15 +207,20 @@ def make_discord_routine_poster(
             log.info(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
-            return await _dm_fallback(row, "creator_cannot_post", tenant.external_id)
-        if is_write_protected(
+            return await fallback("creator_cannot_post")
+        if not authorize(
             policy,
-            channel_id=target.channel_id,
-            parent_channel_id=parent_channel_id,
-            category_id=category_id,
+            subject=Subject(),
+            action=Action.POST,
+            surface=Surface.ROUTINE,
+            place=Place(
+                channel_id=target.channel_id,
+                parent_channel_id=parent_channel_id,
+                category_id=category_id,
+            ),
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
-            return await _dm_fallback(row, "protected_channel", tenant.external_id)
+            return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
         await channel.send(
             content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],

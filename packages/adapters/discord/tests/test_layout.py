@@ -46,24 +46,6 @@ class TestHairline:
         )
 
 
-class TestAirGap:
-    def test_air_gap_is_invisible(self) -> None:
-        sep = layout.air_gap()
-        assert sep.visible is False, (
-            "air_gap() must return a Separator with visible=False (wire field: divider=false)"
-        )
-
-    def test_air_gap_has_large_spacing(self) -> None:
-        sep = layout.air_gap()
-        assert sep.spacing == discord.SeparatorSpacing.large, (
-            "air_gap() must use SeparatorSpacing.large for the invisible spacer"
-        )
-
-    def test_air_gap_returns_separator_instance(self) -> None:
-        sep = layout.air_gap()
-        assert isinstance(sep, discord.ui.Separator), "air_gap() must return a discord.ui.Separator"
-
-
 class TestStaticView:
     def test_static_view_returns_layout_view(self) -> None:
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()

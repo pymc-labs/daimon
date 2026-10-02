@@ -14,6 +14,7 @@ from time import monotonic
 import httpx
 from anthropic import DEFAULT_CONNECTION_LIMITS
 from daimon.core.anthropic_spend import spend_limit_response
+from daimon.core.runtime_health import record_anthropic_response
 
 
 class _Pacer:
@@ -53,6 +54,7 @@ class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
         if request.url.path.startswith("/v1/skills"):
             await self._pacer.wait()
         response = await self._inner.handle_async_request(request)
+        record_anthropic_response(request, response)
         if response.status_code == 429:
             await response.aread()
             if spend_limit_response(response) == "org_cap":

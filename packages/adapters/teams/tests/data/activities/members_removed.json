@@ -1,0 +1,34 @@
+{
+  "membersRemoved": [
+    {
+      "id": "29:1synthetic-other-user-mri"
+    }
+  ],
+  "type": "conversationUpdate",
+  "timestamp": "2017-02-23T19:37:06.96Z",
+  "localTimestamp": "2017-02-23T12:37:06.96-07:00",
+  "id": "f:00000000-0000-4000-8000-000000000013",
+  "channelId": "msteams",
+  "serviceUrl": "https://smba.trafficmanager.net/amer-client-ss.msg/",
+  "from": {
+    "id": "29:1synthetic-user-mri"
+  },
+  "conversation": {
+    "isGroup": true,
+    "conversationType": "channel",
+    "id": "19:channel-1@thread.tacv2"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "channelData": {
+    "team": {
+      "id": "19:team@thread.tacv2"
+    },
+    "eventType": "teamMemberRemoved",
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  }
+}

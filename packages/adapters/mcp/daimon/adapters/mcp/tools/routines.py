@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import CallerIsolation, load_caller_isolation
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
@@ -36,15 +37,18 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.setup_target import origin_channel_id
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.channel_isolation import routine_destination_channel
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.scope import ScopeContext
@@ -266,11 +270,14 @@ async def _check_destination(
             raise ToolError(
                 "the workspace access policy could not be read; no destination was saved"
             ) from err
-    if is_write_protected(
+    if not authorize(
         policy,
-        channel_id=channel_id,
-        parent_channel_id=parent_channel_id,
-        category_id=category_id,
+        subject=Subject(),
+        action=Action.POST,
+        surface=Surface.ROUTINE,
+        place=Place(
+            channel_id=channel_id, parent_channel_id=parent_channel_id, category_id=category_id
+        ),
     ):
         raise ToolError(
             f"{channel_id} is a protected channel: daimon does not post there, so a routine "
@@ -281,25 +288,8 @@ async def _check_destination(
 
 def _sees_routine(caller: CallerIsolation, row: RoutineRow) -> bool:
     """An isolated channel's routines, and its own agents', show only inside it."""
-    place = caller.isolation.isolated_channel(row.channel_id)
+    place = caller.isolated_place(row.channel_id)
     return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
-
-
-def _require_placement(caller: CallerIsolation, *, agent_name: str, channel_id: str | None) -> None:
-    """Refuse an agent the caller can't see, or a destination across an isolation line."""
-    if not caller.sees(agent_name):
-        raise ToolError(f"no agent named {agent_name!r} found for this tenant")
-    owner = caller.isolation.channel_of(agent_name)
-    if channel_id is None or caller.isolation.isolated_channel(channel_id) == owner:
-        return
-    if owner is not None:
-        raise ToolError(
-            f"{agent_name} belongs to an isolated channel, so its routines post only there. "
-            "Nothing was saved."
-        )
-    raise ToolError(
-        "That channel is isolated, so only its own agents post there. Nothing was saved."
-    )
 
 
 async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> TenantAccessPolicy:
@@ -314,25 +304,53 @@ def _check_agent_pin(
     *,
     platform: str,
     agent_name: str,
+    agent: AgentRef,
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
+    destination_channel_id: str | None,
+    origin: Place | None = None,
 ) -> None:
-    """Refuse a routine that would run a pinned agent outside its channels.
+    """Refuse a routine that would run a pinned agent outside its channels, or
+    another agent into an isolated channel (`authorize(SAVE_ROUTINE)`). One
+    saved from a verified ``origin`` inside an isolated channel stays in it.
 
     A pinned agent's routine must post straight into one of its pinned
     channels: the scheduler can't resolve a Discord thread's parent at fire
     time, so a thread destination is refused here rather than skipped later.
     The scheduler re-checks at every fire, so a pin added later still holds.
+    `destination_channel_id` is the channel the destination posts into.
+
+    ``agent`` is built by `daimon.core.authz.build_agent_ref` from the
+    resolved agent and the supplied name, so a pin on any name it answers to
+    holds (and a fact added to `AgentRef` reaches this check too).
     """
-    if agent_name not in policy.agent_channel_pins:
-        return
     target_channel_id: str | None = None
     if kind is not None and destination_id is not None:
         if kind == "channel":
             target_channel_id = destination_id
         elif platform == "slack":
             target_channel_id = destination_id.partition(":")[0]
-    if is_outside_agent_pin(policy, agent_names=(agent_name,), channel_id=target_channel_id):
+    decision = authorize(
+        policy,
+        subject=Subject(),
+        action=Action.SAVE_ROUTINE,
+        surface=Surface.ROUTINE,
+        agent=agent,
+        place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
+        origin=origin,
+    )
+    if decision.reason == "channel_isolated":
+        if origin is not None and isolated_channel_of(
+            policy, origin.channel_id, origin.parent_channel_id
+        ):
+            raise ToolError(
+                "This conversation is in an isolated channel, so its routines post only "
+                "into that channel. Nothing was saved."
+            )
+        raise ToolError(
+            "That channel is isolated, so only its own agents post there. Nothing was saved."
+        )
+    if not decision:
         raise ToolError(
             f"{agent_name} is pinned to specific channels by an operator, so its routines "
             "must post straight into one of them (a channel destination, not a thread "
@@ -418,28 +436,33 @@ async def _create_routine_impl(
     )
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
-    _check_agent_pin(
-        policy,
-        platform=auth.platform or "",
-        agent_name=agent_name,
-        kind=destination_kind,
-        destination_id=destination_id,
-    )
     budget_channel_id = destination_channel_id
     if destination_kind is None:
         budget_channel_id = await origin_budget_channel(
             runtime.session_factory, auth, origin_context_id
         )
 
-    caller = await load_caller_isolation(runtime, auth)
-    _require_placement(caller, agent_name=agent_name, channel_id=budget_channel_id)
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    caller = await load_caller_isolation(
+        runtime, auth, location_channel_id=origin_channel_id(origin)
+    )
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
         name=agent_name,
     )
-    if match is None:
+    if match is None or not caller.sees_agent(match):
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+    _check_agent_pin(
+        policy,
+        platform=auth.platform or "",
+        agent_name=agent_name,
+        agent=build_agent_ref(match.name, match.metadata, agent_name),
+        kind=destination_kind,
+        destination_id=destination_id,
+        destination_channel_id=destination_channel_id,
+        origin=turn_origin_place(origin) if origin is not None else None,
+    )
     agent_id = match.id
     await _require_agent_in_scope(
         runtime,
@@ -524,25 +547,23 @@ async def _update_routine_impl(
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
-        channel_id = new_destination_channel_id if destination_id is not None else row.channel_id
-        _require_placement(
-            caller,
-            agent_name=agent_name or row.agent_name,
-            channel_id=None if clear_destination else channel_id,
-        )
+        if clear_destination:
+            destination_channel_id = None
+        elif destination_id is not None:
+            destination_channel_id = new_destination_channel_id
+        else:
+            destination_channel_id = routine_destination_channel(row)
+        if not caller.sees(agent_name or row.agent_name):
+            raise ToolError(
+                f"no agent named {agent_name or row.agent_name!r} found for this tenant"
+            )
         if clear_destination:
             effective_kind, effective_id = None, None
         elif destination_kind is not None:
             effective_kind, effective_id = destination_kind, destination_id
         else:
             effective_kind, effective_id = row.destination_kind, row.destination_id
-        _check_agent_pin(
-            await _load_policy_for_save(session, tenant_id=tenant_id),
-            platform=auth.platform or "",
-            agent_name=agent_name if agent_name is not None else row.agent_name,
-            kind=effective_kind,
-            destination_id=effective_id,
-        )
+        update_policy = await _load_policy_for_save(session, tenant_id=tenant_id)
 
         # Recompute next_fire_at only when cron or timezone is being changed.
         next_fire_at: datetime | None = None
@@ -564,6 +585,31 @@ async def _update_routine_impl(
             if match is None:
                 raise ToolError(f"no agent named {agent_name!r} found for this tenant")
             new_agent_id = match.id
+        if update_policy.agent_channel_pins or update_policy.isolated_channel_ids:
+            # Check the agent the routine will run, by all its names.
+            effective_id_ma = new_agent_id or row.agent_id
+            effective_agent = next(
+                (
+                    agent
+                    for agent in await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+                    if agent.id == effective_id_ma
+                ),
+                None,
+            )
+            if effective_agent is None:
+                raise ToolError("the routine's agent no longer exists. Nothing was saved.")
+            effective_name = agent_name if new_agent_id is not None else row.agent_name
+            _check_agent_pin(
+                update_policy,
+                platform=auth.platform or "",
+                agent_name=effective_name or effective_agent.name,
+                agent=build_agent_ref(
+                    effective_agent.name, effective_agent.metadata, effective_name
+                ),
+                kind=effective_kind,
+                destination_id=effective_id,
+                destination_channel_id=destination_channel_id,
+            )
         if clear_destination:
             effective_channel_id = None
         elif destination_kind is not None:

@@ -21,6 +21,7 @@ nav:
   - Billing: billing.md
   - Defaults: defaults.md
   - Slack: slack.md
+  - Teams: teams.md
   - Claude Code plugin: plugin.md
   - mux: mux.md
 

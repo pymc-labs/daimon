@@ -139,7 +139,7 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
     await set_access_policy(
         db_session,
         tenant_id=derive_tenant_uuid(platform="slack", workspace_id=TEAM_ID),
-        policy=TenantAccessPolicy(isolated_channel_ids=("C1",)),
+        policy=TenantAccessPolicy(sealed_channel_ids=("C1",), isolated_channel_ids=("C1",)),
     )
     await db_session.commit()
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):

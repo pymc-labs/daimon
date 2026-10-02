@@ -18,10 +18,7 @@ from daimon.core.notebooks.host_client import (
     list_blogs_from_host,
     list_notebooks_from_host,
 )
-from daimon.core.notebooks.slug import AGENT_SLUG_PATTERN, sanitize_slug
-
-# Re-export under the historical private name; slug.py is the canonical owner.
-_AGENT_SLUG_PATTERN = AGENT_SLUG_PATTERN
+from daimon.core.notebooks.slug import sanitize_slug
 
 
 class HostNotConfiguredError(DaimonError):
@@ -48,9 +45,10 @@ def _principal_prefix(principal_key: str) -> str:
 
 
 def _resolve_slug(*, agent_slug: str | None, principal_key: str | None) -> str:
-    # 16 bytes = 128 bits of entropy. The slug doubles as the unauthenticated
-    # access secret for /n/<slug>/* (a marimo session with kernel access on
-    # the host VM), so we want it well past brute-force range.
+    # 16 bytes = 128 bits of entropy. Access is gated by the per-notebook
+    # token the host puts in the link, not the slug (the slug is visible to
+    # other notebooks' code on the host), but a random slug still keeps
+    # links from colliding or being guessed into a 409.
     if agent_slug is None:
         return secrets.token_urlsafe(16)
     if principal_key is None:

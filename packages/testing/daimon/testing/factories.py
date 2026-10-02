@@ -49,6 +49,11 @@ from daimon.core.stores import (
     wizard_session as wizard_session_store,
 )
 from daimon.core.stores.agent_memory_stores import insert_memory_store
+from daimon.core.stores.direct_messages import (
+    DirectMessageRow,
+    set_dm_enabled,
+    start_conversation,
+)
 from daimon.core.stores.domain import (
     AccountRow,
     AgentGithubBindingRow,
@@ -183,6 +188,7 @@ async def make_routine(
     trigger_message: str = "hello",
     enabled: bool = True,
     next_fire_at: datetime | None = None,
+    channel_id: str | None = None,
 ) -> RoutineRow:
     """Create a Routine row via the real routines store, returning RoutineRow."""
     tenant = tenant or await make_tenant(session)
@@ -197,6 +203,7 @@ async def make_routine(
         trigger_message=trigger_message,
         enabled=enabled,
         next_fire_at=next_fire_at,
+        channel_id=channel_id,
     )
 
 
@@ -244,6 +251,7 @@ async def make_usage_event(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     event_id: str | None = None,
+    channel_id: str | None = None,
 ) -> UsageEventRow:
     """Record a usage event via `usage_events.record`, wrapping raw token ints into
     the SDK-typed `BetaManagedAgentsSpanModelUsage` (constructed inline, no
@@ -270,6 +278,7 @@ async def make_usage_event(
         model=model,
         model_usage=model_usage,
         event_id=event_id,
+        channel_id=channel_id,
     )
     orm = (
         await session.execute(
@@ -388,6 +397,40 @@ async def make_channel_budget(
     )
 
 
+async def make_dm_conversation(
+    session: AsyncSession,
+    *,
+    tenant: TenantRow,
+    account_id: uuid.UUID,
+    route_key: str = "dm-chan",
+    external_user_id: str = "u1",
+    workspace_id: str = "g1",
+    scope_id: str = "dm:1",
+    source_channel_id: str | None = "chan-1",
+) -> DirectMessageRow:
+    """A DM moved from `source_channel_id` (None: started before sources), with DMs enabled."""
+    await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+    conversation = DirectMessageRow(
+        platform=tenant.platform,
+        route_key=route_key,
+        external_user_id=external_user_id,
+        tenant_id=tenant.id,
+        account_id=account_id,
+        workspace_id=workspace_id,
+        channel_id=route_key,
+        source_channel_id=source_channel_id,
+        scope_id=scope_id,
+        source_url="https://example.com/source",
+        context="",
+        memory_read_only=False,
+        history=[],
+        recent_message_ids=[],
+        active_until=None,
+    )
+    await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+    return conversation
+
+
 async def make_agent_memory_store(
     session: AsyncSession,
     *,
@@ -465,6 +508,7 @@ async def make_thread_session(
     thread_id: str | None = None,
     ma_session_id: str | None = None,
     ma_agent_id: str | None = None,
+    channel_id: str | None = None,
     watermark_message_id: str | None = None,
     created_at: datetime | None = None,
 ) -> ThreadSessionRow:
@@ -481,6 +525,7 @@ async def make_thread_session(
         account_id=account.id,
         ma_session_id=ma_session_id,
         ma_agent_id=ma_agent_id,
+        channel_id=channel_id,
         watermark_message_id=watermark_message_id,
         created_at=created_at,
     )

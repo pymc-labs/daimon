@@ -7,6 +7,7 @@ that can be unit-tested without a FastMCP Context.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import time
 import uuid
@@ -27,14 +28,21 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
-from daimon.core import agent_lifecycle
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
+from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -44,26 +52,26 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.mcp_merge import (
     DAIMON_MCP_SERVER_NAME,
     get_reserved_mcp_rejection,
-    merge_default_mcp_server,
-    merge_default_mcp_toolset,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
-    MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
-    build_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
-from daimon.core.errors import DefaultsError
+from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
 from daimon.core.github_repo_auth import InstallationLookup
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_attach import attach_mcp_server_to_agent
+from daimon.core.mcp_attach import (
+    McpServerReplaceRefusedError,
+    attach_mcp_server_to_agent,
+    decide_mcp_replacement,
+    replaced_server_url,
+)
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
@@ -72,7 +80,6 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
@@ -119,6 +126,9 @@ class AgentInfo(BaseModel):
     """Set only by ``create_agent`` and ``fork_agent``, and only when nothing
     routes to the new agent yet: post it verbatim, so the person learns the
     agent exists but answers nowhere and what to say to change that."""
+    dropped_skills: list[str] | None = None
+    """Set only by ``fork_agent``: skills scoped to one agent (``agent/skill``),
+    left off the copy. Tell the person which ones."""
 
     @classmethod
     def from_ma(
@@ -203,11 +213,6 @@ _CREATE_FIELDS: Final = frozenset(
         # skills tool group ships; attach skills via update_agent instead.
     }
 )
-
-# Fork copies the source's attached skills (panel _FORK_COPY_FIELDS parity).
-# The create_agent skills restriction (above) applies only to create_agent's
-# flat params, not to cloning an existing agent's state.
-_FORK_COPY_FIELDS: Final = _CREATE_FIELDS | {"skills"}
 
 
 _DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
@@ -295,12 +300,14 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return (
             f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
-            "Use fork_agent to make an editable copy, then edit the named copy."
+            "An admin can make an editable copy with fork_agent; a member can create_agent "
+            "a new one instead."
         )
     if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
         return (
             f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
-            "Use fork_agent to make an editable copy, then edit the named copy."
+            "An admin can make an editable copy with fork_agent; a member can create_agent "
+            "a new one instead."
         )
     return None
 
@@ -325,10 +332,14 @@ async def _list_agents_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     page: str | None,
+    origin_context_id: str | None = None,
 ) -> list[AgentInfo]:
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    caller = await load_caller_isolation(runtime, auth, agents=rows)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    caller = await load_caller_isolation(
+        runtime, auth, agents=rows, location_channel_id=origin_channel_id(origin)
+    )
     rows = [row for row in rows if caller.sees_agent(row)]
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
@@ -341,9 +352,16 @@ async def _get_agent_impl(
     auth: AuthIdentity,
     name: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id, require_identity=False
+        runtime,
+        auth,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        require_identity=False,
+        location_channel_id=origin_channel_id(origin),
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
     # The prompt is readable only by callers who could replace it on any agent:
@@ -549,6 +567,7 @@ async def _update_agent_impl(
     mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None,
     skills: list[str | BetaManagedAgentsSkillParams] | None,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     if model is not None:
         _reject_unknown_model(model)
@@ -558,10 +577,16 @@ async def _update_agent_impl(
         raise ToolError("update_agent: at least one field is required")
     if mcp_servers is not None:
         _reject_reserved_servers(runtime, mcp_servers)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
     if tools is not None:
@@ -571,19 +596,36 @@ async def _update_agent_impl(
     if skills is not None:
         touched_fields.add("skills")
     if touched_fields & reachability.REACHABILITY_GATED_FIELDS:
-        await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=name)
+        await reachability.require_admin_for_reachable_agent(
+            runtime, auth, agent_name=name, agent=agent
+        )
+    mcp_replace_allowed = (
+        await _require_mcp_replace_allowed(
+            runtime,
+            auth,
+            agent,
+            [(str(entry.get("name")), str(entry.get("url"))) for entry in mcp_servers],
+        )
+        if mcp_servers is not None
+        else False
+    )
 
     # Resolve skill names outside the closure — name resolution does not depend on
     # the agent's current state and must not be repeated on each retry attempt.
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
     if skills is not None:
         try:
-            caller = await load_caller_isolation(runtime, auth)
+            caller = await load_caller_isolation(
+                runtime, auth, location_channel_id=origin_channel_id(origin)
+            )
+            owners = await load_skill_owners(runtime, caller, auth.tenant_id)
             resolved_skills = await resolve_skill_names(
                 runtime.client,
                 skills,
                 tenant_id=auth.tenant_id,
-                is_owner_hidden=lambda owner: not caller.sees(owner),
+                is_skill_hidden=lambda skill_id, body: caller.hides_skill(
+                    owners, skill_id=skill_id, body=body
+                ),
             )
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc
@@ -613,6 +655,17 @@ async def _update_agent_impl(
                     "or use remove_skill before adding more."
                 )
         if mcp_servers is not None:
+            if not mcp_replace_allowed and any(
+                replaced_server_url(
+                    fresh, server_name=str(entry.get("name")), url=str(entry.get("url"))
+                )
+                for entry in mcp_servers
+            ):
+                # Attached under this name at another URL since the check above.
+                raise ToolError(
+                    f"'{name}' now has one of these server names at another URL; repointing "
+                    "it needs an admin. Nothing was changed."
+                )
             patch["mcp_servers"] = merge_mcp_servers_with_ma(mcp_servers, fresh)
             # merge_mcp_servers_with_ma's return type is `list | None` at the
             # signature level (None only for a None input), but `mcp_servers`
@@ -642,8 +695,20 @@ async def _update_agent_impl(
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
         return await runtime.client.beta.agents.update(fresh.id, version=fresh.version, **patch)
 
+    # An MCP server change is serialized with the token forms' attach-then-
+    # publish for this agent; other fields need no lock.
+    mcp_lock = (
+        agent_mcp_write_lock(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
+        )
+        if mcp_servers is not None
+        else contextlib.nullcontext()
+    )
     try:
-        updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        async with mcp_lock:
+            updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -680,6 +745,41 @@ async def _update_agent_impl(
     return result
 
 
+async def _require_mcp_replace_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    agent: BetaManagedAgentsAgent,
+    servers: list[tuple[str, str]],
+) -> bool:
+    """Gate repointing an existing server name at another URL (`mcp_replace`).
+
+    Returns whether a replacement is authorized, for the fresh-agent re-check
+    in the write. Refuses here when one is needed and the caller may not make
+    it; the attachment rules count handoff threads and personal defaults as
+    shared, which the plain reachability gate does not.
+    """
+    replaced = [
+        name for name, url in servers if replaced_server_url(agent, server_name=name, url=url)
+    ]
+    if not replaced:
+        return False
+    outcome = await decide_mcp_replacement(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
+        agent=agent,
+        caller=reachability.channel_admin_caller(auth),
+        default=runtime.deployment_default,
+    )
+    if outcome != "allow":
+        raise ToolError(
+            f"'{agent.name}' already has {', '.join(repr(n) for n in replaced)} at another URL "
+            "and is shared, so repointing it needs a server or workspace admin, and the caller "
+            "is not one. Nothing was changed. Do not retry under another name."
+        )
+    return True
+
+
 async def _attach_mcp_server_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -688,6 +788,7 @@ async def _attach_mcp_server_impl(
     server_name: str,
     url: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     # #142: guard the reserved daimon-mcp entry before even looking at the agent.
     # Also reject any URL that points at the deployment's own public_url under a
@@ -700,11 +801,19 @@ async def _attach_mcp_server_impl(
     rejection = get_reserved_mcp_rejection(server_name=server_name, url=url, public_url=public_url)
     if rejection is not None:
         raise ToolError(rejection)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=agent_name, agent=agent
+    )
 
     existing = list(agent.mcp_servers or [])
     # No-op check on the initially-found agent (acceptable: a concurrent change
@@ -719,9 +828,24 @@ async def _attach_mcp_server_impl(
     # The reserved-server guard above is not repeated there: it depends only on
     # caller inputs, so each entry point applies its own policy.
     try:
-        updated = await attach_mcp_server_to_agent(
-            runtime.client, agent.id, server_name=server_name, url=url
-        )
+        # Serialized with the token forms' attach-then-publish for this agent.
+        async with agent_mcp_write_lock(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
+        ):
+            replace_allowed = await _require_mcp_replace_allowed(
+                runtime, auth, agent, [(server_name, url)]
+            )
+            updated = await attach_mcp_server_to_agent(
+                runtime.client,
+                agent.id,
+                server_name=server_name,
+                url=url,
+                replace_allowed=replace_allowed,
+            )
+    except McpServerReplaceRefusedError as exc:
+        raise ToolError(str(exc)) from exc
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -742,81 +866,22 @@ async def _fork_agent_impl(
     source = await resolve_setup_agent(
         runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
     )
-    # A copy of a pinned agent would be an unpinned agent with its prompt,
-    # skills and connectors. Refuse rather than guess which channels the copy
-    # belongs in; an operator pins the copy by name if it should exist.
-    async with runtime.session_factory() as session:
-        try:
-            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-        except AccessPolicyUnreadable as exc:
-            raise ToolError(
-                "fork_agent: the workspace access policy could not be read; nothing was created."
-            ) from exc
-    if any(
-        name in policy.agent_channel_pins
-        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
-        if name is not None
-    ):
-        raise ToolError(
-            f"fork_agent: {source_name} is pinned to specific channels by an operator, so it "
-            "can't be copied. Nothing was created. Do not retry."
+    public_url = runtime.settings.mcp.public_url
+    try:
+        copy = await copy_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            source=source,
+            new_name=new_name,
+            public_url=str(public_url) if public_url is not None else None,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
         )
-    source_ma = await runtime.client.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
-    fork_params["name"] = new_name
-    fork_params["metadata"] = build_metadata(
-        tenant_id=auth.tenant_id,
-        name=new_name,
-        account_id=derive_guild_account_uuid(auth.tenant_id),
-    )
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
-        public_url,
-    )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        cast("list[Tool] | None", fork_params.get("tools")),
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        cast("list[Tool] | None", fork_params.get("tools"))
-    )
-
-    # Every non-forked creation/edit path already runs the guidance applier
-    # (`update_agent`, `reconcile_agent`); a fork bypasses both and copies raw
-    # MA state directly, so normalize it here too. Skip for a source stamped
-    # isolated — its session mounts no secrets, and the block would teach it
-    # to look for resources it must not have.
-    if source_ma.metadata.get(MA_METADATA_KEY_ISOLATED) != "true":
-        fork_params["system"] = apply_credential_guidance(
-            cast("str", fork_params.get("system") or "")
-        )
-
-    # A fork starts with no credentials: no GitHub access, repo binding or
-    # proof, and no agent-wide MCP token. Servers that only work with one are
-    # left off the copy rather than mounted broken.
-    source_agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(source.id))
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
-        sessionmaker=runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        source_agent_uuid=source_agent_uuid,
-        mcp_servers=cast("list[dict[str, object]] | None", fork_params.get("mcp_servers")),
-        tools=cast("list[dict[str, object]] | None", fork_params.get("tools")),
-    )
-    fork_params["mcp_servers"] = servers
-    fork_params["tools"] = tools
-
-    new_ma = await runtime.client.beta.agents.create(**fork_params)
-
-    info = await _build_agent_info(runtime.client, new_ma, tenant_id=auth.tenant_id)
+    except DaimonError as exc:
+        raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
+    info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
+    if copy.dropped_skills:
+        info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
     return await _with_answering_note(runtime, auth, info)
 
 
@@ -860,14 +925,20 @@ async def _archive_agent_impl(
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
-    async def list_agents(ctx: Context, page: str | None = None) -> list[AgentInfo]:  # pyright: ignore[reportUnusedFunction]
+    async def list_agents(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, page: str | None = None, origin_context_id: str | None = None
+    ) -> list[AgentInfo]:
         """List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination."""
-        return await _list_agents_impl(runtime, await _auth(ctx), page)
+        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
+        return await _list_agents_impl(runtime, await _auth(ctx), page, origin_context_id)
 
     @mcp.tool
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, name: str, expected_ma_agent_id: str | None = None
+        ctx: Context,
+        name: str,
+        expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Show what an agent can access: attached MCP servers and skills.
 
@@ -875,12 +946,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
         For an admin on an editable agent, ``system`` is the full system prompt;
-        null means withheld (non-admin caller, or Daimon/defaults-managed agent)."""
+        null means withheld (non-admin caller, or Daimon/defaults-managed agent).
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _get_agent_impl(
             runtime,
             await _auth(ctx),
             name,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -935,6 +1008,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None,
         skills: list[str | BetaManagedAgentsSkillParams] | None = None,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
@@ -949,7 +1023,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         one running now. ``skills`` accepts names such as
         ``["build-models", "compare-models"]``, resolved server-side; explicit
         ``{"type": "custom", "skill_id": "skill_..."}`` entries also work. A model or
-        prompt change also returns ``applies``: post it verbatim as part of the reply."""
+        prompt change also returns ``applies``: post it verbatim as part of the reply.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _update_agent_impl(
             runtime,
             await _auth(ctx),
@@ -961,6 +1036,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             mcp_servers=mcp_servers,
             skills=skills,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -970,6 +1046,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         server_name: str,
         url: str,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Add an MCP server that needs no token, such as Context7, to an agent.
 
@@ -980,7 +1057,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
-        name and URL is a no-op. Other connections are preserved."""
+        name and URL is a no-op. Other connections are preserved.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _attach_mcp_server_impl(
             runtime,
             await _auth(ctx),
@@ -988,6 +1066,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             server_name=server_name,
             url=url,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool

@@ -36,9 +36,11 @@ def _payload(users: list[str] | None) -> dict[str, Any]:
 
 def test_evaluate_reads_the_picked_members_and_the_panel_channel() -> None:
     decision = evaluate_channel_admins_submission(_payload(["U0LEAD"]))
-    assert decision == ChannelAdminsSubmission(meta=META, user_ids=("U0LEAD",))
+    assert decision == ChannelAdminsSubmission(meta=META, user_ids=("U0LEAD",)), (
+        "the picked member is read"
+    )
     empty = evaluate_channel_admins_submission(_payload(None))
-    assert empty is not None and empty.user_ids == ()
+    assert empty is not None and empty.user_ids == (), "an empty picker means no one"
     assert evaluate_channel_admins_submission({"view": {}}) is None, "no panel metadata"
 
 
@@ -81,13 +83,15 @@ async def test_admin_saves_then_clears_and_the_routing_view_refreshes(
     client = await _run(db_session_factory, monkeypatch, admin=True, users=("U0LEAD", "U0LEAD"))
     async with db_session_factory() as session:
         (row,) = await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
-    assert (row.channel_id, row.user_ids) == (CHANNEL, ("U0LEAD",))
+    assert (row.channel_id, row.user_ids) == (CHANNEL, ("U0LEAD",)), "duplicates collapse"
     assert row.updated_by_account_id is not None, "the saver is attributed"
     client.views_update.assert_awaited_once_with(view_id="V1", view={"v": 1})
 
     await _run(db_session_factory, monkeypatch, admin=True, users=())
     async with db_session_factory() as session:
-        assert await list_channel_admins(session, tenant_id=tenant_id, platform="slack") == []
+        assert await list_channel_admins(session, tenant_id=tenant_id, platform="slack") == [], (
+            "saving no one deletes the row"
+        )
 
 
 async def test_member_submission_is_refused_and_stores_nothing(

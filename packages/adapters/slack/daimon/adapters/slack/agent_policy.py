@@ -36,10 +36,11 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -55,6 +56,7 @@ __all__ = [
     "NEEDS_ADMIN_SKILL_MESSAGE",
     "NEEDS_ADMIN_SPEC_MESSAGE",
     "SHARED_AGENT_MESSAGE",
+    "SHARED_AGENT_SKILLS_MESSAGE",
     "gather_target_facts",
     "refusal_message",
     "refuse_unless_allowed",
@@ -67,7 +69,8 @@ log = structlog.get_logger()
 #: admins included: a panel edit never stamps the reconciler's spec hash, so
 #: the drift would survive every later reconcile with no way back.
 MANAGED_AGENT_MESSAGE: Final[str] = (
-    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 
 #: A spec edit by a member against an agent the workspace currently depends on.
@@ -78,9 +81,9 @@ NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
 
 #: A skill added or removed by a member on an agent someone else also uses.
 NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
-    "Others use this agent (a channel or workspace default, a thread, or someone else's "
-    f"routine or queued task), so changing its skills needs {ADMIN_NOUN} or an admin of "
-    "every channel it answers in."
+    "Others use this agent (a default, a thread, or someone else's routine or "
+    f"conversation), so changing its skills needs {ADMIN_NOUN} or an admin of every "
+    "channel it answers in."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -90,7 +93,14 @@ NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
 SHARED_AGENT_MESSAGE: Final[str] = (
     "This agent answers for other people here, so changing its repo or its keys "
     f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to fork it; the fork starts with no keys of its own."
+    "to make you a new agent of your own."
+)
+
+#: A skill-repo import by a member onto a shared agent: the imported skills
+#: would reach everyone it answers.
+SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
+    f"This agent answers for other people here, so adding skills to it needs {ADMIN_NOUN}. "
+    "Ask me and I'll write the request for them, or ask me to fork it and add them to the fork."
 )
 
 AGENT_GONE_MESSAGE: Final[str] = (
@@ -103,9 +113,11 @@ async def gather_target_facts(
     *,
     operation: OperationKind,
     tenant_id: uuid.UUID,
-    agent_name: str,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str | None,
     is_daimon_managed: bool,
     caller: ChannelAdminCaller,
+    caller_account_id: uuid.UUID | None = None,
 ) -> TargetFacts:
     """The policy facts about one target, read fresh and only while the decision turns on them.
 
@@ -124,10 +136,13 @@ async def gather_target_facts(
             operation,
             tenant_id=tenant_id,
             platform="slack",
-            agent_name=agent_name,
+            agent_names=agent_names,
+            ma_agent_id=ma_agent_id,
             default=runtime.deployment_default,
             caller=caller,
             is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=caller.platform_user_id,
         )
 
 
@@ -141,11 +156,13 @@ async def refuse_unless_allowed(
     channel_id: str,
     user_id: str,
     thread_ts: str | None = None,
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Decide `operation` against the agent daimon knows as `agent_id`.
 
     Returns True when the caller must stop (the refusal has been posted as an
-    ephemeral), False to proceed.
+    ephemeral), False to proceed. `caller_account_id` leaves the caller's own
+    live sessions out of the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
@@ -174,9 +191,11 @@ async def refuse_unless_allowed(
         runtime,
         operation=operation,
         tenant_id=tenant_id,
-        agent_name=_agent_name_of(agent),
+        agent_names=agent_pin_names(agent.name, agent.metadata),
+        ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller_account_id=caller_account_id,
     )
     return await _render_outcome(
         client,
@@ -215,7 +234,10 @@ async def refuse_unless_allowed_for_agent_name(
         runtime,
         operation=operation,
         tenant_id=tenant_id,
-        agent_name=agent_name,
+        agent_names=(agent_name,)
+        if agent is None
+        else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
     )
@@ -253,10 +275,6 @@ def _is_daimon_managed(agent: BetaManagedAgentsAgent) -> bool:
     return agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
 
 
-def _agent_name_of(agent: BetaManagedAgentsAgent) -> str:
-    return str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
-
-
 def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     """The copy for a refused `operation`.
 
@@ -268,6 +286,8 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SPEC_MESSAGE
     if operation in ("skill_add", "skill_remove"):
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SKILL_MESSAGE
+    if operation == "skill_repo_connect":
+        return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE
 
 

@@ -33,6 +33,10 @@ without itself changing that state. That is why every ephemeral send below
 routes through that same split rather than a fixed response call, and why
 this module works unmodified from both call sites.
 
+The skill-repo form reuses the same gate at submit time with
+`operation="skill_repo_connect"`: its import attaches skills to the agent,
+which reaches every member a shared agent answers.
+
 The pre-filter's caller bounds this gate with a timeout and opens the modal
 anyway if it expires. That is sound only because call site (2) repeats every
 check below before the write, so it is the real boundary — it is not a
@@ -46,7 +50,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Final
+from typing import Final, Literal
 
 import httpx
 import structlog
@@ -55,6 +59,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
 from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -74,6 +79,11 @@ _SHARED_AGENT_MESSAGE: Final[str] = (
     "Ask a server admin to give it access to the repo with Daimon."
 )
 
+
+_SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
+    "Adding skills to this shared agent needs a server admin (Manage Server). "
+    "Ask a server admin to import them with Daimon, or fork the agent and add them to the fork."
+)
 
 _AGENT_GONE_MESSAGE: Final[str] = (
     "That agent no longer exists — ask again and a fresh request will be posted."
@@ -117,8 +127,13 @@ async def refuse_if_shared_and_not_admin_for_request(
     runtime: DiscordRuntime,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
+    operation: Literal["repo_bind", "skill_repo_connect"] = "repo_bind",
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Click-time re-check for the chat-initiated repo-bind write.
+
+    `caller_account_id` (the requester's, who alone may click) leaves their own
+    live sessions out of the sharing read, as their routines are.
 
     Returns True when the caller must return immediately (the write is
     refused); False when the write may proceed. Order, each short-circuiting:
@@ -187,17 +202,23 @@ async def refuse_if_shared_and_not_admin_for_request(
     async with runtime.sessionmaker() as session:
         facts = await load_target_facts(
             session,
-            "repo_bind",
+            operation,
             tenant_id=tenant_id,
             platform="discord",
-            agent_name=agent.name,
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             caller=channel_admin_caller(interaction.user),
             is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=str(interaction.user.id),
         )
-    outcome = decide_operation("repo_bind", is_admin=False, target=facts)
+    outcome = decide_operation(operation, is_admin=False, target=facts)
     if outcome in ("managed_agent", "needs_admin"):
-        await _send_ephemeral(interaction, _SHARED_AGENT_MESSAGE)
+        await _send_ephemeral(
+            interaction,
+            _SHARED_AGENT_MESSAGE if operation == "repo_bind" else _SHARED_AGENT_SKILLS_MESSAGE,
+        )
         return True
     return False
 

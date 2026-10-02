@@ -12,6 +12,9 @@ This page is the map to read before the code. `CONTRIBUTING.md` has the dev
 setup and the quality gates; [configuration.md](configuration.md) has every
 setting; [self-hosting.md](self-hosting.md) has the deployment.
 
+Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
+Anthropic response attempts, database pool use, event loop lag and active turns.
+
 ## The shape
 
 ```mermaid
@@ -20,6 +23,7 @@ flowchart TB
         direction LR
         Discord
         Slack
+        Teams
         MCP
         Scheduler
         CLI
@@ -50,6 +54,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -64,7 +69,7 @@ and CI:
 | Contract | Forbids |
 | --- | --- |
 | Core must not import adapters | `daimon.core` → `daimon.adapters` |
-| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack → another |
+| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack, teams → another |
 | ORM module is private to stores and defaults | anything but `daimon.core.stores.**` / `daimon.core.defaults.**` → `daimon.core._models` |
 | Core must not import testing | `daimon.core` → `daimon.testing` |
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
@@ -88,7 +93,7 @@ credential, whatever a future contributor is tempted to do inside it.
 
 ## How a message becomes a turn
 
-Discord and Slack run the same two-stage chokepoint in `daimon.core.turn`.
+Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`.
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
 
@@ -133,6 +138,26 @@ config). The order is load-bearing and documented as such in the module:
 The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
+A Slack `app_mention` runs a turn only when its text contains the bot's own
+`<@U…>` mention token, follow-ups in a thread included. Slack's docs say the
+event fires only on a direct mention, but installs have reported it arriving
+for thread replies that never mentioned the bot, so `_handle_app_mention`
+checks the text itself, as Discord checks `message.mentions`. The bot's user
+id comes from `auth.test`, cached per workspace. The check runs after dedup and
+the token read and before the Slack Connect rejection, so an external sender
+who never addressed the bot gets no notice. A dropped event is logged as
+`slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
+without an error reply.
+
+An unmentioned reply in a Discord or Teams thread costs one cascade read of
+`thread_participation_scopes`. In a followed thread it joins a quiet-timer
+batch; once the thread goes quiet the shared gates in
+`packages/core/daimon/core/participation_gates.py` run the hourly cap, balance,
+cap and channel budget checks, then the metered classifier. A `respond`
+verdict runs an ordinary turn through `admit()` as the burst's newest author,
+with every notice withheld. Teams also counts a quote of the bot's message as
+a mention.
+
 Discord checks its per-guild in-flight limit before the optional process-wide
 turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
 replies and DMs count against it; an excess requested turn gets a retry notice.
@@ -140,11 +165,11 @@ Unprompted replies follow their existing silent-refusal policy. Continuation
 wakes retain their existing admission path. The limit is unset by default and
 applies only to this Discord process.
 
-Discord and Slack also limit simultaneous chat turns per tenant before admission.
+Discord, Slack and Teams also limit simultaneous chat turns per tenant before admission.
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
 `default` clears it and restores the adapter's deployment setting (3 by default).
 The check covers Discord mentions, thread participation and wizard submits,
-and Slack mentions. It does not limit MCP or routine turns.
+Slack mentions, and Teams messages, wakes and thread participation. It does not limit MCP or routine turns.
 
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -160,11 +185,12 @@ with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice). The continuation dispatchers on
-both platforms, which can post skip or responder-changed copy outside any
-turn (from the wake poller or a credential submission), ask the same decision
-right before each post and settle the row skipped without posting when it
-isn't `unprotected`.
+the thread, and on its ephemeral shed notice), and Teams `_handle` and
+thread participation (plus the refusals `handle_message` posts). The continuation dispatchers (Teams uses
+core `continuity/dispatch.py`), which can post skip or responder-changed copy
+outside any turn (from the wake poller or a credential submission), ask the
+same decision right before each post and settle the row skipped without
+posting when it isn't `unprotected`.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
@@ -181,14 +207,15 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role (and role ids, for channel admins), refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
+and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids, Teams Entra object and
+conversation ids):
 
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
-| `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
-| `isolated_channel_ids` | nothing is isolated | the agent, skill, routine, routing, handoff and hub MCP tools via `tools/_isolation.py`; the channel read tools via `ChannelReadPolicy`; `/memory` on both platforms; the CLI's `config` writes; `start_dm` refuses to move the conversation. See Channel isolation below |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
+| `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; the session transcript tools (`list_sessions`, `get_session`, `list_session_events`, agent chat's `list_my_sessions`, `get_my_session`, `list_events`, `continue_turn` and the rest, and the hub's) via `tools/_session_access.py`; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
+| `isolated_channel_ids` | nothing is isolated | `authorize()` (`channel_isolated`), asked by admission and `reauthorize`, the routine save and fire checks, the channel write, read and DM tools and every channel default bind (tools, panels, the CLI's `config` writes); visibility in the agent, skill, routine, routing and handoff MCP tools (`tools/_isolation.py`), the hub, the setup panel for members and `/memory`. See Channel isolation below |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 | `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
@@ -215,7 +242,52 @@ one of the same account and responder, not only the current turn's: a member
 who copies an origin id out of a sealed-channel turn can read that channel
 from elsewhere until it expires -- someone who could read it anyway.
 Outside reads are refused after the platform's own caller check, and search
-drops sealed hits. Operators edit the policy with the CLI:
+drops sealed hits.
+
+A session transcript holds everything its turns saw, so the transcript tools
+apply the same seal. `admit()` records the turn's channel and thread on the
+`Admission`, with every id that seals it (its channel and a thread sealed on
+its own), and `create_session` stamps them on the session (`daimon_channel`,
+`daimon_thread`, `daimon_sealed=<ids>`; `daimon.core.session_seal`). The
+recorded seal only grows: a sealed turn that reuses a session adds its id
+(`bind_session`, which waits rather than run the turn if Managed Agents
+refuses the update mid-turn), and a session that replaces another -- by
+transcript, checkpoint, bundle, handoff or dead-session recovery -- inherits
+its predecessor's ids, or is sealed to its own thread when the predecessor
+can't be read. Each read or follow-up requires the calling turn's origin to be
+inside every recorded id, whatever the current policy, and judges the channel
+and thread against the current policy as a channel read would: the main MCP
+server's session tools take the calling turn's `origin_context_id`, claimable
+only by a chat turn's own credential; agent-chat keys run outside every
+channel, so they never list, read or continue a sealed conversation, and the
+hub does the same for members. A workspace admin may list and read any sealed
+conversation from the hub, and a channel admin those of the channels they
+administer whose every seal lies there too (the channel, a thread in it, or
+its `channel:ts`), but continue none (see [Trust model](#trust-model)).
+Sealing a channel later covers its existing sessions, and unsealing never
+releases a session that ran sealed -- only that thread, when the thread was
+sealed on its own. A session from before the stamp that a thread ran on
+(`thread_sessions`) has no known
+parent channel: while the tenant seals anything it is shown only to a turn in
+that same thread. Nor can a sealed turn open or drive another session to carry
+its content out: agent chat's `start_turn`, `ask` and `continue_turn` are off
+the surface a chat turn's token (`chat_agent_id`) sees, and refuse that
+credential outright if they are ever reached with it
+(`_require_outside_chat_turn`), so every session they create comes from a
+headless caller outside every channel. The one exception is an agent key
+minted with "Use from your coding tools" in a sealed channel, or in a channel
+its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
+records that channel (`coding_token_channel`), and its calls run as a turn
+there -- under the channel's pin, seal, environment and budget, with its
+sessions stamped to the channel (`token_channel_id`). `authorize` sees it as
+the place of the key's turns (`mcp_place`) and as the read origin, nowhere
+else, and re-decides both at the moment of action; the seal is read right
+before a session is created, and a conversation opened before its channel was
+sealed can be read but not continued. Keys minted anywhere else are
+unchanged. A server admin mints anywhere; a channel admin of every channel an
+agent is pinned to mints for it only from inside one of those channels, and
+that token is always bound there (`authorize(MINT_CODING_TOKEN)`, through
+`authorize_coding_token`). Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -233,9 +305,10 @@ daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 A pinned agent runs only in its listed channels and the threads under them.
 The pin is keyed by agent name and checked against both the cascade's name and
 the agent's own metadata name, so a thread handed to the agent by id is
-covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a DM
-included, and admins get no exemption: the pin exists because of what the
-agent's credentials reach, not who is asking. `hand_off_task` refuses to bring
+covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a
+member's DM included. Admins are exempt only where the reply reaches no one
+else -- their own DM and hub turns -- and even there the agent's channel sends
+reach only its pinned channels (see [Trust model](#trust-model)). `hand_off_task` refuses to bring
 a pinned agent into another channel before anything is written. A pinned
 agent's routine must post straight into a pinned channel (a channel
 destination, not a thread or none), because the scheduler cannot resolve a
@@ -254,9 +327,11 @@ policy is read on every call, and a pinned agent is refused before any session
 is created or message sent. Only the operator's internal tokens, which carry
 no platform user, bypass it.
 
-Pins are not the only boundary between projects in one workspace. Whatever an
-agent can reach (its repo, keys, connectors and memory) is also guarded where
-a member could otherwise borrow it:
+Cross-agent protection is complete only for pinned agents: an unpinned agent
+still answers wherever the cascade sends it, so pin every client project
+agent. Beyond the pin, whatever an agent can reach (its repo, keys,
+connectors and memory) is also guarded where a member could otherwise borrow
+it:
 
 - `hand_off_task` lets a member hand a thread only to the agent the channel
   itself answers with; any other destination needs an admin.
@@ -270,9 +345,44 @@ fields not given keep their stored value, including concurrent CLI edits.
 Pins are edited in place instead: `--add-pin-agent` adds channels to one
 agent's pin and `--remove-pin-agent` drops one channel or the whole pin, and
 every other agent's pin is kept, so onboarding a second client never unpins
-the first. Removing a pin that isn't stored is refused. `--pin-agent` still
-replaces the whole map, but refuses to drop an agent it doesn't name unless
-`--replace-pins` is given. Every `set` prints the resulting policy.
+the first. An unpinned agent runs anywhere (pins fail open), so every way of
+dropping a pin is explicit and refused otherwise: removing a pin or channel
+that isn't stored, removing an agent's last channel by id (use the bare
+`--remove-pin-agent AGENT`), naming one agent in both `--add-pin-agent` and
+`--remove-pin-agent`, or mixing the bare and `AGENT=CHANNEL_ID` remove forms
+for one agent. Pin names must match an agent of the tenant exactly; a name
+that only matches after NFKC and case folding is refused with the right one.
+A Slack `D…` id is never a pin channel. `--pin-agent` still replaces the whole
+map (rewriting the channels of every agent it names), but refuses to drop an
+agent it doesn't name unless `--replace-pins` is given, and `--clear` needs
+`--replace-pins` when pins exist. Every `set` prints the resulting policy and
+a line for each agent left unpinned. Onboarding a client uses
+`--add-pin-agent`. An empty pin map is left out of the stored row.
+
+A private DM conversation (`dm:` scope) is outside every pin wherever it is
+checked: admission, `hand_off_task`, and continuations owed to a DM, which are
+admitted as DM turns. Adding a key, connector token, skill-repo token or repo
+binding to a pinned agent (`request_agent_key`, `request_mcp_token`,
+`request_mcp_oauth`, `request_skill_repo_token`, `request_repo_binding`) or
+pointing it at a public repo (`bind_public_repo`) needs an admin, a channel
+admin of every channel it is pinned to, or a request made inside one of its
+channels. The form's submit
+(Discord, Slack and Teams) re-checks the rule against the agent as it is now, resolved by its stable id
+and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
+pin added later or a rename still holds; a target that can't be resolved under
+a pin is refused. The direct configuration tools (`update_agent`,
+`attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`)
+check it with no turn origin (an `origin_context_id` only finds the agent), so on
+a pinned agent they are an admin's or a channel
+admin's of every pinned channel; members inside its channels use the request
+tools. An agent key's self-edit tools (`set_repo_binding`/`clear_repo_binding`/
+`self_write_file`/`self_delete_file`) are refused on a pinned agent: an agent
+key's stored roles are never trusted, so neither exemption applies to it. One
+guard (`tools/_pin_guard.py`) serves all of them.
+A sign-in (`request_mcp_oauth`) is re-checked when its callback arrives, before
+any grant or attach. Routines are checked against every name of the agent they
+run (at save and at every fire, after the scheduler self-heals to a replacement
+agent), and so is `hand_off_task`'s destination.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
@@ -289,21 +399,41 @@ that channel on top of the server admins (`channel_admins`,
 live role ids on the account (`accounts.platform_role_ids`) beside the role, so
 MCP tools test a grant without asking the platform; Slack has no roles, so a
 Slack grant is by user id. A channel admin may do what a server admin may for
-an agent local to their channels -- not the tenant default, every
-channel-scope row and thread binding in a channel they run, and no routine
-running it made by a server admin or another channel's admin
+an agent local to their channels -- not the tenant default or anyone's
+personal default, answering or running somewhere and only in channels they
+run (channel-scope rows, thread bindings, and other people's live sessions
+and routines, each by its channel), and no unattended run of it owed to a
+server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent. A `/dm` conversation counts as the channel it was
-started from. A channel admin binds only a shared agent (managed or
-tenant-wide), one answering nowhere, or one already local to them,
-never another channel's own agent. Managed agents and the tenant default stay with server
+started from. A session counts in the channel recorded when it was created
+(`thread_sessions.channel_id`) and in any its spend was attributed to, and a
+routine in the one its spend counts against; one with none recorded could run
+anywhere, and the refusal says so. An agent answering nowhere is local to
+nobody, so locality only narrows what key and MCP server replacements and
+removals and skill repo connects count as shared, never past it. In `daimon.core.authz` a channel admin
+is `Subject.administered_channel_ids`, filled from the stored grants and never
+`is_admin`: configuring a pinned agent from anywhere is theirs once they
+administer every channel of every pin on it (a pin to no channel stays with
+server admins), and so is minting it a coding-tools token bound to one of
+those channels (never an unbound one). A channel admin binds only a shared agent
+(managed or tenant-wide), one answering nowhere yet, or one already local
+to them, never another channel's own agent. No chat tool, panel or CLI
+write (`daimon config set`, `daimon config propagate`) binds a pinned agent
+as the default of a channel outside its pin, for server admins too
+(`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
+and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
-included, keep the old grant. A routine fires with its creator's rights, so a
-channel admin's edits reach the routines running that agent, as they reach
-anyone chatting with it: a server admin who chats with an agent a channel admin
+included, keep the old grant. Unattended runs are routines and queued wakes
+(timers, handoffs, applied private input); each fires with its requester's
+rights, so a channel admin's edits reach them as they reach anyone chatting
+with the agent. A member's run carries that member's own read visibility, as
+their chat does, and a server admin who chats with an agent a channel admin
 edited runs its instructions with their own rights, as with any agent someone
-else wrote. Server admins edit grants
+else wrote. The check reads requesters' rights at edit time, as stored at
+their last chat turn: a requester promoted later runs earlier edits with the
+new rights. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
 panel, or with the CLI:
 
@@ -314,28 +444,71 @@ daimon channels admins clear discord GUILD_ID CHANNEL_ID
 ```
 
 **Channel isolation — `packages/core/daimon/core/channel_isolation.py`.** An
-isolated channel C keeps its own agents to itself. C's own agents are those
-local to it in the agent-reach sense: C's default, or a handoff responder in a
-thread under C, answering nowhere else, never built in. Isolating needs one, so
-`set_channel_isolation` (`channel_isolation_setup.py`) refuses a channel
-without it unless given a fork: it copies `fork_from`, or whoever answers in C,
-under a name from the channel and makes the copy C's default in the same step.
-Like every fork the copy carries no credentials, and a pinned agent is not copied.
-A call runs inside C when the agent executing it is one of C's, or when a
-handoff runs from a thread under C; the hub runs outside. From outside, C's
-agents are missing from `list_agents` and every by-name lookup (get, update,
-fork, archive, keys, skills, `set_setup_target`), from handoff destinations and
-from the hub's `list_daimons` and `ask`; so are their agent-scoped skills,
-their routines and routines posting into C or created there, and `/memory`.
-From inside C only C's agents show. C's messages read like a sealed channel's,
-also open to C's own agents; memory stays writable. Routing that would break
-this is refused: C's agent bound anywhere else or as the tenant default,
-another agent bound in C, C's default cleared. Server admins toggle it from
-Who answers where in the setup panel, with `set_channel_isolation`, or with
-`--isolated-channel`; in chat they see what the conversation's agent sees.
-Limits: setup threads run as the built-in agent, so C's agents are invisible
-there; archiving C's agent leaves C isolated with nobody of its own (bind a new
-one); `/dm` from C is refused.
+isolated channel C keeps its own agents to itself. The marker
+(`isolated_channel_ids`) sits on two existing controls: C must be sealed, and
+C's own agents are those pinned to C alone (`access_policy.isolation_owner`,
+by every name the agent carries). `set_channel_isolation`
+(`channel_isolation_setup.py`) does all three in one write under the policy
+lock: it seals C, pins C's default agent to C and adds the marker. The default
+must not be built in, pinned elsewhere or answering anywhere else
+(`agent_reach`, checked at write time only); otherwise the call is refused
+with the reason, unless asked for a copy. Then `fork_from`, or whoever answers
+in C, is copied by `agent_fork.copy_agent` (`authorize(FORK)`: an admin's call,
+never a pinned agent; no credentials, no agent-scoped skills, which the reply
+names) under a name from the channel, made C's default and pinned; a copy the
+locked re-check refuses is archived. Ending isolation drops the marker and
+keeps the seal and pins, unless `drop_seal_and_pins` lifts them too.
+
+Enforcement is `authorize()`'s: it fills `AgentRef.confined_to` and
+`Place.isolated_channel` from the policy, so every check and re-check is
+fresh. In C only C's own agents run, post, read, get routines or become the
+default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
+`SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
+(`Place.setup_thread`) still answers as the built-in agent. C's own agents
+post nowhere outside C, not even the requester's DM, and send no direct
+messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
+fire check (the resolved agent, by every name, at the routine's destination)
+decide through `RUN_AGENT`; thread participation skips a refused turn before
+its classifier runs. Memory stays writable for C's own agents in C and is
+read-only for any other agent there, as in a sealed channel. A session
+whose seal ids lie in C is read and continued only by C's own agents
+(`READ_SESSION`, `CONTINUE_SESSION`). A verified turn origin in C holds the
+call to C whatever agent runs it (`origin`): its posts, cards and routines
+stay in C and it sends no direct messages; only its setup thread may still
+configure C's own agent. A thread routine saved without its parent channel
+is treated as inside any isolated channel until delivery places it
+(`Place.parent_unresolved`). Isolation
+constrains agents: a caller with no executing agent (an operator token, the
+CLI) may still post into C, which is input, not a leak; the seal keeps reads
+inside.
+
+What callers see follows from where they stand. An MCP call is inside C when
+its verified turn origin is in C, when it carries a channel-bound coding-tool
+token for C, or when its chat turn's agent is one of C's; an agent key is
+never inside by its agent alone. The roster, agent and key tools take the
+turn's `origin_context_id` for this. From outside, C's agents are missing from
+`list_agents` and every by-name lookup, from handoff destinations,
+`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines and
+routines posting into C; inside C only C's agents show. For members the
+setup panel's roster, details and Who answers where are filtered the same way
+at the panel's location, and `/memory` hides an agent wherever it may not
+run; server admins see everything. Server admins are exempt in their own DM
+and hub, and a channel admin of C there too, but C's agents still never post
+outside C. `get_tenant_summary` lists each channel with `isolated`.
+
+Server admins toggle isolation from Who answers where in the setup panel,
+which shows the channel as Private (sealed), Dedicated agent (pinned to it
+alone) and Hidden (isolated), and offers to end isolation or lift the seal
+and pins too; with `set_channel_isolation` (also under `channels:write`); or
+with `--isolated-channel`, which must seal C and pin its default to it alone
+in the same command; any later `--pin` or `--sealed-channel` change that
+would break an isolated channel is refused. A pinned default is never copied:
+change its pin first. Ending warns that the dedicated agents keep what they
+remembered in C and may carry it elsewhere once unpinned. Limits: tools on
+other MCP servers don't see the policy; an agent created inside C isn't C's
+own until it is pinned there; `/dm` from C is refused; a call is held to C
+only where its tool takes a verified origin (not the send, DM, self-edit or
+routine edit tools), and a call that names none is judged from outside.
 
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
@@ -346,11 +519,22 @@ the channel, with `set_channel_environment` and `clear_channel_environment`; a
 channel admin sets the channels they run, and a thread id resolves to its
 parent. Who answers where in both setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
-(`packages/core/daimon/core/channel_environments.py`). The name must match an
-existing environment in the tenant; conversations pick it up from their next
-message, keeping their files, and `explain_agent_resolution` reports each
-tier's environment. A channel admin can move their channel onto any
-environment a member created, including one with unrestricted networking. A
+(`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
+drops the rows across an isolation line, and inside an isolated channel the
+workspace and deployment environments too. The name must match an existing
+environment in the tenant, looked up once so the network rule and the write
+judge the same one; conversations pick it up from their next message, keeping
+their files and their seal, and `explain_agent_resolution` reports each tier's
+environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
+sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
+Discord thread the pick names), an environment with unrestricted
+networking (any network beyond package managers and MCP servers: anything but
+a cloud environment on limited networking with no allowed hosts) needs a
+server admin, and so does clearing a pick onto a default that has one. A pick
+made before the seal never met that rule, so sealing or isolating a channel
+whose own pick is open warns that a server admin should confirm it; who made
+a pick isn't recorded. An operator token's
+`channels:write` covers a channel's environment, never the tenant default. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default.
@@ -363,9 +547,10 @@ absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
 uploaded under the agent-scoped title, never the shared library. A name a
 shared or built-in skill already holds, or one that would load under the same
-folder as an attached skill, is refused. Forks share skill ids, so a skill
-another agent also has attached is never versioned; the upload must take a
-new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
+folder as an attached skill, is refused. A fork drops agent-scoped skills
+(`copy_agent`), but one attached by id or kept by an older fork may still be
+shared, so a skill another agent also has attached is never versioned; the
+upload must take a new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
 origin is `owner/repo/path@branch`, never the URL as typed) and the adding
 account, so no repo sync replaces, deletes or re-attaches it, and removing the
 skill forgets it. `add_skill` previews first and adds only when called again
@@ -374,12 +559,18 @@ person presses Approve on the confirmation card (below). Without tool safety
 there is no card, so a chat confirm adds nothing and points to Add skill in
 the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
-`skill_remove` operations follow one rule: built-in agents never, server
+`skill_remove` operations follow the shared-agent rule
+(`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
 admins on any other, channel admins on agents local to their channels, anyone
-on agents nobody else uses. That last test reads the agent's full reach: no
-default, no thread binding, and no routine or queued continuation of anyone
-else's. Uploads of an isolated channel's agents are hidden outside it like its
-other agent-scoped skills.
+on agents nobody else uses. Sharing is read as widely as a key change
+(`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
+default, or another member's routine or live session. A pinned agent takes a
+chat add only from a verified origin in its channels (`require_pin_write_access`
+with the card's origin); `remove_skill`, like the other direct configuration
+tools, passes none. The target resolves from the turn's channel, so an
+isolated channel's setup thread reaches only its own agents and nothing outside
+reaches them. Their uploads are hidden outside it like its other agent-scoped
+skills, keyed by the upload row's agent.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
@@ -449,7 +640,7 @@ however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
-(`packages/core/daimon/core/confirmation.py`), Discord and Slack each draw the
+(`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
@@ -495,13 +686,14 @@ string.
 and how much had finished, what survived, the next step, and a request id. The
 copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
 body of the red card, with the headline as the footer reason, and log the
-request id with the underlying error so it is the handle for the detail. No
+request id with the underlying error so it is the handle for the detail;
+Teams draws it as plain text on the ❌ card. No
 lifecycle hook carries it -- the reason rides on the state every lifecycle
 already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
 Anthropic's monthly spend-cap response stops SDK retries at the HTTP transport.
-If Anthropic reports that cap or a user-set spend limit, Discord and Slack
+If Anthropic reports that cap or a user-set spend limit, Discord, Slack and Teams
 show a model usage limit notice and log `anthropic.spend_limit_reached` with
 the tenant and limit type.
 
@@ -511,8 +703,8 @@ Anything daimon quotes into a turn from someone other than the person asking
 goes through one envelope, `packages/core/daimon/core/untrusted.py`: an
 element marked `trust="untrusted"`, opened by a fixed line saying the content
 is data, not instructions, with every value escaped so the content cannot
-close the element early. The Discord and Slack context builders wrap replayed
-thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
+close the element early. The Discord, Slack and Teams context builders wrap
+replayed thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
 returns its transcript in it; the quoted transcript on a workspace
 replacement (`render_previous_session`) uses it too. The channel read and
 search tools return JSON rows, so their results carry the same marker as
@@ -524,9 +716,129 @@ Third-party MCP tool results travel from Managed Agents straight to the model
 without passing through daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").
 
+## Trust model
+
+Admins are trusted; pins and seals protect members and channels. An agent pin
+(`agent_channel_pins`) and a sealed channel (`sealed_channel_ids`) exist to
+keep one client's context away from other people -- members of other
+channels, and anyone reading where an agent posts -- not to restrict a
+workspace admin. So an admin is exempt only where the output reaches no one
+but them:
+
+| Surface | Members | Admins |
+| --- | --- | --- |
+| Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |
+| DM (`admit(is_dm=True)`, Teams personal chats included) | pinned agent refused | pin exempt |
+| Hub `ask` / `start_turn` / `continue_turn` | pinned agent refused | pin exempt |
+| Hub `list_my_sessions` / `get_session` / `list_events` on a sealed conversation | refused | allowed, anyone's; a channel admin's in the channels they administer |
+| Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
+| Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin, or channel admin of every pinned channel) |
+| `fork_agent` of a pinned agent | refused | refused |
+| "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
+| Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
+| An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
+| An isolated channel's own agent | runs, posts and reads only in its channel; sends no DMs | also runs in their own DM and hub (so does a channel admin of that channel), but still posts nowhere outside it |
+
+The pin, seal, isolation, protection, invoker and fork rules are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); the turn pipeline, the
+MCP gates, the channel tools, the routine and handoff tools and the fork
+paths gather their facts and ask it, including the hub's admin and channel
+admin read of a sealed conversation and the refusal to continue one. The scheduler's
+protection and invoker checks and the shared-agent replace/remove table are
+still decided where they are.
+
+**Decided again at the moment of action.** Admission is a decision about a
+turn that has not run yet, so it is asked again, on the policy as it is
+then, where it matters:
+
+- `bind_session` and the dead-session recovery call
+  `daimon.core.turn.admission.reauthorize` before a session is found,
+  reused, replaced or created. A pin, protection or invoker change since
+  admission refuses the turn there; a seal added since joins the turn's seal
+  ids, so the session is stamped with it and memory mounts read-only.
+- Every channel send, card and direct message reads the policy when it is
+  made, as do the routine fire, the handoff and the form submit checks.
+- The MCP OAuth callback asks the pinned-agent write rule again after the
+  code exchange and before the grant is written to the vault.
+- A published report's reader variant carries its source agent's names
+  (`daimon_reader_source`), so a pin on the source holds for the reader, and
+  publishing a pinned agent's reader needs an admin or an `origin_context_id`
+  from inside its channels.
+- An agent-scoped key is never exempt as an admin inside `authorize`,
+  whoever minted it, and never holds its minter's channel admin grants
+  (`build_subject`), so a channel-bound key reaches no channel but its own.
+
+A demoted admin keeps their stored role until their next platform turn
+refreshes it; that is accepted.
+
+On every turn, wherever a pinned agent runs (including an exempt admin turn
+and a member's turn inside its channel), its sends (messages, replies,
+threads and posts, files and cards on Discord, Slack and Teams) reach only:
+its pinned channels and threads under them; the requester's own 1:1 DM with
+daimon (a Slack IM whose user is the requester, or a Teams personal chat the
+requester is in); and direct messages to the requester. Its context never
+lands in another channel or another person's DM. An isolated channel's own
+agent is stricter: it posts only into its channel and the threads under it,
+never the requester's DM, and sends no direct messages.
+
+Isolation constrains agents, not callers. Inside an isolated channel C only
+C's own agents run, post and read; a caller with no executing agent, such as
+an operator token or the CLI, may still post into C. That is input, not a
+leak: the seal keeps C's messages readable only from inside it. A session that ran in a DM
+(a Slack IM, a Teams personal chat, or a `/dm` conversation) is private:
+admins never read it from the hub.
+
+A channel admin has a server admin's rights limited to the channels they
+administer, so only those rows' exemptions apply to them, and only there:
+pinned-agent configuration, coding-tool tokens, hub reads of their channels'
+sealed conversations, and isolation, where a channel admin of C is exempt in
+their own DM and hub for C's agents only. That grant is the person's, never
+an agent key's. Other hub turns, DMs and forks treat them as members.
+
+Continuing a sealed channel conversation from the hub stays refused for admins
+because a follow-up would join the channel's own conversation, which the
+channel goes on reusing. Branching a private copy for the admin is a possible
+follow-up.
+
+Who counts as an admin:
+
+- In admission (DMs), the live role the adapter passes for this turn.
+- For credential and configuration tools, a chat turn's credential, whose
+  `is_admin` reads the account's stored role -- recorded from the platform by
+  that turn's admission, and as current as the person's last platform turn
+  when the same vault token is reused by their hub or routine sessions. The
+  operator's own internal token is trusted too; an agent-scoped key never.
+- In the hub, the account's stored role, and for a channel admin the stored
+  grants matched against the role ids of their last turn. The hub has no
+  live platform role, so a demotion or promotion takes effect on the
+  person's next Discord, Slack or Teams turn in that workspace, which
+  records the platform's current role.
+
+An operator token (below) is an admin only while its account's stored role is,
+checked on every request. Like the hub, it sees a demotion only once the
+person's next platform turn records it, so revoke the token to stop it at once.
+It always carries a platform user, so it is billed and pin-checked like that
+admin's own chat turn, never trusted as the operator.
+
+Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
+user are never admins on these surfaces, whatever role their account holds or
+who minted them. A pin binds a bearer with no platform user too: such callers
+skip billing, not admission.
+
+The pin decisions (turn admission, MCP and hub turns, routine save and fire,
+handoff, configuration writes and form submits), pinned sends and direct
+messages, channel and session seal reads, channel isolation, fork, channel
+admins' configuration rights and channel default binds are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); each caller keeps only
+its own I/O and refusal copy. The live protection and invoker checks in the
+scheduler and routine delivery and the OAuth no-request rule still use the
+same `access_policy` predicates directly.
+
 ## Tenancy and isolation
 
-One Discord guild or one Slack workspace is one tenant. The tenant UUID is
+One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is
 derived, not allocated: `derive_tenant_uuid(platform, workspace_id)` in
 `packages/core/daimon/core/ma_identity.py` is a UUID5 under a frozen
 namespace, so the same workspace maps to the same tenant across database
@@ -554,6 +866,21 @@ file (`packages/core/daimon/core/credential_env.py`) or brokered per call
 (`packages/core/daimon/core/broker/`), and the MCP server the sandbox calls
 back into authenticates a JWT whose `agent_id` claim is the derived agent
 UUID from `packages/core/daimon/core/ma_identity.py`.
+
+Because that env file is `source`d in the sandbox, `credential_env.py`
+serializes every value so bash cannot expand or execute it, and
+`packages/core/daimon/core/env_file.py` decides which key *names* may be
+stored. Names that control an interpreter, archiver, loader, locale, package
+manager, git, an HTTP client or a CA bundle, or that redirect an SDK's own
+endpoint (`TAR_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`,
+`*_BASE_URL`, …) are hard-denied for everyone (the four git commit-identity
+names `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and
+`GIT_COMMITTER_EMAIL` excepted) and dropped from the mount even
+if stored earlier; a non-admin member may additionally add only a secret
+name (ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`,
+`_PASSPHRASE` or `_PAT` — never an identity, region or `*_URL`/`*_HOST`
+name, which only an admin may add). This keeps one tenant member from handing another client's
+agent code execution or a redirected connector through a key value or name.
 
 ## Sessions and Managed Agents
 
@@ -601,8 +928,8 @@ against.
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
   tool), and anything else queued through `daimon.core.continuity.wakes`. A wake is
-  a `task_continuations` row. The Discord and Slack adapters each run a wake
-  poller (`run_wake_poller`) that opens threads with due rows and hands them
+  a `task_continuations` row. The Discord, Slack and Teams adapters each run
+  a wake poller (`run_wake_poller`) that opens threads with due rows and hands them
   to the adapter's continuation dispatch. That dispatch takes the thread's
   turn guard and goes through `admit()`, `bind_session()` and
   `run_prepared_turn()` like a mention, so the balance, cap and channel
@@ -633,8 +960,10 @@ against.
   then every Discord, Slack and MCP process on a timer-aware build. Only then
   may `create_timer` be called, and it is only exposed by that MCP build.
   Downgrading `0029_feat084_timers` deletes every timer row, fired or not.
-  A timer only runs as the agent it was set with. If the thread answers to
-  another agent when the timer fires, the adapter refuses it after
+  A wake (timer, handoff, applied private input) only runs as the agent it
+  was queued for; applied private input may also resume the agent of the
+  requester's live session in the thread. If the thread answers to
+  another agent when the wake fires, the adapter refuses it after
   `admit()` and before anything is bound or billed. It settles the row
   `skipped/skip_target_changed` and posts a notice in the thread.
 
@@ -643,7 +972,16 @@ If you add another, reuse `admit()` rather than re-deriving the gate order.
 ## Standalone apps
 
 `apps/notebook-host/` serves published marimo notebooks, spawning one
-`marimo edit` subprocess per notebook behind a reverse proxy.
+marimo subprocess per notebook behind a reverse proxy. Each subprocess has
+its own access token, and scratch notebooks are read-only unless the
+publisher asks for the editor and the operator allows it
+(`notebook.allow_editable` on the bot and `allow_editable` on the host). With
+`DAIMON_NOTEBOOK__ORIGIN_BASE` set, each notebook is served from its own origin
+(`<label>.<origin_base>`); the proxy routes by Host and refuses cross-origin
+requests and WebSockets. Without it, notebooks share one origin, so a public
+host admits uploads only from the tenants the operator lists in
+`DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
+signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach daimon over HTTP with capability tokens, and the
@@ -664,9 +1002,11 @@ tenants; usage recording and configured caps continue through the same path.
 
 `daimon promo create|list|revoke|redemptions` manages deployment-wide promo
 codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
-button and modal) or with the MCP tool `redeem_promo_code`; each surface calls
+button, shown only while a code is redeemable, and a modal) or with the MCP
+tool `redeem_promo_code`; each surface calls
 `daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
-timed credit windows. See [billing.md](billing.md#promo-codes).
+timed credit windows through `daimon.core.promo_settlement`. See
+[billing.md](billing.md#promo-codes).
 
 ### Invocation context fragments
 
@@ -865,7 +1205,8 @@ Authenticated requests through the main JWT MCP application (`tools/call` and
 `security_audit_events` row. The identity middleware records the tenant, account,
 platform user and agent identifiers, tool name, timestamp, outcome and a fixed
 reason code. Agent identity includes the signed external `agent_id` or ordinary
-chat `chat_agent_id` claim. The shared operation policy annotates that same request with the
+chat `chat_agent_id` claim. A registered token adds its kind and jti, and a
+scoped tool adds the operator scope it checked. The shared operation policy annotates that same request with the
 operation name and its decision; a policy denial remains a denial even if a tool
 catches it. Arguments, messages, credentials, response bodies and exception text
 are never copied into the row. Tool names outside the supported identifier syntax
@@ -880,8 +1221,13 @@ bound including queue wait. Shutdown drains tracked writes. Writes are best effo
 timeouts, cancellation, overflow and database failures emit `security_audit.write_failed`
 with an error type, never the error body. An unavailable audit store does not delay
 the tool response or change authorization behavior. Tool failures use outcome
-`error`; authorization and policy rejections use `denied`. Calls rejected before the JWT verifier
-establishes a tenant cannot be safely attributed and are outside this trail.
+`error`; authorization and policy rejections use `denied`. When the verifier refuses a
+registered token (revoked, expired, a demoted admin, a kind that does not match its
+row), it writes a `denied` row under the token's own tenant with tool name
+`auth/verify` and the refusal as the reason. Other calls rejected before the JWT
+verifier establishes a tenant cannot be safely attributed and are outside this trail.
+`daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
+row (tool name `cli/<command>`) in the same transaction as their change.
 The policy remains synchronous and does no I/O outside an MCP audit scope;
 Discord/Slack setup-panel actions and the separate hub OAuth applications
 (`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
@@ -920,6 +1266,46 @@ not a malicious database administrator or SQL caller able to set arbitrary GUCs.
 Existing privacy panels do not yet deliver a full audit export: operators include
 the CLI JSON export in the requested bundle.
 
+### Operator tokens
+
+An operator token lets an external integration call a few MCP tools over
+`/mcp` for one server admin. Only `daimon mcp mint-operator-token` mints one
+(there is no chat or setup-panel flow), with one or more scopes, a TTL of 30
+days by default and at most 90 and, with `promo:create`, an optional
+`--max-issued-usd` ceiling in whole cents. `daimon mcp list-tokens` and
+`revoke-token` manage every registered token, and `set-token-scopes --jti ...
+--scope ...` narrows an operator token to the scopes given: it only removes
+scopes, so adding one takes a new token. `mint-token` CLI tokens are
+registered and expire too, while older jti-less ones keep working.
+
+| Scope | Tools |
+| --- | --- |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `promo:redeem` | `redeem_promo_code` |
+| `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
+
+`get_tenant_summary` lists every channel with a default, a budget, admins or
+isolation, and `channels[].isolated` says whether it is isolated.
+`set_channel_isolation` with an operator token acts as that admin: the copy
+it may make is an admin's fork, and its seal and pin writes are the same as
+the panel's.
+
+Each request, `DaimonJWTVerifier` reads the token's `mcp_tokens` row: it must
+be unrevoked and unexpired, its account still a server admin by stored role
+with a platform user, and its scopes non-empty. The stored role changes only
+on the account's next platform turn, so a demoted admin's token keeps working
+until then or until it expires; `revoke-token` is the immediate stop, taking
+effect on the token's next request. Scopes come from the row, so narrowing
+them applies to the next request. An operator token cannot open a billing
+checkout (`/billing/checkout` answers 403). The identity middleware disables
+every tool for the token, enables those tagged `scope:<name>` for its scopes,
+skips the search collapse and limits it to `operator_calls_per_minute` calls.
+Each tool re-checks its scope (`tools/_scopes.py`). `promo:create` tools carry
+no `admin` tag and a server baseline hides them from everyone else. A later
+`channels:write` tool joins by taking the tag and the `require_scope` call;
+`_scopes.py` describes the steps.
+
 ### Opt-in DM conversations
 
 DM conversations are disabled unless the tenant's separate `direct_message_policies`
@@ -935,11 +1321,25 @@ new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
+`/dm` refuses in a sealed channel or a Discord thread that is sealed or sits
+under a sealed channel, before any history is read: the DM sits outside the seal
+and can reach unsealed channels. Admission reports this as `source_sealed`, and
+`start_dm` refuses it too. Slack's slash command carries no thread, so a Slack
+thread sealed on its own (`channel:thread_ts`) is not refused; instead its root
+and broadcast replies are dropped from the copied channel history, as the read
+tools do. Discord system notices (thread created, pins) are never copied. The DM
+row records its source channel and thread and, on Slack, the `channel:thread_ts`
+of every copied message. Every private turn re-checks them against the current
+seal list. Once any of them is sealed the DM is quarantined: the turn is refused,
+the conversation row (copied context and private history) is deleted, and the
+scope's provider sessions are retired and archived, so a fresh `/dm` is needed.
+Rows from before provenance was recorded cannot prove their source unsealed and
+are quarantined as soon as the tenant seals anything.
 
 Turns use the shared billing/session/recovery pipeline. Row claims prevent overlapping
 or duplicate DM deliveries. The route retains bounded source context and private
-history; privacy preview and deletion include it. Memory restrictions inherited from
-a sealed source remain attached to its DM conversation, and current DM policy is
+history; privacy preview and deletion include it. Memory restrictions inherited
+from the source remain attached to its DM conversation, and current DM policy is
 checked on each admission. Session preparation enforces the selected memory mount access.
 Slack private turns register their physical DM destination under a random execution
 ID carried in a signed JWT in an isolated MA vault. The read guard resolves only

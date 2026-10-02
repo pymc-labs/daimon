@@ -14,11 +14,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
+from daimon.adapters.discord.credential_origin import resolve_credential_target
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import FormPinRefused, consume_form_unless_pinned
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
 from daimon.core.posted_controls import NO_LONGER_VALID_MESSAGE
-from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.domain import CredentialRequestRow
 
 import discord
@@ -52,17 +53,22 @@ async def start_mcp_oauth_from_click(
     if app_root_url is None or mcp.jwt_secret is None or runtime.turn_deps.fernet is None:
         await interaction.followup.send(_UNCONFIGURED, ephemeral=True)
         return
+    agent = await resolve_credential_target(interaction, runtime=runtime, row=row)
+    if agent is None:
+        return
     now = datetime.now(UTC)
-    async with runtime.sessionmaker() as session, session.begin():
-        consumed = await credential_requests_store.consume_credential_request(
-            session, token=row.token, now=now
-        )
-        if consumed is None:
-            flow = None
-        else:
-            flow = await begin_mcp_oauth_flow(
-                session, request=consumed, app_root_url=app_root_url, now=now
-            )
+    try:
+        async with runtime.sessionmaker() as session, session.begin():
+            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+            if consumed is None:
+                flow = None
+            else:
+                flow = await begin_mcp_oauth_flow(
+                    session, request=consumed, app_root_url=app_root_url, now=now
+                )
+    except FormPinRefused as refused:
+        await interaction.followup.send(refused.refusal, ephemeral=True)
+        return
     if consumed is None or flow is None:
         await interaction.followup.send(NO_LONGER_VALID_MESSAGE, ephemeral=True)
         return

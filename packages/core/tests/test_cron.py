@@ -1,7 +1,7 @@
-"""Pure-function tests for `daimon.core.cron.next_slot_at_or_after`.
+"""Pure-function tests for `daimon.core.cron`.
 
-No DB, no clocks, no I/O. Three cases: UTC boundary +1s, IANA-tz mapping
-to UTC, and DST spring-forward.
+No DB, no clocks, no I/O. Slot arithmetic (UTC boundary +1s, IANA-tz mapping
+to UTC, DST spring-forward) and the user-input validation wrapper.
 """
 
 from __future__ import annotations
@@ -9,7 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from daimon.core.cron import next_slot_at_or_after
+import pytest
+from daimon.core.cron import InvalidScheduleError, next_slot_at_or_after, validated_next_slot
 
 
 def test_next_slot_at_or_after_utc_boundary_returns_following_minute() -> None:
@@ -54,3 +55,26 @@ def test_next_slot_at_or_after_handles_dst_spring_forward() -> None:
     assert local.hour in (2, 3), (
         f"DST resolution should land at 02:30/03:30 (skip) or 03:00, got {local.isoformat()}"
     )
+
+
+@pytest.mark.parametrize(
+    ("cron_expr", "tz", "message"),
+    [
+        ("0 9 * * *", "Mars/Olympus", "unknown timezone: 'Mars/Olympus'"),
+        ("0 9 * * *", "../etc", "unknown timezone: '../etc'"),
+        ("61 * * * *", "UTC", "invalid cron expression: '61 * * * *'"),
+        ("0 0 31 2 *", "UTC", "invalid cron expression: '0 0 31 2 *'"),
+    ],
+)
+def test_validated_next_slot_names_what_is_wrong(cron_expr: str, tz: str, message: str) -> None:
+    after = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
+    with pytest.raises(InvalidScheduleError) as error:
+        validated_next_slot(cron_expr, tz, after)
+    assert str(error.value) == message, "the error names the bad field for the user"
+
+
+def test_validated_next_slot_returns_the_next_slot_for_valid_input() -> None:
+    after = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
+    assert validated_next_slot("* * * * *", "UTC", after) == next_slot_at_or_after(
+        "* * * * *", "UTC", after
+    ), "valid input yields the same slot as the unvalidated helper"

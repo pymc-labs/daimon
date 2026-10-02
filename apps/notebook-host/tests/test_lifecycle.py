@@ -131,20 +131,21 @@ def _make_fake_popen(alive: bool = True) -> subprocess.Popen[bytes]:
     mock = unittest.mock.create_autospec(subprocess.Popen, instance=True)
     mock.poll.return_value = None if alive else 0  # type: ignore[attr-defined]
     mock.pid = 99999  # type: ignore[attr-defined]
+    mock.stdin = unittest.mock.MagicMock()  # type: ignore[attr-defined]
     return mock  # type: ignore[return-value]
 
 
 def _marimo_subcommand(argv: list[str]) -> str:
     """Return the marimo subcommand (``edit``/``run``) from a captured argv.
 
-    The command is ``uv run --with marimo marimo <subcommand> ...`` — ``marimo``
+    The command is ``uv run --with marimo==<v> marimo -q <subcommand> ...`` — ``marimo``
     appears twice (the ``--with`` arg and the executable), so we anchor off the
     LAST occurrence; a forward ``index('marimo')`` would hit the ``--with`` arg.
     A bare ``argv.index('run')`` is also wrong here because ``uv run`` injects
     its own ``run``.
     """
     last_marimo = len(argv) - 1 - argv[::-1].index("marimo")
-    return argv[last_marimo + 1]
+    return next(arg for arg in argv[last_marimo + 1 :] if not arg.startswith("-"))
 
 
 def test_allocate_port_returns_first_free_port_when_no_processes_used() -> None:
@@ -359,19 +360,6 @@ def test_notebook_process_url_returns_public_url() -> None:
     assert np.url == "http://example.com:8001/n/my-nb/", "url should be the public-facing proxy URL"
 
 
-def test_notebook_process_internal_url_returns_localhost_url() -> None:
-    """NotebookProcess.internal_url returns http://localhost:<port>/n/<slug>/"""
-    from notebook_host.lifecycle import NotebookProcess
-
-    proc = _make_fake_popen()
-    np = NotebookProcess(
-        slug="my-nb", port=8100, process=proc, public_host="example.com", host_port=8001
-    )
-    assert np.internal_url == "http://localhost:8100/n/my-nb/", (
-        "internal_url should point to the subprocess directly"
-    )
-
-
 NOTEBOOK_TEMPLATE = '''import marimo
 
 __generated_with = "0.23.8"
@@ -414,7 +402,7 @@ async def test_spawn_marimo_then_kill(tmp_path: Path) -> None:
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text(NOTEBOOK_TEMPLATE % slug, encoding="utf-8")
 
-    proc = spawn_marimo(slug, paths, port)
+    proc = spawn_marimo(slug, paths, port, access_token="t")
     np = NotebookProcess(
         slug=slug,
         port=port,
@@ -424,7 +412,7 @@ async def test_spawn_marimo_then_kill(tmp_path: Path) -> None:
         started_at=time.time(),
     )
 
-    ready = await wait_for_port(port, slug, 30.0)
+    ready = await wait_for_port(port, slug, 30.0, access_token="t")
     assert ready is True, "marimo subprocess should become ready within 30 seconds"
 
     kill(np)
@@ -662,7 +650,7 @@ def test_spawn_marimo_uses_workspace_cwd(monkeypatch: pytest.MonkeyPatch, tmp_pa
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t")
 
     assert captured.get("cwd") == str(tmp_path / "myslug" / "workspace"), (
         "Popen cwd should be the per-slug workspace dir, not the slug root"
@@ -694,7 +682,7 @@ def test_spawn_marimo_still_uses_basename_arg(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t")
 
     # marimo edit <basename> — the basename appears, the full path does not.
     assert "notebook.py" in captured_args, "marimo edit arg should be the basename"
@@ -725,7 +713,7 @@ def test_spawn_marimo_creates_workspace_and_data_dirs(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t")
 
     assert (tmp_path / "myslug" / "workspace").is_dir(), "workspace dir must exist after spawn"
     assert (tmp_path / "myslug" / "data").is_dir(), "data dir must exist after spawn"
@@ -768,6 +756,7 @@ def test_spawn_marimo_passes_preexec_fn(monkeypatch: pytest.MonkeyPatch, tmp_pat
         "slug",
         paths,
         8100,
+        access_token="t",
         rlimit_as_bytes=4_000_000_000,
         rlimit_cpu_seconds=3600,
     )
@@ -801,7 +790,7 @@ def _capture_spawn_env(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, **spawn_kwargs)  # pyright: ignore[reportArgumentType]
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", **spawn_kwargs)  # pyright: ignore[reportArgumentType]
     env = captured.get("env")
     assert isinstance(env, dict), "spawn_marimo must pass env= to Popen"
     return env
@@ -867,7 +856,7 @@ def test_spawn_marimo_with_jail_uid_none_uses_rlimit_only_preexec(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, jail_uid=None)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", jail_uid=None)
 
     assert captured.get("preexec_fn") is None, (
         "jail_uid=None with no rlimits must leave preexec_fn None, unchanged from before "
@@ -899,7 +888,7 @@ def test_spawn_marimo_with_jail_uid_set_always_has_a_preexec_fn(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, jail_uid=4242)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", jail_uid=4242)
 
     assert captured.get("preexec_fn") is not None, (
         "jail_uid set must always yield a preexec_fn, even with no rlimits configured"
@@ -1027,7 +1016,7 @@ def _capture_spawn_cmd(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, sandbox=sandbox)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", sandbox=sandbox)
     return captured_args
 
 
@@ -1136,7 +1125,7 @@ def test_spawn_marimo_uses_run_subcommand_when_mode_run(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, mode="run")
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", mode="run")
 
     assert "run" in captured, "mode='run' must invoke `marimo run`"
     assert "edit" not in captured, "mode='run' must not invoke `marimo edit`"
@@ -1168,7 +1157,7 @@ def test_spawn_marimo_defaults_to_edit_mode(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t")
 
     assert _marimo_subcommand(captured) == "edit", "default mode must be edit"
 
@@ -1196,10 +1185,12 @@ def test_spawn_marimo_run_mode_with_sandbox_places_flag_after_run(
     paths = get_slug_paths(tmp_path, "myslug")
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# stub", encoding="utf-8")
-    lifecycle.spawn_marimo("myslug", paths, 8100, mode="run", sandbox=True)
+    lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", mode="run", sandbox=True)
 
     assert _marimo_subcommand(captured) == "run", "marimo subcommand must be `run`"
-    marimo_subcommand_idx = len(captured) - 1 - captured[::-1].index("marimo") + 1
+    marimo_subcommand_idx = captured.index(
+        "run", len(captured) - 1 - captured[::-1].index("marimo")
+    )
     assert captured[marimo_subcommand_idx + 1] == "--sandbox", (
         "--sandbox must immediately follow `run`"
     )
@@ -1226,8 +1217,9 @@ def test_should_reap_false_for_run_mode_even_when_dead() -> None:
         host_port=8001,
         started_at=time.time() - 10_000_000.0,
         mode="run",
+        permanent=True,
     )
     assert should_reap(dead_blog, 7200) is False, (
-        "a run-mode process must never be reaped by should_reap, dead or alive"
+        "a blog must never be reaped by should_reap, dead or alive"
     )
     assert should_reap(dead_blog, 0) is False, "indefinite TTL doesn't change the rule"

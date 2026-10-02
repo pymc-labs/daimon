@@ -28,6 +28,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_server_url import same_mcp_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -223,13 +224,13 @@ async def _ensure_agent_mcp_vault_locked(
 
 
 def same_server_url(left: str, right: str) -> bool:
-    """One vault slot per server: compare without a trailing slash.
+    """One vault slot per server: compare in `canonical_mcp_url` form.
 
     Whether MA itself treats `.../mcp` and `.../mcp/` as one URL is not
     verified; daimon treats them as one everywhere so its own comparisons
     agree with each other.
     """
-    return left.rstrip("/") == right.rstrip("/")
+    return same_mcp_url(left, right)
 
 
 async def ensure_agent_mcp_vault(

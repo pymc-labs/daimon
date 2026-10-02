@@ -3,7 +3,8 @@
 ``register_channel_isolation_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closure; it delegates to ``_set_channel_isolation_impl``, which tests call
 without a FastMCP Context. Isolation is a tenant-wide change, so server
-admins only. The rules live in ``daimon.core.channel_isolation_setup``.
+admins only (and operator tokens with ``channels:write``). The rules live in
+``daimon.core.channel_isolation_setup``.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
@@ -27,19 +30,22 @@ from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
-from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    set_channel_isolation,
+)
 from daimon.core.errors import DaimonError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 
 _NOTE = (
-    "While a channel is isolated its own agents answer only there and are hidden everywhere "
-    "else, and from inside it only they are visible. Its messages are readable only from "
-    "inside it; memory stays writable."
+    "The channel is sealed and its own agent is pinned to it: it answers only there and is "
+    "hidden everywhere else, and from inside it only its own agents are visible. Its "
+    "messages are readable only from inside it; its own agents' memory stays writable."
 )
+_LIFT_HINT = "A server admin lifts them from Who answers where in the setup panel."
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,7 @@ async def _set_channel_isolation_impl(
     isolated: bool,
     fork_from: str | None = None,
 ) -> SetChannelIsolationResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     if auth.platform not in ("discord", "slack"):
         raise ToolError("Channel isolation exists only on Discord and Slack.")
@@ -91,28 +98,15 @@ async def _set_channel_isolation_impl(
         )
     except InvalidChannelAdminIds as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc
-    fork: ForkAgent | None = None
-    label: str | None = None
-    if isolated and fork_from is not None:
-        public_url = runtime.settings.mcp.public_url
-
-        async def fork_copy(source: str, new_name: str) -> None:
-            await fork_agent(
-                runtime.client,
-                runtime.session_factory,
-                tenant_id=auth.tenant_id,
-                source_name=source,
-                new_name=new_name,
-                public_url=str(public_url) if public_url is not None else None,
-            )
-
-        fork = fork_copy
-        label = await _channel_label(runtime, auth, channel)
+    fork = isolated and fork_from is not None
+    label = await _channel_label(runtime, auth, channel) if fork else None
+    public_url = runtime.settings.mcp.public_url
     try:
         change = await set_channel_isolation(
             runtime.client,
             runtime.session_factory,
             tenant_id=auth.tenant_id,
+            platform=auth.platform,
             channel_id=channel,
             isolated=isolated,
             default=runtime.deployment_default,
@@ -120,6 +114,8 @@ async def _set_channel_isolation_impl(
             channel_label=label,
             fork=fork,
             fork_from=fork_from,
+            public_url=str(public_url) if public_url is not None else None,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
         )
     except DaimonError as exc:
         raise ToolError(f"{exc} Nothing was changed.") from exc
@@ -129,12 +125,14 @@ async def _set_channel_isolation_impl(
         agent_name=change.agent_name,
         forked_from=change.forked_from,
         changed=change.changed,
-        note=_NOTE if change.isolated else "The channel is open again.",
+        note=" ".join(filter(None, [_NOTE, change.dropped_skills_note, change.network_warning]))
+        if change.isolated
+        else f"Isolation ended. {END_ISOLATION_WARNING} {_LIFT_HINT}",
     )
 
 
 def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_isolation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -144,8 +142,9 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Isolate one channel, or end its isolation. For example, give #team-alpha an
         agent nobody outside it can see or reach. Requires Manage Server (admin).
 
-        An isolated channel needs an agent of its own: its default agent, answering
-        nowhere else and not built in. If it has none, pass ``fork_from`` (an agent
+        Isolating seals the channel and pins its own agent to it: its default agent,
+        answering nowhere else, pinned nowhere else and not built in. If it has none, pass
+        ``fork_from`` (an agent
         name, usually the one answering there now): that agent is copied under a name
         taken from the channel and becomes the channel's default. The copy carries no
         credentials, and an agent pinned to channels can't be copied. Without it the call
@@ -154,8 +153,9 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         While isolated, the channel's own agents can't be set as the default anywhere
         else, don't appear in agent, skill or routine lists outside it, and can't be
         handed tasks from elsewhere; inside it only they appear. Its messages are
-        readable only from inside it. ``channel_id`` MUST be the parent channel's id,
-        never a thread's.
+        readable only from inside it. Ending isolation keeps the seal and the pins; a
+        server admin lifts them from Who answers where in the setup panel.
+        ``channel_id`` MUST be the parent channel's id, never a thread's.
         """
         return await _set_channel_isolation_impl(
             runtime, await _auth(ctx), channel_id=channel_id, isolated=isolated, fork_from=fork_from

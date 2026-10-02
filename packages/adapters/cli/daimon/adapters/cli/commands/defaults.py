@@ -24,6 +24,9 @@ defaults_app = typer.Typer(help="System defaults reconciliation.")
 def _outcome_dict(o: ResourceOutcome) -> dict[str, str | None]:
     d = dataclasses.asdict(o)
     d["action"] = o.action.value
+    # Only skill imports set `refusal`; keep the operator JSON as it was.
+    if d["refusal"] is None:
+        del d["refusal"]
     return d
 
 

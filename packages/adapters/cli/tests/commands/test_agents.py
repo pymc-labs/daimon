@@ -26,6 +26,7 @@ from anthropic.types.beta.beta_managed_agents_mcp_toolset_default_config import 
     BetaManagedAgentsMCPToolsetDefaultConfig,
 )
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+from cryptography.fernet import Fernet
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import agents as agents_cmd
 from daimon.adapters.cli.commands.agents import (
@@ -38,12 +39,16 @@ from daimon.adapters.cli.commands.agents import (
     agents_update,
 )
 from daimon.adapters.cli.runtime import CliRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.errors import SpecError, StoreError
+from daimon.core.errors import DaimonError, SpecError, StoreError
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_google_binding import get_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
@@ -1320,3 +1325,78 @@ def test_agents_archive_confirmation_names_the_resolved_tenant(
     assert guild_id in result.stdout, (
         f"confirmation prompt must name the resolved tenant's external id: {result.stdout!r}"
     )
+
+
+def _fork_router(
+    source_data: dict[str, object], created_bodies: list[dict[str, object]]
+) -> MARouter:
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([source_data]))
+    router.add("GET", r"/v1/agents/ag_source", lambda req, m: httpx.Response(200, json=source_data))
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created_bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={**source_data, "id": "ag_fork", "name": "forked-agent"})
+
+    router.add("POST", r"/v1/agents", on_create)
+    return router
+
+
+async def test_agents_fork_refuses_a_pinned_source(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A copy of a pinned agent would carry its prompt and connectors with no pin."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        await set_access_policy(
+            s,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_channel_pins={"base-agent": ("C1",)}),
+        )
+    created: list[dict[str, object]] = []
+    router = _fork_router(
+        _agent_json(agent_id="ag_source", name="base-agent", tenant_id=tenant.id), created
+    )
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    with pytest.raises(DaimonError, match="pinned to specific channels"):
+        await agents_fork(rt=rt, console=Console(file=StringIO()), src="base-agent", dst="copy")
+    assert created == []
+
+
+async def test_agents_fork_leaves_token_backed_mcp_servers_off_the_copy(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork starts credential-less; a server that needs the source's token stays behind."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_source"),
+        mcp_server_url="https://crm.example.com/mcp",
+        plaintext_token="tok_client_a",
+    )
+    source = _agent_json(agent_id="ag_source", name="base-agent", tenant_id=tenant.id)
+    source["mcp_servers"] = [
+        {"type": "url", "name": "crm", "url": "https://crm.example.com/mcp"},
+        {"type": "url", "name": "docs", "url": "https://docs.example.com/mcp"},
+    ]
+    source["tools"] = [
+        {"type": "mcp_toolset", "mcp_server_name": "crm"},
+        {"type": "mcp_toolset", "mcp_server_name": "docs"},
+    ]
+    created: list[dict[str, object]] = []
+    rt = build_cli_runtime(
+        db_session_factory, router=_fork_router(source, created), settings=_FakeSettings()
+    )
+
+    await agents_fork(rt=rt, console=Console(file=StringIO()), src="base-agent", dst="copy")
+
+    servers = cast("list[dict[str, object]]", created[0]["mcp_servers"])
+    tools = cast("list[dict[str, object]]", created[0]["tools"])
+    assert [server["name"] for server in servers] == ["docs"]
+    assert "crm" not in {tool.get("mcp_server_name") for tool in tools}, "its toolset goes too"

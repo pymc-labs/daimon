@@ -25,7 +25,7 @@ from daimon.adapters.discord.agent_setup.navigation import (
 )
 from daimon.adapters.discord.agent_setup.roster_view import RosterView, roster_rows
 from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -40,6 +40,7 @@ from daimon.core.scope import (
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -664,7 +665,6 @@ async def test_concurrent_details_clicks_keep_each_render_bound_to_its_agent(
         coding_targets.append(agent)
 
     monkeypatch.setattr(details_view_module, "open_setup_conversation", capture_setup)
-    monkeypatch.setattr(details_view_module, "is_guild_admin", lambda _interaction: True)
     monkeypatch.setattr(details_view_module, "send_coding_tools_access", capture_coding_tools)
 
     interactions = {name: _clicker(responded=True) for name in ("A", "B")}

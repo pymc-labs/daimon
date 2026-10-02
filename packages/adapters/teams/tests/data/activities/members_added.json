@@ -1,0 +1,43 @@
+{
+  "type": "conversationUpdate",
+  "membersAdded": [
+    {
+      "id": "28:bot-client-id"
+    }
+  ],
+  "timestamp": "2021-12-07T22:34:56.534Z",
+  "id": "f:00000000-0000-4000-8000-000000000012",
+  "channelId": "msteams",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/",
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "conversation": {
+    "isGroup": true,
+    "conversationType": "channel",
+    "tenantId": "00000000-0000-0000-0000-000000000001",
+    "id": "19:channel-1@thread.tacv2",
+    "name": "2021 Test Channel"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "channelData": {
+    "settings": {
+      "selectedChannel": {
+        "id": "19:channel-1@thread.tacv2"
+      }
+    },
+    "team": {
+      "aadGroupId": "00000000-0000-0000-0000-000000000004",
+      "name": "TestTeam2022",
+      "id": "19:team@thread.tacv2"
+    },
+    "eventType": "teamMemberAdded",
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  }
+}

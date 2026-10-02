@@ -14,11 +14,12 @@ the tests and the parity drivers keep importing every public name from here.
 Authorization mirrors the Discord `CredentialRequestButton` exactly:
 requester-only for every kind (the click's user must match the row's
 `requester_platform_user_id`), expiry and single-use checked at click time,
-and — for the `repo` kind only — a shared-agent admin gate, run once as a
+and — for the `repo` kind — a shared-agent admin gate, run once as a
 pre-filter before the modal opens and once more at submission before the
-consume. There is deliberately NO admin gate for the env/mcp/skill_repo
-kinds; see `tools/credential_requests.py` in the MCP adapter for the
-documented trade.
+consume. The `skill_repo` kind is gated at submission only; the MCP mint
+already refused it for a member on a shared agent. There is deliberately NO
+admin gate for the env/mcp kinds; see `tools/credential_requests.py` in the
+MCP adapter for the documented trade.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import anthropic
 from daimon.adapters.slack.credential_forms import (
     CRED_CALLBACK_PREFIX,
     CredentialSubmissionDecision,
@@ -46,9 +48,15 @@ from daimon.adapters.slack.credential_submissions import (
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
 from daimon.core.credential_requests import (
     CredentialRequestKind,
 )
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
 from daimon.core.posted_controls import (
@@ -112,18 +120,46 @@ async def start_mcp_oauth_from_click(
             thread_ts=thread_ts,
         )
         return
+    try:
+        agent = await find_agent_by_derived_uuid(
+            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        )
+    except anthropic.APIError:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="I couldn't verify this agent. Nothing was saved; please try again.",
+            thread_ts=thread_ts,
+        )
+        return
+    async with runtime.sessionmaker() as session:
+        pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+    if pin_refusal is not None:
+        await post_ephemeral(
+            client, channel_id=channel_id, user_id=user_id, text=pin_refusal, thread_ts=thread_ts
+        )
+        return
     now = datetime.now(UTC)
-    async with runtime.sessionmaker() as session, session.begin():
-        consumed = await credential_requests_store.consume_credential_request(
-            session, token=row.token, now=now
-        )
-        flow = (
-            await begin_mcp_oauth_flow(
-                session, request=consumed, app_root_url=app_root_url, now=now
+    try:
+        async with runtime.sessionmaker() as session, session.begin():
+            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+            flow = (
+                await begin_mcp_oauth_flow(
+                    session, request=consumed, app_root_url=app_root_url, now=now
+                )
+                if consumed is not None
+                else None
             )
-            if consumed is not None
-            else None
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+            thread_ts=thread_ts,
         )
+        return
     if consumed is None or flow is None:
         await post_ephemeral(
             client,

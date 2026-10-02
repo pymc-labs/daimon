@@ -25,9 +25,10 @@ import functools
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
+import anthropic as anthropic_pkg
 import structlog
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
@@ -40,6 +41,7 @@ from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
+from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     fingerprint_identity,
@@ -48,15 +50,21 @@ from daimon.core.session_snapshot import (
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
-from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
-from daimon.core.turn.admission import Admission
+from daimon.core.stores.thread_sessions import (
+    create_thread_session,
+    get_live_thread_session,
+    get_thread_session_by_id,
+)
+from daimon.core.turn.admission import Admission, reauthorize
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
+from daimon.core.turn_origin import SessionState
 from daimon.core.usage_recording import record_turn_usage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,7 +89,21 @@ class ContinuityOutcome:
     user_prefix: str = ""
     system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = ()
 
+    def session_state(self) -> SessionState:
+        """This bind as `<turn_controls>` facts.
 
+        `lost` follows the replacement's transfer degrade ladder, which already
+        says what did not survive; that keeps the controls' "say what is
+        missing" instruction accurate.
+        """
+        lost = _LOST_BY_TRANSFER.get(self.transfer_kind, ())
+        return SessionState(state=self.state, applied=self.applied, lost=lost)
+
+
+_LOST_BY_TRANSFER: dict[TransferKind | None, tuple[str, ...]] = {
+    "transcript": ("working files",),
+    "history": ("working files", "earlier conversation"),
+}
 CONTINUED = ContinuityOutcome()
 
 
@@ -116,6 +138,9 @@ class FreshSession:
     ma_session_id: str
     mapping_id: uuid.UUID
     snapshot: SessionSnapshot
+    # The admission as decided again right before the session was created
+    # (`reauthorize`), so the turn runs under what the session was built with.
+    admission: Admission | None = None
 
 
 __all__ = [
@@ -158,6 +183,8 @@ class CreatedSession:
 
     ma_session_id: str
     snapshot: SessionSnapshot
+    # The admission as decided again right before `sessions.create`.
+    admission: Admission | None = None
 
 
 async def create_ma_session(
@@ -166,6 +193,7 @@ async def create_ma_session(
     *,
     tenant_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
+    predecessor_session_id: str | None = None,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -173,7 +201,52 @@ async def create_ma_session(
     divergent second call site is exactly the bug shape this phase exists to
     kill. The snapshot is taken from the object `sessions.create` returned,
     the authority on what the session will execute.
+
+    A session that replaces `predecessor_session_id` -- by transcript,
+    checkpoint, bundle, handoff or dead-session recovery -- carries its
+    predecessor's work, so it is stamped with its predecessor's seal as well
+    as this turn's (`daimon.core.session_seal.inherited_seal_ids`).
+
+    Every session is created here -- a thread's first, a replacement after a
+    checkpoint or workspace transfer, a dead-session successor -- so the
+    admission is decided again here, on the policy as it is at this moment
+    (`reauthorize`): a pin added during a transfer or lock wait refuses the
+    turn before any session exists, and a seal added since is stamped on the
+    session and mounts memory read-only.
     """
+    admission = await reauthorize(deps, admission)
+    seal: set[str] = set(admission.origin_seal_ids)
+    if predecessor_session_id is not None and admission.origin_channel_id is not None:
+        async with deps.sessionmaker() as db:
+            policy = await load_access_policy(db, tenant_id=tenant_id)
+        seal |= await inherited_seal_ids(
+            deps.anthropic,
+            predecessor_session_id=predecessor_session_id,
+            own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
+            tenant_seals_anything=bool(policy.sealed_channel_ids),
+        )
+    if predecessor_session_id is not None:
+        # The predecessor lookup above awaits MA: decide again after it, so a
+        # pin or seal saved during it applies to the successor being built.
+        admission = await reauthorize(deps, admission)
+        seal |= admission.origin_seal_ids
+    built = admission
+
+    async def fence() -> None:
+        # `create_session` awaits vault, credential, file and repository work
+        # before `sessions.create`; decide once more immediately before it.
+        # A pin raises `AdmissionDenied`; a seal the session was not built
+        # with makes the turn wait and be prepared again read-only.
+        current = await reauthorize(deps, built)
+        if (
+            current.origin_seal_ids != built.origin_seal_ids
+            or current.memory_read_only != built.memory_read_only
+        ):
+            raise SessionBusyError(
+                pending_reasons=("seal",),
+                retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+            )
+
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
@@ -194,7 +267,11 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
-        channel_id=admission.channel_id,
+        budget_channel_id=admission.budget_channel_id,
+        origin_channel_id=admission.origin_channel_id,
+        origin_thread_id=admission.origin_thread_id,
+        origin_seal_ids=frozenset(seal),
+        before_create=fence,
     )
 
     has_repo = any(
@@ -213,7 +290,7 @@ async def create_ma_session(
         repo_token_issued_at=int(time.time()) if has_repo else None,
         vault_id=next(iter(ma_session.vault_ids), None),
     )
-    return CreatedSession(ma_session_id=ma_session.id, snapshot=snapshot)
+    return CreatedSession(ma_session_id=ma_session.id, snapshot=snapshot, admission=admission)
 
 
 async def insert_mapping(
@@ -247,6 +324,7 @@ async def insert_mapping(
         account_id=session_account_id,
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
+        channel_id=admission.budget_channel_id,
         effective_config=snapshot,
         identity_fingerprint=fingerprint_identity(snapshot),
         mutable_fingerprint=fingerprint_mutable(snapshot),
@@ -254,7 +332,12 @@ async def insert_mapping(
         transfer_file_id=transfer_file_id,
         transfer_kind=transfer_kind,
     )
-    return FreshSession(ma_session_id=created.ma_session_id, mapping_id=row.id, snapshot=snapshot)
+    return FreshSession(
+        ma_session_id=created.ma_session_id,
+        mapping_id=row.id,
+        snapshot=snapshot,
+        admission=created.admission,
+    )
 
 
 async def create_fresh_session(
@@ -281,14 +364,27 @@ async def create_fresh_session(
     records about where that work came from. A first session for a thread
     passes none of them.
     """
+    predecessor_session_id: str | None = None
+    if predecessor_id is not None:
+        async with deps.sessionmaker() as session:
+            predecessor = await get_thread_session_by_id(session, id=predecessor_id)
+        # A lineage row that can't be found still means old work is carried:
+        # inherited_seal_ids seals an unreadable predecessor to this thread.
+        predecessor_session_id = (
+            predecessor.ma_session_id if predecessor is not None else "unknown-predecessor"
+        )
     created = await create_ma_session(
-        deps, admission, tenant_id=tenant_id, extra_resources=extra_resources
+        deps,
+        admission,
+        tenant_id=tenant_id,
+        extra_resources=extra_resources,
+        predecessor_session_id=predecessor_session_id,
     )
     async with deps.sessionmaker() as session:
         fresh = await insert_mapping(
             session,
             created,
-            admission,
+            created.admission or admission,
             tenant_id=tenant_id,
             platform=platform,
             thread_id=thread_id,
@@ -325,7 +421,7 @@ def bind_recorder(
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
 
-    `channel_id` is `Admission.channel_id`: the channel whose budget the
+    `channel_id` is `Admission.budget_channel_id`: the channel whose budget the
     turn's spend counts toward.
     """
     if (observation := current_outcome.get()) is not None:
@@ -396,6 +492,82 @@ async def bind_session(
     return result
 
 
+async def _decide_reuse_again(
+    deps: TurnDeps, prepared: PreparedTurn, *, now: Callable[[], dt.datetime]
+) -> PreparedTurn:
+    """Decide the admission again once preparation is done, for a reused session.
+
+    Preparation waits on a lock and may check compatibility before it settles
+    on the existing session, so the policy is read once more here: a pin or
+    protection added meanwhile refuses the turn (`AdmissionDenied`), and a
+    seal added meanwhile is stamped onto the session (`_stamp_reused_seal`).
+    A reused session mounted memory writable can't take a new seal in place,
+    so that turn waits (`SessionBusyError`) and the next one is prepared
+    read-only. A freshly created session was decided in `create_ma_session`.
+    """
+    if not prepared.reused:
+        return prepared
+    current = await reauthorize(deps, prepared.admission)
+    if current is prepared.admission:
+        return prepared
+    if current.memory_read_only and not prepared.admission.memory_read_only:
+        raise SessionBusyError(
+            pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=1)
+        )
+    return replace(prepared, admission=current)
+
+
+async def _stamp_reused_seal(
+    deps: TurnDeps, prepared: PreparedTurn, *, now: Callable[[], dt.datetime]
+) -> None:
+    """Add this sealed turn's seal to a session it reuses.
+
+    A fresh session is stamped at creation; one opened before its channel was
+    sealed lacks this seal and would be readable again after an unseal once
+    this turn has written sealed content into it. The recorded seal only
+    grows: a thread seal already on the session is kept beside a channel
+    one. A session that has gone away is left to the dead-session recovery,
+    whose replacement inherits its seal. One MA won't update mid-turn blocks
+    this turn: running it unstamped is the leak this exists to close.
+    """
+    if prepared.reused:
+        await stamp_session_seal(deps, prepared.ma_session_id, prepared.admission, now=now)
+
+
+async def stamp_session_seal(
+    deps: TurnDeps, ma_session_id: str, admission: Admission, *, now: Callable[[], dt.datetime]
+) -> None:
+    """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
+    if not admission.origin_seal_ids or admission.origin_channel_id is None:
+        return
+    try:
+        current = await deps.anthropic.beta.sessions.retrieve(ma_session_id)
+        recorded = seal_ids(current.metadata)
+        if admission.origin_seal_ids <= recorded:
+            return
+        await deps.anthropic.beta.sessions.update(
+            ma_session_id,
+            metadata=dict(
+                origin_stamp(
+                    channel_id=admission.origin_channel_id,
+                    thread_id=admission.origin_thread_id,
+                    seal=recorded | admission.origin_seal_ids,
+                )
+            ),
+        )
+    except anthropic_pkg.NotFoundError:
+        log.info("turn.seal_stamp_session_gone", ma_session_id=ma_session_id)
+    except anthropic_pkg.APIStatusError as error:
+        # MA refuses updates mid-turn ("... while session is running"); any
+        # other refusal fails the turn rather than running it unstamped.
+        if error.status_code != 409 and "while session is running" not in str(error):
+            raise
+        log.info("turn.seal_stamp_busy", ma_session_id=ma_session_id)
+        raise SessionBusyError(
+            pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
+        ) from error
+
+
 async def bind_session_impl(
     deps: TurnDeps,
     admission: Admission,
@@ -460,6 +632,11 @@ async def bind_session_impl(
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
 
     async def _bind() -> PreparedTurn:
+        # Decide the admission again at the moment its session is found,
+        # reused, replaced or created: a pin, seal, protection or invoker
+        # change since `admit()` applies to this turn, and a seal added in
+        # between is stamped on the session (`reauthorize`).
+        current = await reauthorize(deps, admission)
         # Imported here, not at module scope: `session_preparation` imports
         # this module for the types above, and importing it back at module
         # scope would make either module unimportable first. The import is
@@ -481,7 +658,7 @@ async def bind_session_impl(
             tenant_id=tenant_id,
             external_user_id=external_user_id,
             markup=deps.markup,
-            channel_id=admission.channel_id,
+            channel_id=admission.budget_channel_id,
         )
 
         # `SessionOps` is built here rather than at import time so that
@@ -489,7 +666,7 @@ async def bind_session_impl(
         # globals when the bind runs, which is what keeps them patchable.
         outcome = await prepare_session_for_turn(
             deps,
-            admission,
+            current,
             ops=SessionOps(
                 read_live_row=get_live_thread_session,
                 create_fresh=create_fresh_session,
@@ -507,7 +684,9 @@ async def bind_session_impl(
             now=now,
         )
         if isinstance(outcome, PreparationDeferred):
-            return outcome.prepared
+            prepared_turn = await _decide_reuse_again(deps, outcome.prepared, now=now)
+            await _stamp_reused_seal(deps, prepared_turn, now=now)
+            return prepared_turn
         if isinstance(outcome, PreparationBusy):
             raise SessionBusyError(
                 pending_reasons=outcome.pending_reasons, retry_after=outcome.retry_after
@@ -519,7 +698,9 @@ async def bind_session_impl(
                 retry_after=outcome.retry_after,
                 preserved=outcome.preserved,
             )
-        return outcome
+        prepared_turn = await _decide_reuse_again(deps, outcome, now=now)
+        await _stamp_reused_seal(deps, prepared_turn, now=now)
+        return prepared_turn
 
     try:
         return await asyncio.wait_for(_bind(), timeout=remaining_s(effective_deadline, now=now()))

@@ -6,6 +6,7 @@ call, the `thread_sessions` mapping write, and recorder binding.
 from __future__ import annotations
 
 import dataclasses
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -265,6 +266,138 @@ async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exi
     assert prepared.watermark == "msg-99", "must return the row's watermark_message_id"
 
 
+@pytest.mark.parametrize("seal_id", [None, "vault"], ids=["open", "sealed"])
+async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    seal_id: str | None,
+) -> None:
+    """A thread whose channel was sealed mid-conversation keeps its session: the
+    seal must reach that session's stamp, or unsealing later would open a
+    transcript written under the seal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-1",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-99",
+    )
+    await db_session.commit()
+    updates: list[dict[str, object]] = []
+
+    def _update(request: httpx.Request, _match: object) -> httpx.Response:
+        updates.append(json.loads(request.content))
+        return httpx.Response(200, json=ma_session(id="sess_existing").model_dump(mode="json"))
+
+    router = MARouter()
+    router.add("POST", r"/v1/sessions/sess_existing$", _update)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = dataclasses.replace(
+        _admission(account_id=account.id, agent=agent, env=env),
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_ids=frozenset() if seal_id is None else frozenset({seal_id}),
+        memory_read_only=seal_id is not None,
+    )
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-1",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True
+    if seal_id is None:
+        assert updates == [], "an open turn must not touch the session's metadata"
+    else:
+        assert [u.get("metadata") for u in updates] == [
+            {"daimon_channel": "vault", "daimon_thread": "thread-1", "daimon_sealed": "vault"}
+        ]
+
+
+async def test_bind_session_blocks_a_sealed_turn_ma_will_not_stamp_mid_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Running the turn unstamped is the leak; wait for the session instead."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-1",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-99",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Cannot update session while session is running",
+                },
+            },
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_ids=frozenset({"vault"}),
+        memory_read_only=True,
+    )
+
+    with pytest.raises(SessionBusyError):
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            reuse_existing=True,
+        )
+
+
 async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -310,6 +443,46 @@ async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     assert live.ma_session_id == prepared.ma_session_id, (
         "the persisted row's ma_session_id must match the returned PreparedTurn"
     )
+
+
+async def test_bind_session_stamps_the_budget_channel_apart_from_the_origin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A DM turn runs in the DM but bills the channel it was opened from."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    session_bodies: list[dict[str, object]] = []
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        router=_router_with_session_create(session_bodies=session_bodies),
+    )
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="dm-chan",
+        budget_channel_id="chan-2",
+    )
+
+    await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="dm:1",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    metadata = session_bodies[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata.get("daimon_channel") == "dm-chan"
+    assert metadata.get("daimon_budget_channel") == "chan-2"
 
 
 async def test_bind_session_always_creates_fresh_session_when_reuse_existing_false(

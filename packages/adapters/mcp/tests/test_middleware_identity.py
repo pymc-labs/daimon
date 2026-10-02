@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware.mcp_identity import (
     IdentityMiddleware,
@@ -21,6 +22,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
 )
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from fastmcp import Client, FastMCP
+from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.context import Context
 from fastmcp.server.transforms import Visibility
@@ -1208,3 +1210,54 @@ async def test_platform_visibility_no_platform_claim_sees_neither_tag(
     assert "untagged_tool" in tool_names, "an untagged tool must stay visible with no platform"
     assert "discord_tool" not in tool_names, "no platform claim must not enable discord tools"
     assert "slack_tool" not in tool_names, "no platform claim must not enable slack tools"
+
+
+@pytest.mark.parametrize(("agent", "expected"), [(True, "c-1"), (False, None)])
+async def test_identity_middleware_binds_a_channel_only_for_an_agent_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    agent: bool,
+    expected: str | None,
+) -> None:
+    """The verifier's `bound_channel_id` reaches the identity only beside an agent id."""
+    account_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+    token = AccessToken(token="t", client_id="c", scopes=[], claims={"bound_channel_id": "c-1"})
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: token
+    )
+    captured: list[AuthIdentity] = []
+
+    async def subject(_ctx: object) -> str:
+        return str(account_id)
+
+    async def tenant(_ctx: object) -> str:
+        return str(tenant_id)
+
+    async def role(_ctx: object) -> str:
+        return "user"
+
+    async def agent_id(_ctx: object) -> str | None:
+        return str(uuid.uuid4()) if agent else None
+
+    mcp = FastMCP(name="test")
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=subject,
+            tenant_resolver=tenant,
+            role_resolver=role,
+            agent_id_resolver=agent_id,
+            is_admin_resolver=_fixture_is_admin_resolver_false,
+            internal_resolver=_fixture_internal_resolver_false,
+            sessionmaker=sessionmaker,
+        )
+    )
+
+    @mcp.tool(tags={"agent-chat"})
+    async def whoami(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
+        captured.append(await ctx.get_state("auth"))
+        return "ok"
+
+    async with Client(mcp) as client:
+        await client.call_tool("whoami", {})
+
+    assert captured[0].bound_channel_id == expected

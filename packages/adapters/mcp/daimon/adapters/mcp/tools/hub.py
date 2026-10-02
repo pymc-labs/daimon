@@ -20,14 +20,21 @@ handle is only usable by the account that created the session: the
 compared to the caller's account before any read or continuation, and
 ``list_my_sessions`` filters on it. Channel threads driven by the chat
 adapters carry the thread starter's account, so they are invisible to
-everyone else through the hub.
+everyone else through the hub -- except to a workspace admin (stored role,
+refreshed by their next platform turn), who may list and read every channel
+conversation of the daimon, sealed ones included, but continue none that is
+sealed, and to a channel admin (stored grants), who may do the same for the
+channels they administer (docs/architecture.md, "Trust model").
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Literal
 
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import (
@@ -35,10 +42,18 @@ from daimon.adapters.mcp.hub.identity import (
     _hub_auth,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import agent_name_of, load_isolation
+from daimon.adapters.mcp.tools._ctx import (
+    _admission_recheck,  # pyright: ignore[reportPrivateUsage]
+    _admit,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._pagination import Page
-from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
+from daimon.adapters.mcp.tools._session_access import (
+    admin_readable_legacy_sessions,
+    hub_session_access,
+    load_hub_subject,
+    session_belongs_to_caller,
+    sessions_outside_seals,
+)
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
@@ -52,10 +67,14 @@ from daimon.adapters.mcp.tools.agent_chat import (
     agent_pin_names,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
+from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
+from daimon.core.authz import Subject
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_admins import load_stored_subject
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
@@ -63,6 +82,8 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
 
 _NOT_FOUND = "daimon not found"
 _SESSION_NOT_FOUND = "session not found"
@@ -98,26 +119,41 @@ async def _agents_by_tenant(
     """Each tenant's agents, less those an isolated channel keeps to itself.
 
     A hub call runs outside every channel, so an isolated channel's own agents
-    are neither listed nor resolvable here.
+    are neither listed nor resolvable here, except for an admin of that
+    workspace or of that channel, as their stored role and grants say (the
+    isolation exemption in their own hub). A tenant whose access policy can't
+    be read is left out whole, so one bad workspace doesn't hide the others.
     """
     by_id = await list_agents_by_tenants(
         runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
     )
     out: list[tuple[HubTenant, list[BetaManagedAgentsAgent]]] = []
     for tenant in hub.tenants:
-        isolation = await load_isolation(runtime, tenant.tenant_id)
+        try:
+            async with runtime.session_factory() as session:
+                policy = await load_access_policy(session, tenant_id=tenant.tenant_id)
+                subject = (
+                    await load_stored_subject(
+                        session,
+                        tenant_id=tenant.tenant_id,
+                        platform=hub.platform,
+                        account_id=tenant.account_id,
+                        platform_user_id=hub.platform_user_id,
+                    )
+                    if policy.isolated_channel_ids
+                    else Subject()
+                )
+        except AccessPolicyUnreadable:
+            log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
+            continue
         agents = by_id[tenant.tenant_id]
-        out.append(
-            (
-                tenant,
-                [
-                    a
-                    for a in agents
-                    if isolation.is_visible(agent_name_of(a), inside_channel_id=None)
-                ],
-            )
-        )
+        out.append((tenant, [a for a in agents if _hub_sees(policy, subject, a)]))
     return out
+
+
+def _hub_sees(policy: TenantAccessPolicy, subject: Subject, agent: BetaManagedAgentsAgent) -> bool:
+    owner = isolation_owner(policy, agent_pin_names(agent))
+    return owner is None or subject.is_admin or owner in subject.administered_channel_ids
 
 
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:
@@ -198,36 +234,68 @@ async def _verify_account_owns_session(
     to other members of the workspace.
     """
     session = await _verify_agent_owns_session(runtime, auth, handle)
-    if not _owned_by(session, auth):
+    if not _owned_by(session, auth) and session.id not in await admin_readable_legacy_sessions(
+        runtime, auth, [session]
+    ):
         raise ToolError(_SESSION_NOT_FOUND)
 
 
 async def _list_my_sessions_impl(
     runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
 ) -> list[SessionInfo]:
-    out: list[SessionInfo] = []
+    owned: list[BetaManagedAgentsSession] = []
+    others: list[BetaManagedAgentsSession] = []
     async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
-        if _owned_by(session, auth):
-            out.append(SessionInfo.from_ma(session))
-    return out
+        (owned if _owned_by(session, auth) else others).append(session)
+    legacy = await admin_readable_legacy_sessions(runtime, auth, others)
+    owned.extend(s for s in others if s.id in legacy)
+    # The hub runs outside every channel: sealed conversations stay hidden,
+    # except to an admin's or channel admin's hub read (`hub_session_access`),
+    # which also opens other members' channel conversations, an admin's legacy
+    # ones included.
+    return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
 def register_hub_tools(
     mcp: FastMCP, runtime: McpRuntime, *, billing_config: BillingConfig | None
 ) -> None:
-    async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> AuthIdentity:
+    async def _admitted(
+        ctx: Context, daimon_id: str, tool_name: str
+    ) -> tuple[AuthIdentity, Subject, Callable[[], Awaitable[None]]]:
+        """Admit a hub turn; returns the identity, the caller's stored rights,
+        and the re-check the turn runs right before its create and send.
+
+        One read per call serves both the pin exemption (server admins only)
+        and sealed-session access; the re-check reads the stored role again.
+        """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
+        subject = await load_hub_subject(runtime, auth)
+        # The grants ride on the identity for the hub branch of `_admit`.
+        auth = replace(auth, administered_channel_ids=subject.administered_channel_ids)
 
         async def names() -> tuple[str | None, ...]:
             return agent_pin_names(agent)
 
-        return await _admit(
+        # A channel admin's hub turn is judged as one too, so an isolated
+        # channel they administer lends them its own agents here.
+        hub_exempt = subject.is_admin or bool(subject.administered_channel_ids)
+
+        admitted = await _admit(
             auth,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name=tool_name,
             agent_names=names,
+            pin_exempt=hub_exempt,
         )
+        recheck = _admission_recheck(
+            admitted,
+            sessionmaker=runtime.session_factory,
+            tool_name=tool_name,
+            agent_names=names,
+            pin_exempt=hub_exempt,
+        )
+        return admitted, subject, recheck
 
     @mcp.tool
     async def list_daimons(  # pyright: ignore[reportUnusedFunction]
@@ -261,10 +329,13 @@ def register_hub_tools(
         result to continue the same conversation. On timeout the error carries
         the handle; resume with it rather than asking again.
         """
-        auth = await _admitted(ctx, daimon_id, "ask")
-        if handle is not None:
-            await _verify_account_owns_session(runtime, auth, handle)
-        return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
+        auth, subject, recheck = await _admitted(ctx, daimon_id, "ask")
+        with hub_session_access(subject, "continue"):
+            if handle is not None:
+                await _verify_account_owns_session(runtime, auth, handle)
+            return _ask_tool_result(
+                await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck)
+            )
 
     @mcp.tool
     async def start_turn(  # pyright: ignore[reportUnusedFunction]
@@ -274,17 +345,18 @@ def register_hub_tools(
 
         Returns ``{"handle": ...}`` for polling with ``get_session``.
         """
-        auth = await _admitted(ctx, daimon_id, "start_turn")
-        return await _start_turn_impl(runtime, auth, message)
+        auth, _, recheck = await _admitted(ctx, daimon_id, "start_turn")
+        return await _start_turn_impl(runtime, auth, message, recheck=recheck)
 
     @mcp.tool
     async def continue_turn(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, handle: str, message: str
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting."""
-        auth = await _admitted(ctx, daimon_id, "continue_turn")
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _continue_turn_impl(runtime, auth, handle, message)
+        auth, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
+        with hub_session_access(subject, "continue"):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _continue_turn_impl(runtime, auth, handle, message, recheck=recheck)
 
     @mcp.tool
     async def get_session(  # pyright: ignore[reportUnusedFunction]
@@ -292,8 +364,9 @@ def register_hub_tools(
     ) -> SessionInfo:
         """Status of one session. Poll until ``idle`` before reading ``list_events``."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _get_session_impl(runtime, auth, handle)
+        with hub_session_access(await load_hub_subject(runtime, auth), "read"):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _get_session_impl(runtime, auth, handle)
 
     @mcp.tool
     async def list_events(  # pyright: ignore[reportUnusedFunction]
@@ -306,8 +379,9 @@ def register_hub_tools(
     ) -> Page[SessionEventOut]:
         """A session's transcript. The daimon's reply is in ``agent.message`` events."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _list_events_impl(runtime, auth, handle, page, limit, order)
+        with hub_session_access(await load_hub_subject(runtime, auth), "read"):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _list_events_impl(runtime, auth, handle, page, limit, order)
 
     @mcp.tool
     async def list_my_sessions(  # pyright: ignore[reportUnusedFunction]
@@ -316,7 +390,13 @@ def register_hub_tools(
         """Sessions you started with this daimon, for resuming with ``handle``.
 
         Other people's conversations with the same daimon are not listed and
-        their handles are not accepted.
+        their handles are not accepted; nor are conversations from a sealed
+        channel, which can only be read from inside it. A workspace admin also
+        sees everyone's channel conversations with this daimon, sealed ones
+        included, and can read them with ``get_session``/``list_events``, but
+        can't continue a sealed one from here. A channel admin sees the same
+        for the channels they administer.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
-        return await _list_my_sessions_impl(runtime, auth, agent)
+        with hub_session_access(await load_hub_subject(runtime, auth), "read"):
+            return await _list_my_sessions_impl(runtime, auth, agent)

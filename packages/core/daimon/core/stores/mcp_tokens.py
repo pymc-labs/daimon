@@ -1,26 +1,31 @@
 """MCP token registry store — CRUD for the mcp_tokens jti table.
 
-Three functions, no try/except — exceptions propagate (guideline:architecture).
+No try/except — exceptions propagate (guideline:architecture).
 
-- create_mcp_token_row: insert a new token row (called by mint_agent_mcp_token
-  before signing; mint supplies jti so no refresh needed).
+- create_mcp_token_row: insert a new token row (the mint functions in
+  `daimon.core.mcp_auth` call it before signing and supply the jti).
 - get_mcp_token: PK lookup by jti; returns McpTokenRow | None.
 - revoke_mcp_token: atomic UPDATE…RETURNING that sets revoked_at=now only when
   revoked_at IS NULL; returns McpTokenRow | None (None = already-revoked or unknown).
+- list_mcp_tokens: operator listing, live tokens only unless asked.
+- lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
+- update_mcp_token_scopes: replace a live operator token's scopes.
 
-Injected `now` in revoke_mcp_token follows guideline:architecture — no
-datetime.now() calls inside core logic.
+Injected `now` follows guideline:architecture — no datetime.now() calls
+inside core logic.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import McpToken
-from daimon.core.stores.domain import McpTokenRow
-from sqlalchemy import CursorResult, delete, func, select, update
+from daimon.core.stores.domain import McpTokenKind, McpTokenRow
+from sqlalchemy import CursorResult, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -30,23 +35,37 @@ async def create_mcp_token_row(
     jti: uuid.UUID,
     account_id: uuid.UUID,
     tenant_id: uuid.UUID,
-    agent_id: str,
+    agent_id: str | None,
     label: str | None,
     created_at: datetime,
+    kind: McpTokenKind = "agent",
+    scopes: Collection[str] = (),
+    expires_at: datetime | None = None,
+    max_issued_usd: Decimal | None = None,
+    platform: str | None = None,
+    channel_id: str | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
-    The caller (mint_agent_mcp_token) generates jti and passes it in so
-    the JWT payload and the DB row share the same value. created_at is also
+    The caller (a mint function) generates jti and passes it in so the JWT
+    payload and the DB row share the same value. created_at is also
     injected (injected-clock convention per guideline:architecture).
+    `platform` and `channel_id` name the channel the token is bound to, both or
+    neither.
     """
     orm = McpToken(
         jti=jti,
         account_id=account_id,
         tenant_id=tenant_id,
         agent_id=agent_id,
+        kind=kind,
+        scopes=sorted(scopes),
         label=label,
         created_at=created_at,
+        expires_at=expires_at,
+        max_issued_usd=max_issued_usd,
+        platform=platform,
+        channel_id=channel_id,
     )
     session.add(orm)
     await session.flush()
@@ -164,3 +183,59 @@ async def count_tokens_for_account(
         select(func.count()).select_from(McpToken).where(McpToken.account_id == account_id)
     )
     return result.scalar_one()
+
+
+async def list_mcp_tokens(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    tenant_id: uuid.UUID | None = None,
+    kind: McpTokenKind | None = None,
+    include_inactive: bool = False,
+) -> list[McpTokenRow]:
+    """Token rows, newest first; revoked and expired ones only when `include_inactive`."""
+    stmt = select(McpToken).order_by(McpToken.created_at.desc(), McpToken.jti)
+    if tenant_id is not None:
+        stmt = stmt.where(McpToken.tenant_id == tenant_id)
+    if kind is not None:
+        stmt = stmt.where(McpToken.kind == kind)
+    if not include_inactive:
+        stmt = stmt.where(
+            McpToken.revoked_at.is_(None),
+            or_(McpToken.expires_at.is_(None), McpToken.expires_at > now),
+        )
+    return [McpTokenRow.model_validate(orm) for orm in (await session.scalars(stmt)).all()]
+
+
+async def lock_mcp_token(session: AsyncSession, *, jti: uuid.UUID) -> McpTokenRow | None:
+    """Row-lock a token so its issuing ceiling is checked and counted serially."""
+    stmt = select(McpToken).where(McpToken.jti == jti).with_for_update()
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else McpTokenRow.model_validate(orm)
+
+
+async def add_issued_usd(session: AsyncSession, *, jti: uuid.UUID, amount_usd: Decimal) -> None:
+    """Count promo credit a token issued against its ceiling. Call under `lock_mcp_token`."""
+    await session.execute(
+        update(McpToken)
+        .where(McpToken.jti == jti)
+        .values(issued_usd=McpToken.issued_usd + amount_usd)
+    )
+
+
+async def update_mcp_token_scopes(
+    session: AsyncSession, *, jti: uuid.UUID, scopes: Collection[str]
+) -> McpTokenRow | None:
+    """Set a live operator token's scopes; None when no live operator row has `jti`.
+
+    The caller checks the change only removes scopes (`validate_scope_narrowing`)
+    under `lock_mcp_token`; the verifier reads the new set on the next request.
+    """
+    stmt = (
+        update(McpToken)
+        .where(McpToken.jti == jti, McpToken.kind == "operator", McpToken.revoked_at.is_(None))
+        .values(scopes=sorted(scopes))
+        .returning(McpToken)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else McpTokenRow.model_validate(orm)

@@ -17,6 +17,7 @@ from daimon.core.mcp_oauth.complete import (
     complete_mcp_oauth_flow,
     registered_client,
 )
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import McpOAuthFlowRow
@@ -85,7 +86,12 @@ async def _flow(
 
 
 def _fake_ma(
-    tenant_id: uuid.UUID, *, vault_id: str, account_id: uuid.UUID, agent_id: uuid.UUID
+    tenant_id: uuid.UUID,
+    *,
+    vault_id: str,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    mcp_servers: list[dict[str, str]] | None = None,
 ):  # test-local bundle
     """MA with the requester's vault already bootstrapped and one agent."""
     created_credentials: list[dict[str, Any]] = []
@@ -95,6 +101,7 @@ def _fake_ma(
         id="ag_oauth",
         name="daimon",
         metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
+        mcp_servers=mcp_servers or [],
         tools=[
             {
                 "type": "agent_toolset_20260401",
@@ -197,6 +204,7 @@ async def test_complete_exchanges_code_writes_grant_and_attaches_server(
         public_url=_PUBLIC_URL,
         now=_NOW,
         session_factory=db_session_factory,
+        default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
     assert completion.vault_id == "vlt_me" and completion.credential_id == "vcrd_oauth"
     assert completion.ma_agent_id == "ag_oauth"
@@ -227,3 +235,152 @@ async def test_registered_client_refuses_a_flow_that_skipped_start(
     flow, _tenant_id = await _flow(db_session, with_client=False)
     with pytest.raises(McpOAuthIncompleteFlowError):
         registered_client(flow, fernet=make_fernet())
+
+
+async def test_complete_refuses_repointing_a_shared_agents_server_for_a_member(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """H2: the grant is personal, the attach is not. A member's callback must not
+    repoint the live agent's existing `notion` at the flow's URL."""
+    from daimon.core.mcp_attach import McpServerReplaceRefusedError
+
+    flow, tenant_id = await _flow(db_session)
+    await db_session.commit()
+
+    def token_handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+
+    anthropic, _created, updates = _fake_ma(
+        tenant_id,
+        vault_id="vlt_me",
+        account_id=flow.account_id,
+        agent_id=flow.agent_id,
+        mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
+    )
+    with pytest.raises(McpServerReplaceRefusedError):
+        await complete_mcp_oauth_flow(
+            httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
+            anthropic,
+            flow=flow,
+            code="code123",
+            fernet=make_fernet(),
+            jwt_secret=b"x" * 32,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            session_factory=db_session_factory,
+            default=DeploymentDefault(agent_name="daimon", environment_name="default"),
+        )
+    assert updates == [], "the agent's server must not be repointed"
+
+
+async def test_complete_lets_an_admin_requester_repoint_a_shared_agents_server(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The callback re-decides against the requester's recorded role (possibly stale)."""
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.domain import Role
+
+    flow, tenant_id = await _flow(db_session)
+    await set_role(db_session, flow.account_id, Role.ADMIN)
+    await db_session.commit()
+
+    def token_handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+
+    anthropic, _created, updates = _fake_ma(
+        tenant_id,
+        vault_id="vlt_me",
+        account_id=flow.account_id,
+        agent_id=flow.agent_id,
+        mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
+    )
+    completion = await complete_mcp_oauth_flow(
+        httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
+        anthropic,
+        flow=flow,
+        code="code123",
+        fernet=make_fernet(),
+        jwt_secret=b"x" * 32,
+        public_url=_PUBLIC_URL,
+        now=_NOW,
+        session_factory=db_session_factory,
+        default=DeploymentDefault(agent_name="daimon", environment_name="default"),
+    )
+    assert completion.ma_agent_id == "ag_oauth"
+    assert [s["url"] for s in updates[0]["mcp_servers"]] == [flow.mcp_server_url]
+
+
+@pytest.mark.parametrize("granted", [True, False], ids=["channel-admin", "member"])
+async def test_complete_decides_a_repoint_as_the_request_did_for_a_channel_admin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], granted: bool
+) -> None:
+    """The callback builds the requester from their stored platform id and role ids, so a
+    channel admin allowed when asking is not refused after the token is already stored."""
+    from daimon.core.mcp_attach import McpServerReplaceRefusedError
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.accounts import get_account, set_platform_role_ids
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.core.stores.scoped_config_write import set_fields
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_platform_principal
+
+    flow, tenant_id = await _flow(db_session)
+    tenant = await get_tenant(db_session, tenant_id)
+    account = await get_account(db_session, flow.account_id)
+    assert tenant is not None and account is not None, "the flow's tenant and account exist"
+    await make_platform_principal(
+        db_session, platform="discord", external_id="requester-1", tenant=tenant, account=account
+    )
+    await set_platform_role_ids(db_session, account.id, ["r1"])
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c1"),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        mode="agent",
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="c1" if granted else "c9",
+        role_ids=["r1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+
+    def token_handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+
+    anthropic, _created, updates = _fake_ma(
+        tenant_id,
+        vault_id="vlt_me",
+        account_id=flow.account_id,
+        agent_id=flow.agent_id,
+        mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
+    )
+
+    async def complete() -> None:
+        await complete_mcp_oauth_flow(
+            httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
+            anthropic,
+            flow=flow,
+            code="code123",
+            fernet=make_fernet(),
+            jwt_secret=b"x" * 32,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            session_factory=db_session_factory,
+            default=DeploymentDefault(agent_name="other", environment_name="default"),
+        )
+
+    if not granted:
+        with pytest.raises(McpServerReplaceRefusedError):
+            await complete()
+        assert updates == [], "an admin of another channel does not repoint c1's agent"
+        return
+    await complete()
+    assert [s["url"] for s in updates[0]["mcp_servers"]] == [flow.mcp_server_url], (
+        "the admin of the only channel the agent answers in repoints its server"
+    )

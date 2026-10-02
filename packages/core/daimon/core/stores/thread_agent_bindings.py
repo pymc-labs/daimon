@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from typing import Literal
 
@@ -10,7 +11,7 @@ from daimon.core._models import ThreadAgentBinding
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import ThreadAgentBindingRow
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -163,9 +164,16 @@ async def list_active_setup_bindings_for_tenant(
 
 
 async def list_bound_parent_channel_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID, responder_name: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    responder_names: Collection[str],
+    responder_ma_agent_id: str | None = None,
 ) -> list[str]:
-    """Parent channels of every thread that answers as `responder_name`, sorted.
+    """Parent channels of every thread that answers as one of `responder_names`, sorted.
+
+    A thread bound to `responder_ma_agent_id` counts under any name, so a
+    rename since the binding cannot hide it.
 
     Archived and locked threads count: reopening one routes to the agent again.
     Only a deleted thread no longer answers. Private conversation scopes are
@@ -175,7 +183,10 @@ async def list_bound_parent_channel_ids(
         select(ThreadAgentBinding.parent_channel_id)
         .where(
             ThreadAgentBinding.tenant_id == tenant_id,
-            ThreadAgentBinding.responder_name == responder_name,
+            or_(
+                ThreadAgentBinding.responder_name.in_(responder_names),
+                ThreadAgentBinding.responder_ma_agent_id == responder_ma_agent_id,
+            ),
             ThreadAgentBinding.deleted.is_(False),
             ThreadAgentBinding.thread_id.not_like(f"{DM_SCOPE_PREFIX}%"),
         )
@@ -185,46 +196,23 @@ async def list_bound_parent_channel_ids(
     return list(ids.scalars())
 
 
-async def list_handoff_parent_channel_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID
-) -> dict[str, list[str]]:
-    """Responder name -> sorted parent channels of its live handed-over threads.
-
-    Setup conversations are left out: they answer as the built-in Daimon to
-    configure some other agent, which routes nobody to it.
-    """
-    rows = await session.execute(
-        select(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
-        .where(
-            ThreadAgentBinding.tenant_id == tenant_id,
-            ThreadAgentBinding.kind == "handoff",
-            ThreadAgentBinding.deleted.is_(False),
-        )
-        .distinct()
-        .order_by(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
-    )
-    parents: dict[str, list[str]] = {}
-    for responder_name, parent_channel_id in rows.tuples():
-        parents.setdefault(responder_name, []).append(parent_channel_id)
-    return parents
-
-
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
-) -> list[tuple[str, str, str]]:
-    """`(dm_channel_id, scope_id, responder_name)` of every private conversation scope."""
+) -> list[tuple[str, str, str, str]]:
+    """`(dm_channel_id, scope_id, responder_name, responder_ma_agent_id)` of every DM scope."""
     rows = await session.execute(
         select(
             ThreadAgentBinding.parent_channel_id,
             ThreadAgentBinding.thread_id,
             ThreadAgentBinding.responder_name,
+            ThreadAgentBinding.responder_ma_agent_id,
         ).where(
             ThreadAgentBinding.tenant_id == tenant_id,
             ThreadAgentBinding.deleted.is_(False),
             ThreadAgentBinding.thread_id.like(f"{DM_SCOPE_PREFIX}%"),
         )
     )
-    return [(parent, scope, responder) for parent, scope, responder in rows.tuples()]
+    return list(rows.tuples())
 
 
 async def update_target(

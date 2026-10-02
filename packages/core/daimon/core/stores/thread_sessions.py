@@ -26,10 +26,10 @@ import uuid as _uuid
 from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import ThreadSession
+from daimon.core._models import ThreadSession, UsageEvent
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,81 @@ async def get_live_thread_session(
     if orm is None:
         return None
     return ThreadSessionRow.model_validate(orm)
+
+
+async def get_thread_session_at(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: _uuid.UUID,
+    at: datetime,
+) -> ThreadSessionRow | None:
+    """The caller's newest row in the thread created at or before `at`, any status.
+
+    That is the session the caller was talking to at `at`; dead and
+    superseded rows are kept, so it is found after it was replaced.
+    """
+    orm = (
+        await session.execute(
+            select(ThreadSession)
+            .where(
+                ThreadSession.tenant_id == tenant_id,
+                ThreadSession.platform == platform,
+                ThreadSession.thread_id == thread_id,
+                ThreadSession.account_id == account_id,
+                ThreadSession.created_at <= at,
+            )
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return None if orm is None else ThreadSessionRow.model_validate(orm)
+
+
+async def list_live_session_channel_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    ma_agent_id: str,
+    caller_account_id: _uuid.UUID | None = None,
+) -> list[str | None]:
+    """The channels the live sessions with `ma_agent_id` run in; None for an unknown one.
+
+    A session runs in the channel recorded at its creation and in every one
+    its spend was attributed to (`usage_events.channel_id`), which also places
+    rows older than the column; counting both never places a session in fewer
+    channels than either. A session with neither has no known channel. The
+    caller's own sessions are left out; None for `caller_account_id` counts
+    them all, as `is_agent_shared_for_key_changes` does.
+    """
+    statement = (
+        select(ThreadSession.id, ThreadSession.channel_id, UsageEvent.channel_id)
+        .select_from(ThreadSession)
+        .outerjoin(
+            UsageEvent,
+            and_(
+                UsageEvent.tenant_id == ThreadSession.tenant_id,
+                UsageEvent.managed_session_id == ThreadSession.ma_session_id,
+                UsageEvent.channel_id.is_not(None),
+            ),
+        )
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.ma_agent_id == ma_agent_id,
+            ThreadSession.status == "live",
+        )
+    )
+    if caller_account_id is not None:
+        statement = statement.where(ThreadSession.account_id.is_distinct_from(caller_account_id))
+    by_session: dict[_uuid.UUID, set[str]] = {}
+    for row_id, recorded, spent in (await session.execute(statement.distinct())).tuples():
+        by_session.setdefault(row_id, set()).update(c for c in (recorded, spent) if c is not None)
+    channels: set[str | None] = {channel for found in by_session.values() for channel in found}
+    if any(not found for found in by_session.values()):
+        channels.add(None)
+    return list(channels)
 
 
 async def get_latest_thread_session(
@@ -111,6 +186,7 @@ async def create_thread_session(
     account_id: _uuid.UUID,
     ma_session_id: str,
     ma_agent_id: str | None = None,
+    channel_id: str | None = None,
     watermark_message_id: str | None = None,
     created_at: datetime | None = None,
     effective_config: SessionSnapshot | None = None,
@@ -124,6 +200,7 @@ async def create_thread_session(
 
     account_id is the calling user's account and is persisted on the row so that
     get_live_thread_session can scope future lookups to the same caller.
+    `channel_id` is the channel the session runs for, which agent reach reads.
 
     The optional `created_at` kwarg is provided so tests can control ordering
     deterministically for newest-row-wins assertions. When None, the DB
@@ -142,6 +219,7 @@ async def create_thread_session(
         "account_id": account_id,
         "ma_session_id": ma_session_id,
         "ma_agent_id": ma_agent_id,
+        "channel_id": channel_id,
         "watermark_message_id": watermark_message_id,
         "effective_config": (
             None if effective_config is None else effective_config.model_dump(mode="json")
@@ -409,3 +487,26 @@ async def update_mutable_fingerprint(
         )
     )
     await session.flush()
+
+
+async def thread_ids_for_sessions(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    ma_session_ids: list[str],
+) -> dict[str, str]:
+    """Map each of `ma_session_ids` that some thread ran on to that thread's id.
+
+    Any status, any account: the transcript tools use it to tell a channel
+    conversation from a headless one when a session predates the channel stamp
+    (`daimon.core.defaults.metadata.MA_METADATA_KEY_CHANNEL`).
+    """
+    if not ma_session_ids:
+        return {}
+    rows = await session.execute(
+        select(ThreadSession.ma_session_id, ThreadSession.thread_id).where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.ma_session_id.in_(ma_session_ids),
+        )
+    )
+    return {ma_session_id: thread_id for ma_session_id, thread_id in rows.all()}

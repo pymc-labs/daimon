@@ -1254,3 +1254,259 @@ async def test_restricted_turn_replaces_a_missing_legacy_session_safely(
     row = await _live_row(db_session_factory, tenant=tenant, account=account)
     assert row is not None and row.effective_config is not None
     assert row.effective_config.memory_read_only
+
+
+# --- the seal a successor inherits -------------------------------------------
+
+
+def _sealed(
+    admission: Admission, *, seal_id: str | None, also: frozenset[str] = frozenset()
+) -> Admission:
+    """A channel turn in thread-1 under vault, sealed by `seal_id` (or open)."""
+    return replace(
+        admission,
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_ids=also | (frozenset() if seal_id is None else frozenset({seal_id})),
+    )
+
+
+def _sealed_stamp(transport: _Transport, session_id: str) -> str | None:
+    return transport.state.sessions[session_id].metadata.get("daimon_sealed")
+
+
+async def test_a_replacement_after_an_unseal_keeps_the_predecessors_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Sealed turn, unseal, model change: the successor carries the old work
+    and must stay under the seal it was written under."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    first = await _prepare(
+        deps, _sealed(_admission(account=account), seal_id="vault"), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    assert _sealed_stamp(transport, first.ma_session_id) == "vault"
+
+    moved = _agent(model_id="claude-opus-5")
+    _register(transport.state, moved)
+    second = await _prepare(
+        deps,
+        _sealed(_admission(account=account, agent=moved), seal_id=None),
+        tenant=tenant,
+        account=account,
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity.state == "replaced"
+    assert _sealed_stamp(transport, second.ma_session_id) == "vault"
+
+
+async def test_an_environment_switch_successor_keeps_the_predecessors_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel's environment changes under a sealed conversation: the session
+    in the new environment carries the old work, so it keeps the old seal ids,
+    even once the channel was unsealed in between."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    first = await _prepare(
+        deps,
+        _sealed(_admission(account=account), seal_id="vault", also=frozenset({"thread-1"})),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+    switched = replace(
+        _sealed(_admission(account=account), seal_id=None),
+        environment=ma_environment(id="env_gpu", name="gpu", created_at=_NOW.isoformat()),
+    )
+    second = await _prepare(deps, switched, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity.state == "replaced", "a new environment replaces the session"
+    assert transport.state.sessions[second.ma_session_id].environment_id == "env_gpu", (
+        "the successor runs in the channel's new environment"
+    )
+    assert _sealed_stamp(transport, second.ma_session_id) == "thread-1,vault", (
+        "the successor inherits every seal id its predecessor ran under"
+    )
+
+
+async def test_a_transcript_or_bundle_transfer_keeps_the_predecessors_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        _sealed(_admission(account=account), seal_id="thread-1"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        return PreparedReplacement(
+            extra_resources=(),
+            transfer_file_id=None,
+            transfer_kind="transcript",
+            user_prefix="Carrying the transcript over.",
+        )
+
+    moved = _agent(model_id="claude-opus-5")
+    _register(transport.state, moved)
+    second = await _prepare(
+        deps,
+        _sealed(_admission(account=account, agent=moved), seal_id="vault"),
+        tenant=tenant,
+        account=account,
+        transfer=_transfer,
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity.transfer_kind == "transcript"
+    assert _sealed_stamp(transport, second.ma_session_id) == "thread-1,vault", (
+        "the thread seal it inherits is kept beside the channel seal of this turn"
+    )
+
+
+async def test_a_handoff_successor_keeps_the_predecessors_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps, _sealed(_admission(account=account), seal_id="vault"), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    successor_agent = _agent(agent_id="ag_successor")
+    _register(transport.state, successor_agent)
+    async with db_session_factory() as session, session.begin():
+        binding = await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="vault",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_successor",
+            responder_name="research-bot",
+            kind="handoff",
+        )
+
+    handed = await _prepare(
+        deps,
+        _sealed(
+            _admission(account=account, agent=successor_agent, thread_binding_id=binding.id),
+            seal_id=None,
+        ),
+        tenant=tenant,
+        account=account,
+    )
+
+    assert isinstance(handed, PreparedTurn)
+    assert handed.continuity.state == "replaced"
+    assert _sealed_stamp(transport, handed.ma_session_id) == "vault"
+
+
+async def test_a_sealed_turn_on_a_reused_session_keeps_its_narrower_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Thread sealed on its own, then its channel sealed: both stay recorded."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        _sealed(_admission(account=account), seal_id="thread-1"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+
+    from daimon.core.turn.prepare import (
+        _stamp_reused_seal,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    reused = await _prepare(
+        deps, _sealed(_admission(account=account), seal_id="vault"), tenant=tenant, account=account
+    )
+    assert isinstance(reused, PreparedTurn) and reused.reused
+    await _stamp_reused_seal(deps, reused, now=lambda: _NOW)
+    await transport.client().beta.sessions.events.send(
+        reused.ma_session_id, events=[{"type": "user.message", "content": []}]
+    )
+
+    assert _sealed_stamp(transport, reused.ma_session_id) == "thread-1,vault"
+
+
+async def test_a_successor_of_an_unreadable_predecessor_is_sealed_to_its_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    async with db_session_factory() as session, session.begin():
+        gone = await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            account_id=account.id,
+            ma_session_id="sess_gone",
+            ma_agent_id=_AGENT_ID,
+        )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    fresh = await create_fresh_session(
+        deps,
+        _sealed(_admission(account=account), seal_id=None),
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        session_account_id=account.id,
+        predecessor_id=gone.id,
+    )
+
+    assert _sealed_stamp(transport, fresh.ma_session_id) == "thread-1"
+
+
+async def test_a_thread_sealed_with_its_parent_records_both_seals(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Fresh and reused alike: unsealing the parent must leave the thread seal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    both = _sealed(_admission(account=account), seal_id="vault", also=frozenset({"thread-1"}))
+
+    first = await _prepare(deps, both, tenant=tenant, account=account)
+
+    assert isinstance(first, PreparedTurn)
+    assert _sealed_stamp(transport, first.ma_session_id) == "thread-1,vault"

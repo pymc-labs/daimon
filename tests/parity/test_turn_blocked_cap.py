@@ -20,7 +20,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import build_turn_router
-from .drivers.protocol import PlatformDriver
+from .drivers.protocol import PlatformDriver, platform_ids
 
 _BILLING_CONFIG = BillingConfig(
     secret_key=SecretStr("sk_test_parity"),
@@ -36,8 +36,9 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id = "900003001"
-    user_id = "555000113"
+    workspace_id, user_id, channel_id = platform_ids(
+        driver.param_id, workspace=900003001, user=555000113, channel=100002
+    )
 
     tenant = await make_tenant(
         db_session, platform=cast(Platform, driver.param_id), workspace_id=workspace_id
@@ -70,7 +71,7 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
         router=router,
         tenant_id=tenant.id,
         workspace_id=workspace_id,
-        channel_id="100002",
+        channel_id=channel_id,
         user_id=user_id,
         text="hello",
         billing_config=_BILLING_CONFIG,

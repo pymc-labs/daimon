@@ -12,6 +12,7 @@ dependencies = [
     "daimon-adapter-discord",
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
+    "daimon-adapter-teams",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ daimon-adapter-mcp = { workspace = true }
 daimon-adapter-discord = { workspace = true }
 daimon-adapter-scheduler = { workspace = true }
 daimon-adapter-slack = { workspace = true }
+daimon-adapter-teams = { workspace = true }
 daimon-testing = { workspace = true }
 daimon-mux = { workspace = true }
 
@@ -53,7 +55,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 "**/tests/**" = ["E501", "ANN401"]
 
 [tool.pyright]
-include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
+include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
@@ -77,7 +79,7 @@ forbidden_modules = ["daimon.adapters"]
 [[tool.importlinter.contracts]]
 name = "Adapters must not import each other"
 type = "independence"
-modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack"]
+modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack", "daimon.adapters.teams"]
 
 [[tool.importlinter.contracts]]
 name = "ORM module is private to stores and defaults"
@@ -95,12 +97,15 @@ source_modules = [
     "daimon.core.agent_fork",
     "daimon.core.agent_guidance",
     "daimon.core.agent_lifecycle",
+    "daimon.core.agent_pins",
     "daimon.core.agent_mcp_credentials",
     "daimon.core.agent_reach",
     "daimon.core.anthropic_spend",
     "daimon.core.answering_map",
     "daimon.core.artifacts",
+    "daimon.core.authz",
     "daimon.core.billing",
+    "daimon.core.billing_panel",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
     "daimon.core.channel_admins",
@@ -142,19 +147,25 @@ source_modules = [
     "daimon.core.mcp_credential_sweep",
     "daimon.core.mcp_oauth",
     "daimon.core.mcp_personal_servers",
+    "daimon.core.mcp_server_url",
     "daimon.core.mcp_token_check",
+    "daimon.core.mcp_token_connect",
     "daimon.core.mcp_vault",
     "daimon.core.mcp_vault_janitor",
     "daimon.core.media",
     "daimon.core.memory_resource",
+    "daimon.core.memory_view",
     "daimon.core.message_feedback",
+    "daimon.core.message_split",
     "daimon.core.models_catalog",
     "daimon.core.notebooks",
     "daimon.core.observability",
     "daimon.core.ops_alerts",
     "daimon.core.operation_policy",
+    "daimon.core.operator_tokens",
     "daimon.core.security_audit",
     "daimon.core.output_delivery",
+    "daimon.core.participation_gates",
     "daimon.core.pending_file_sweeper",
     "daimon.core.posted_controls",
     "daimon.core.pricing",
@@ -162,18 +173,22 @@ source_modules = [
     "daimon.core.promo_allocation",
     "daimon.core.promo_codes",
     "daimon.core.promo_credit",
+    "daimon.core.promo_settlement",
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.repo_resource",
     "daimon.core.reports",
     "daimon.core.roster",
     "daimon.core.routine_delivery",
+    "daimon.core.routines",
     "daimon.core.routing_facts",
+    "daimon.core.runtime_health",
     "daimon.core.scheduler",
     "daimon.core.scope",
     "daimon.core.session_compat",
     "daimon.core.session_preparation",
     "daimon.core.session_preparation_stages",
+    "daimon.core.session_seal",
     "daimon.core.session_snapshot",
     "daimon.core.session_update_ops",
     "daimon.core.sessions",
@@ -189,6 +204,8 @@ source_modules = [
     "daimon.core.specs",
     "daimon.core.support_escalation",
     "daimon.core.tables",
+    "daimon.core.teams_bot_framework",
+    "daimon.core.teams_threads",
     "daimon.core.tenant_balance",
     "daimon.core.thread_classifier",
     "daimon.core.thread_naming",
@@ -244,7 +261,7 @@ forbidden_modules = ["daimon"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
+testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow'"
 markers = [
     "contract: live MA API tests -- opt-in only, never gate CI",
@@ -267,4 +284,5 @@ dev = [
     "daimon-testing",
     "aioresponses>=0.7.9",
     "syrupy>=5.5.3",
+    "jsonschema>=4.23",
 ]

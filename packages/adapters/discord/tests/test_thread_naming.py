@@ -21,7 +21,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import Message, TextBlock, Usage
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -31,6 +31,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -224,7 +225,6 @@ def _runtime(
     settings.thread_naming = thread_naming
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
-    discord_settings.per_caller_thread_sessions = True
     settings.discord = discord_settings
     anthropic = build_fake_anthropic(router.dispatch)
     resolver_cache = new_resolver_cache()

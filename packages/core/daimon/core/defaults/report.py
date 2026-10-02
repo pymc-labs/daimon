@@ -31,6 +31,8 @@ class ResourceOutcome:
     action: Action
     anthropic_id: str | None = None
     error: str | None = None
+    # Set only for a deliberate refusal: the reason, safe to show in a channel.
+    refusal: str | None = None
 
 
 @dataclass
@@ -52,13 +54,6 @@ class ApplyReport:
     def is_failure(self) -> bool:
         return any(
             o.action is Action.FAILED
-            for o in (*self.agents, *self.environments, *self.skills, *self.system_config)
-        )
-
-    def has_changes(self) -> bool:
-        """Whether any outcome is not a no-op skip, across all four resource kinds."""
-        return any(
-            o.action is not Action.SKIPPED
             for o in (*self.agents, *self.environments, *self.skills, *self.system_config)
         )
 

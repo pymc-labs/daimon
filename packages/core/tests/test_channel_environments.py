@@ -4,26 +4,32 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
+from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
+    SEALED_NETWORK_UNCHECKED_WARNING,
+    SEALED_OPEN_NETWORK_WARNING,
     build_archive_environment_note,
     build_clear_environment_note,
     build_environment_resolution_note,
     build_set_environment_note,
     environment_choices,
     environment_option_value,
+    has_open_network,
     list_environment_names,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
+    sealed_network_warning,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext, TenantScopeRef
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_environment
+from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -224,3 +230,94 @@ async def test_list_environment_names_reads_only_this_tenants_resolver_names() -
         "deduplicated, case-insensitive order, this tenant only, and never a name a save "
         "could not find"
     )
+
+
+def _limited(
+    *hosts: str, package_managers: bool = False, mcp_servers: bool = False
+) -> BetaCloudConfig:
+    return BetaCloudConfig(
+        type="cloud",
+        networking=BetaLimitedNetwork(
+            type="limited",
+            allowed_hosts=list(hosts),
+            allow_mcp_servers=mcp_servers,
+            allow_package_managers=package_managers,
+        ),
+        packages=EMPTY_CLOUD_CONFIG.packages,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (EMPTY_CLOUD_CONFIG, True),
+        (_limited(), False),
+        (_limited(package_managers=True, mcp_servers=True), False),
+        (_limited("example.com"), True),
+    ],
+    ids=["unrestricted", "limited", "package-managers-and-mcp", "allowed-host"],
+)
+def test_has_open_network_counts_any_allowed_host_as_open(
+    config: BetaCloudConfig, expected: bool
+) -> None:
+    """Package managers and MCP servers keep a limited network closed; an allowed host doesn't."""
+    assert has_open_network(ma_environment(config=config)) is expected, (
+        "an allowed host is somewhere a sealed channel's content could go"
+    )
+
+
+async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
+    db_session: AsyncSession,
+) -> None:
+    """A channel's own open pick may predate its seal; a default is a server admin's own call."""
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    router.add_environment_list(
+        ma_environment(id="env_open", name="open", tenant_id=tenant.id),
+        ma_environment(id="env_closed", name="closed", tenant_id=tenant.id, config=_limited()),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    default = DeploymentDefault(environment_name="open")
+
+    async def warning(channel_id: str) -> str | None:
+        return await sealed_network_warning(
+            db_session, client, tenant_id=tenant.id, channel_id=channel_id, default=default
+        )
+
+    for channel_id, name in (("c_open", "open"), ("c_closed", "closed")):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel_id),
+            tenant_id=tenant.id,
+            environment_name=name,
+        )
+    assert await warning("c_open") == SEALED_OPEN_NETWORK_WARNING, "its own open pick warns"
+    assert await warning("c_closed") is None, "a limited network needs no confirmation"
+    assert await warning("c_inherits") is None, "the open default is a server admin's pick"
+
+
+async def test_sealed_network_warning_survives_a_failed_lookup(db_session: AsyncSession) -> None:
+    """The seal is saved before the warning, so a lookup error says so instead of failing."""
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/environments",
+        lambda _r, _m: httpx.Response(400, json={"type": "error", "error": {"type": "x"}}),
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c_open"),
+        tenant_id=tenant.id,
+        environment_name="open",
+    )
+
+    warning = await sealed_network_warning(
+        db_session,
+        build_fake_anthropic(router.dispatch),
+        tenant_id=tenant.id,
+        channel_id="c_open",
+        default=DeploymentDefault(environment_name="open"),
+    )
+
+    assert warning == SEALED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"

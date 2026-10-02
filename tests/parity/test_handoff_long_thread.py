@@ -30,7 +30,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import SlackSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_resolver import new_resolver_cache
@@ -44,6 +44,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, list_response, session_response
@@ -121,7 +122,14 @@ def _register_slack_defaults(
         },
         repeat=True,
     )
-    for method in ("auth.test", "chat.postMessage", "chat.update", "chat.postEphemeral"):
+    # auth.test carries the bot's own user id, which the mention gate matches
+    # against the event's <@U_BOT> token.
+    mock.post(  # pyright: ignore[reportUnknownMemberType]
+        f"{_SLACK_API_BASE}/auth.test",
+        payload={"ok": True, "user_id": "U_BOT"},
+        repeat=True,
+    )
+    for method in ("chat.postMessage", "chat.update", "chat.postEphemeral"):
         mock.post(  # pyright: ignore[reportUnknownMemberType]
             f"{_SLACK_API_BASE}/{method}",
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_LONG_THREAD"},

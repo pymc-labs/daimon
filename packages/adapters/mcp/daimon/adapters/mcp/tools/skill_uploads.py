@@ -29,13 +29,19 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agents import (
     _system_agent_rejection,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
 from daimon.adapters.mcp.tools.skills import (
     _resolve_sync_token,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -102,10 +108,10 @@ async def require_skill_change(
 ) -> None:
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
-    A built-in agent is forked first; a server admin may change any other; a
-    channel admin one that answers only in their channels; anyone one nobody
-    else uses: no default, bound thread, or someone else's routine or queued
-    continuation.
+    A built-in agent is refused; a server admin may change any other; a
+    channel admin one that answers and runs only in their channels; anyone one
+    nobody else uses, read as widely as a key change
+    (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
     """
     rejection = _system_agent_rejection(agent)
     if rejection is not None:
@@ -114,17 +120,26 @@ async def require_skill_change(
         runtime,
         auth,
         operation,
-        agent_name=agent_name,
+        agent_names=(agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        ma_agent_id=agent.id,
         is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    if decide_operation(operation, is_admin=auth.is_admin, target=facts) != "allow":
-        raise ToolError(
-            f"'{agent_name}' is used beyond this caller (a channel or workspace default, a "
-            "thread, or someone else's routine or queued task), so changing its skills needs "
-            "a workspace or server admin, or an admin of every channel it answers in. Tell "
-            "the caller an admin can ask Daimon to make this change. Nothing was changed. "
-            "Do not retry."
+    if decide_operation(operation, is_admin=auth.is_admin, target=facts) == "allow":
+        return
+    if facts.runs_unattended_beyond_caller:
+        why = "runs unattended (a routine or queued wake) for someone with wider rights"
+    elif facts.has_unplaced_run:
+        why = reachability.UNPLACED_RUN_REASON
+    else:
+        why = (
+            "is used beyond this caller (a default, a bound thread, or someone else's "
+            "routine or conversation)"
         )
+    raise ToolError(
+        f"'{agent_name}' {why}, so changing its skills needs a workspace or server admin, "
+        "or an admin of every channel it answers in. Tell the caller an admin can ask "
+        "Daimon to make this change. Nothing was changed. Do not retry."
+    )
 
 
 async def _load_bundle(
@@ -236,12 +251,21 @@ async def _add_skill_impl(
     path: str = "",
     branch: str = "main",
     content_hash: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AddSkillResult:
     if sum(source is not None for source in (skill_md, attachment_url, repo_url)) != 1:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
+    # The upload waits for the person's Approve on the card, like the private
+    # request forms, so a member inside a pinned agent's channels may add one.
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
     await require_skill_change(runtime, auth, agent, agent_name=agent_name, operation="skill_add")
     has_card = runtime.settings.tool_safety.enabled
     if content_hash is not None and not has_card:
@@ -341,6 +365,7 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             str | None,
             Field(description="The preview's content_hash, once the person has confirmed it."),
         ] = None,
+        origin_context_id: str | None = None,
     ) -> AddSkillResult:
         """Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
         this chat, or one folder of a GitHub repository. Pass exactly one source.
@@ -351,10 +376,10 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         approves the upload on a confirmation card. Without cards the preview's
         summary says to use Add skill in /agent-setup instead. The skill belongs to
         this agent alone; ``sync_skills`` fills the shared library instead, and
-        ``remove_skill`` detaches it. A built-in agent must be forked first. Anyone may
-        change an agent nobody else uses (no default, thread, routine or queued
-        continuation); otherwise it takes a server admin or an admin of every channel
-        using it."""
+        ``remove_skill`` detaches it. A built-in agent is refused. Anyone may change an
+        agent nobody else uses (no default, bound thread, or other people's routine or
+        conversation); otherwise it takes a server admin or an admin of every channel
+        using it. Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _add_skill_impl(
             runtime,
             await _auth(ctx),
@@ -366,4 +391,5 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             path=path,
             branch=branch,
             content_hash=content_hash,
+            origin_context_id=origin_context_id,
         )

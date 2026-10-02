@@ -26,7 +26,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.access_policy import is_outside_agent_pin
+from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -47,6 +47,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import ChatPlatform
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import get_binding, upsert_responder_binding
@@ -64,17 +65,15 @@ from pydantic import Field
 _REPLY_VERBATIM = "Reply with `confirmation` verbatim and nothing else."
 
 
-def _channel_mention(platform: Literal["discord", "slack"], channel_id: str) -> str:
+def _channel_mention(platform: ChatPlatform, channel_id: str) -> str:
     """Render a parent channel id as this platform's channel-link mention.
 
-    Discord and Slack both render `<#id>` as a clickable channel link, kept
-    as an explicit per-platform switch rather than a bare f-string so a
-    future platform with different mention syntax is not silently handed
-    the wrong one.
+    Discord and Slack both render `<#id>` as a clickable channel link. Teams has
+    no text syntax for one, so it names the place: a 1:1 chat id starts `a:`.
     """
-    if platform in ("discord", "slack"):
-        return f"<#{channel_id}>"
-    raise ValueError(f"unsupported platform for channel mention: {platform!r}")
+    if platform == "teams":
+        return "this chat" if channel_id.startswith("a:") else "this channel"
+    return f"<#{channel_id}>"
 
 
 @dataclass(frozen=True)
@@ -121,8 +120,8 @@ async def _hand_off_task_impl(
     question, which is a refusal the caller answers and retries.
     """
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    # `require_turn_origin` already refused any platform but these two.
-    platform = cast(Literal["discord", "slack"], origin.platform)
+    # `require_turn_origin` already refused any non-chat platform.
+    platform = cast(ChatPlatform, origin.platform)
 
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     # A thread under an isolated channel hands off only to that channel's own
@@ -185,11 +184,16 @@ async def _hand_off_task_impl(
         destination_reachable=reachable,
         existing_binding_kind=binding.kind if binding is not None else None,
         origin_responder_ma_agent_id=origin.responder_ma_agent_id,
-        destination_pinned_elsewhere=is_outside_agent_pin(
+        # A DM origin runs in no channel, so it is outside every pin.
+        destination_pinned_elsewhere=not authorize(
             policy,
-            agent_names=(destination_name,),
-            channel_id=origin.thread_id or origin.parent_channel_id,
-            parent_channel_id=origin.parent_channel_id,
+            subject=Subject(),
+            action=Action.RUN_AGENT,
+            surface=Surface.HANDOFF,
+            agent=build_agent_ref(destination.name, destination.metadata, destination_name),
+            place=Place.from_origin(
+                parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
+            ),
         ),
         destination_answers_channel=channel_config.agent_name == destination_name,
         caller_is_admin=auth.is_admin,

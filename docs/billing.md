@@ -139,20 +139,23 @@ per-session cap and no window other than the calendar month.
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
 its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
-channel it came from. A turn with no channel (an older DM, an MCP turn) and a
-channel with no budget are never gated.
+channel it came from. A turn with no channel (an older DM, an MCP turn from
+a key not minted in a channel) and a channel with no budget are never gated.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
 belongs to each adapter. The turn aborts — it never silently degrades to a
 cheaper model. The balance and cap checks are re-run, with the same order, by
 the MCP tools that start a turn (`_admit` in
-`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`); the billed media
+`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`), followed by the
+budget of the channel an agent key was minted in; the billed media
 tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
-channel, found from its `origin_context_id`. Each scheduled
-routine fire runs all three, the budget against the routine's channel, and
-records the reason as that run's error instead of raising. Wakes pass through
-chat admission, so all three apply. Discord's unprompted thread participation
+channel, found from its `origin_context_id` (or the key's own channel). A
+routine such a key saves without a destination records that channel. Each scheduled
+routine fire runs all three, the budget last against the routine's channel
+(after the agent pin check), and records the reason as that run's error
+instead of raising. Wakes pass through
+chat admission, so all three apply. Unprompted thread participation (Discord and Teams)
 checks all three too, and skips silently, on the grounds that a billing
 notice is owed to someone who actually asked.
 
@@ -206,16 +209,21 @@ An admin can cap what one channel may spend with `set_channel_budget` (MCP)
 or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
 budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
 with no row there is no limit, and nothing is created by default. It works
-the same with or without Stripe and for either funding mode.
+the same with or without Stripe and for either funding mode. Budgets exist on
+Discord and Slack only; Teams has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
   pre-markup usage `/billing` totals. Debits carry the parent channel, so a
-  thread counts toward its channel.
+  thread counts toward its channel. A session records it in its own
+  `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
+  reads; it is kept apart from `daimon_channel`, where the conversation runs,
+  so a DM counts toward its source channel without being placed in it.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
-  after its end. Panels show a fixed window as `START until END`.
+  after its end. Panels show a fixed window as `START until END`, and a
+  total window that has not started as `from START`.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
@@ -232,11 +240,17 @@ What a budget does not cover:
   turns are neither attributed nor gated. A DM moved with `/dm` since then
   records the parent channel it came from
   (`direct_message_conversations.source_channel_id`): `/dm` is refused while
-  that channel's budget is used up, and the DM's turns count toward it and
-  are gated by it.
-- **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
-  like) record no channel and do not check budgets yet. A media tool call
-  without a live `origin_context_id` is not attributed either.
+  that channel's budget is used up, and the DM's turns and media calls
+  count toward it and are gated by it. `get_channel_budget` in such a DM
+  reads that channel's budget.
+- **MCP turns from an unbound key.** An agent key minted with "Use from your
+  coding tools" in a sealed channel, or in one its agent is pinned to, records
+  that channel (`mcp_tokens.channel_id`): its `start_turn`, `ask` and
+  `continue_turn` are gated by that channel's budget, and the sessions it
+  opens carry `daimon_budget_channel`, so their spend is attributed there.
+  Every other key, the hub and bearer tokens record no channel and are not
+  gated. A media tool call without a live `origin_context_id` is not
+  attributed either.
 - **Routines with no channel**: made without a destination outside a
   channel (no `origin_context_id`, or from a DM), and Discord thread
   destinations saved before this release (see
@@ -261,7 +275,7 @@ then balance-gated on its first message.
 The product flow is Stripe Checkout, one-time payments rather than a
 subscription:
 
-1. `/billing` on Discord or Slack offers fixed amounts, each labelled with an
+1. `/billing` on Discord or Slack (`billing` on Teams) offers fixed amounts, each labelled with an
    estimated number of turns derived from that tenant's own history. Admin
    status is verified at click time, not at render.
 2. The chat adapters never import `stripe`. They mint a token and POST to
@@ -313,10 +327,9 @@ all turns; the cap gate applies even without Stripe.
 ## Promo codes
 
 An operator can hand out credit as a code that a tenant admin redeems. Nothing
-changes until a code exists; the only visible surface before that is the
-admin-only **Redeem code** button in `/billing`. The Discord ready message and
-the Slack install page point admins at `/billing` only while some code can be
-redeemed.
+is visible until some code can be redeemed: only then does `/billing` show
+admins a **Redeem code** button, and the Discord ready message and the Slack
+install page point them at it.
 
 ```sh
 daimon promo create --amount 20                    # prints a generated code once
@@ -329,37 +342,56 @@ daimon promo revoke CODE_ID
 
 Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
 cannot be shown again. Generated codes are 20 Crockford base32 characters in
-dash-separated groups of five; matching ignores case, spaces and dashes, and reads O as 0 and I or L as 1.
-`--code` sets a chosen code of at least 12 characters instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
-bound when it can be redeemed, and `--max-redemptions` how many tenants may
-redeem it. Each tenant redeems a code at most once.
+dash-separated groups of five; matching ignores case, spaces and dashes, and
+reads O as 0 and I or L as 1. `--code` sets a chosen code of at least 12
+characters instead. `--amount` is at most $999,999.99. `--redeem-from` and
+`--redeem-until` bound when it can be redeemed, and `--max-redemptions` how
+many tenants may redeem it. Each tenant redeems a code at most once.
 
 - **Credit** codes add a `promo_credit` ledger entry at once, keyed
   `promo:{code_id}:{tenant_id}`. It is ordinary credit and never expires.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
-  opens (same key). Fifteen minutes after the window closes, a `promo_expiry`
-  entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes only what was not
-  spent. Spend inside a window draws on timed credit first, the credit that
+  opens (same key). At the first scheduler tick after the window closes, a
+  `promo_expiry` entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes
+  what was not spent, so spend after the window comes from ordinary credit
+  only. Spend inside a window draws on timed credit first, the credit that
   ends earliest first, then on ordinary credit. A window that opens and closes
   while the scheduler is down expires without a grant.
-- **Late spend.** Turn debits are dated by the model call, not by when they
-  were written, so a call the [sweep](#the-tables) records after the window
-  closed still draws on the timed credit. The fifteen-minute wait bounds that
-  lag: spend recorded later counts as ordinary spend. Until the expiry runs,
-  the leftover credit still counts toward the balance, so turns in those
-  minutes can leave a tenant with no other credit slightly negative.
+- **Late spend.** Every turn debit stores `occurred_at`, the model call's own
+  time, so a call the [sweep](#the-tables) records after the window closed
+  still counts as spend inside it. Fifteen minutes after the close a
+  `promo_expiry_refund` entry, keyed
+  `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
+  never more than the expiry removed. Until then late spend is debited twice,
+  once itself and once inside the expiry, so for up to about fifteen minutes
+  the balance can read low or negative, or hit the balance gate, until the
+  refund lands. Spend recorded later counts as ordinary spend: after a grant's
+  reconcile, spend recorded inside its window is still charged to that grant
+  first, as far as it had credit left, even where it overlaps a later grant
+  that is still open. That part is paid from ordinary credit and never
+  credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
 credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
-with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
+with the admin-only MCP tool `redeem_promo_code`, which is the only way on
+Teams: its `billing` card shows no promo codes. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses
 cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
+
+An integration can issue codes over MCP with an operator token holding
+`promo:create` (see [architecture](architecture.md#operator-tokens)):
+`create_promo_code`, `list_promo_codes` and `revoke_promo_code` take the same
+terms as `daimon promo`, and no server admin sees them. A token minted with
+`--max-issued-usd` (whole cents) may issue at most that much credit in total,
+counted as `amount_usd × max_redemptions` per code (so `max_redemptions` is
+required); `mcp_tokens.issued_usd` tracks the total, and revoking a code gives
+none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 
 ## The tables
 
@@ -371,13 +403,14 @@ including timed credit not yet started, stays.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made and expired. |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
-`trial`, `topup`, `manual_credit`, `promo_credit`, `promo_expiry`, `turn_debit`, `checkpoint_debit`, `media_debit`,
+`trial`, `topup`, `manual_credit`, `promo_credit`, `promo_expiry`,
+`promo_expiry_refund`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
@@ -447,11 +480,11 @@ the optional `billing` extra, which is what pulls in `stripe`.
 
 The Discord and Slack terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
-without a tenant omit it.
+without a tenant omit it. Teams answers carry no usage footer.
 
 ## What you can see
 
-`/billing` on Discord and Slack is the reporting surface, always over the
+`/billing` on Discord and Slack, and `billing` on Teams, is the reporting surface, always over the
 current calendar month, built from
 `packages/core/daimon/core/stores/usage_events.py`. A member sees their own
 spend, turn count and cap plus the tenant balance; an admin additionally sees

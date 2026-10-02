@@ -26,6 +26,7 @@ from daimon.core.notebooks.host_client import (
     list_blogs_from_host,
     publish_blog_to_host,
 )
+from daimon.core.observability import redact_text
 from pydantic import HttpUrl, SecretStr
 from rich.console import Console
 from rich.table import Table
@@ -95,11 +96,14 @@ async def publish_blog_file(
             async with httpx.AsyncClient(timeout=_PUBLISH_TIMEOUT_SECONDS) as http:
                 body = await _put(http)
     except NotebookValidationError as err:
-        detail = "\n".join(f"  - {line}" for line in err.cell_errors) or "  (no detail)"
-        console.print(f"[red]blog failed validation — cells did not execute:[/red]\n{detail}")
+        detail = "\n".join(f"  - {redact_text(line)}" for line in err.cell_errors) or (
+            "  (no detail)"
+        )
+        console.print("blog failed validation — cells did not execute:", style="red")
+        console.print(detail, markup=False, highlight=False)
         raise typer.Exit(code=4) from err
     except NotebookHostError as err:
-        console.print(f"[red]{err}[/red]")
+        console.print(redact_text(str(err)), style="red", markup=False)
         raise typer.Exit(code=5) from err
     url = str(body.get("url", ""))
     console.print(f"[green]✓ published blog {slug!r}[/green] → {url}")
@@ -154,7 +158,7 @@ async def attach_file(
             async with httpx.AsyncClient(timeout=30.0) as http:
                 body = await _put(http)
     except NotebookHostError as err:
-        console.print(f"[red]{err}[/red]")
+        console.print(redact_text(str(err)), style="red", markup=False)
         raise typer.Exit(code=5) from err
     path = str(body.get("path", ""))
     console.print(f"[green]✓ attached {name!r}[/green] → {path}")
@@ -197,7 +201,7 @@ async def list_blogs_op(
             async with httpx.AsyncClient(timeout=30.0) as http:
                 body = await _get(http)
     except NotebookHostError as err:
-        console.print(f"[red]{err}[/red]")
+        console.print(redact_text(str(err)), style="red", markup=False)
         raise typer.Exit(code=5) from err
 
     blogs_any: Any = body.get("blogs", [])
@@ -261,6 +265,6 @@ async def delete_blog_op(
             async with httpx.AsyncClient(timeout=30.0) as http:
                 await _del(http)
     except NotebookHostError as err:
-        console.print(f"[red]{err}[/red]")
+        console.print(redact_text(str(err)), style="red", markup=False)
         raise typer.Exit(code=5) from err
     console.print(f"[green]✓ deleted blog {slug!r}[/green]")

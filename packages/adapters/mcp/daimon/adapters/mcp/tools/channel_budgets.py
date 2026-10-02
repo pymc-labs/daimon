@@ -4,7 +4,8 @@ A budget caps what one channel may spend (see ``daimon.core.channel_budget``
 for how spend and windows are counted). Reading one is a member action for a
 channel the caller can see. Listing, setting and clearing act on the whole
 server or workspace, so they are admin-tagged and re-checked in the impl.
-Money crosses this boundary as decimal strings, both ways.
+Operator tokens read them with ``tenant:read`` and change them with
+``channels:write``. Money crosses this boundary as decimal strings, both ways.
 """
 
 from __future__ import annotations
@@ -15,12 +16,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import (
@@ -39,6 +41,7 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import channel_budgets as store
+from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -66,7 +69,7 @@ class ChannelBudgetResult:
     """Debited spend in the window, markup included."""
     remaining_usd: str
     active: bool
-    """False only for a fixed window that has not started or has ended: it gates nothing."""
+    """False before a total or fixed window's start, or after a fixed one ends: it gates nothing."""
     summary: str
     """The line to read back, e.g. '$1.20 of $5.00 (monthly)'."""
 
@@ -151,10 +154,15 @@ async def origin_budget_channel(
 ) -> str | None:
     """The channel a tool call's spend counts against: its turn's parent channel.
 
-    None without a live origin of this caller and responder, or in a DM, so
-    the call is simply not attributed; tools that need a channel use
-    `require_turn_origin` instead, which explains the refusal.
+    A DM counts toward the channel it was started from, and an agent key
+    minted in a channel toward that channel. None without a live origin of
+    this caller and responder, or in an older DM, so the call is simply not
+    attributed; tools that need a channel use `require_turn_origin` instead,
+    which explains the refusal.
     """
+    bound = token_channel_id(auth)
+    if bound is not None:
+        return bound
     if not origin_context_id or auth.platform not in _PLATFORMS:
         return None
     try:
@@ -170,25 +178,35 @@ async def origin_budget_channel(
             platform=cast(str, auth.platform),
             now=datetime.now(UTC),
         )
-    if origin is None or _is_dm_scope(origin.thread_id):
-        return None
-    if auth.agent_id is not None and auth.agent_id != derive_agent_uuid(
-        tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
-    ):
-        return None
+        if origin is None or (
+            auth.agent_id is not None
+            and auth.agent_id
+            != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        ):
+            return None
+        if _is_dm_scope(origin.thread_id):
+            return await get_source_channel(
+                session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+            )
     return origin.parent_channel_id
 
 
 async def _origin_channel(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> str:
-    """The calling turn's parent channel; the origin already proves the caller is there."""
+    """The calling turn's parent channel, or its DM's source; the origin proves access."""
     if not origin_context_id:
         raise ToolError(_NEEDS_CHANNEL)
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    if _is_dm_scope(origin.thread_id):
+    if not _is_dm_scope(origin.thread_id):
+        return origin.parent_channel_id
+    async with runtime.session_factory() as session:
+        source = await get_source_channel(
+            session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+        )
+    if source is None:
         raise ToolError("a direct message belongs to no channel, so no channel budget applies")
-    return origin.parent_channel_id
+    return source
 
 
 async def _get_channel_budget_impl(
@@ -197,6 +215,7 @@ async def _get_channel_budget_impl(
     channel_id: str | None,
     origin_context_id: str | None = None,
 ) -> ChannelBudgetLookup:
+    require_scope(auth, "tenant:read")
     platform = _require_platform(auth)
     if channel_id is not None and channel_id.strip():
         target = await _budget_channel(runtime, auth, channel_id.strip())
@@ -218,6 +237,7 @@ async def _get_channel_budget_impl(
 async def _list_channel_budgets_impl(
     runtime: McpRuntime, auth: AuthIdentity
 ) -> list[ChannelBudgetResult]:
+    require_scope(auth, "tenant:read")
     _require_admin(auth)
     platform = _require_platform(auth)
     now = datetime.now(UTC)
@@ -241,6 +261,7 @@ async def _set_channel_budget_impl(
     ends_at: str | None,
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
     try:
@@ -273,6 +294,7 @@ async def _clear_channel_budget_impl(
     Any other id is used as given, so a budget on a channel since deleted or
     hidden can still be cleared.
     """
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
     target = _require_channel_id(channel_id).partition(":")[0]
@@ -287,14 +309,15 @@ async def _clear_channel_budget_impl(
 
 
 def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", *scope_tags("tenant:read")})
     async def get_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, origin_context_id: str | None = None
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        For the channel this turn is in, omit ``channel_id`` and pass this
-        turn's ``origin_context_id``. For another channel, pass its id; a
+        For the channel this turn is in (in a DM, the channel it was moved
+        from), omit ``channel_id`` and pass this turn's
+        ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
         budget of a channel they can see. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.
@@ -303,12 +326,12 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), channel_id, origin_context_id
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
         """List every channel budget in this server or workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -340,7 +363,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ends_at=ends_at,
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str
     ) -> ClearChannelBudgetResult:

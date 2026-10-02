@@ -89,8 +89,8 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
             )
         )
-    if read_policy.restricts_any:
-        # Slack's total counts every page, withheld hits included, so it would
+    if read_policy.policy.sealed_channel_ids:
+        # Slack's total counts every page, sealed hits included, so it would
         # answer "does the sealed channel mention X?". Report only what is
         # shown, as Discord does for unscoped searches.
         total = len(matches)

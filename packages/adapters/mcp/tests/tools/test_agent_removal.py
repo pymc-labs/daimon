@@ -1125,3 +1125,164 @@ async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
 
     remaining = await _list_agent_keys_impl(runtime, auth, agent_name="agent-b")
     assert remaining == ["SHARED"], "removing from agent-a must not affect agent-b's SHARED key"
+
+
+# --- remove-then-add on a shared agent (every name, bindings, personal defaults) ---
+
+
+def _named_agent_router(
+    *, tenant_id: uuid.UUID, display_name: str, routing_name: str, agent_id: str
+) -> tuple[AsyncAnthropic, Any]:
+    agent = ma_agent(
+        id=agent_id,
+        name=display_name,
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": routing_name},
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
+    return build_fake_anthropic(router.dispatch), agent
+
+
+async def _assert_remove_then_add_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    client: AsyncAnthropic,
+    agent: Any,
+    agent_name: str,
+) -> None:
+    """The remove is refused, so the follow-up add is a REPLACEMENT, which is refused too."""
+    from daimon.adapters.mcp.tools.credential_requests import (
+        _require_key_replacement_allowed,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores.agent_files import get_agent_file
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            key="GITHUB_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    runtime = _runtime(client, session_factory=db_session_factory)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+    )
+
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _remove_agent_key_impl(runtime, auth, agent_name=agent_name, key="GITHUB_TOKEN")
+    async with db_session_factory() as session:
+        row = await get_agent_file(
+            session, tenant_id=tenant_id, agent_id=agent_uuid, key="GITHUB_TOKEN"
+        )
+    assert row is not None and row.content == "the-value-in-use", "nothing was removed"
+    with pytest.raises(ToolError, match="needs (an|a server or workspace) admin"):
+        await _require_key_replacement_allowed(runtime, auth, ma_agent=agent, key="GITHUB_TOKEN")
+
+
+async def test_remove_agent_key_refused_when_the_agent_is_another_accounts_personal_default(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.scope import UserScopeRef
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    async with db_session_factory() as session, session.begin():
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        other = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=other.id),
+            tenant_id=tenant_id,
+            agent_name="acme",
+        )
+    client, agent = _named_agent_router(
+        tenant_id=tenant_id, display_name="acme", routing_name="acme", agent_id="ag_acme"
+    )
+    await _assert_remove_then_add_refused(
+        db_session_factory,
+        tenant_id=tenant_id,
+        agent_id="ag_acme",
+        client=client,
+        agent=agent,
+        agent_name="acme",
+    )
+
+
+async def test_remove_agent_key_refused_while_a_handoff_thread_is_bound_to_the_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    async with db_session_factory() as session, session.begin():
+        await create_binding(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id="chan-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_acme",
+            responder_name="acme",
+            kind="handoff",
+        )
+    client, agent = _named_agent_router(
+        tenant_id=tenant_id, display_name="acme", routing_name="acme", agent_id="ag_acme"
+    )
+    await _assert_remove_then_add_refused(
+        db_session_factory,
+        tenant_id=tenant_id,
+        agent_id="ag_acme",
+        client=client,
+        agent=agent,
+        agent_name="acme",
+    )
+
+
+async def test_remove_agent_key_refused_when_display_and_routing_names_differ(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """daimon_name 'acme' (what the caller names), display 'Acme Display' (the default)."""
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="Acme Display")
+    client, agent = _named_agent_router(
+        tenant_id=tenant_id, display_name="Acme Display", routing_name="acme", agent_id="ag_acme"
+    )
+    await _assert_remove_then_add_refused(
+        db_session_factory,
+        tenant_id=tenant_id,
+        agent_id="ag_acme",
+        client=client,
+        agent=agent,
+        agent_name="acme",
+    )
+
+
+async def test_detach_mcp_server_refused_when_display_and_routing_names_differ(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Same single-name gap on detach: the tenant default names the display name."""
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="Acme Display")
+    agent = ma_agent(
+        id="ag_acme",
+        name="Acme Display",
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "acme"},
+        mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+    )
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _detach_mcp_server_impl(
+            _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
+            auth,
+            agent_name="acme",
+            server_name="ctx7",
+        )

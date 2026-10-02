@@ -27,15 +27,20 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _build_agent_info,  # pyright: ignore[reportPrivateUsage]
     _ma_tool_to_param,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
 from daimon.adapters.mcp.tools.skill_uploads import require_skill_change
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
@@ -62,6 +67,12 @@ class RemoveEnvCredentialResult(BaseModel):
     (the delete is idempotent, so the call still succeeds either way)."""
 
 
+def _agent_names(agent: BetaManagedAgentsAgent, requested: str) -> tuple[str, ...]:
+    """Every name `agent` may be configured under: the one asked for, its MA
+    display name and its ``daimon_name`` routing name."""
+    return (requested, agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""))
+
+
 async def _detach_mcp_server_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -69,6 +80,7 @@ async def _detach_mcp_server_impl(
     agent_name: str,
     server_name: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     # Reserved-name check first and unconditionally — before any agent lookup
     # or I/O, mirroring _attach_mcp_server_impl's #142 guard.
@@ -76,9 +88,15 @@ async def _detach_mcp_server_impl(
     if rejection is not None:
         raise ToolError(rejection)
 
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     # `mcp_remove` sits in `decide_operation`'s attachment family, not the spec
     # family `_reject_system_agent` enforces: the token form attaches a server
     # to the seeded agent for any member, and the defaults reconciler unions
@@ -90,7 +108,12 @@ async def _detach_mcp_server_impl(
     # still needs an admin to undo, because the removal reaches everyone.
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = await reachability.target_facts(
-        runtime, auth, "mcp_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
+        runtime,
+        auth,
+        "mcp_remove",
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
@@ -156,11 +179,18 @@ async def _remove_skill_impl(
     agent_name: str,
     skill_id: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
-    # Same rule as add_skill: fork a built-in agent first; a channel admin may
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    # Same rule as add_skill: a built-in agent is refused; a channel admin may
     # change an agent local to their channels.
     await require_skill_change(
         runtime, auth, agent, agent_name=agent_name, operation="skill_remove"
@@ -216,18 +246,21 @@ async def _list_agent_keys_impl(
     *,
     agent_name: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> list[str]:
     # Deliberately NOT reachability-gated and NOT _reject_system_agent-guarded:
     # env variables are per-agent daimon rows keyed (tenant_id, agent_id, key)
     # that never enter the MA agent spec, so neither the spec-drift guard nor
     # the approved-configuration gate applies. This is a read; the ungated-
     # reads convention (_ctx.py's _require_admin docstring) covers it too.
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
         runtime,
         auth,
         name=agent_name,
         expected_ma_agent_id=expected_ma_agent_id,
         require_identity=False,
+        location_channel_id=origin_channel_id(origin),
     )
     agent_id: uuid.UUID = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory() as session:
@@ -242,6 +275,7 @@ async def _remove_agent_key_impl(
     agent_name: str,
     key: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> RemoveEnvCredentialResult:
     # Adding and removing a key are deliberately NOT symmetric. Adding is a
     # contribution: one new value, held by the requester alone, that overwrites
@@ -255,12 +289,26 @@ async def _remove_agent_key_impl(
     # _reject_system_agent and require_admin_for_reachable_agent still do not
     # apply: those guard the MA agent spec, and these keys are per-agent daimon
     # rows that never enter it.
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    # Every name the agent answers to, live thread bindings and personal
+    # defaults: a removal followed by a fresh add is a replacement, so it
+    # needs the same wide check `key_replace` uses.
     facts = await reachability.target_facts(
-        runtime, auth, "key_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
+        runtime,
+        auth,
+        "key_remove",
+        agent_names=_agent_names(agent, agent_name),
+        ma_agent_id=str(agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
@@ -289,6 +337,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             str, Field(description="Name of the attached MCP server to disconnect.")
         ],
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Disconnect an MCP server such as Linear or Notion from an agent. Detach
         the named connection and its tools while preserving other servers and
@@ -300,13 +349,15 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         daimon server cannot be removed. Use this when a connection keeps
         failing: a server admin can disconnect from any agent, built-in Daimon
         included; a member can disconnect from an agent that is not a channel or
-        workspace default."""
+        workspace default.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _detach_mcp_server_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             server_name=server_name,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -315,6 +366,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent_name: str,
         skill_id: str,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Stop an agent using an attached skill, such as eda. Remove that one
         attachment while preserving other skills; it applies from the agent's next
@@ -323,13 +375,15 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``delete_skill`` destroys the shared workspace skill instead;
         ``update_agent`` adds existing skills and ``add_skill`` new ones. Accept a skill
         name or raw ``skill_id``. The resource and other agents stay intact. A built-in
-        agent must be forked first; changing a default agent needs admin."""
+        agent is refused; changing a default agent needs admin.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _remove_skill_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             skill_id=skill_id,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -346,6 +400,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ),
         ],
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> RemoveEnvCredentialResult:
         """Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
 
@@ -355,13 +410,15 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         returns its secret value. Removing it stops it being supplied from the next
         message; it does not cancel it at the service or stop work already using it.
         Anyone may add a key, but removing one from an agent that answers a channel
-        or the whole workspace needs an admin."""
+        or the whole workspace needs an admin.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _remove_agent_key_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             key=key,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -369,15 +426,18 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         agent_name: str,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> list[str]:
         """What keys does an agent have? List its stored API key names, never values.
 
         Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
         keys or ``remove_agent_key`` to remove them. Stored names on this target
-        are not proof that the answering agent can use those keys."""
+        are not proof that the answering agent can use those keys.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _list_agent_keys_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )

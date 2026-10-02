@@ -10,11 +10,24 @@ all fields are top-level on the single Settings class).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_only(netloc: str) -> str:
+    """``netloc`` without its port (IPv6 brackets stripped)."""
+    host = netloc.rsplit("@", 1)[-1]
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.split(":", 1)[0].lower()
 
 
 class Settings(BaseSettings):
@@ -123,6 +136,74 @@ class Settings(BaseSettings):
     # degrades: that's acceptable for a resource cap and is not acceptable
     # for an isolation boundary.
     allow_unjailed_spawn: bool = False
+    # Serve the marimo code editor for `notebook_edit` upload tokens and
+    # `PUT /admin/notebooks/{slug}` with `editable: true`. Off: every notebook
+    # is a read-only app, whatever the bot asks for. An editor link runs
+    # arbitrary code on this host, so only turn it on for a host that serves
+    # one client. Same variable name as the bot's `notebook.allow_editable`.
+    allow_editable: bool = False
+    # Boot even though links would go out over plain http to a non-localhost
+    # host. Links carry each notebook's access token, so by default the host
+    # refuses to start without an `https://` `public_url_base`. Only for a
+    # trusted private network.
+    allow_http_links: bool = False
+    # Serve every notebook from its own origin, ``<label>.<origin_base>``,
+    # with ``label`` an unguessable value derived from the notebook's token
+    # (never the slug). Needs wildcard DNS and a wildcard TLS certificate for
+    # ``*.<origin_base>``. May carry a port for local testing
+    # ("localhost:8001"; browsers resolve ``*.localhost`` to 127.0.0.1). When
+    # set, the proxy routes by Host, requires the exact origin on every
+    # cross-origin request and WebSocket, and refuses path-mode /n/<slug>/ on
+    # any other host. Unset: all notebooks share one origin, so a public host
+    # serves only the tenants listed in ``tenants`` (see README).
+    origin_base: str | None = None
+    origin_scheme: Literal["https", "http"] = "https"
+    tenants: Annotated[tuple[UUID, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads "
+            "from, comma-separated or as a JSON array of strings. Their notebooks share one "
+            "browser origin and can reach each other, so list only tenants one operator "
+            "controls. Empty refuses every upload. Ignored with ORIGIN_BASE (every notebook "
+            "gets its own origin) and on localhost. An unlisted tenant's 403 names its id; "
+            "`daimon tenants list --json` shows every tenant's id."
+        ),
+    )
+
+    @field_validator("tenants", mode="before")
+    @classmethod
+    def _parse_tenants(cls, v: object) -> object:
+        # Arrives as a raw env_file line; a JSON-only parse crash-looped boot
+        # on "", a bare UUID or a comma list. Bad ids still fail, named.
+        if not isinstance(v, str):
+            return v
+        raw = v.strip()
+        try:
+            items: list[object] = json.loads(raw) if raw.startswith("[") else [*raw.split(",")]
+        except json.JSONDecodeError as e:
+            raise ValueError(f"DAIMON_NOTEBOOK__TENANTS is not a JSON array: {e}") from e
+        tenants: list[UUID] = []
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            try:
+                tenants.append(UUID(text))
+            except ValueError:
+                raise ValueError(
+                    f"DAIMON_NOTEBOOK__TENANTS: {text!r} is not a tenant UUID"
+                ) from None
+        return tuple(tenants)
+
+    @property
+    def is_local_dev(self) -> bool:
+        """Links only ever point at this machine (no public origin configured)."""
+        if self.origin_base is not None:
+            return _host_only(self.origin_base) in _LOCAL_HOSTS
+        if self.public_url_base is not None:
+            return _host_only(urlsplit(self.public_url_base).netloc) in _LOCAL_HOSTS
+        return self.public_host in _LOCAL_HOSTS
+
     # Path to the persisted uid registry. Host writes {slug: uid} whenever a
     # new slug is jailed; ``None`` (default) means "use
     # ``data_dir / 'uids.json'``" — keeps it on the same persistent volume

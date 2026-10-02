@@ -6,8 +6,9 @@ Three call sites (`daimon.adapters.mcp.tools.reachability`,
 `daimon.adapters.slack.agent_policy`) each re-implement the same
 underlying rule — blast radius of one agent -> open to any member; blast
 radius of the whole tenant (a channel or workspace default) -> admin only —
-with a load-bearing difference in what gets checked first. This module is
-the single place that rule and its ordering are written down; the shell
+with a load-bearing difference in what gets checked first. This module names
+the operations and their families; `daimon.core.authz.authorize`
+(`Action.CHANGE_SHARED_AGENT`) decides each family's order; the shell
 gates read a `PolicyOutcome` from here and keep their own copy of the
 strings and I/O, because the readers (a `ToolError`, a Discord ephemeral, a
 Slack ephemeral) differ.
@@ -21,29 +22,36 @@ There are three rule families, each a fixed short-circuit order:
   notices. Order: managed ->
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`. Adding or removing one of an agent's skills
-  changes what it does, so it follows the same order: the managed agent is
-  forked first, and anyone may change an agent that answers nowhere. For the
-  two skill kinds "nowhere" is strict (`needs_strict_reach`): no bound
-  thread and no routine or queued continuation of anyone else's either.
+  changes what it does, so it follows the same order: a managed agent is
+  refused, and anyone may change an agent nobody else uses. Skill files
+  reach every place keys do, so both kinds read sharing as wide as a key
+  change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
 
-- **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`):
-  attachments never enter the agent spec, so the managed-agent absolutism
-  above does not apply, and an admin attaching to a shared or managed agent
-  is the first-run onboarding step this family exists to allow. Order: admin
-  -> `allow` (checked BEFORE the managed check — this is the one step
-  ordered differently from the spec family, and it is what keeps an admin
-  able to bind a repo or replace a key on the seeded agent); managed ->
-  `managed_agent`; reachable -> `needs_admin`; else `allow`.
+- **attachment** (`key_replace`, `key_remove`, `mcp_replace`, `mcp_remove`,
+  `repo_bind`, `skill_repo_connect`): attachments never enter the agent
+  spec, so the managed-agent absolutism above does not apply, and an admin
+  attaching to a shared or managed agent is the first-run onboarding step
+  this family exists to allow. Order: admin -> `allow` (checked BEFORE the managed check — this
+  is the one step ordered differently from the spec family, and it is what
+  keeps an admin able to bind a repo or replace a key on the seeded agent);
+  managed -> `managed_agent`; reachable -> `needs_admin`; else `allow`.
+  `skill_repo_connect` imports skills and attaches them to the agent, which
+  changes what it runs for everyone it answers, so it gates like the other
+  attachment writes. The attach itself still refuses a managed agent for
+  everyone, admins included: skills are part of the agent spec.
 
-- **posted-token exception** (`key_add`, `keys_import`, `mcp_connect`,
-  `skill_repo_connect`): always `allow`. A single-use posted-token write is
-  scoped to one value the requester alone holds, on one key, on one agent —
-  a new contribution never overwrites or removes existing shared state, so
-  it needs no admin and no reachability read. Only the destructive
-  attachment writes (replace, remove) need an admin.
+- **posted-token exception** (`key_add`, `keys_import`, `mcp_connect`):
+  always `allow`. A single-use posted-token write is scoped to one value the
+  requester alone holds, on one key, on one agent — a new contribution never
+  overwrites or removes existing shared state, so it needs no admin and no
+  reachability read. Only the destructive attachment writes (replace,
+  remove) and the skill-repo import need an admin. `mcp_connect` covers a
+  new server name or the same name at the same URL; repointing an existing
+  name at another URL, or overwriting the agent's shared token for a URL, is
+  `mcp_replace`.
 
 Where either of the first two families would answer `needs_admin`, a channel
-admin whose channels hold every place the agent answers
+admin whose channels hold every place the agent answers or runs
 (`is_local_to_caller_channels`, see `daimon.core.agent_reach`) is allowed
 instead. The managed check still refuses them: only a server admin passes it.
 """
@@ -52,6 +60,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, AgentReach, OperationFamily, Subject, Surface, authorize
 from daimon.core.security_audit import record_policy_decision
 from pydantic import BaseModel
 
@@ -61,6 +71,7 @@ OperationKind = Literal[
     "key_remove",
     "keys_import",
     "mcp_connect",
+    "mcp_replace",
     "mcp_remove",
     "repo_bind",
     "skill_repo_connect",
@@ -76,14 +87,12 @@ _SPEC_OPERATIONS: frozenset[OperationKind] = frozenset(
 )
 
 _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
-    {"key_replace", "key_remove", "mcp_remove", "repo_bind"}
+    {"key_replace", "key_remove", "mcp_replace", "mcp_remove", "repo_bind", "skill_repo_connect"}
 )
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset(
-    {"key_add", "keys_import", "mcp_connect", "skill_repo_connect"}
+    {"key_add", "keys_import", "mcp_connect"}
 )
-
-_STRICT_REACH_OPERATIONS: frozenset[OperationKind] = frozenset({"skill_add", "skill_remove"})
 
 
 class TargetFacts(BaseModel):
@@ -99,6 +108,26 @@ class TargetFacts(BaseModel):
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
     is_local_to_caller_channels: bool = False
+    # Why a channel admin's agent is not local: an unattended run owed to someone
+    # with wider rights. Explains a refusal; decisions never read it.
+    runs_unattended_beyond_caller: bool = False
+    # Or another member's conversation or routine in a channel never recorded,
+    # which could be anywhere. Explains a refusal too.
+    has_unplaced_run: bool = False
+
+
+def _family(operation: OperationKind) -> OperationFamily:
+    if operation in _POSTED_TOKEN_OPERATIONS:
+        return "posted_token"
+    if operation in _SPEC_OPERATIONS:
+        return "spec"
+    # operation in _ATTACHMENT_OPERATIONS — the only remaining family.
+    return "attachment"
+
+
+#: The table reads no tenant policy: a shared-agent change is decided on the
+#: target's reach and the caller's admin status alone.
+_NO_POLICY = TenantAccessPolicy()
 
 
 def _decide_operation(
@@ -107,31 +136,26 @@ def _decide_operation(
     """Return the policy outcome for `operation` against `target`.
 
     Every `OperationKind` belongs to exactly one of the three families
-    described in the module docstring; this dispatches to that family's
-    fixed order. See the module docstring for why the order differs between
-    the spec and attachment families and why the posted-token family always
-    allows.
+    described in the module docstring; `authorize` decides that family's
+    fixed order (`Action.CHANGE_SHARED_AGENT`). See the module docstring for
+    why the order differs between the spec and attachment families and why
+    the posted-token family always allows.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS:
+    decision = authorize(
+        _NO_POLICY,
+        subject=Subject(is_admin=is_admin),
+        action=Action.CHANGE_SHARED_AGENT,
+        surface=Surface.CONFIG,
+        operation_family=_family(operation),
+        reach=AgentReach(
+            managed=target.is_daimon_managed,
+            reachable=target.is_reachable_in_tenant,
+            local_to_caller=target.is_local_to_caller_channels,
+        ),
+    )
+    if decision:
         return "allow"
-    if operation in _SPEC_OPERATIONS:
-        if target.is_daimon_managed:
-            return "managed_agent"
-        if is_admin:
-            return "allow"
-        return _reachable_outcome(target)
-    # operation in _ATTACHMENT_OPERATIONS — the only remaining family.
-    if is_admin:
-        return "allow"
-    if target.is_daimon_managed:
-        return "managed_agent"
-    return _reachable_outcome(target)
-
-
-def _reachable_outcome(target: TargetFacts) -> PolicyOutcome:
-    if target.is_reachable_in_tenant and not target.is_local_to_caller_channels:
-        return "needs_admin"
-    return "allow"
+    return "managed_agent" if decision.reason == "managed_agent" else "needs_admin"
 
 
 def decide_operation(
@@ -162,21 +186,10 @@ def needs_reachability_read(
     return not is_admin and not is_daimon_managed
 
 
-def needs_strict_reach(operation: OperationKind) -> bool:
-    """True when "reachable" must count bound threads and others' unattended runs too.
-
-    New skill files reach everyone who talks to the agent and every run that
-    fires it, so a member may add or remove one only on an agent nobody else
-    uses in any way. The other kinds keep the cascade-only reading.
-    """
-    return operation in _STRICT_REACH_OPERATIONS
-
-
 __all__ = [
     "OperationKind",
     "PolicyOutcome",
     "TargetFacts",
     "decide_operation",
     "needs_reachability_read",
-    "needs_strict_reach",
 ]

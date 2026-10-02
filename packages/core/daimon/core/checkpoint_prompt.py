@@ -107,10 +107,6 @@ _SHA1_LINE = re.compile(r"^\s*([0-9a-f]{40})\s*$", re.MULTILINE)
 
 _TOO_LARGE_LINE = re.compile(rf"^\s*{HANDOFF_TOO_LARGE_MARKER}\s+(\d+)\s*$", re.MULTILINE)
 
-# Lines that merely echo a command from the prompt, rather than being its
-# output, when :func:`checkpoint_archive_listed` looks for the listing.
-_COMMAND_ECHO_PREFIXES = ("tar ", "ls ", "find ", "cd ", "git ", "$ ", "# ")
-
 
 def handoff_filename(transfer_id: uuid.UUID) -> str:
     """The flat outputs filename for one transfer's bundle."""
@@ -331,21 +327,3 @@ def checkpoint_too_large_bytes(reply: str) -> int | None:
 
     match = _TOO_LARGE_LINE.search(reply)
     return None if match is None else int(match.group(1))
-
-
-def checkpoint_archive_listed(reply: str, filename: str) -> bool:
-    """True when the reply shows the archive in an ``ls`` listing.
-
-    A weak confirmation, and only that: it proves the session named the file
-    outside the commands it was handed. The authoritative check is the Files
-    API listing, which the transfer polls next.
-    """
-
-    for line in reply.splitlines():
-        stripped = line.strip()
-        if filename not in stripped:
-            continue
-        if stripped.startswith(_COMMAND_ECHO_PREFIXES):
-            continue
-        return True
-    return False

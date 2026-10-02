@@ -1,9 +1,10 @@
 """This channel's environment, picked on Who answers where.
 
 Workspace admins and this channel's admins get a select there. A pick
-re-checks both live, and checks that the environment still exists before
-anything is written. Slack has no roles, so a channel admin is a member the
-channel's grant names.
+re-checks both live through `authorize` (which keeps an unrestricted network
+out of a channel admin's reach in a sealed channel), and checks that the
+environment still exists before anything is written. Slack has no roles, so a
+channel admin is a member the channel's grant names.
 """
 
 from __future__ import annotations
@@ -15,20 +16,22 @@ import anthropic
 import structlog
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
+from daimon.core.authz import Subject
+from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
+    authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
+    may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
 )
-from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
-from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 
 log = structlog.get_logger()
@@ -42,17 +45,27 @@ ENVIRONMENT_NEED_ADMIN_MESSAGE: Final = (
 )
 
 
-async def may_pick_environment(
-    runtime: SlackRuntime, *, tenant_id: uuid.UUID, channel_id: str, user_id: str, is_admin: bool
-) -> bool:
-    """Workspace admin, or a member this channel's grant names. `is_admin` is resolved live."""
-    if is_admin:
-        return True
+async def load_picker_subject(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, user_id: str, is_admin: bool
+) -> Subject:
+    """The caller as `authorize` sees them. `is_admin` is resolved live."""
     async with runtime.sessionmaker() as session:
-        grant = await get_channel_admins(
-            session, tenant_id=tenant_id, platform="slack", channel_id=channel_id
+        return await load_live_subject(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
         )
-    return is_channel_admin(ChannelAdminCaller(platform_user_id=user_id), grant=grant)
+
+
+async def may_pick_environment(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, channel_id: str, subject: Subject
+) -> bool:
+    """Workspace admin, or a member this channel's grant names."""
+    async with runtime.sessionmaker() as session:
+        return await may_pick_environment_in(
+            session, tenant_id=tenant_id, subject=subject, channel_id=channel_id
+        )
 
 
 async def load_environment_picker(
@@ -73,7 +86,12 @@ async def load_environment_picker(
     if not is_admin and (
         user_id is None
         or not await may_pick_environment(
-            runtime, tenant_id=tenant_id, channel_id=channel_id, user_id=user_id, is_admin=False
+            runtime,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            subject=await load_picker_subject(
+                runtime, tenant_id=tenant_id, user_id=user_id, is_admin=False
+            ),
         )
     ):
         return None
@@ -92,22 +110,42 @@ async def load_environment_picker(
 
 
 async def save_environment_choice(
-    runtime: SlackRuntime, *, tenant_id: uuid.UUID, channel_id: str, user_id: str, value: str
+    runtime: SlackRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    user_id: str,
+    subject: Subject,
+    value: str,
 ) -> str:
     """Write the pick for `channel_id` and return what to tell the reader.
 
-    The caller has re-checked the caller live. A value no picker offers, or an
-    environment that no longer exists, writes nothing.
+    `subject` is the caller as just re-checked live. A value no picker offers,
+    an environment that no longer exists, or a pick `authorize` refuses writes
+    nothing.
     """
     try:
         name = parse_environment_option(value)
     except ValueError:
         return NOT_OFFERED_NOTE
-    if name is not None and (
-        await find_environment_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
-        is None
-    ):
+    async with runtime.sessionmaker() as session:
+        pick = await authorize_environment_pick(
+            session,
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            subject=subject,
+            channel_id=channel_id,
+            environment_name=name,
+            default=runtime.deployment_default,
+        )
+    if pick.decision.reason == "sealed":
+        return build_sealed_network_refusal(environment_name=name)
+    if not pick.decision:
+        return ENVIRONMENT_NEED_ADMIN_MESSAGE
+    if name is not None and pick.missing:
         return build_missing_environment_note(name)
+    # The environment the network rule judged, not a second lookup by name.
+    name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id

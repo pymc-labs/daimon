@@ -5524,3 +5524,82 @@ async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip(
         skills=None,
     )
     assert len(update_calls) == 1
+
+
+def _personal_agent_router(
+    *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> tuple[list[dict[str, Any]], AsyncAnthropic]:
+    """One agent that already has `ctx7` at the real URL; captures update bodies."""
+    updates: list[dict[str, Any]] = []
+    body = ma_agent(
+        id="ag_personal",
+        name="personal-bot",
+        mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://real.example/mcp"}],
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "personal-bot",
+            "daimon_account": str(account_id),
+        },
+    ).model_dump(mode="json")
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json_body(req))
+        return httpx.Response(200, json=body)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([body]))
+    router.add("GET", r"/v1/agents/([^/]+)", lambda _req, _m: httpx.Response(200, json=body))
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    return updates, build_fake_anthropic(router.dispatch)
+
+
+@pytest.mark.parametrize("tool", ["attach_mcp_server", "update_agent"])
+async def test_member_cannot_repoint_a_server_on_someones_personal_default_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """H2: a personal default answers another person, so repointing its server is
+    `mcp_replace` and needs an admin, though the plain reachability gate passes."""
+    from daimon.core.scope import UserScopeRef
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    async with db_session_factory() as session, session.begin():
+        from daimon.core.stores.tenants import get_tenant
+
+        tenant = await get_tenant(session, tenant_id)
+        owner = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=owner.id),
+            tenant_id=tenant_id,
+            agent_name="personal-bot",
+        )
+    member = uuid.uuid4()
+    updates, client = _personal_agent_router(tenant_id=tenant_id, account_id=member)
+    auth = AuthIdentity(account_id=member, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    runtime = _runtime(client, session_factory=db_session_factory)
+
+    with pytest.raises(ToolError, match="admin"):
+        if tool == "attach_mcp_server":
+            await _attach_mcp_server_impl(
+                runtime,
+                auth,
+                agent_name="personal-bot",
+                server_name="ctx7",
+                url="https://attacker.example/mcp",
+            )
+        else:
+            await _update_agent_impl(
+                runtime,
+                auth,
+                name="personal-bot",
+                model=None,
+                description=None,
+                system=None,
+                tools=None,
+                mcp_servers=[
+                    {"name": "ctx7", "type": "url", "url": "https://attacker.example/mcp"}
+                ],
+                skills=None,
+            )
+    assert updates == [], "the server must not be repointed"

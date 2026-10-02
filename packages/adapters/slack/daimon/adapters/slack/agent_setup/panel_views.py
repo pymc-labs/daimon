@@ -43,6 +43,8 @@ from daimon.core.channel_environments import (
     EnvironmentPicker,
     environment_option_value,
 )
+from daimon.core.channel_isolation import ChannelIsolationStatus
+from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
@@ -70,6 +72,7 @@ __all__ = [
     "ACTION_END_ISOLATION",
     "ACTION_ISOLATE",
     "ACTION_ISOLATE_COPY",
+    "ACTION_LIFT_ISOLATION",
     "ACTION_NEW",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
@@ -85,6 +88,7 @@ __all__ = [
     "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
     "build_channel_admins_form",
+    "build_created_view",
     "build_creating_view",
     "build_details_view",
     "build_error_view",
@@ -114,7 +118,9 @@ ACTION_ENVIRONMENT: Final = "agent_setup__environment"
 ACTION_ISOLATE: Final = "agent_setup__isolation:isolate"
 ACTION_ISOLATE_COPY: Final = "agent_setup__isolation:copy"
 ACTION_END_ISOLATION: Final = "agent_setup__isolation:end"
-"""Isolate this channel (with a copy of its agent when needed) or end it. Admins only."""
+ACTION_LIFT_ISOLATION: Final = "agent_setup__isolation:lift"
+"""Isolate this channel (with a copy of its agent when needed), end it, or lift its seal
+and pins too. Admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
@@ -202,11 +208,18 @@ CHANNEL_ADMINS_NOTE: Final = (
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
     "the workspace default stay with workspace admins."
 )
+LIFT_ISOLATION_LABEL: Final = "Lift seal and pins"
 ISOLATION_NOTE: Final = (
-    "An isolated channel's own agents answer only there and are hidden everywhere else; "
-    "inside it only they are visible. Its messages are readable only from inside it. "
-    "Isolating needs an agent that answers only here. *Isolate with a copy* makes one from "
-    "the agent answering now when there is none."
+    "Isolating makes this channel private, so its messages read only from inside it, gives "
+    "it a dedicated agent pinned to it alone, so that agent answers only here, and hides "
+    "that agent everywhere else, while inside only the channel's own agents show. It needs "
+    "an agent that answers only here; *Isolate with a copy* makes one from the agent "
+    "answering now."
+)
+LIFT_ISOLATION_NOTE: Final = (
+    f"*{LIFT_ISOLATION_LABEL}* also ends isolation, makes the channel's messages readable "
+    "from elsewhere and unpins its dedicated agents, so they can answer elsewhere, bringing "
+    "what they remembered here."
 )
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
@@ -577,15 +590,15 @@ def build_routing_view(
     unrouted_agent_name: str | None,
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
     environment_picker: EnvironmentPicker | None = None,
-    isolated: bool | None = None,
+    isolation: ChannelIsolationStatus | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's. `isolated` is too,
-    when the panel has a channel: it adds that channel's isolation buttons.
+    channel's admins and a button to edit this channel's. `isolation` is too,
+    when the panel has a channel, not a DM: it adds that channel's isolation buttons.
     The environment each channel runs in resolves on its own and gets its own
     block; `environment_picker` is passed for workspace admins and this
     channel's admins, who get a select for this channel's environment.
@@ -635,8 +648,8 @@ def build_routing_view(
     blocks.append({"type": "divider"})
     if channel_admins is not None:
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
-    if isolated is not None and channel_id:
-        blocks.extend(_isolation_blocks(channel_id=channel_id, isolated=isolated))
+    if isolation is not None and _is_channel(channel_id):
+        blocks.extend(_isolation_blocks(channel_id=channel_id, status=isolation))
     blocks.append(
         _context(
             _routing_request_line(
@@ -725,6 +738,11 @@ def _environment_select(picker: EnvironmentPicker) -> dict[str, Any]:
     return element
 
 
+def _is_channel(channel_id: str) -> bool:
+    """A DM (`D…`) has no channel admins and can't be isolated."""
+    return bool(channel_id) and not channel_id.startswith("D")
+
+
 def _channel_admins_blocks(
     grants: Sequence[ChannelAdminsRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
@@ -738,9 +756,8 @@ def _channel_admins_blocks(
     if len(lines) < len(grants):
         lines.append(f"_and {len(grants) - len(lines)} more_")
     listing = "\n".join(lines) or "_no channel has its own admins yet_"
-    edit = (
-        _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if channel_id else None
-    )
+    editable = _is_channel(channel_id)
+    edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
     return [
         _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),
@@ -748,20 +765,37 @@ def _channel_admins_blocks(
     ]
 
 
-def _isolation_blocks(*, channel_id: str, isolated: bool) -> list[dict[str, Any]]:
-    state = "is isolated" if isolated else "is not isolated"
+def isolation_status_line(status: ChannelIsolationStatus) -> str:
+    """Private, dedicated agent and hidden, on one line. Pure."""
+    dedicated = ", ".join(f"*{escape_mrkdwn(name)}*" for name in status.dedicated_agent_names)
+    return (
+        f"Private: {'yes' if status.is_private else 'no'} · Dedicated agent: "
+        f"{dedicated or 'none'} · Hidden: {'yes' if status.is_hidden else 'no'}"
+    )
+
+
+def _isolation_blocks(*, channel_id: str, status: ChannelIsolationStatus) -> list[dict[str, Any]]:
+    state = "is isolated" if status.is_hidden else "is not isolated"
     buttons = (
         [_button(action_id=ACTION_END_ISOLATION, label="End isolation", style="danger")]
-        if isolated
+        if status.is_hidden
         else [
             _button(action_id=ACTION_ISOLATE, label="Isolate", style="primary"),
             _button(action_id=ACTION_ISOLATE_COPY, label="Isolate with a copy"),
         ]
     )
+    notes = [ISOLATION_NOTE]
+    if status.is_hidden:
+        notes.append(f"Ending isolation: {END_ISOLATION_WARNING}")
+    if status.is_liftable:
+        buttons.append(
+            _button(action_id=ACTION_LIFT_ISOLATION, label=LIFT_ISOLATION_LABEL, style="danger")
+        )
+        notes.append(LIFT_ISOLATION_NOTE)
     return [
-        _section(f"*Isolation*\n<#{channel_id}> {state}."),
+        _section(f"*Isolation*\n<#{channel_id}> {state}.\n{isolation_status_line(status)}"),
         {"type": "actions", "elements": buttons},
-        _context(ISOLATION_NOTE),
+        _context(" ".join(notes)),
         {"type": "divider"},
     ]
 
@@ -951,6 +985,27 @@ def build_creating_view(*, agent_name: str, meta: PanelMetadata) -> dict[str, An
             _section(f"Creating *{escape_mrkdwn(agent_name)}*…"),
             _context("This takes a few seconds."),
         ],
+        private_metadata=encode_panel_metadata(
+            meta.with_view("creating", agent_name=agent_name, root_view_id=meta.root_view_id)
+        ),
+        callback_id=CALLBACK_CREATING,
+    )
+
+
+def build_created_view(
+    *, agent_name: str, meta: PanelMetadata, isolated_here: bool
+) -> dict[str, Any]:
+    """What the placeholder becomes when the new agent can't be shown to its creator here."""
+    name = escape_mrkdwn(agent_name)
+    text = (
+        f"*{name}* was created. This channel is isolated, so it shows here once it is set "
+        "as the channel's agent."
+        if isolated_here
+        else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+    )
+    return finish_modal(
+        title="New agent",
+        blocks=[_section(text)],
         private_metadata=encode_panel_metadata(
             meta.with_view("creating", agent_name=agent_name, root_view_id=meta.root_view_id)
         ),

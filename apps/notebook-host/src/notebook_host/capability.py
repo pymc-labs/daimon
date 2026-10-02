@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
 
-Op = Literal["blog", "notebook", "data"]
+Op = Literal["blog", "notebook", "notebook_edit", "data"]
 
 
 class CapabilityClaims(BaseModel):
@@ -29,6 +29,9 @@ class CapabilityClaims(BaseModel):
     max_bytes: int
     exp: int
     jti: str
+    # The bot's tenant id. A host without per-notebook origins serves only
+    # listed tenants (``admin._admit_tenant``); tokens without one predate this.
+    tenant: str | None = None
 
 
 def _unb64(s: str) -> bytes:

@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 from anthropic import AsyncAnthropic
@@ -525,12 +526,95 @@ async def test_fire_gates_on_and_attributes_to_the_routine_channel(
         assert fetched.last_error == "channel_budget_exceeded"
         return
     assert fetched.last_error is None
-    assert calls[0]["channel_id"] == "chan-9"
+    assert calls[0]["budget_channel_id"] == "chan-9"
     factory = calls[0]["usage_record_factory"]
     assert callable(factory)
     partial = factory("sess_abc", "claude-opus-4-7")
     assert isinstance(partial, functools.partial)
     assert partial.keywords["channel_id"] == "chan-9"
+
+
+async def test_fire_checks_the_agent_pin_before_the_channel_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fire both pinned out and over its channel budget records the pin refusal:
+    the budget gate runs last, after the pin is checked on the resolved agent."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing import MARouter, build_fake_anthropic, ma_agent
+
+    now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("111000111",)}),
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id="999000999", limit_usd=Decimal("0")
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="U_PIN",
+        agent_id="agent_dest",
+        agent_name="acme-config",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="report",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="channel",
+        destination_id="999000999",
+        channel_id="999000999",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add_agent(
+        ma_agent(
+            id="agent_dest",
+            name="Acme Display",
+            tenant_id=tenant.id,
+            metadata={"daimon_name": "acme-config"},
+        )
+    )
+    client = build_fake_anthropic(router.dispatch)
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    ran: list[object] = []
+
+    async def fake_run_turn(**kwargs: object) -> object:
+        ran.append(kwargs)
+        return "done"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_dest"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+    ):
+        await fire(row)
+    await client.close()
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error == "agent_pinned_elsewhere", (
+        "the pin refusal must win over the channel budget refusal"
+    )
+    assert ran == [], "a refused fire must not run a turn"
 
 
 async def test_fire_balance_gate_passes_threads_tenant_id_markup_pricing_into_usage_record_factory(
@@ -810,6 +894,72 @@ async def test_fire_runs_in_the_routine_channels_environment(
         await fire(row)
 
     assert captured_env == [expected], f"the routine must run in {expected!r}"
+    await fake_client.close()
+
+
+async def test_fire_runs_in_the_destination_channels_environment_without_a_saved_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routine saved before its channel was recorded runs where it delivers."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ENV"),
+        tenant_id=tenant.id,
+        environment_name="gpu",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="x",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="channel",
+        destination_id="C_ENV",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    captured_env: list[str] = []
+
+    async def fake_resolve_environment(*args: object, daimon_tag: str, **kwargs: object) -> str:
+        captured_env.append(daimon_tag)
+        return "resolved-env"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(agent_name="x", environment_name="y"),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", return_value="resolved-agent"
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment",
+            side_effect=fake_resolve_environment,
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail"),
+        unittest.mock.patch("daimon.adapters.scheduler.main.record_result"),
+    ):
+        await fire(row)
+
+    assert captured_env == ["gpu"], "the destination's channel picks the environment"
     await fake_client.close()
 
 
@@ -1366,3 +1516,186 @@ async def test_settle_promo_credit_swallows_sqlalchemy_error(
         side_effect=SQLAlchemyError("boom"),
     ):
         await _settle_promo_credit(db_session_factory)  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("destination_kind", "destination_id", "channel_id"),
+    [("channel", "room", "room"), ("thread", "555000555", None)],
+    ids=["channel", "thread saved without its parent"],
+)
+async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_line(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    destination_kind: Literal["channel", "thread"],
+    destination_id: str,
+    channel_id: str | None,
+) -> None:
+    """Routing may change after a routine is saved: an outside agent's routine
+    posting into a channel isolated since then is skipped, not run. A Discord
+    thread saved before its parent was recorded may lie under that channel, so
+    it is skipped too while anything is isolated."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing import ma_agent
+
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind=destination_kind,
+        destination_id=destination_id,
+        channel_id=channel_id,
+    )
+    await db_session.commit()
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_x"
+
+    agent = ma_agent(id="agent_x", name="daimon", tenant_id=tenant.id)
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn",
+            side_effect=AssertionError("a routine crossing the line must not run a turn"),
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+        unittest.mock.patch.object(
+            client.beta.agents, "retrieve", new=unittest.mock.AsyncMock(return_value=agent)
+        ),
+    ):
+        await fire(row)
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None and fetched.last_error == "channel_isolated"
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("destination", "pinned_out"),
+    [(None, True), ("999000999", True), ("111000111", False)],
+    ids=["no-destination", "other-channel", "pinned-channel"],
+)
+async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str | None,
+    pinned_out: bool,
+) -> None:
+    """The routine saved its config name; the pin is on the agent's display name.
+    The fire must check the resolved agent's names, not the saved name alone."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing import ma_agent
+
+    now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("111000111",)}),
+    )
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="U_PIN",
+        agent_id="agent_dest",
+        agent_name="acme-config",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="report",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="channel" if destination else None,
+        destination_id=destination,
+    )
+    await db_session.commit()
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    ran: list[object] = []
+
+    async def fake_run_turn(**kwargs: object) -> object:
+        ran.append(kwargs)
+        return "done"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_dest"
+
+    agent = ma_agent(
+        id="agent_dest",
+        name="Acme Display",
+        tenant_id=tenant.id,
+        metadata={"daimon_name": "acme-config"},
+    )
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+        unittest.mock.patch.object(
+            client.beta.agents, "retrieve", new=unittest.mock.AsyncMock(return_value=agent)
+        ),
+    ):
+        await fire(row)
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    if pinned_out:
+        assert after.last_error == "agent_pinned_elsewhere" and ran == []
+    else:
+        assert after.last_error is None and len(ran) == 1
+    await client.close()

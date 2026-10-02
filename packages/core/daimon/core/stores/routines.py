@@ -14,7 +14,7 @@ companion `advance_stale` call recovers those plus any rows whose
 from __future__ import annotations
 
 import uuid as _uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -22,8 +22,13 @@ import structlog
 from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import CatchUpPolicy, Role, RoutineDestinationKind, RoutineRow
-from pydantic import BaseModel, ConfigDict
+from daimon.core.stores.domain import (
+    CatchUpPolicy,
+    Role,
+    RoutineDestinationKind,
+    RoutineRow,
+    UnattendedRequester,
+)
 from sqlalchemy import and_, delete, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,20 +118,17 @@ async def list_routines_for_tenant(
     return [RoutineRow.model_validate(r) for r in rows]
 
 
-class RoutineCreator(BaseModel):
-    """A routine's creator, with the stored role and role ids its fires run with."""
-
-    model_config = ConfigDict(frozen=True)
-
-    platform_user_id: str
-    is_admin: bool = False
-    role_ids: tuple[str, ...] = ()
-
-
 async def list_routine_creators(
-    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, agent_name: str
-) -> list[RoutineCreator]:
-    """Who made the routines that run `agent_name`, paused ones included.
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    agent_names: Collection[str],
+    agent_id: str | None = None,
+) -> list[UnattendedRequester]:
+    """Who made the routines that run the agent, paused ones included.
+
+    A routine counts when it names any of `agent_names` or runs `agent_id`.
 
     A routine with no recorded creator never fires and is left out; a creator
     with no account yet fires as a plain member.
@@ -144,13 +146,13 @@ async def list_routine_creators(
         .outerjoin(Account, Account.id == PlatformPrincipal.account_id)
         .where(
             Routine.tenant_id == tenant_id,
-            Routine.agent_name == agent_name,
+            or_(Routine.agent_name.in_(agent_names), Routine.agent_id == agent_id),
             Routine.created_by_user_id.is_not(None),
         )
         .distinct()
     )
     return [
-        RoutineCreator(
+        UnattendedRequester(
             platform_user_id=user_id,
             is_admin=role == Role.ADMIN,
             role_ids=tuple(role_ids or ()),
@@ -158,6 +160,30 @@ async def list_routine_creators(
         for user_id, role, role_ids in rows.tuples()
         if user_id is not None
     ]
+
+
+async def list_routine_channel_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    agent_names: Collection[str],
+    agent_id: str | None = None,
+    caller_platform_user_id: str | None = None,
+) -> list[str | None]:
+    """The channels of the routines that run the agent, paused ones included.
+
+    None stands for a routine with no channel. The caller's own routines are
+    left out; None for `caller_platform_user_id` counts them all.
+    """
+    statement = select(Routine.channel_id).where(
+        Routine.tenant_id == tenant_id,
+        or_(Routine.agent_name.in_(agent_names), Routine.agent_id == agent_id),
+    )
+    if caller_platform_user_id is not None:
+        statement = statement.where(
+            Routine.created_by_user_id.is_distinct_from(caller_platform_user_id)
+        )
+    return list((await session.execute(statement.distinct())).scalars())
 
 
 async def update_routine(

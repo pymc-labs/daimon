@@ -17,14 +17,25 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import load_isolation, refuse, require_bindable
+from daimon.adapters.mcp.tools._ctx import (
+    _auth,  # pyright: ignore[reportPrivateUsage]
+    _require_admin,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools._isolation import (
+    CallerIsolation,
+    load_caller_isolation,
+    load_isolation,
+    refuse,
+    require_bindable,
+)
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.reachability import (
-    require_bindable_by_channel_admin,
-    require_scope_admin,
+    require_bindable_as_channel_default,
+    require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.channel_environments import build_environment_resolution_note
+from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
@@ -39,7 +50,7 @@ from daimon.core.scope import (
     TenantScopeRef,
     merge,
 )
-from daimon.core.stores.domain import ThreadAgentBindingRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.thread_agent_bindings import get_binding, list_active_bindings
@@ -77,6 +88,20 @@ class ClearDefaultResult:
     requirement. Supplied by the tool rather than recalled from a prompt."""
 
 
+async def _require_scope_admin(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
+) -> None:
+    """The workspace default needs a server admin; a channel's also admits its channel admins.
+
+    Operator tokens change only channel defaults, never the workspace one."""
+    if channel_id is None:
+        if auth.is_operator:
+            raise ToolError("An operator token changes only a channel's default; pass channel_id.")
+        _require_admin(auth)
+    else:
+        await require_channel_admin(runtime, auth, channel_id=channel_id)
+
+
 async def _set_agent_default_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -84,27 +109,32 @@ async def _set_agent_default_impl(
     channel_id: str | None,
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
-    await require_scope_admin(runtime, auth, channel_id=channel_id)
+    require_scope(auth, "channels:write")
+    await _require_scope_admin(runtime, auth, channel_id)
     agent = None
-    if expected_ma_agent_id is not None or auth.platform in ("discord", "slack"):
+    if expected_ma_agent_id is not None or auth.platform in CHAT_PLATFORMS:
         agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
     if channel_id is not None:
-        await require_bindable_by_channel_admin(
+        await require_bindable_as_channel_default(
             runtime,
             auth,
+            channel_id=channel_id,
             agent_name=agent_name,
+            agent=agent,
             is_daimon_managed=agent is not None
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
-    isolation = await load_isolation(runtime, auth.tenant_id)
-    if isolation.is_active:
-        if agent is None:
-            agent = await find_agent_by_daimon_tag(
-                runtime.client, tenant_id=auth.tenant_id, name=agent_name
-            )
-        require_bindable(isolation, agent_name, agent=agent, channel_id=channel_id)
+    else:
+        # The workspace default answers everywhere, so no pinned agent can be it.
+        policy = await load_isolation(runtime, auth.tenant_id)
+        if policy.agent_channel_pins:
+            if agent is None:
+                agent = await find_agent_by_daimon_tag(
+                    runtime.client, tenant_id=auth.tenant_id, name=agent_name
+                )
+            require_bindable(policy, agent_name, agent=agent, channel_id=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -141,10 +171,11 @@ async def _clear_agent_default_impl(
     auth: AuthIdentity,
     channel_id: str | None,
 ) -> ClearDefaultResult:
-    await require_scope_admin(runtime, auth, channel_id=channel_id)
+    require_scope(auth, "channels:write")
+    await _require_scope_admin(runtime, auth, channel_id)
     if channel_id is not None:
-        isolation = await load_isolation(runtime, auth.tenant_id)
-        refuse(isolation.clear_refusal(channel_id=channel_id), agent_name=None)
+        policy = await load_isolation(runtime, auth.tenant_id)
+        refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -232,6 +263,22 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
     )
 
 
+_ACROSS_LINE_MSG = (
+    "{place} is across an isolated channel's line from this conversation, so its "
+    "routing can't be shown here."
+)
+
+
+_NO_OWN_AGENT_NOTE = (
+    "None of this isolated channel's own agents answers here, so a mention is refused "
+    "until an admin sets the channel's agent."
+)
+
+
+def _visible(caller: CallerIsolation, agent_name: str | None) -> str | None:
+    return agent_name if agent_name is not None and caller.sees(agent_name) else None
+
+
 async def _explain_agent_resolution_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -244,8 +291,14 @@ async def _explain_agent_resolution_impl(
     already infer from a turn's footer, and the people most often confused about
     which agent answers are ordinary members. Gating it would leave the question
     unanswerable by exactly the callers who ask it.
+
+    Isolation still applies: a channel across an isolated channel's line from
+    the caller is refused, and agents the caller can't see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
+    caller = await load_caller_isolation(runtime, auth)
+    if caller.isolated_place(channel_id) != caller.inside_channel_id:
+        raise ToolError(_ACROSS_LINE_MSG.format(place=f"channel '{channel_id}'"))
 
     async with runtime.session_factory() as session:
         channel_row = await get_scope(
@@ -254,7 +307,7 @@ async def _explain_agent_resolution_impl(
         tenant_row = await get_scope(session, scope=TenantScopeRef(tenant_id=tenant_id))
         binding = None
         recent: list[ThreadAgentBindingRow] = []
-        if auth.platform in ("discord", "slack"):
+        if auth.platform in CHAT_PLATFORMS:
             if thread_id is not None:
                 binding = await get_binding(
                     session,
@@ -284,30 +337,44 @@ async def _explain_agent_resolution_impl(
                         f"({binding.responder_ma_agent_id}); configuration target: {target}. "
                         f"{next_step}"
                     )
-            recent = await list_active_bindings(
-                session,
-                tenant_id=tenant_id,
-                platform=auth.platform,
-                parent_channel_id=channel_id,
-                limit=10,
-            )
+            if binding is not None and not caller.sees(binding.responder_name):
+                raise ToolError(_ACROSS_LINE_MSG.format(place=f"thread '{thread_id}'"))
+            recent = [
+                row
+                for row in await list_active_bindings(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=auth.platform,
+                    parent_channel_id=channel_id,
+                    limit=10,
+                )
+                if caller.sees(row.responder_name)
+            ]
 
     channel_cfg = channel_row if isinstance(channel_row, ChannelConfigRow) else None
     tenant_cfg = tenant_row if isinstance(tenant_row, TenantConfigRow) else None
     resolved = merge(channel=channel_cfg, tenant=tenant_cfg, default=runtime.deployment_default)
+    hidden_winner = binding is None and _visible(caller, resolved.agent_name) is None
 
     return AgentResolutionExplanation(
         channel_id=channel_id,
-        effective_agent_name=binding.responder_name if binding else resolved.agent_name,
+        effective_agent_name=binding.responder_name
+        if binding
+        else _visible(caller, resolved.agent_name),
         winning_tier="thread" if binding else resolved.agent_name_tier,
         channel_default=channel_cfg.agent_name if channel_cfg is not None else None,
-        tenant_default=tenant_cfg.agent_name if tenant_cfg is not None else None,
-        deployment_default=runtime.deployment_default.agent_name,
+        tenant_default=_visible(caller, tenant_cfg.agent_name if tenant_cfg is not None else None),
+        deployment_default=_visible(caller, runtime.deployment_default.agent_name),
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
         channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
-        tenant_environment=tenant_cfg.environment_name if tenant_cfg is not None else None,
-        deployment_environment=runtime.deployment_default.environment_name,
+        # An isolated channel's insiders see no workspace picks (`hide_across_isolation`).
+        tenant_environment=tenant_cfg.environment_name
+        if tenant_cfg is not None and caller.inside_channel_id is None
+        else None,
+        deployment_environment=runtime.deployment_default.environment_name
+        if caller.inside_channel_id is None
+        else None,
         environment_explanation=build_environment_resolution_note(
             environment_name=resolved.environment_name,
             tier=resolved.environment_name_tier,
@@ -321,6 +388,8 @@ async def _explain_agent_resolution_impl(
         recent_setup_conversations=tuple(recent),
         explanation=_thread_explanation(binding)
         if binding
+        else _NO_OWN_AGENT_NOTE
+        if hidden_winner and resolved.agent_name is not None
         else build_resolution_note(
             agent_name=resolved.agent_name,
             tier=resolved.agent_name_tier,
@@ -330,7 +399,7 @@ async def _explain_agent_resolution_impl(
 
 
 def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def set_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -354,7 +423,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``<channel platform="discord" id="..." role="parent_channel">``.
         Never pass the current thread's id here. Slack: use the id from
         ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. A channel default is resolved from the parent;
+        names the parent channel. Teams: use ``parent_channel_id`` from
+        turn_controls. A channel default is resolved from the parent;
         setup threads keep their bound responder. A default
         written against a thread id is a scope nothing ever reads: the write
         succeeds, this tool reports success, and the channel keeps answering
@@ -364,7 +434,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
         )
 
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def clear_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,
@@ -381,7 +451,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Clearing a thread id is a
+        ``<channel platform="slack" id="...">``. Teams: use
+        ``parent_channel_id`` from turn_controls. Clearing a thread id is a
         silent no-op that leaves the channel's real default in place.
         """
         return await _clear_agent_default_impl(runtime, await _auth(ctx), channel_id)
@@ -411,7 +482,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Asking about a thread id
+        ``<channel platform="slack" id="...">``. Teams: ``parent_channel_id``
+        from turn_controls, with its ``thread_id``. Asking about a thread id
         reports that thread's own (almost always empty) scope, which reads
         as a confident answer about the channel and is not one — and if the
         same wrong id was just passed to ``set_agent_default``, this tool

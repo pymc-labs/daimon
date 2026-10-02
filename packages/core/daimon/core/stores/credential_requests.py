@@ -100,6 +100,16 @@ async def peek_credential_request(
     return CredentialRequestRow.model_validate(orm)
 
 
+async def get_credential_request_by_idempotency_key(
+    session: AsyncSession, *, idempotency_key: uuid.UUID
+) -> CredentialRequestRow | None:
+    """The row minted under `idempotency_key`, used or not; None once erased."""
+    orm = await session.scalar(
+        select(CredentialRequest).where(CredentialRequest.idempotency_key == idempotency_key)
+    )
+    return None if orm is None else CredentialRequestRow.model_validate(orm)
+
+
 async def consume_credential_request(
     session: AsyncSession,
     *,

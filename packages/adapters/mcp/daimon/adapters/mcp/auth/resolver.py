@@ -23,6 +23,10 @@ walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
 
 The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
 chat keeps ``agent_id=None``; only the Google token path consumes chat identity.
+
+``token_kind``, ``token_jti`` and ``scopes`` come from the token's registry row
+(the verifier writes them under verifier-only claim keys). An operator token
+sees only the tools tagged with its scopes.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import McpTokenKind, Role
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,10 +53,38 @@ class AuthIdentity:
     is_admin: bool = False
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
-    # Role ids the account held on its last chat turn, and whether any channel
-    # admin grant names it; both read by the verifier from the database.
+    # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
+    token_kind: McpTokenKind | None = None
+    token_jti: uuid.UUID | None = None
+    # What an operator token may call, read from its row on every request.
+    scopes: frozenset[str] = frozenset()
+    # Role ids the account held on its last chat turn, and the channels its
+    # channel admin grants name; both read by the verifier from the database.
     platform_role_ids: tuple[str, ...] = ()
-    is_channel_admin: bool = False
+    administered_channel_ids: frozenset[str] = frozenset()
+    # The channel the agent key was minted in, from its mcp_tokens row; read
+    # through `token_channel_id`.
+    bound_channel_id: str | None = None
+
+    @property
+    def is_operator(self) -> bool:
+        return self.token_kind == "operator"
+
+    @property
+    def is_channel_admin(self) -> bool:
+        return bool(self.administered_channel_ids)
+
+
+def token_channel_id(auth: AuthIdentity) -> str | None:
+    """The channel an agent key's calls run inside, or None.
+
+    A key minted in a sealed channel, or in a channel its agent is pinned to,
+    records that channel (`daimon.core.mcp_auth.coding_token_channel`), and
+    its calls count as a turn there: the pin, the seal, the environment, the
+    channel budget and usage attribution all see it. Every other caller (an
+    unbound key, a chat turn, the hub, a CLI token) runs outside every channel.
+    """
+    return auth.bound_channel_id if auth.agent_id is not None else None
 
 
 def resolve_role(role_str: str | None) -> Role:
