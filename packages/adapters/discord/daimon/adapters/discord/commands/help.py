@@ -40,6 +40,7 @@ def _body(bot_display_name: str) -> str:
 -# /privacy — See, export, or delete what {bot_display_name} stores about you
 
 **Meta**
+-# /here — Who answers here, what it can read and holds
 -# /help — List commands and the @bot conversational entrypoint\
 """
 

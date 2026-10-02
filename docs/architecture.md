@@ -1074,6 +1074,12 @@ admission before any of this runs.
 
 ## Entry points that are not a chat message
 
+- **`/here`** in Discord and Slack reads routing, access policy and credential
+  names, then renders one ephemeral card through `daimon.core.here_card`.
+  `where_am_i` in the MCP adapter returns that same card and structured facts
+  when the agent is asked about its identity, reach or credentials. The model
+  does not compose the card.
+
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
   the same `create_session` the chat path uses and delegates the drain to the
