@@ -173,6 +173,9 @@ def test_a_thread_routine_saved_without_its_parent_stays_inside_until_placed() -
     assert not routine_destination_place(slack, channel_id="c1").parent_unresolved, (
         "a Slack thread carries its channel"
     )
+    no_channel = legacy.model_copy(update={"destination_id": ":1.2"})
+    assert is_routine_parent_unknown(no_channel), "an id with an empty channel part names none"
+    assert routine_destination_channel(no_channel) == ":1.2", "so it is placed by itself"
 
 
 _TEAMS_CHANNEL = "19:abc-123@thread.tacv2"

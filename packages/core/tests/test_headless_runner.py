@@ -885,9 +885,19 @@ async def test_run_turn_without_usage_record_factory_stamps_session_billing_exem
     )
 
 
-async def test_run_turn_stamps_a_routine_session_with_where_it_fires() -> None:
+@pytest.mark.parametrize("observed", [False, True], ids=["unobserved", "observed"])
+async def test_run_turn_stamps_a_routine_session_with_where_it_fires(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    observed: bool,
+) -> None:
     """A routine session carries its destination's channel, thread and seal, so
-    its transcript reads only where a turn there would."""
+    its transcript reads only where a turn there would, whether or not the run is
+    observed (the scheduler's runs are: they pass a session factory)."""
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
     session_create_capture: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=session_create_capture)
 
@@ -896,7 +906,8 @@ async def test_run_turn_stamps_a_routine_session_with_where_it_fires() -> None:
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        session_factory=db_session_factory if observed else None,
         origin_place=RoutineOrigin(
             channel_id="c1", thread_id="t1", seal_ids=frozenset({"c1"}), private_dm_id="routine:r1"
         ),

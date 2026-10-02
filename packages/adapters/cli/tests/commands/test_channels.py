@@ -460,6 +460,27 @@ async def test_isolate_names_a_slack_copy_after_the_channel(
     assert "its own agent is launch-room, copied from shared" in _out(console)
 
 
+async def test_isolate_end_lifts_the_seal_and_pins_when_asked(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`--end --lift-seal-and-pins` unseals the channel and unpins its own agents."""
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    where = {"rt": rt, "console": _console(), "platform": "discord", "workspace_id": GUILD}
+    named = _discord_channels({CHANNEL: {"guild_id": GUILD, "name": "Team Alpha", "type": 0}})
+    await channels_isolate(**where, channel_id=CHANNEL, fork_from="shared", discord_transport=named)
+
+    await channels_isolate(**where, channel_id=CHANNEL, end=True, lift_seal_and_pins=True)
+
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == (), "isolation ended"
+    assert policy.sealed_channel_ids == (), "the seal was lifted"
+    assert policy.agent_channel_pins == {}, "and the copy unpinned"
+
+
 async def test_isolate_refuses_teams_and_bad_flag_mixes(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
