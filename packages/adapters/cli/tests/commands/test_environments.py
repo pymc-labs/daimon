@@ -19,6 +19,9 @@ from daimon.adapters.cli.commands.environments import (
     environments_update,
 )
 from daimon.core.errors import StoreError
+from daimon.core.scope import ChannelScopeRef
+from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, list_response
@@ -381,6 +384,12 @@ async def test_environments_archive_calls_sdk_archive(
     """archive resolves by tag then calls environments.archive."""
     async with db_session_factory() as s, s.begin():
         tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await set_fields(
+            s,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+            tenant_id=tenant.id,
+            environment_name="to-archive",
+        )
 
     env_data = _env_json(
         env_id="env_arc",
@@ -406,6 +415,14 @@ async def test_environments_archive_calls_sdk_archive(
 
     assert archived == ["env_arc"], "archive must POST MA archive endpoint"
 
+    async with db_session_factory() as s:
+        row = await get_scope(s, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
+    assert row is None, "the channel's pick of the removed environment is cleared"
+    assert (
+        "cleared 1 channel or tenant pick of 'to-archive'"
+        in cast(StringIO, console.file).getvalue()
+    ), "the output says how many picks were cleared"
+
 
 @pytest.mark.asyncio
 async def test_environments_delete_success(
@@ -414,6 +431,12 @@ async def test_environments_delete_success(
     """delete calls environments.delete on success (200 response)."""
     async with db_session_factory() as s, s.begin():
         tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await set_fields(
+            s,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+            tenant_id=tenant.id,
+            environment_name="to-delete",
+        )
 
     env_data = _env_json(
         env_id="env_del",
@@ -438,6 +461,13 @@ async def test_environments_delete_success(
     await environments_delete(rt=rt, console=console, name="to-delete", yes=True)
 
     assert deleted == ["env_del"], "delete must call MA environments.delete"
+
+    async with db_session_factory() as s:
+        row = await get_scope(s, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
+    assert row is None, "the channel's pick of the removed environment is cleared"
+    assert (
+        "cleared 1 channel or tenant pick of 'to-delete'" in cast(StringIO, console.file).getvalue()
+    ), "the output says how many picks were cleared"
 
 
 @pytest.mark.asyncio

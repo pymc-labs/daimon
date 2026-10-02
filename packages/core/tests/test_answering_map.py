@@ -205,6 +205,62 @@ async def test_load_answering_map_folds_real_config_rows_and_setup_conversations
     assert not answering.setup_threads_truncated, "one conversation is not a truncated listing"
 
 
+def test_build_answering_map_lays_out_environments_beside_the_agents() -> None:
+    """A channel naming only an environment is no agent override, whatever its mode."""
+    tenant_id = uuid.uuid4()
+    channels = [
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="c2", environment_name="science"),
+        ChannelConfigRow(
+            tenant_id=tenant_id,
+            channel_id="c1",
+            environment_name="gpu",
+            mode="user_active",
+        ),
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="c3", agent_name="alpha"),
+    ]
+
+    answering = build_answering_map(
+        tenant=TenantConfigRow(tenant_id=tenant_id, environment_name="shared"),
+        channels=channels,
+        default=DeploymentDefault(agent_name="daimon", environment_name="default"),
+        setup_threads=[],
+        setup_threads_truncated=False,
+    )
+
+    assert [(row.channel_id, row.environment_name) for row in answering.channel_environments] == [
+        ("c1", "gpu"),
+        ("c2", "science"),
+    ], "channels with their own environment come out in channel_id order, mode ignored"
+    assert [row.channel_id for row in answering.channel_overrides] == ["c3"], (
+        "an environment-only row must not read as routing to an agent"
+    )
+    assert answering.environment_in("c2") == ("science", "channel"), "own setting wins"
+    assert answering.environment_in("c3") == ("shared", "tenant"), "then the workspace default"
+    assert answering.environment_in(None) == ("shared", "tenant"), "no channel reads the tenant"
+
+
+def test_answering_map_environment_falls_through_to_the_deployment_default() -> None:
+    answering = build_answering_map(
+        tenant=None,
+        channels=[],
+        default=DeploymentDefault(environment_name="default"),
+        setup_threads=[],
+        setup_threads_truncated=False,
+    )
+
+    assert answering.tenant_environment is None, "no tenant row means no workspace environment"
+    assert answering.environment_in("c1") == ("default", "deployment"), (
+        "with no row at all the deployment default decides, exactly as before"
+    )
+    assert build_answering_map(
+        tenant=None,
+        channels=[],
+        default=DeploymentDefault(),
+        setup_threads=[],
+        setup_threads_truncated=False,
+    ).environment_in("c1") == (None, None), "nothing configured resolves to nothing"
+
+
 def test_routed_agent_names_drops_the_deployment_default_behind_a_workspace_default() -> None:
     """A workspace default takes the fall-through, so the deployment default reaches nobody."""
     overrides = (ChannelAnswer(channel_id="c1", agent_name="alpha"),)

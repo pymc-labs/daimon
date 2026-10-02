@@ -18,10 +18,14 @@ from daimon.adapters.mcp.tools.environments import (
     _list_environments_impl,
     _update_environment_impl,
 )
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.specs import EnvironmentSpec
+from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _ma_env(**overrides: object) -> BetaEnvironment:
@@ -251,9 +255,24 @@ async def test_update_environment_impl_rejects_empty_patch() -> None:
         )
 
 
-async def test_archive_environment_impl_calls_ma_archive() -> None:
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
+async def test_archive_environment_impl_archives_in_ma_and_clears_its_picks(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
+        for channel_id, env in (("c1", "e"), ("c2", "other")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
+                tenant_id=tenant_id,
+                environment_name=env,
+            )
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            environment_name="e",
+        )
 
     archived: list[str] = []
 
@@ -276,11 +295,32 @@ async def test_archive_environment_impl_calls_ma_archive() -> None:
         ),
     )
     router.add("POST", r"/v1/environments/([^/]+)/archive", on_archive)
-    client = build_fake_anthropic(router.dispatch)
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),  # type: ignore[arg-type]
+        deployment_default=DeploymentDefault(),
+    )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _archive_environment_impl(_runtime(client), auth, "e")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    result = await _archive_environment_impl(runtime, auth, "e")
+
     assert archived == ["env_a"], "should archive the correct MA environment"
+    assert result.cleared_picks == 2, "the channel pick and the workspace pick are cleared"
+    assert "cleared 2 picks" in result.note, "the reply says how many picks were cleared"
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c1"))
+        is None
+    ), "the channel that picked it falls through to the next tier"
+    assert await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id)) is None, (
+        "the workspace default pick is cleared"
+    )
+    other = await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c2"))
+    assert other is not None and other.environment_name == "other", (
+        "a pick of another environment is untouched"
+    )
 
 
 async def test_update_and_archive_refuse_a_managed_environment() -> None:

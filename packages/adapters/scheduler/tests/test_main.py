@@ -36,12 +36,13 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, ModelRates
 from daimon.core.promo_codes import build_promo_code_terms
 from daimon.core.scheduler import run_one_tick
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
@@ -808,10 +809,157 @@ async def test_fire_uses_deployment_default(
     )
     assert len(captured_env) == 1, "resolve_environment must be called exactly once"
     assert captured_env[0] == "y", (
-        f"scheduler fire must pass deployment_default.environment_name='y' to resolve_environment; "
-        f"got {captured_env[0]!r}"
+        "with no channel or tenant environment, scheduler fire must pass "
+        f"deployment_default.environment_name='y'; got {captured_env[0]!r}"
     )
 
+    await fake_client.close()
+
+
+@pytest.mark.parametrize(
+    ("channel_env", "tenant_env", "expected"),
+    [("gpu", "shared", "gpu"), (None, "shared", "shared")],
+    ids=["channel", "tenant-default"],
+)
+async def test_fire_runs_in_the_routine_channels_environment(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    channel_env: str | None,
+    tenant_env: str | None,
+    expected: str,
+) -> None:
+    """A routine runs where a turn in its channel would: channel, then tenant default."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    if channel_env is not None:
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ENV"),
+            tenant_id=tenant.id,
+            environment_name=channel_env,
+        )
+    if tenant_env is not None:
+        await set_fields(
+            db_session,
+            scope=TenantScopeRef(tenant_id=tenant.id),
+            tenant_id=tenant.id,
+            environment_name=tenant_env,
+        )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="x",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        channel_id="C_ENV",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    captured_env: list[str] = []
+
+    async def fake_resolve_environment(*args: object, daimon_tag: str, **kwargs: object) -> str:
+        captured_env.append(daimon_tag)
+        return "resolved-env"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(agent_name="x", environment_name="y"),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", return_value="resolved-agent"
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment",
+            side_effect=fake_resolve_environment,
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail"),
+        unittest.mock.patch("daimon.adapters.scheduler.main.record_result"),
+    ):
+        await fire(row)
+
+    assert captured_env == [expected], f"the routine must run in {expected!r}"
+    await fake_client.close()
+
+
+async def test_fire_runs_in_the_destination_channels_environment_without_a_saved_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routine saved before its channel was recorded runs where it delivers."""
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ENV"),
+        tenant_id=tenant.id,
+        environment_name="gpu",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="x",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="channel",
+        destination_id="C_ENV",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    captured_env: list[str] = []
+
+    async def fake_resolve_environment(*args: object, daimon_tag: str, **kwargs: object) -> str:
+        captured_env.append(daimon_tag)
+        return "resolved-env"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(agent_name="x", environment_name="y"),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", return_value="resolved-agent"
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment",
+            side_effect=fake_resolve_environment,
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail"),
+        unittest.mock.patch("daimon.adapters.scheduler.main.record_result"),
+    ):
+        await fire(row)
+
+    assert captured_env == ["gpu"], "the destination's channel picks the environment"
     await fake_client.close()
 
 

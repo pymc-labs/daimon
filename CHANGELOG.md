@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Audit what members set up before the cross-agent fixes: `list_routines` as an admin for routines whose agent is not the one their destination channel answers with, and thread handoff bindings to agents from other projects. These keep working until removed.
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
+- Routines now run in their channel's environment, then the workspace default, instead of always the deployment default. A channel or workspace `environment_name` already set with `daimon config set` moves those routines onto it from their next fire; `daimon config unset` it first to keep them where they were.
 
 ### Added
 
@@ -198,6 +199,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
+- **Channel environments.** Admins can pick the environment a Discord or
+  Slack channel's turns run in, or the workspace default, with
+  `set_channel_environment` and `clear_channel_environment` (a channel's, not
+  the workspace's, also under an operator token's `channels:write`); an admin
+  of a channel can pick that channel's. In a sealed channel, or one holding a
+  sealed Slack thread or the sealed Discord thread the pick names, an environment with unrestricted networking (any network
+  beyond package managers and MCP servers, so any allowed host) needs a server
+  admin, and so does clearing a pick when the default it falls back to has
+  one. Sealing or isolating a channel whose own pick has such a network warns
+  that a server admin should confirm or change it. Who answers where in the
+  setup panel lists each channel's environment on the reader's side of an
+  isolation and offers a select for it, and `explain_agent_resolution` names
+  the environment and the tier that chose it.
+  A conversation switches from its next message and keeps its files and its
+  seal, and a routine runs in its channel's environment. Archiving or deleting
+  an environment clears the picks that named it. The missing-environment
+  notice now points at the panel instead of the operator. With no channel or
+  workspace environment set, nothing changes; see the upgrade notes for
+  routines where one already is.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

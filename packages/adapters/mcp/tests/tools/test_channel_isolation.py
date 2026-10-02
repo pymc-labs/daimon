@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools.routines as routines_mod
@@ -371,6 +372,10 @@ async def test_explain_agent_resolution_stays_on_the_callers_side(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
+    runtime = replace(
+        runtime,
+        deployment_default=DeploymentDefault(agent_name="daimon", environment_name="sandbox"),
+    )
     outside, inside = world.auth(), world.auth(executing="agent_local")
 
     with pytest.raises(ToolError, match="across an isolated channel's line"):
@@ -381,8 +386,10 @@ async def test_explain_agent_resolution_stays_on_the_callers_side(
     assert (here.effective_agent_name, here.deployment_default) == ("local", None), (
         "inside, the shared fallback is not named"
     )
+    assert here.deployment_environment is None, "inside, the workspace environments are hidden"
     there = await _explain_agent_resolution_impl(runtime, outside, OTHER)
     assert there.effective_agent_name == "shared"
+    assert there.deployment_environment == "sandbox", "outside, they are shown as before"
 
 
 async def test_posts_and_direct_messages_stay_on_their_side(

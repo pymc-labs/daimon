@@ -510,6 +510,35 @@ own until it is pinned there; `/dm` from C is refused; a call is held to C
 only where its tool takes a verified origin (not the send, DM, self-edit or
 routine edit tools), and a call that names none is judged from outside.
 
+**Channel environments.** The environment a turn runs in resolves over the
+same tiers as the agent but on its own (`_pick_environment` in
+`packages/core/daimon/core/scope.py`), so a channel can keep its agent and run
+it with the packages one team needs; routines follow the channel they post to.
+Server admins set any channel's environment, or the tenant default by omitting
+the channel, with `set_channel_environment` and `clear_channel_environment`; a
+channel admin sets the channels they run, and a thread id resolves to its
+parent. Who answers where in both setup panels lists each channel's
+environment and gives server admins and this channel's admins a select for it
+(`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
+drops the rows across an isolation line, and inside an isolated channel the
+workspace and deployment environments too. The name must match an existing
+environment in the tenant, looked up once so the network rule and the write
+judge the same one; conversations pick it up from their next message, keeping
+their files and their seal, and `explain_agent_resolution` reports each tier's
+environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
+sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
+Discord thread the pick names), an environment with unrestricted
+networking (any network beyond package managers and MCP servers: anything but
+a cloud environment on limited networking with no allowed hosts) needs a
+server admin, and so does clearing a pick onto a default that has one. A pick
+made before the seal never met that rule, so sealing or isolating a channel
+whose own pick is open warns that a server admin should confirm it; who made
+a pick isn't recorded. An operator token's
+`channels:write` covers a channel's environment, never the tenant default. A
+channel with no environment of its own falls through, so nothing changes until
+one is set. Chat over MCP has no channel, so it uses the tenant or deployment
+default.
+
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP
@@ -1213,7 +1242,7 @@ registered and expire too, while older jti-less ones keep working.
 | Scope | Tools |
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 

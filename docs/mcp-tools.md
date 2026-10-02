@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 102 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 104 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -100,6 +100,15 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
+## `channel_environments`
+
+Channel environment tools: which environment a channel's turns run in.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Stop a channel picking its own environment, so it uses the workspace default. |
+| `set_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Choose the environment a channel's turns run in, or the workspace default. |
+
 ## `channel_isolation`
 
 Channel isolation tool: keep a channel's own agents inside it.
@@ -154,7 +163,7 @@ Environment tools: list / get / create / update / archive.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `archive_environment` | admin only | Archive the MA environment and delete from the tenant pool. |
-| `create_environment` | all callers | Create a sandbox environment an agent can later be scoped onto. |
+| `create_environment` | all callers | Create a sandbox environment a channel or the workspace can later run in. |
 | `get_environment` | all callers | Return one environment by name. |
 | `list_environments` | all callers | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
@@ -212,7 +221,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_agent_default` | admin only, channel admins too, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
-| `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers and which routing tier decided it. |
+| `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
 | `set_agent_default` | admin only, channel admins too, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
 
 ## `publish`

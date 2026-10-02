@@ -48,7 +48,7 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import routine_destination_place
+from daimon.core.channel_isolation import routine_destination_channel, routine_destination_place
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -82,7 +82,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
@@ -91,6 +91,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
+from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
@@ -323,7 +324,8 @@ async def _build_fire(
             )
 
         # Resolve agent + environment by daimon-tag at fire time,
-        # self-healing across MA archive/recreate.
+        # self-healing across MA archive/recreate. The environment follows the
+        # routine's channel, then the tenant default, like a turn there would.
         # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
         agent_tag = row.agent_name or deployment_default.agent_name or "daimon"
         _public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
@@ -337,10 +339,19 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
+        async with sm() as scope_s:
+            scoped = await resolve(
+                scope_s,
+                context=ScopeContext(
+                    tenant_id=row.tenant_id,
+                    channel_id=routine_destination_channel(row) or row.channel_id,
+                ),
+                default=deployment_default,
+            )
         resolved_env_id = await resolve_environment(
             client,
             tenant_id=row.tenant_id,
-            daimon_tag=deployment_default.environment_name or "default",
+            daimon_tag=scoped.environment_name or "default",
             cached_id=None,
             apply_callable=lambda: reconcile_tenant_defaults(
                 client, sm, settings.defaults_root, tenant_id=row.tenant_id, public_url=_public_url

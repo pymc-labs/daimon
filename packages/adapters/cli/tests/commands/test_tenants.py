@@ -28,14 +28,14 @@ from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.scope import TenantScopeRef
+from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores import scoped_config_write, tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
 )
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
-from daimon.testing import MARouter, ma_agent
+from daimon.testing import MARouter, ma_agent, ma_environment
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy import text
@@ -455,6 +455,41 @@ async def test_access_policy_get_reports_a_tenant_without_a_policy_as_open(
     )
 
     assert "access policy: open" in _output(console), _output(console)
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_warns_when_a_new_seal_meets_an_open_environment(
+    db_session_factory: async_sessionmaker[AsyncSession], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A channel's own pick made before the seal skipped its network rule: warn, don't refuse."""
+    result = await provision_tenant(db_session_factory, platform="discord", workspace_id="seal-env")
+    router = MARouter()
+    router.add_environment_list(
+        ma_environment(id="env_open", name="open", tenant_id=result.tenant_id)
+    )
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+    channel = "555555555555555555"
+    async with db_session_factory.begin() as session:
+        await scoped_config_write.set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=result.tenant_id, channel_id=channel),
+            tenant_id=result.tenant_id,
+            environment_name="open",
+        )
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="seal-env",
+        sealed_channel=[channel],
+    )
+
+    err = " ".join(capsys.readouterr().err.split())
+    assert f"Sealed {channel}." in err and "a server admin should confirm" in err, err
+    assert await _policy(db_session_factory, workspace_id="seal-env") == TenantAccessPolicy(
+        sealed_channel_ids=(channel,)
+    ), "the warning never refuses the seal"
 
 
 @pytest.mark.asyncio

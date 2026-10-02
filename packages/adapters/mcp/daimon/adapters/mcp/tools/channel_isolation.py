@@ -125,7 +125,7 @@ async def _set_channel_isolation_impl(
         agent_name=change.agent_name,
         forked_from=change.forked_from,
         changed=change.changed,
-        note=" ".join(filter(None, [_NOTE, change.dropped_skills_note]))
+        note=" ".join(filter(None, [_NOTE, change.dropped_skills_note, change.network_warning]))
         if change.isolated
         else f"Isolation ended. {END_ISOLATION_WARNING} {_LIFT_HINT}",
     )

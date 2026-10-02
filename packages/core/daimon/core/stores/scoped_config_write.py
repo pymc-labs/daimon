@@ -181,14 +181,45 @@ async def clear_agent_references(
 
     Returns the number of scope rows cleared. The caller owns the transaction.
     """
+    return await _clear_references(
+        session, tenant_id=tenant_id, field="agent_name", value=agent_name
+    )
+
+
+async def clear_environment_references(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    environment_name: str,
+) -> int:
+    """Clear every channel- and tenant-scope pick of an environment in one tenant.
+
+    The environment counterpart of `clear_agent_references`, for when an
+    environment is archived or deleted: each pick falls through to the next
+    tier instead of failing every turn there. Returns the number of scope rows
+    cleared. The caller owns the transaction.
+    """
+    return await _clear_references(
+        session, tenant_id=tenant_id, field="environment_name", value=environment_name
+    )
+
+
+async def _clear_references(
+    session: AsyncSession, *, tenant_id: uuid.UUID, field: ConfigField, value: str
+) -> int:
+    channel_column = (
+        ChannelConfig.agent_name if field == "agent_name" else ChannelConfig.environment_name
+    )
+    tenant_column = (
+        TenantConfig.agent_name if field == "agent_name" else TenantConfig.environment_name
+    )
     # Materialize the channel ids before mutating: unset_fields may remove rows,
     # so iterating a live result set while it writes would be wrong.
     channel_ids: list[str] = list(
         (
             await session.execute(
                 select(ChannelConfig.channel_id).where(
-                    ChannelConfig.tenant_id == tenant_id,
-                    ChannelConfig.agent_name == agent_name,
+                    ChannelConfig.tenant_id == tenant_id, channel_column == value
                 )
             )
         )
@@ -198,8 +229,7 @@ async def clear_agent_references(
     tenant_row_matches = (
         await session.execute(
             select(TenantConfig.tenant_id).where(
-                TenantConfig.tenant_id == tenant_id,
-                TenantConfig.agent_name == agent_name,
+                TenantConfig.tenant_id == tenant_id, tenant_column == value
             )
         )
     ).scalar_one_or_none() is not None
@@ -208,14 +238,10 @@ async def clear_agent_references(
         await unset_fields(
             session,
             scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
-            fields=["agent_name"],
+            fields=[field],
         )
     if tenant_row_matches:
-        await unset_fields(
-            session,
-            scope=TenantScopeRef(tenant_id=tenant_id),
-            fields=["agent_name"],
-        )
+        await unset_fields(session, scope=TenantScopeRef(tenant_id=tenant_id), fields=[field])
 
     return len(channel_ids) + (1 if tenant_row_matches else 0)
 

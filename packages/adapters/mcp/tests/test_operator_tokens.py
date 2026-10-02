@@ -113,7 +113,9 @@ async def test_channels_write_token_lists_exactly_its_tools(
         "set_channel_admins",
         "clear_channel_admins",
         "set_channel_isolation",
-    }, "channels:write covers the channel budget, agent, admin and isolation tools"
+        "set_channel_environment",
+        "clear_channel_environment",
+    }, "channels:write covers the channel budget, agent, admin, isolation and environment tools"
 
 
 async def test_operator_token_cannot_call_a_tool_outside_its_scopes(
