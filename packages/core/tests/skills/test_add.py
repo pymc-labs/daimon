@@ -271,6 +271,26 @@ async def test_a_recheck_on_the_fresh_agent_refuses_before_the_upload_and_the_at
     assert fake.updates == [], "refused at the attach, on the agent as it is then"
 
 
+async def test_an_agent_that_attaches_the_skill_during_the_add_stops_the_new_version(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The sharing check runs after the fresh read, right before the version push."""
+    tenant = await make_tenant(db_session)
+    fake = _FakeMA(agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id))
+    first = await _add(fake, db_session_factory, tenant.id)
+    held = [{"type": "custom", "skill_id": first.skill_id, "version": "1"}]
+    fake.agent = ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, skills=held)
+
+    async def attach_elsewhere(fresh: BetaManagedAgentsAgent) -> None:
+        fake.others = [ma_agent(id="ag_2", name="other", tenant_id=tenant.id, skills=held)]
+
+    with pytest.raises(SkillIngestError, match="also attached to another agent"):
+        await _add(
+            fake, db_session_factory, tenant.id, text=_md("A new body."), recheck=attach_elsewhere
+        )
+    assert fake.versions == [], "no version reaches the other agent"
+
+
 async def _repo_skill(files: dict[str, bytes], path: str):
     tarball = make_tarball(files)
     transport = httpx.MockTransport(lambda _r: httpx.Response(200, content=tarball))

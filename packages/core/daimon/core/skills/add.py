@@ -217,15 +217,6 @@ async def add_agent_skill(
         skill_id = known_id or await _find_own_skill(
             client, tenant_id=tenant_id, agent_name=agent_name, name=preview.name
         )
-        if skill_id is not None:
-            await _refuse_shared(
-                client,
-                tenant_id=tenant_id,
-                agent=agent,
-                agent_name=agent_name,
-                name=preview.name,
-                skill_id=skill_id,
-            )
         await _refuse_mount_clash(
             client,
             tenant_id=tenant_id,
@@ -234,7 +225,19 @@ async def add_agent_skill(
             name=preview.name,
             own_skill_id=skill_id,
         )
-        await recheck(await client.beta.agents.retrieve(agent.id))
+        fresh = await client.beta.agents.retrieve(agent.id)
+        await recheck(fresh)
+        if skill_id is not None:
+            # After the fresh read, right before the version push: another
+            # agent that attached this id meanwhile would get the version too.
+            await _refuse_shared(
+                client,
+                tenant_id=tenant_id,
+                agent=fresh,
+                agent_name=agent_name,
+                name=preview.name,
+                skill_id=skill_id,
+            )
         if skill_id is None:
             created = await client.beta.skills.create(
                 display_title=tenant_scoped_display_title(
