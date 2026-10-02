@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from typing import Any
@@ -29,11 +30,16 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -119,12 +125,13 @@ class _World:
         self.skills: list[dict[str, Any]] = []
         self.created: list[str] = []
 
-    def put_agent(self, **metadata: str) -> None:
+    def put_agent(self, *, system: bool = False, **metadata: str) -> None:
+        owner = {} if system else {"daimon_account": str(uuid.uuid4())}
         agent = ma_agent(
             id="ag_helper",
             name="helper",
             tenant_id=self.tenant_id,
-            metadata={"daimon_account": str(uuid.uuid4()), **metadata},
+            metadata={**owner, **metadata},
         )
         self.state.agents[agent.id] = agent.model_dump(mode="json")
 
@@ -148,7 +155,9 @@ class _World:
         self.skills.append(skill)
         return httpx.Response(200, json=skill)
 
-    async def run(self, monkeypatch: pytest.MonkeyPatch, *, admin: bool = False) -> MagicMock:
+    async def run(
+        self, monkeypatch: pytest.MonkeyPatch, *, admin: bool = False, meta: PanelMetadata = META
+    ) -> MagicMock:
         monkeypatch.setattr(agent_policy, "resolve_is_admin", AsyncMock(return_value=admin))
         monkeypatch.setattr(add_skill, "resolve_is_admin", AsyncMock(return_value=admin))
         monkeypatch.setattr(add_skill, "load_details_view", AsyncMock(return_value={"v": 1}))
@@ -161,7 +170,7 @@ class _World:
         client = MagicMock()
         client.chat_postEphemeral = AsyncMock()
         client.views_update = AsyncMock()
-        first = evaluate_add_skill_submission(_payload(_MD))
+        first = evaluate_add_skill_submission(_payload(_MD, meta))
         decision = evaluate_add_skill_submission(_payload(_MD, _previewed(first)))
         await run_add_skill_submission(
             runtime, client, team_id=TEAM, user_id=USER, decision=decision
@@ -237,3 +246,83 @@ async def test_a_built_in_agent_is_refused_even_for_an_admin(
 
     assert _told(client) == [MANAGED_AGENT_MESSAGE]
     assert world.created == []
+
+
+async def test_a_system_agent_is_refused_even_for_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent no account owns is daimon's own, though it carries no managed stamp."""
+    world = await _world(db_session_factory)
+    world.put_agent(system=True)
+
+    client = await world.run(monkeypatch, admin=True)
+
+    assert _told(client) == [MANAGED_AGENT_MESSAGE]
+    assert world.created == []
+
+
+async def test_a_pinned_agent_takes_an_add_only_from_inside_its_channels_or_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    world.put_agent()
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": ("C0PINNED",)}),
+        )
+
+    outside = await world.run(monkeypatch)
+    assert _told(outside) == [PIN_WRITE_REFUSAL] and world.created == []
+
+    inside = await world.run(monkeypatch, meta=dataclasses.replace(META, channel_id="C0PINNED"))
+    assert _told(inside) == ["helper now has the skill *notes*."]
+    admin = await world.run(monkeypatch, admin=True)
+    assert _told(admin) == ["helper already had the skill *notes*."]
+
+
+async def test_the_members_own_conversation_with_the_agent_is_not_sharing(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    world.put_agent()
+    async with db_session_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, platform="slack", external_id=USER, tenant_id=world.tenant_id
+        )
+        await create_thread_session(
+            session,
+            tenant_id=world.tenant_id,
+            platform="slack",
+            thread_id="1700000000.000100",
+            account_id=principal.account_id,
+            ma_session_id="sesn_own",
+            ma_agent_id="ag_helper",
+        )
+
+    client = await world.run(monkeypatch)
+
+    assert _told(client) == ["helper now has the skill *notes*."]
+
+
+async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattached(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attach re-checks the agent as it is then."""
+    world = await _world(db_session_factory)
+    world.put_agent()
+    upload = world._skills  # pyright: ignore[reportPrivateUsage]
+
+    def upload_then_stamp(request: httpx.Request) -> httpx.Response:
+        response = upload(request)
+        if request.method == "POST":
+            world.put_agent(daimon_managed="true")
+        return response
+
+    world._skills = upload_then_stamp  # type: ignore[method-assign]  # swap the fake mid-run
+    client = await world.run(monkeypatch)
+
+    assert len(world.created) == 1, "uploaded before the change"
+    assert world.state.agents["ag_helper"]["skills"] == [], "but never attached"
+    assert _told(client) == [MANAGED_AGENT_MESSAGE]

@@ -25,6 +25,9 @@ Two entry points, differing only in how the target is named:
 Both re-resolve admin status live (never from the rendered view or from
 `private_metadata`) and re-read reachability and channel admin grants from the
 database on every call.
+
+`refuse_unless_pin_allows` applies the pin rule (`daimon.core.agent_pins.
+pin_refusal`, the private forms' rule) with the panel's channel as the place.
 """
 
 from __future__ import annotations
@@ -36,9 +39,10 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.authz import Place, Subject
+from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.operation_policy import (
@@ -61,6 +65,7 @@ __all__ = [
     "refusal_message",
     "refuse_unless_allowed",
     "refuse_unless_allowed_for_agent_name",
+    "refuse_unless_pin_allows",
 ]
 
 log = structlog.get_logger()
@@ -217,13 +222,15 @@ async def refuse_unless_allowed_for_agent_name(
     channel_id: str,
     user_id: str,
     thread_ts: str | None = None,
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Decide `operation` against the agent the panel calls `agent_name`.
 
     A name with no live MA agent behind it is not refused here — see the
     module docstring — it is decided as an unmanaged target, which leaves the
     reachability read as the only thing standing between a member and the
-    write.
+    write. `caller_account_id` leaves the caller's own live sessions out of
+    the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
@@ -240,6 +247,7 @@ async def refuse_unless_allowed_for_agent_name(
         ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller_account_id=caller_account_id,
     )
     return await _render_outcome(
         client,
@@ -249,6 +257,54 @@ async def refuse_unless_allowed_for_agent_name(
         user_id=user_id,
         thread_ts=thread_ts,
     )
+
+
+async def refuse_unless_pin_allows(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    channel_id: str,
+    user_id: str,
+    is_admin: bool,
+    agent: BetaManagedAgentsAgent | None = None,
+) -> bool:
+    """Refuse a configuration write the agent's pin forbids from the panel in `channel_id`.
+
+    A server admin, or an admin of every channel in the pin, may write from
+    anywhere; anyone else only from inside the pin. Without `agent` the name is
+    looked up, and only under a pin. Returns True when refused (posted).
+    """
+    caller = ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin)
+
+    async def target() -> BetaManagedAgentsAgent | None:
+        if agent is not None:
+            return agent
+        return await find_agent_by_daimon_tag(
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+        )
+
+    async with runtime.sessionmaker() as session:
+
+        async def live_subject() -> Subject:
+            return await load_live_subject(
+                session, tenant_id=tenant_id, platform="slack", caller=caller
+            )
+
+        refusal = await pin_refusal(
+            session,
+            tenant_id=tenant_id,
+            load_subject=live_subject,
+            load_agent=target,
+            place=Place.from_origin(parent_channel_id=channel_id or None, thread_id=None),
+        )
+    if refusal is None:
+        return False
+    await _post_refusal(
+        client, channel_id=channel_id, user_id=user_id, thread_ts=None, text=refusal
+    )
+    return True
 
 
 def _allowed_whatever_the_target(operation: OperationKind, *, is_admin: bool) -> bool:

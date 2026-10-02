@@ -58,7 +58,10 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_policy import refuse_unless_allowed_for_agent_name
+from daimon.adapters.slack.agent_policy import (
+    refuse_unless_allowed_for_agent_name,
+    refuse_unless_pin_allows,
+)
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
@@ -119,6 +122,7 @@ from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
+from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -782,7 +786,21 @@ async def _dispatch_panel_action(
 
     if action_id == panel_views.ACTION_ADD_SKILL:
         agent_name = str(action.get("value") or meta.agent_name or "")
-        if not agent_name or await refuse_unless_allowed_for_agent_name(
+        if not agent_name or await refuse_unless_pin_allows(
+            runtime,
+            client,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+            is_admin=is_admin,
+        ):
+            return
+        async with runtime.sessionmaker.begin() as session:
+            principal = await get_or_create_platform_principal(
+                session, platform="slack", external_id=user_id, tenant_id=tenant_id
+            )
+        if await refuse_unless_allowed_for_agent_name(
             runtime,
             client,
             operation="skill_add",
@@ -790,6 +808,7 @@ async def _dispatch_panel_action(
             agent_name=agent_name,
             channel_id=meta.channel_id,
             user_id=user_id,
+            caller_account_id=principal.account_id,
         ):
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
