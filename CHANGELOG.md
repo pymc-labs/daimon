@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- MCP calls refused by an access decision (an agent pin, channel isolation or protection, the invoker allowlist, a routine destination, a channel default binding or an environment pick) are now recorded in `security_audit_events` as denials, with the action as the operation and `authz:<reason>` as the reason. Before, they were recorded as tool errors with no operation.
 - A Teams routine posting into an isolated channel no longer falls back to its creator's 1:1 chat when the post fails, matching Discord and Slack: the result is skipped and stays inside the channel.
 - A chat turn's credential can now act only on its own responder's turn origin in the tools that require one (credential requests, publishing, repo binding, task continuity, timers, channel budgets and setup targets), as agent keys already could. Before, it could name another responder's origin on the same account.
 - A routine's session is now stamped with the channel it fires into and the seal over it, as a chat turn there is. The transcript of a sealed or isolated channel's routine can no longer be read from outside that channel, including by the routine's owner.

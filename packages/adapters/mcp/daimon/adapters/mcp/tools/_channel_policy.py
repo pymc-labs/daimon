@@ -30,6 +30,7 @@ from daimon.core.access_policy import (
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin
@@ -105,6 +106,7 @@ async def require_channel_writable(
     # lookup; settle those first.
     first = authorize(policy, subject=subject, action=Action.POST, place=place)
     if first.reason == "channel_protected":
+        record_authz_denial(Action.POST, first.reason)
         raise ToolError(_PROTECTED_MSG)
     if not policy.isolated_channel_ids and (place.own_dm or not policy.agent_channel_pins):
         return
@@ -112,6 +114,8 @@ async def require_channel_writable(
     decision = authorize(
         policy, subject=subject, action=Action.POST, agent=agent, place=place, origin=origin
     )
+    if not decision:
+        record_authz_denial(Action.POST, decision.reason)
     if decision.reason == "channel_isolated":
         if isolated_channel_of(policy, channel_id, parent_channel_id):
             raise ToolError(_ISOLATED_WRITE_MSG)
@@ -185,6 +189,8 @@ async def require_dm_recipient_allowed(
         agent=await _executing_agent(runtime, auth, policy),
         recipient_id=recipient_id,
     )
+    if not decision:
+        record_authz_denial(Action.DIRECT_MESSAGE, decision.reason)
     if decision.reason == "agent_unresolved":
         raise ToolError(_PINNED_SEND_MSG)
     if decision.reason == "channel_isolated":

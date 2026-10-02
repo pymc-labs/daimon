@@ -11,6 +11,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
@@ -152,6 +153,7 @@ async def _policy_gate(
         else None
     )
     if decision is not None and not decision:
+        record_authz_denial(Action.RUN_AGENT, decision.reason)
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),
@@ -174,11 +176,13 @@ async def _policy_gate(
     if auth.platform_user_id is None:
         return
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not authorize(
+    start = authorize(
         policy,
         subject=mcp_subject(auth, is_admin=is_admin),
         action=Action.START_TURN,
-    ):
+    )
+    if not start:
+        record_authz_denial(Action.START_TURN, start.reason)
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),

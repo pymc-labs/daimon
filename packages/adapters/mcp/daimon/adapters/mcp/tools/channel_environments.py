@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.authz import Action
 from daimon.core.channel_environments import (
     EnvironmentPick,
     authorize_environment_pick,
@@ -32,6 +33,7 @@ from daimon.core.channel_environments import (
     build_set_environment_note,
     save_scope_environment,
 )
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -130,6 +132,8 @@ async def _require_pick_allowed(
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+    if not pick.decision:
+        record_authz_denial(Action.SET_CHANNEL_ENVIRONMENT, pick.decision.reason)
     if pick.decision.reason == "sealed":
         raise ToolError(
             build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."

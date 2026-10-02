@@ -29,6 +29,7 @@ from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_defau
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
@@ -131,6 +132,8 @@ async def require_bindable_as_channel_default(
             agent=AgentRef.of(*names),
             place=Place(channel_id=channel_id),
         )
+        if not decision:
+            record_authz_denial(Action.BIND_CHANNEL_DEFAULT, decision.reason)
         if decision.reason == "channel_isolated":
             raise ToolError(
                 "This channel is isolated, so only its own agents (pinned to it alone) can be "

@@ -1227,7 +1227,11 @@ reason code. Agent identity includes the signed external `agent_id` or ordinary
 chat `chat_agent_id` claim. A registered token adds its kind and jti, and a
 scoped tool adds the operator scope it checked. The shared operation policy annotates that same request with the
 operation name and its decision; a policy denial remains a denial even if a tool
-catches it. Arguments, messages, credentials, response bodies and exception text
+catches it. A tool that refuses a call on an access decision (`authorize`: a pin,
+isolation, protection, the invoker allowlist, a routine or default binding, an
+environment pick) records the action as the operation and `authz:<reason>` as
+the reason, so those refusals are denials rather than tool errors; a list that
+filters on the same decisions records nothing. Arguments, messages, credentials, response bodies and exception text
 are never copied into the row. Tool names outside the supported identifier syntax
 are recorded as `<invalid>`.
 

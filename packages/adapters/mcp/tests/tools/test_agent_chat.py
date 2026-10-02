@@ -77,6 +77,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
@@ -3353,6 +3354,11 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
     assert "pinned this agent" in str(payload.get("content"))
     mock_create_session.assert_not_awaited()
     assert sends == []
+    async with db_session_factory() as session:
+        audited = await list_events(session, tenant_id=tenant_id)
+    assert [(row.operation, row.reason) for row in audited if row.tool_name == tool_name] == [
+        ("run_agent", "authz:agent_pinned_elsewhere")
+    ], "the refusal is audited as a pin denial"
 
 
 async def _seal_tenant(
