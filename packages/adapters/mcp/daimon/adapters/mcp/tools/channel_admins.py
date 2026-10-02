@@ -2,7 +2,8 @@
 
 ``register_channel_admin_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures;
 each delegates to a module-private ``_*_impl`` that tests call without a
-FastMCP Context. All three are tenant-wide changes, so server admins only.
+FastMCP Context. They are tenant-wide, so server admins only; operator tokens
+read them with ``tenant:read`` and change them with ``channels:write``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_admins import (
     CHANNEL_ADMIN_PLATFORMS,
     InvalidChannelAdminIds,
@@ -70,6 +72,7 @@ def _platform(auth: AuthIdentity) -> str:
 
 
 async def _list_channel_admins_impl(runtime: McpRuntime, auth: AuthIdentity) -> ChannelAdminsList:
+    require_scope(auth, "tenant:read")
     _require_admin(auth)
     platform = _platform(auth)
     async with runtime.session_factory() as session:
@@ -93,6 +96,7 @@ async def _set_channel_admins_impl(
     role_ids: list[str],
     user_ids: list[str],
 ) -> SetChannelAdminsResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _platform(auth)
     try:
@@ -125,6 +129,7 @@ async def _set_channel_admins_impl(
 async def _clear_channel_admins_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str
 ) -> SetChannelAdminsResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _platform(auth)
     async with runtime.session_factory.begin() as session:
@@ -139,7 +144,7 @@ async def _clear_channel_admins_impl(
 
 
 def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> ChannelAdminsList:
@@ -149,7 +154,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         return await _list_channel_admins_impl(runtime, await _auth(ctx))
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -173,7 +178,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,

@@ -667,6 +667,12 @@ Who counts as an admin:
   person's next Discord, Slack or Teams turn in that workspace, which
   records the platform's current role.
 
+An operator token (below) is an admin only while its account's stored role is,
+checked on every request. Like the hub, it sees a demotion only once the
+person's next platform turn records it, so revoke the token to stop it at once.
+It always carries a platform user, so it is billed and pin-checked like that
+admin's own chat turn, never trusted as the operator.
+
 Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
 user are never admins on these surfaces, whatever role their account holds or
 who minted them. A pin binds a bearer with no platform user too: such callers
@@ -1051,7 +1057,8 @@ Authenticated requests through the main JWT MCP application (`tools/call` and
 `security_audit_events` row. The identity middleware records the tenant, account,
 platform user and agent identifiers, tool name, timestamp, outcome and a fixed
 reason code. Agent identity includes the signed external `agent_id` or ordinary
-chat `chat_agent_id` claim. The shared operation policy annotates that same request with the
+chat `chat_agent_id` claim. A registered token adds its kind and jti, and a
+scoped tool adds the operator scope it checked. The shared operation policy annotates that same request with the
 operation name and its decision; a policy denial remains a denial even if a tool
 catches it. Arguments, messages, credentials, response bodies and exception text
 are never copied into the row. Tool names outside the supported identifier syntax
@@ -1066,8 +1073,13 @@ bound including queue wait. Shutdown drains tracked writes. Writes are best effo
 timeouts, cancellation, overflow and database failures emit `security_audit.write_failed`
 with an error type, never the error body. An unavailable audit store does not delay
 the tool response or change authorization behavior. Tool failures use outcome
-`error`; authorization and policy rejections use `denied`. Calls rejected before the JWT verifier
-establishes a tenant cannot be safely attributed and are outside this trail.
+`error`; authorization and policy rejections use `denied`. When the verifier refuses a
+registered token (revoked, expired, a demoted admin, a kind that does not match its
+row), it writes a `denied` row under the token's own tenant with tool name
+`auth/verify` and the refusal as the reason. Other calls rejected before the JWT
+verifier establishes a tenant cannot be safely attributed and are outside this trail.
+`daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
+row (tool name `cli/<command>`) in the same transaction as their change.
 The policy remains synchronous and does no I/O outside an MCP audit scope;
 Discord/Slack setup-panel actions and the separate hub OAuth applications
 (`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
@@ -1105,6 +1117,40 @@ resets it; TRUNCATE is never allowed. This guards accidental application mutatio
 not a malicious database administrator or SQL caller able to set arbitrary GUCs.
 Existing privacy panels do not yet deliver a full audit export: operators include
 the CLI JSON export in the requested bundle.
+
+### Operator tokens
+
+An operator token lets an external integration call a few MCP tools over
+`/mcp` for one server admin. Only `daimon mcp mint-operator-token` mints one
+(there is no chat or setup-panel flow), with one or more scopes, a TTL of 30
+days by default and at most 90 and, with `promo:create`, an optional
+`--max-issued-usd` ceiling in whole cents. `daimon mcp list-tokens` and
+`revoke-token` manage every registered token, and `set-token-scopes --jti ...
+--scope ...` narrows an operator token to the scopes given: it only removes
+scopes, so adding one takes a new token. `mint-token` CLI tokens are
+registered and expire too, while older jti-less ones keep working.
+
+| Scope | Tools |
+| --- | --- |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins` |
+| `promo:redeem` | `redeem_promo_code` |
+| `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
+
+Each request, `DaimonJWTVerifier` reads the token's `mcp_tokens` row: it must
+be unrevoked and unexpired, its account still a server admin by stored role
+with a platform user, and its scopes non-empty. The stored role changes only
+on the account's next platform turn, so a demoted admin's token keeps working
+until then or until it expires; `revoke-token` is the immediate stop, taking
+effect on the token's next request. Scopes come from the row, so narrowing
+them applies to the next request. An operator token cannot open a billing
+checkout (`/billing/checkout` answers 403). The identity middleware disables
+every tool for the token, enables those tagged `scope:<name>` for its scopes,
+skips the search collapse and limits it to `operator_calls_per_minute` calls.
+Each tool re-checks its scope (`tools/_scopes.py`). `promo:create` tools carry
+no `admin` tag and a server baseline hides them from everyone else. A later
+`channels:write` tool joins by taking the tag and the `require_scope` call;
+`_scopes.py` describes the steps.
 
 ### Opt-in DM conversations
 

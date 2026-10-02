@@ -1,6 +1,6 @@
 """The channel an agent's coding-tool token was minted in.
 
-A token minted from the setup panel in a channel the agent is pinned to, or
+An agent key minted from the setup panel in a channel the agent is pinned to, or
 in a sealed channel, records that channel and its platform; its calls then run
 inside it (pins, seals, environment and channel budget). Every existing row
 and every token minted anywhere else carries neither, and behaves as before.
@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0036_mcp_token_channels"
-down_revision: str | None = "0035_channel_admins"
+revision: str = "0037_mcp_token_channels"
+down_revision: str | None = "0036_operator_tokens"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -25,7 +25,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_mcp_tokens_channel",
         "mcp_tokens",
-        "(platform IS NULL) = (channel_id IS NULL)",
+        "(platform IS NULL) = (channel_id IS NULL) AND (channel_id IS NULL OR kind = 'agent')",
     )
 
 

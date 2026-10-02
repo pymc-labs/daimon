@@ -64,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
+  mints a token acting over `/mcp` for one server admin with only the scopes it
+  names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide
+  `promo:create` with an optional `--max-issued-usd`), for 30 days by default
+  and at most 90. Each request rechecks the row and the account's stored admin
+  role, which changes on the person's next platform turn, so `revoke-token` is
+  the immediate stop and `set-token-scopes` narrows. Calls are rate limited
+  (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`); calls, refusals and token changes
+  are audited. Channel budget, agent and admin tools take the scopes. New tools:
+  `get_tenant_summary` (with each channel's admins) and, for `promo:create`,
+  `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`
+  tokens now expire and can be revoked. Run migration `0036_operator_tokens`.
 - **Teams takes every private form Discord and Slack do.** A key value can
   span lines, `request_agent_key` without a key posts a `.env` form on Teams
   (the file is pasted, since a dialog has no file input), and repo and
@@ -171,7 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spend counts there. The token never carries its minter's channel admin
   grants. A channel admin of every channel an agent is pinned to may now mint
   one from inside those channels, always bound. Tokens minted elsewhere, and
-  existing ones, are unchanged. Run migration `0036_mcp_token_channels`.
+  existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

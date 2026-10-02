@@ -63,6 +63,8 @@ def audit_list_command(
                     "operation",
                     "outcome",
                     "reason",
+                    "token_kind",
+                    "scope",
                 ),
             )
 

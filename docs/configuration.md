@@ -246,6 +246,13 @@ How long an uploaded bundle object is retained on the Files API before deletion.
 Deletion is performed by the scheduler's pending-file sweeper, not by this process
 directly — a deployment running no scheduler will never reclaim these objects.
 
+### `DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`
+
+`int` · optional · default `60`
+
+Per-token cap on tool calls an operator token (minted with `daimon mcp mint-operator-
+token`) may make per rolling minute, counted in each MCP process. Set to 0 to disable.
+
 ## Hub
 
 Read from `daimon.core.config.HubSettings`. Prefix `DAIMON_HUB__`.
