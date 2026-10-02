@@ -167,7 +167,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
                 except ValueError:
                     continue
                 self.rate_limit_min[key] = min(self.rate_limit_min.get(key, remaining), remaining)
-        if response.status_code in (429, 529):
+        if response.status_code == 429 or response.status_code >= 500:
             key = (response.status_code, request.url.path)
             self.statuses[key] = self.statuses.get(key, 0) + 1
             tenant = ACTIVE_TENANT.get()
@@ -940,7 +940,7 @@ async def _run(args: argparse.Namespace) -> None:
                 http_client=DefaultAsyncHttpxClient(transport=transport),
             ) as client:
                 await _phases(args, client, sm, settings, names, ids, Path(tmp), transport)
-        print("upstream 429/529 responses by endpoint:", transport.statuses)
+        print("upstream 429/5xx responses by endpoint:", transport.statuses)
         print("minimum Anthropic rate-limit remaining:", transport.rate_limit_min)
     finally:
         await engine.dispose()
@@ -997,7 +997,8 @@ async def _phases(
         ready: list[tuple[str, uuid.UUID]] = []
         for name, tenant_id in zip(names, ids, strict=True):
             async with sm() as session:
-                if await get_tenant(session, tenant_id) is not None:
+                tenant = await get_tenant(session, tenant_id)
+                if tenant is not None and tenant.provision_status == "ready":
                     ready.append((name, tenant_id))
         if not ready:
             raise RuntimeError("no synthetic tenants found for this run-id")
