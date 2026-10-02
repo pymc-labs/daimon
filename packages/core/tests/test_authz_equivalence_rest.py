@@ -86,7 +86,7 @@ def _old_delivery_refusal(
     return None
 
 
-_OLD_SPEC: frozenset[str] = frozenset({"agent_spec_edit"})
+_OLD_SPEC: frozenset[str] = frozenset({"agent_spec_edit", "skill_add", "skill_remove"})
 _OLD_POSTED_TOKEN: frozenset[str] = frozenset({"key_add", "keys_import", "mcp_connect"})
 
 
