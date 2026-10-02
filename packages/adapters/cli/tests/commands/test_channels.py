@@ -14,6 +14,7 @@ import httpx
 import pytest
 import typer
 from anthropic import AsyncAnthropic
+from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands.channels import (
     budget_clear,
     budget_list,
@@ -26,11 +27,13 @@ from daimon.adapters.cli.commands.channels import (
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
@@ -360,6 +363,101 @@ async def test_isolate_copies_an_agent_seals_and_pins_it_then_ends(
         ended = await load_access_policy(s, tenant_id=tenant.id)
     assert ended.isolated_channel_ids == (), "isolation ended"
     assert ended.sealed_channel_ids == (CHANNEL,), "the seal stays unless lifted"
+
+
+async def _isolatable(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    workspace_id: str,
+    channels: tuple[str, str] = (CHANNEL, OTHER_CHANNEL),
+) -> uuid.UUID:
+    """A tenant whose channel answers with a shared agent, so isolating it needs a copy."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform=platform, workspace_id=workspace_id)
+        for channel in channels:
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+                tenant_id=tenant.id,
+                agent_name="shared",
+                mode="agent",
+            )
+    return tenant.id
+
+
+def _isolate_settings(*, keys: tuple[str, ...] = ()) -> SimpleNamespace:
+    return SimpleNamespace(
+        cli=FakeCliSettings.cli,
+        discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
+        mcp=SimpleNamespace(public_url=None),
+        crypto=SimpleNamespace(
+            keys=tuple(SimpleNamespace(get_secret_value=lambda k=k: k) for k in keys)
+        ),
+    )
+
+
+async def test_isolate_copies_without_a_label_when_discord_errors(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed channel lookup names the copy after the channel id, as the tool does."""
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    console = _console()
+    failing = httpx.MockTransport(lambda _request: httpx.Response(500, json={}))
+
+    await channels_isolate(
+        rt=rt,
+        console=console,
+        platform="discord",
+        workspace_id=GUILD,
+        channel_id=CHANNEL,
+        fork_from="shared",
+        discord_transport=failing,
+    )
+
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == (CHANNEL,), "the lookup error never aborts isolation"
+    assert "its own agent is channel-000002, copied from shared" in _out(console)
+
+
+async def test_isolate_names_a_slack_copy_after_the_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The Slack name is read with the workspace's bot token, as the tool reads it."""
+    key = Fernet.generate_key().decode()
+    tenant_id = await _isolatable(db_session_factory, "slack", "T1", ("C0LAUNCH1", "C0OTHER1"))
+    async with db_session_factory.begin() as session:
+        await upsert_slack_bot_token(
+            session,
+            team_id="T1",
+            encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-test"),
+        )
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=_ma(tenant_id, "shared"),
+        settings=_isolate_settings(keys=(key,)),
+    )
+    console = _console()
+
+    def conversations_info(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer xoxb-test", "with the bot token"
+        assert request.url.params["channel"] == "C0LAUNCH1"
+        return httpx.Response(200, json={"ok": True, "channel": {"name": "launch-room"}})
+
+    await channels_isolate(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="T1",
+        channel_id="C0LAUNCH1",
+        fork_from="shared",
+        slack_transport=httpx.MockTransport(conversations_info),
+    )
+
+    assert "its own agent is launch-room, copied from shared" in _out(console)
 
 
 async def test_isolate_refuses_teams_and_bad_flag_mixes(

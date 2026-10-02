@@ -11,6 +11,7 @@ from typing import Annotated, Any, cast
 
 import httpx
 import typer
+from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
@@ -27,6 +28,7 @@ from daimon.core.channel_budget import (
 from daimon.core.channel_isolation_setup import set_channel_isolation
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
+from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_admins import (
@@ -36,6 +38,7 @@ from daimon.core.stores.channel_admins import (
     set_channel_admins,
 )
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_summary import ChannelSummary, load_tenant_summary
 from pydantic import BaseModel
@@ -58,6 +61,7 @@ _TEAMS_THREAD = ";messageid="
 _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
+_SLACK_CONVERSATIONS_INFO = "https://slack.com/api/conversations.info"
 
 
 class BudgetListing(BaseModel):
@@ -595,6 +599,64 @@ def channels_isolate_command(
     run_cli(_run(), console=console)
 
 
+async def _channel_label(
+    rt: CliRuntime,
+    *,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    discord_transport: httpx.AsyncBaseTransport | None,
+    slack_transport: httpx.AsyncBaseTransport | None,
+) -> str | None:
+    """The channel's name, to name a copied agent after; None when it can't be
+    read, as `set_channel_isolation` the tool does."""
+    if platform == "slack":
+        return await _fetch_slack_channel_name(
+            rt, team_id=workspace_id, channel_id=channel_id, transport=slack_transport
+        )
+    if rt.settings.discord is None:
+        return None
+    try:
+        found = await _fetch_discord_channel(
+            rt.settings.discord.bot_token.get_secret_value(),
+            channel_id=channel_id,
+            transport=discord_transport,
+        )
+    except DaimonError:
+        return None
+    if found is None or str(found.get("guild_id")) != workspace_id:
+        return None
+    name = found.get("name")
+    return name if isinstance(name, str) else None
+
+
+async def _fetch_slack_channel_name(
+    rt: CliRuntime, *, team_id: str, channel_id: str, transport: httpx.AsyncBaseTransport | None
+) -> str | None:
+    """The Slack channel's name, read with the workspace's bot token; None without one."""
+    keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+    if not keys:
+        return None
+    async with rt.sessionmaker() as session:
+        row = await get_slack_bot_token(session, team_id=team_id)
+    if row is None:
+        return None
+    try:
+        token = decrypt_token(build_multifernet(keys), row.encrypted_token)
+        async with httpx.AsyncClient(timeout=10.0, transport=transport) as http:
+            response = await http.get(
+                _SLACK_CONVERSATIONS_INFO,
+                params={"channel": channel_id},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        body = cast("dict[str, Any]", response.json()) if response.is_success else {}
+    except (InvalidToken, httpx.HTTPError, ValueError):
+        return None
+    channel = cast("dict[str, Any]", body.get("channel") or {}) if body.get("ok") else {}
+    name = channel.get("name")
+    return name if isinstance(name, str) else None
+
+
 async def channels_isolate(
     *,
     rt: CliRuntime,
@@ -606,6 +668,7 @@ async def channels_isolate(
     end: bool = False,
     lift_seal_and_pins: bool = False,
     discord_transport: httpx.AsyncBaseTransport | None = None,
+    slack_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     if platform not in _ISOLATION_PLATFORMS:
         raise typer.BadParameter("channel isolation exists only on Discord and Slack")
@@ -615,15 +678,18 @@ async def channels_isolate(
         raise typer.BadParameter("--lift-seal-and-pins only applies with --end")
     channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    label = None
-    if fork_from is not None and platform == "discord" and rt.settings.discord is not None:
-        found = await _fetch_discord_channel(
-            rt.settings.discord.bot_token.get_secret_value(),
+    label = (
+        await _channel_label(
+            rt,
+            platform=platform,
+            workspace_id=workspace_id,
             channel_id=channel,
-            transport=discord_transport,
+            discord_transport=discord_transport,
+            slack_transport=slack_transport,
         )
-        if found is not None and str(found.get("guild_id")) == workspace_id:
-            label = cast("str | None", found.get("name"))
+        if fork_from is not None
+        else None
+    )
     public_url = rt.settings.mcp.public_url if fork_from is not None else None
     change = await set_channel_isolation(
         rt.anthropic,
