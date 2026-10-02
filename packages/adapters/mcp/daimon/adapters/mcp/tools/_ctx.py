@@ -18,7 +18,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.termination import TerminationReason, denial_termination_reason
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -167,7 +167,7 @@ async def _policy_gate(
             tool=tool_name,
             gate="channel_isolation" if decision.reason == "channel_isolated" else "agent_pin",
         )
-        refused(TerminationReason.ADMISSION_DENIED)
+        refused(denial_termination_reason(decision.reason))
         if decision.reason == "channel_isolated":
             raise ToolError(
                 "TERMINAL ERROR: This agent's key is bound to an isolated channel that "

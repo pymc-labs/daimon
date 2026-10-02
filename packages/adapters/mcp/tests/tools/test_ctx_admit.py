@@ -19,10 +19,13 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.turn_outcomes import list_for_tenant
+from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 async def test_admit_denies_when_over_balance(
@@ -296,3 +299,40 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
         await admit("local")
     with _BALANCE_OK:
         assert await admit("daimon") is auth, "any other agent's hub run is not charged to room"
+
+
+@pytest.mark.parametrize(
+    ("policy", "bound", "agent", "expected"),
+    [
+        (_PINNED, None, "acme-project", TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE),
+        (_ISOLATED, "room", "daimon", TerminationReason.ADMISSION_CHANNEL_ISOLATED),
+    ],
+    ids=["pinned", "isolated"],
+)
+async def test_a_refused_turn_records_which_gate_refused_it(
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
+    policy: TenantAccessPolicy,
+    bound: str | None,
+    agent: str,
+    expected: TerminationReason,
+) -> None:
+    """`daimon usage turns` tells a pin from an isolation refusal, not just `admission_denied`."""
+    auth = _key(await _member(db_session, policy=policy), bound=bound)
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def names() -> tuple[str | None, ...]:
+        return (agent, None)
+
+    with pytest.raises(ToolError, match="TERMINAL ERROR"):
+        await _admit(
+            auth,
+            sessionmaker=sessionmaker,
+            billing_config=None,
+            tool_name="start_turn",
+            agent_names=names,
+        )
+    await drain_outcomes()
+    async with sessionmaker() as session:
+        rows = await list_for_tenant(session, auth.tenant_id)
+    assert [row.reason for row in rows] == [expected], "the refusal is recorded under its gate"
