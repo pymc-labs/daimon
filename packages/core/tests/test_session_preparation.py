@@ -881,7 +881,7 @@ async def test_the_transfer_hook_is_given_the_old_session_and_its_result_is_moun
 
 async def test_a_crash_after_the_successor_exists_finishes_the_supersede_on_the_next_bind(
     db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_schema: str,
 ) -> None:
     """The successor is created and committed before the old row is closed, so
     a process that dies between them leaves two live rows and one usable
@@ -889,41 +889,53 @@ async def test_a_crash_after_the_successor_exists_finishes_the_supersede_on_the_
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    transport = _Transport()
-    deps = _deps(db_session_factory, transport)
-    admission = _admission(account=account)
-
-    first = await _prepare(deps, admission, tenant=tenant, account=account)
-    assert isinstance(first, PreparedTurn)
-    old_row = await _live_row(db_session_factory, tenant=tenant, account=account)
-    assert old_row is not None
-
-    # The half-finished state: a successor exists, the old row is still live.
-    successor = await create_fresh_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-1",
-        session_account_id=account.id,
-        predecessor_id=old_row.id,
+    engine = create_async_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"],
+        connect_args={"server_settings": {"search_path": f"{db_schema},public"}},
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=0.05,
     )
-    assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 2
-    creates_before = transport.creates
+    db_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        transport = _Transport()
+        deps = _deps(db_session_factory, transport)
+        admission = _admission(account=account)
 
-    resumed = await _prepare(deps, admission, tenant=tenant, account=account)
+        first = await _prepare(deps, admission, tenant=tenant, account=account)
+        assert isinstance(first, PreparedTurn)
+        old_row = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert old_row is not None
 
-    assert isinstance(resumed, PreparedTurn)
-    assert resumed.ma_session_id == successor.ma_session_id, (
-        "the session the interrupted replacement created is the one to use"
-    )
-    assert transport.creates == creates_before, "and no second session may be paid for"
-    healed = await get_thread_session_by_id(db_session, id=old_row.id)
-    assert healed is not None and healed.status == "superseded", (
-        "the supersede the crash interrupted must be finished"
-    )
-    assert healed.replaced_by_id == successor.mapping_id
-    assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
+        # The half-finished state: a successor exists, the old row is still live.
+        successor = await create_fresh_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            predecessor_id=old_row.id,
+        )
+        assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 2
+        creates_before = transport.creates
+
+        resumed = await _prepare(deps, admission, tenant=tenant, account=account)
+
+        assert isinstance(resumed, PreparedTurn)
+        assert resumed.ma_session_id == successor.ma_session_id, (
+            "the session the interrupted replacement created is the one to use"
+        )
+        assert transport.creates == creates_before, "and no second session may be paid for"
+        healed = await get_thread_session_by_id(db_session, id=old_row.id)
+        assert healed is not None and healed.status == "superseded", (
+            "the supersede the crash interrupted must be finished"
+        )
+        assert healed.replaced_by_id == successor.mapping_id
+        assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
+
+    finally:
+        await engine.dispose()
 
 
 async def test_a_failed_replacement_backs_off_and_leaves_the_old_session_live(
@@ -1036,14 +1048,16 @@ async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_ses
     [(20, 6), (20, 1), (2, 1)],
     ids=["pre-fix-unbounded-reference", "bounded-same-pool", "bounded-burst"],
 )
+@pytest.mark.parametrize("replacement", [False, True], ids=["fresh", "replacement"])
 async def test_fresh_burst_waits_before_pool_checkout(
     db_session: AsyncSession,
     db_schema: str,
     monkeypatch: pytest.MonkeyPatch,
     pool_size: int,
     gate_limit: int,
+    replacement: bool,
 ) -> None:
-    """Measure the unchanged lock hold, then burst above the bounded pool size."""
+    """Fresh and replacement bursts leave room for short DB transactions."""
     import daimon.core.turn.prepare as turn_prepare
     from daimon.core.session_preparation_gate import PreparationGate, preparation_counts
 
@@ -1060,6 +1074,15 @@ async def test_fresh_burst_waits_before_pool_checkout(
     sm = async_sessionmaker(engine, expire_on_commit=False)
     transport = _Transport()
     deps = replace(_deps(sm, transport), preparation_gate=PreparationGate(gate_limit))
+    admission = _admission(account=account)
+    if replacement:
+        for index in range(6):
+            await _prepare(
+                deps, admission, tenant=tenant, account=account, thread_id=f"fresh-{index}"
+            )
+        moved = _agent(model_id="claude-opus-5")
+        _register(transport.state, moved)
+        admission = _admission(account=account, agent=moved)
     original = turn_prepare.create_ma_session
     upstream_calls = 0
     checked_out_at: dict[int, float] = {}
@@ -1092,7 +1115,7 @@ async def test_fresh_burst_waits_before_pool_checkout(
             asyncio.create_task(
                 _prepare(
                     deps,
-                    _admission(account=account),
+                    admission,
                     tenant=tenant,
                     account=account,
                     thread_id=f"fresh-{index}",

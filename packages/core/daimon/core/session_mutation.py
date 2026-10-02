@@ -15,15 +15,24 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+async def lock_session_mutation(db: AsyncSession, session_id: str, *, check: bool = True) -> None:
+    """Hold the fence until the caller's transaction ends.
+
+    Preparations already hold a connection for their advisory lock. Reuse it
+    so the preparation gate reserves room for short database transactions.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"session_mutation:{session_id}"},
+    )
+    if check:
+        await require_writable_session(db, session_id)
+
+
 @asynccontextmanager
 async def session_mutation_fence(
     factory: async_sessionmaker[AsyncSession], session_id: str, *, check: bool = True
 ) -> AsyncIterator[None]:
     async with factory.begin() as db:
-        await db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": f"session_mutation:{session_id}"},
-        )
-        if check:
-            await require_writable_session(db, session_id)
+        await lock_session_mutation(db, session_id, check=check)
         yield

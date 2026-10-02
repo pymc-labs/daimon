@@ -52,7 +52,7 @@ from daimon.core.session_compat import (
     UpdateOp,
     decide_session_compatibility,
 )
-from daimon.core.session_mutation import session_mutation_fence
+from daimon.core.session_mutation import lock_session_mutation
 from daimon.core.session_preparation_stages import (
     FreshSessionFactory,
     PreparationStageName,
@@ -308,12 +308,12 @@ async def _heal_lineage(deps: TurnDeps, session: AsyncSession, *, row: ThreadSes
         mapping_id=str(row.id),
         predecessor_id=str(row.predecessor_id),
     )
-    async with session_mutation_fence(deps.sessionmaker, predecessor.ma_session_id, check=False):
-        with contextlib.suppress(anthropic_pkg.NotFoundError):
-            await deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)
-        async with deps.sessionmaker.begin() as closing:
-            await lock_access_policy(closing, tenant_id=row.tenant_id)
-            await mark_superseded(closing, id=row.predecessor_id, replaced_by_id=row.id)
+    await lock_session_mutation(session, predecessor.ma_session_id, check=False)
+    with contextlib.suppress(anthropic_pkg.NotFoundError):
+        await deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)
+    async with deps.sessionmaker.begin() as closing:
+        await lock_access_policy(closing, tenant_id=row.tenant_id)
+        await mark_superseded(closing, id=row.predecessor_id, replaced_by_id=row.id)
 
 
 async def _close_out(
@@ -742,47 +742,47 @@ async def _prepare_session_for_turn_locked(
             # A handoff carries the old work only to an agent that could read
             # it itself from here; otherwise the new agent starts with nothing.
             carry = not handed_over or await _destination_may_carry(deps, admission, row)
-            async with session_mutation_fence(deps.sessionmaker, row.ma_session_id):
-                observed = None
-                if source_exists:
-                    try:
-                        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
-                    except anthropic_pkg.NotFoundError:
-                        pass
-                    except anthropic_pkg.APIError as error:
-                        log.warning(
-                            "session_preparation.replacement_source_unreadable",
-                            session_id=row.ma_session_id,
-                            error=type(error).__name__,
-                        )
-                        return PreparationBusy(
-                            pending_reasons=decision.reasons,
-                            retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
-                        )
-                if observed is not None and observed.status not in ("idle", "terminated"):
-                    raise SessionBusyError(
-                        pending_reasons=("session_active",),
+            await lock_session_mutation(db, row.ma_session_id)
+            observed = None
+            if source_exists:
+                try:
+                    observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                except anthropic_pkg.NotFoundError:
+                    pass
+                except anthropic_pkg.APIError as error:
+                    log.warning(
+                        "session_preparation.replacement_source_unreadable",
+                        session_id=row.ma_session_id,
+                        error=type(error).__name__,
+                    )
+                    return PreparationBusy(
+                        pending_reasons=decision.reasons,
                         retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
                     )
-                outcome = await _run_replacement(
-                    deps,
-                    admission,
-                    ops=ops,
-                    row=row,
-                    recorded=recorded,
-                    desired=desired,
-                    reasons=decision.reasons,
-                    fresh_start=fresh_start,
-                    # A checkpoint executes the old session. Never run it with
-                    # a writable mount after the origin has become read-only.
-                    transfer=None if tightening_memory or not carry else transfer,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    thread_id=thread_id,
-                    session_account_id=session_account_id,
-                    deadline=bound_deadline,
-                    now=moment,
+            if observed is not None and observed.status not in ("idle", "terminated"):
+                raise SessionBusyError(
+                    pending_reasons=("session_active",),
+                    retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
                 )
+            outcome = await _run_replacement(
+                deps,
+                admission,
+                ops=ops,
+                row=row,
+                recorded=recorded,
+                desired=desired,
+                reasons=decision.reasons,
+                fresh_start=fresh_start,
+                # A checkpoint executes the old session. Never run it with
+                # a writable mount after the origin has become read-only.
+                transfer=None if tightening_memory or not carry else transfer,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                session_account_id=session_account_id,
+                deadline=bound_deadline,
+                now=moment,
+            )
             if isinstance(outcome, PreparationFailure):
                 return outcome
             return from_fresh(outcome.fresh, outcome.continuity)
