@@ -85,7 +85,7 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
     def fake_cli(*args: str) -> str:
         calls.append(args)
         if args[:3] == ("channels", "isolation", "set"):
-            return "123: isolated, agent team-a-copy"
+            return "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon."
         return "ok"
 
     monkeypatch.setattr(layout, "cli", fake_cli)
@@ -112,7 +112,10 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
     layout.teardown_team(cast("layout.Discord", api), args, state, "team-a")
     assert state["teams"] == {}
     assert ("channels", "isolation", "lift", "discord", args.guild_id, state_id(api)) in calls
-    assert any(call[:2] == ("agents", "--guild") and "archive" in call for call in calls)
+    assert any(
+        call[:2] == ("agents", "--guild") and "archive" in call and "team-a-copy" in call
+        for call in calls
+    ), "teardown should archive the copy named in the wrapped isolate output"
 
 
 def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, monkeypatch) -> None:
@@ -121,7 +124,7 @@ def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, mo
     def fake_cli(*args: str) -> str:
         calls.append(args)
         return (
-            "123: isolated, agent team-a-copy"
+            "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon."
             if args[:3] == ("channels", "isolation", "set")
             else "ok"
         )

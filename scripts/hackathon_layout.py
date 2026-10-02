@@ -124,10 +124,12 @@ def cli(*args: str) -> str:
 
 
 def parse_agent(output: str) -> str:
-    marker = ": isolated, agent "
-    if marker not in output:
+    """The agent named by `channels isolation set`; Rich may wrap the line."""
+    marker = "; its own agent is "
+    flat = " ".join(output.split())
+    if marker not in flat:
         raise RuntimeError(f"could not read isolated agent from CLI output: {output}")
-    return output.rsplit(marker, 1)[1].strip()
+    return flat.rsplit(marker, 1)[1].split(",", 1)[0].removesuffix(".").strip()
 
 
 def resolve_role(api: Discord, guild: str, name: str) -> str | None:

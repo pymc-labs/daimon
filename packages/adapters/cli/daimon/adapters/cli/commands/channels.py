@@ -85,54 +85,14 @@ def isolation_set_command(
     channel_id: str,
     fork_from: Annotated[str | None, typer.Option("--fork-from")] = None,
 ) -> None:
-    """Seal and isolate a channel, copying an agent when --fork-from is given."""
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-            change = await set_channel_isolation(
-                rt.anthropic,
-                rt.sessionmaker,
-                tenant_id=tenant_id,
-                platform=platform,
-                channel_id=channel_id,
-                isolated=True,
-                default=rt.deployment_default,
-                actor_account_id=None,
-                fork=fork_from is not None,
-                fork_from=fork_from,
-                public_url=str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url else None,
-                subject=Subject(is_admin=True),
-            )
-            console.print(f"{channel_id}: isolated, agent {change.agent_name}")
-
-    run_cli(_run(), console=console)
+    """Alias of `channels isolate`: seal and isolate a channel, copying --fork-from."""
+    _run_isolate(platform, workspace_id, channel_id, fork_from=fork_from)
 
 
 @isolation_app.command("lift")
 def isolation_lift_command(platform: str, workspace_id: str, channel_id: str) -> None:
-    """End isolation and remove its seal and exclusive agent pins."""
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-            await set_channel_isolation(
-                rt.anthropic,
-                rt.sessionmaker,
-                tenant_id=tenant_id,
-                platform=platform,
-                channel_id=channel_id,
-                isolated=False,
-                default=rt.deployment_default,
-                actor_account_id=None,
-                drop_seal_and_pins=True,
-                subject=Subject(is_admin=True),
-            )
-            console.print(f"{channel_id}: isolation, seal and pins removed")
-
-    run_cli(_run(), console=console)
+    """Alias of `channels isolate --end --lift-seal-and-pins`."""
+    _run_isolate(platform, workspace_id, channel_id, end=True, lift_seal_and_pins=True)
 
 
 class BudgetListing(BaseModel):
@@ -875,6 +835,25 @@ def channels_isolate_command(
     ] = False,
 ) -> None:
     """Isolate a channel: seal it and pin its default agent to it alone, in one write."""
+    _run_isolate(
+        platform,
+        workspace_id,
+        channel_id,
+        fork_from=fork_from,
+        end=end,
+        lift_seal_and_pins=lift_seal_and_pins,
+    )
+
+
+def _run_isolate(
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    *,
+    fork_from: str | None = None,
+    end: bool = False,
+    lift_seal_and_pins: bool = False,
+) -> None:
     console = Console(highlight=False)
 
     async def _run() -> None:
