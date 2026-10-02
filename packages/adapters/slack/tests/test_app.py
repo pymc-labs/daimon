@@ -3079,8 +3079,8 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
-        == f"This workspace's {display_name} credit is depleted. An admin can top up with `/billing`."
+        if str(b.get("text", "")) == f"This workspace's {display_name} credit is depleted. "
+        "A workspace admin can top up with `/billing`."
     ]
     assert depleted, (
         f"expected the exact D-10 over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -3164,10 +3164,7 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == (
-            "Monthly usage cap reached for this workspace. "
-            "An admin can adjust the cap with `/billing` (when available)."
-        )
+        == "You've reached your monthly usage cap. An operator can raise it."
     ]
     assert cap_msgs, (
         f"expected the exact D-10 over-cap copy via chat.postMessage, got: {post_bodies}"
@@ -3434,7 +3431,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "This workspace's daimon credit is depleted. An admin can top up with `/billing`."
+        == "This workspace's daimon credit is depleted. A workspace admin can top up with `/billing`."
     ]
     assert depleted, (
         f"expected the exact over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -3535,10 +3532,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == (
-            "Monthly usage cap reached for this workspace. "
-            "An admin can adjust the cap with `/billing` (when available)."
-        )
+        == "You've reached your monthly usage cap. An operator can raise it."
     ]
     assert cap_msgs, f"expected the exact over-cap copy via chat.postMessage, got: {post_bodies}"
 

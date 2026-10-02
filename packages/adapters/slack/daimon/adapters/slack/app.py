@@ -136,6 +136,7 @@ from daimon.adapters.slack.routines_panel.submit import (
 )
 from daimon.adapters.slack.runtime import (
     SlackRuntime,
+    admission_refusal_message,
     resolve_bot_display_name,
     responder_handle,
 )
@@ -1836,14 +1837,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "You aren't on this workspace's list of people who can start a turn. "
-                        "A workspace admin can add you."
-                    ),
-                )
             elif err.reason == "agent_pinned_elsewhere":
                 log.info(
                     "turn.skipped.agent_pinned_elsewhere",
@@ -1851,14 +1844,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This agent only runs in the channels an operator pinned it to, "
-                        "so it can't answer here."
-                    ),
                 )
             elif err.reason == "channel_isolated":
                 log.info(
@@ -1868,14 +1853,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel is isolated and the agent that would answer isn't one of "
-                        "its own. A workspace admin must set the channel's agent."
-                    ),
-                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1884,16 +1861,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        f"This workspace's "
-                        f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
-                        "credit is depleted. "
-                        "An admin can top up with `/billing`."
-                    ),
-                )
             elif err.reason == "channel_budget_exceeded":
                 log.info(
                     "turn.skipped.over_channel_budget",
@@ -1901,14 +1868,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel has used its spending budget. "
-                        "A workspace admin can raise or clear it."
-                    ),
                 )
             else:
                 log.info(
@@ -1919,13 +1878,11 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
+            if err.reason != "channel_protected":
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=(
-                        "Monthly usage cap reached for this workspace. "
-                        "An admin can adjust the cap with `/billing` (when available)."
-                    ),
+                    text=admission_refusal_message(err.reason, self.runtime.settings),
                 )
             return
 
