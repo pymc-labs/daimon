@@ -38,6 +38,7 @@ body:
       options:
         - Discord
         - Slack
+        - Teams
         - MCP
         - CLI
         - Scheduler

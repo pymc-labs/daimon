@@ -1,8 +1,8 @@
 # Self-hosting daimon
 
 This guide expands the README quickstart. It covers the full Docker Compose
-setup, running the processes by hand, Slack, the Claude Code login mounts,
-chart storage and connecting MCP servers.
+setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
+login mounts, chart storage and connecting MCP servers.
 
 ## Prerequisites
 
@@ -76,7 +76,7 @@ unset `DAIMON_DISCORD__BOT_TOKEN` is the usual cause.
 
 Every tagged release is published to the GitHub Container Registry as
 `ghcr.io/pymc-labs/daimon`, so a host that should not compile anything can run
-a release straight from the registry. All five application services run the
+a release straight from the registry. All six application services run the
 same image and differ only in the command Compose gives them, so one `image:`
 line per service is the whole change. Put it in `docker-compose.override.yml`,
 which Compose reads on top of `docker-compose.yml` automatically:
@@ -91,12 +91,14 @@ services:
     image: ghcr.io/pymc-labs/daimon:0.2.0
   slack:
     image: ghcr.io/pymc-labs/daimon:0.2.0
+  teams:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
   scheduler:
     image: ghcr.io/pymc-labs/daimon:0.2.0
 ```
 
 Then `docker compose pull && docker compose up -d`. Drop the `--build` flag
-from step 3 and from the Slack profile command: it rebuilds from the working
+from step 3 and from the Slack and Teams profile commands: it rebuilds from the working
 tree under the same tag and throws the pulled image away. The image ships
 only code; `init` still seeds `defaults/` from your checkout, so check out the
 matching tag first (`git checkout v0.2.0`). Upgrading is checking out the
@@ -116,7 +118,9 @@ uv run python -m daimon.adapters.discord
 ```
 
 The `export` is required because the `alembic` CLI reads the shell
-environment and does not load `.env`.
+environment and does not load `.env`. Slack and Teams start the same way,
+with `uv run python -m daimon.adapters.slack` and
+`uv run python -m daimon.adapters.teams`.
 
 ### Several MCP instances
 
@@ -146,12 +150,314 @@ from an env var, and Slack will not redirect to `localhost`.
 [`slack.md`](slack.md) covers the trust model for per-user Slack access.
 Read it before enabling that feature.
 
+## Microsoft Teams (optional)
+
+Teams takes the most setup of the three platforms, because the pieces live in
+four Microsoft admin portals:
+
+- **Entra** (the organisation's directory) holds the app's identity.
+- **Azure** hosts the bot registration that Teams talks to.
+- **The Teams admin center** decides who may install the app.
+- **Teams itself** is where you add it.
+
+None of it is hard, but the order matters. Plan on an hour the first time.
+
+Two things work differently from Discord and Slack:
+
+- **Teams pushes messages to you.** Microsoft delivers every message to an
+  HTTPS address you give it, so the Teams service needs a public hostname
+  with a valid certificate. Discord and Slack dial out for messages instead.
+- **One deployment serves one organisation.** The bot answers only people in
+  the Microsoft 365 organisation it is registered in, and turns away
+  messages from anywhere else.
+
+What the bot does once it is running (1:1 chats, channel threads, commands,
+files and its limits) is in [`teams.md`](teams.md).
+
+### Before you start
+
+You need:
+
+- **A Microsoft 365 organisation with Teams, and a work account inside it.**
+  Do every step below signed in with that account. A personal Microsoft
+  account, or an address from another provider, won't work: signing up for
+  Azure with one creates a separate, empty directory, and a bot registered
+  there can't talk to your Teams.
+- **An Azure subscription in that same organisation.** Microsoft 365 doesn't
+  include one. Pay-As-You-Go is enough, and the bot itself costs nothing:
+  the Azure Bot's F0 tier and its Teams channel are free. Adding a small
+  budget alert under Cost Management is cheap insurance.
+- **A public HTTPS hostname** for the Teams service, such as
+  `teams.example.com`, with a publicly trusted certificate.
+- **The right roles**, or someone who has them:
+
+| Step | Who can do it |
+| --- | --- |
+| Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
+| Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
+| Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin per team |
+
+### 1. Register the app in Entra
+
+This registration is the identity daimon signs in as.
+
+1. Go to [entra.microsoft.com](https://entra.microsoft.com) → **App
+   registrations** → **New registration**.
+2. Give it a name (`daimon` is fine) and choose **Accounts in this
+   organizational directory only**. Leave the redirect URI empty, then
+   **Register**.
+3. On the Overview page, copy two values:
+    - **Application (client) ID**: this is `DAIMON_TEAMS__CLIENT_ID`.
+    - **Directory (tenant) ID**: this is `DAIMON_TEAMS__TENANT_ID`.
+4. **Certificates & secrets** → **New client secret**. Copy the **Value**
+   (not the Secret ID) straight into your password manager or `.env`: it is
+   shown only once. This is `DAIMON_TEAMS__CLIENT_SECRET`. Note its expiry
+   date, because the bot stops answering the day it lapses.
+
+You don't need to add any API permissions here. The bot reads channels
+through a team-level permission that a team owner grants when they add the
+app (more on that in step 7). Only the optional channel files need a Graph
+permission.
+
+### 2. Create the Azure Bot and connect it to Teams
+
+The Azure Bot is the registration Teams uses to find your bot.
+
+1. In [portal.azure.com](https://portal.azure.com), create a resource group
+   (say, `daimon`) if you don't have one.
+2. **Create a resource** → search for **Azure Bot** → **Create**:
+    - **Pricing tier:** F0 (Free).
+    - **Type of App:** Single Tenant.
+    - **Creation type:** Use existing app registration, then paste the
+      client ID and tenant ID from step 1.
+3. Leave the messaging endpoint for now; you'll set it in step 4, once the
+   Teams service is reachable.
+4. Open the new bot → **Channels**. Under *Available channels*, click the
+   name **Microsoft Teams**. It's a link, not a button. Accept the terms,
+   choose **Microsoft Teams Commercial**, and click **Apply** (you may need
+   to scroll down). Teams should then appear in the channel list as
+   *Healthy*.
+
+If clicking the name does nothing, your account probably has read-only
+access to the bot; check **Access control (IAM)** → **View my access**. As a
+fallback, open Cloud Shell (the `>_` icon in the portal's top bar) and run:
+
+```bash
+az bot msteams create -g <resource-group> -n <bot-name>
+```
+
+### 3. Run the Teams service
+
+**Find your admins.** Teams doesn't tell bots who its admins are, so you list
+daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
+the person → copy **Object ID**. Admins can create routines, mint
+coding-tool tokens, replace shared keys, top up and see everyone's usage.
+Anyone can create an agent. You can change the list later.
+
+**Add the values to `.env`:**
+
+```bash
+DAIMON_TEAMS__CLIENT_ID=<application (client) ID>
+DAIMON_TEAMS__TENANT_ID=<directory (tenant) ID>
+DAIMON_TEAMS__CLIENT_SECRET=<client secret value>
+DAIMON_TEAMS__ADMIN_USER_IDS=["<object ID>","<another object ID>"]
+```
+
+A few things to know:
+
+- **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
+  set, every daimon process expects the full set. A half-filled block stops
+  them all from starting, not just Teams.
+- **The admin list is a JSON array**, not a comma-separated list.
+- **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
+- **The `mcp` service reads these same values**, because the agent's Teams
+  tools (posting, reading channels, sending files) run there. With Compose,
+  sharing `.env` takes care of that.
+
+**Start it:**
+
+```bash
+docker compose --profile teams up --build -d
+```
+
+The service listens on `127.0.0.1:3978` (`DAIMON_TEAMS__PORT`) and serves
+`/api/messages`, `/healthz` and `/readyz`. `docker compose logs teams` should
+show `teams.tenant_ready` once it has set up your organisation.
+
+**Put it behind your public hostname.** Microsoft must reach `/api/messages`
+over HTTPS. Any reverse proxy or tunnel works. With
+[Caddy](https://caddyserver.com), which fetches the certificate for you:
+
+```text
+teams.example.com {
+	@teams path /api/messages /healthz /readyz /oauth/teams/files/callback
+	handle @teams {
+		reverse_proxy 127.0.0.1:3978
+	}
+	handle {
+		respond 404
+	}
+}
+```
+
+Only those four paths need to be public. The last one is used only by the
+optional channel files. Check it from outside your network:
+`curl https://teams.example.com/healthz` should return `{"status":"live"}`.
+
+### 4. Point the bot at daimon
+
+Back in the Azure Bot → **Settings** → **Configuration**, set the
+**Messaging endpoint** to your hostname **with `/api/messages` on the end**:
+
+```text
+https://teams.example.com/api/messages
+```
+
+Forgetting that suffix is the most common reason a bot never answers. While
+you're on that page, check that **Microsoft App ID** is your client ID,
+**App Tenant ID** is your tenant ID, and **App type** is SingleTenant. Then
+**Apply**. Changes can take a few minutes to reach Teams.
+
+### 5. Build the Teams app package
+
+Teams installs apps from a zip file holding three files at its top level:
+
+- `manifest.json`;
+- `color.png`, a 192×192 full-colour icon;
+- `outline.png`, a 32×32 icon, white on a transparent background.
+
+The manifest template is
+[`teams-app-manifest.yaml`](teams-app-manifest.yaml). Fill in your client ID
+and hostname and convert it to JSON. From the repository root, with any
+Python 3 that has PyYAML:
+
+```bash
+mkdir -p teams-app
+CLIENT_ID=<application (client) ID> TEAMS_HOST=teams.example.com python3 - <<'EOF'
+import json, os, yaml
+text = open("docs/teams-app-manifest.yaml").read()
+text = text.replace("${DAIMON_TEAMS__CLIENT_ID}", os.environ["CLIENT_ID"])
+text = text.replace("DAIMON_HOST", os.environ["TEAMS_HOST"])
+with open("teams-app/manifest.json", "w") as f:
+    json.dump(yaml.safe_load(text), f, indent=2)
+EOF
+```
+
+Before you zip it, check these fields in `manifest.json`:
+
+- `termsOfUseUrl` should point at your own terms page, since daimon serves
+  none.
+- `websiteUrl` and `privacyUrl` should point at pages you serve. The Teams
+  host itself answers 404 outside the four bot paths.
+- `name` is what people see. If you run more than one deployment, say a test
+  one and a production one, give each its own Entra app, Azure Bot and
+  package, with a distinct name such as `daimon (test)`.
+
+Then add the two icons. `assets/icon.png` can be resized to 192×192 for
+`color.png`; the white-on-transparent `outline.png` you make yourself. Zip
+the three files, not the folder that holds them:
+
+```bash
+cd teams-app && zip ../daimon-teams.zip manifest.json color.png outline.png
+```
+
+### 6. Upload and allow the app
+
+In the [Teams admin center](https://admin.teams.microsoft.com):
+
+1. **Teams apps** → **Manage apps** → **Upload new app**, then choose the zip.
+2. Open the uploaded app → **Users and groups** → **Edit availability**, and
+   make it available to everyone or to the people who'll use it. (Tenants not
+   yet on app centric management: check that its status is **Allowed** and
+   that **Permission policies** allow custom apps.)
+3. Optional: under **Setup policies**, add the app to *Installed apps* to
+   install and pin it for everyone.
+
+A new upload can take anywhere from a few minutes to a few hours to show up
+in the Teams client. If custom app uploads are allowed for users, you can
+skip the admin center and sideload instead: in Teams, **Apps** → **Manage
+your apps** → **Upload an app**.
+
+### 7. Say hello
+
+- **1:1 chat:** in Teams, **Apps** → **Built for your org** → your app →
+  **Add**. That opens a chat with the bot and it greets you. Send `help` or
+  `setup`.
+- **A team:** on the app's page, open the menu next to **Add** → **Add to a
+  team**, then pick the team and a channel. A team owner is asked to allow
+  the app to read the team's channel messages. Accept, since that's how the
+  bot reads the thread it is asked about. The bot then posts a welcome in
+  the team. To ask it something, @mention it in a post or a reply. Pick the
+  name from the autocomplete list so it turns into a highlighted mention:
+  typed text alone doesn't count.
+
+Group chats aren't supported: the package doesn't offer them, and the bot
+turns away any that reach it.
+
+### Channel files (optional)
+
+Out of the box, the bot reads images in channel messages, and handles files
+in 1:1 chats both ways. Files shared in a channel live in the team's
+SharePoint site, which the team-level permission doesn't reach. To let the
+bot open those files and save its own outputs to the channel's Files tab:
+
+1. Entra → **App registrations** → your app → **API permissions** → **Add a
+   permission** → **Microsoft Graph** → **Application permissions** →
+   `Sites.Selected` → **Grant admin consent**. This permission reaches only
+   the sites you grant one by one, not every site in the organisation.
+2. Same app → **Authentication** → **Add a platform** → **Web**, with the
+   redirect URI `https://teams.example.com/oauth/teams/files/callback`.
+3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
+   hostname, without `/api/messages`) and run
+   `docker compose --profile teams up -d` so the service picks it up.
+4. When a daimon admin shares a file in a team daimon can't open yet, the bot
+   posts an **Enable files** card. Click it and sign in as a SharePoint or
+   global admin. The first sign-in in your organisation must be a global
+   admin, who approves this for everyone. daimon then grants itself access
+   to that one team's site, and the next message can read the file.
+
+This covers standard channels. Private and shared channels keep their files
+in a separate site, which daimon doesn't use. [`teams.md`](teams.md#channel-files-optional)
+also shows how to grant a site by hand.
+
+### If the bot doesn't answer
+
+- **Teams won't add the app and asks you to check that it's registered and
+  the Teams channel is enabled:** the Azure Bot's Teams channel isn't on (step 2), or the
+  manifest's `id` and `botId` don't match the client ID.
+- **No answer anywhere, and nothing in `docker compose logs teams`:** the
+  messages aren't reaching daimon. Check the messaging endpoint (step 4),
+  including the `/api/messages` suffix, and that `/healthz` answers from
+  outside your network.
+- **1:1 chats work but channel @mentions don't:** if the app was added to the
+  team before the messaging endpoint was right, the team never linked up.
+  Remove the app from the team (team → ⋯ → **Manage team** → **Apps**) and
+  add it again. Check, too, that the mention was picked from autocomplete.
+- **Every daimon process fails at startup after adding Teams:** a
+  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
+  a JSON array of object IDs.
+- **`teams.tenant_reconcile_failed` in the logs:** daimon couldn't finish
+  setting up your organisation, and it refuses turns until it does. The log
+  line says why.
+- **It stopped answering after months of working:** the client secret has
+  probably expired. Create a new one (step 1), update `.env` and run
+  `docker compose --profile teams up -d`, which also recreates `mcp`.
+
+### Updating the app
+
+Changes to the manifest only reach Teams in a new package. Bump `version` in
+`manifest.json`, zip it again and upload it over the existing app in the
+Teams admin center (the app → **Upload file**). Teams that already have the
+app pick up the update, and a team owner may be asked to accept new
+permissions.
+
 ## Claude Code login mounts
 
 Coding-agent clients such as Claude Code connect through the plugin in
 [`plugin/`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) instead of a per-agent token. It logs in via
 Slack or Discord OAuth and reaches every daimon install the logged-in person
-belongs to.
+belongs to. There is no Teams login yet.
 
 Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
 `DAIMON_CRYPTO__KEYS` (login state is encrypted at rest) and
@@ -352,7 +658,7 @@ values).
 `daimon crypto encrypt-plaintext` encrypts every plaintext row in place with the
 first key, in one transaction, leaving timestamps and attribution unchanged.
 Run it after enabling keys on a deployment that stored keys without them, and
-only once **every** process (MCP, Discord, Slack, scheduler) has restarted with
+only once **every** process (MCP, Discord, Slack, Teams, scheduler) has restarted with
 the keys: a process still running without keys can't read the rows it encrypts,
 and turns for those agents fail. Then run `verify` again. Add `verify` to your
 onboarding checklist.

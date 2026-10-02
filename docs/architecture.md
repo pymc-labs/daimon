@@ -1090,7 +1090,8 @@ add per-memory author/origin records or rollback tooling.
 ### Platform table rendering
 
 Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to
-booleans. Missing/false preserves current plain-text delivery. UUID keys are
+booleans. Teams renders Markdown tables natively, so the setting does nothing
+there. Missing/false preserves current plain-text delivery. UUID keys are
 validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
 code and accepts an optional async platform hook. Without a hook the input is
 returned unchanged. Both adapter helpers also default to disabled. Hook failures
