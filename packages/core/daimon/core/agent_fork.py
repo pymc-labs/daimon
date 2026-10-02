@@ -264,11 +264,19 @@ async def copy_agent(
         new_name=new_name,
         own=split.own,
     )
-    return AgentCopy(
-        await anthropic.beta.agents.retrieve(created.id),
-        (*split.dropped, *failed),
-        tuple(copied),
-    )
+    try:
+        agent = await anthropic.beta.agents.retrieve(created.id)
+    except APIError as exc:
+        # The copy exists: raising would leave it orphaned and unreported, so
+        # return the create's snapshot; `copied_skills` names what it lacks.
+        _log.warning(
+            "agent_fork.reread_failed",
+            tenant_id=str(tenant_id),
+            agent_id=created.id,
+            error=type(exc).__name__,
+        )
+        agent = created
+    return AgentCopy(agent, (*split.dropped, *failed), tuple(copied))
 
 
 async def fork_agent(

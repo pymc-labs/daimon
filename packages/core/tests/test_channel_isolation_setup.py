@@ -654,6 +654,85 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_ski
     assert row.origin == "pasted", "the copy keeps where the skill came from"
 
 
+async def test_fork_agent_returns_the_copy_when_its_final_reread_fails(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The copy exists once created: a failed re-read after its skills are copied
+    returns it with what was copied instead of raising and orphaning it."""
+    tenant = await make_tenant(db_session)
+    source = ma_agent(
+        id="agent_src",
+        name="shared",
+        tenant_id=tenant.id,
+        skills=[{"type": "custom", "skill_id": "skill_own", "version": "1"}],
+    )
+    state = FakeMAState()
+    state.agents[source.id] = source.model_dump(mode="json")
+    notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
+    skills = [
+        SkillListResponse(
+            id="skill_own",
+            type="custom",
+            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name="shared/notes"),
+            latest_version="1",
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            source="custom",
+        ).model_dump(mode="json")
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        if method == "GET" and path == "/v1/skills":
+            return list_response(skills)
+        if method == "POST" and path == "/v1/skills":
+            created = {**skills[0], "id": "sk_new", "display_title": "copy"}
+            skills.append(created)
+            return httpx.Response(200, json=created)
+        if method == "GET" and path.endswith("/content"):
+            return httpx.Response(200, content=notes.zip_bytes)
+        copy = next((a for i, a in state.agents.items() if i != "agent_src"), None)
+        attached = copy is not None and any(
+            skill["skill_id"] == "sk_new" for skill in copy.get("skills") or []
+        )
+        if method == "GET" and copy is not None and path == f"/v1/agents/{copy['id']}" and attached:
+            return httpx.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
+        raise NotHandled
+
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_src"),
+        agent_name="shared",
+        name="notes",
+        source_repo_url="",
+        source_repo_branch="",
+        source_path="",
+        content_hash=notes.preview.content_hash,
+        anthropic_id="skill_own",
+        anthropic_latest_version="1",
+        source="upload",
+        origin="pasted",
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(combine_handlers(handler, make_fake_ma_handler(state)))
+
+    copy = await fork_agent(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        source_name="shared",
+        new_name="team-alpha",
+        public_url=None,
+        subject=ADMIN,
+    )
+
+    assert copy.agent.id in state.agents, "the copy that exists is the one returned"
+    assert copy.copied_skills == ("team-alpha/notes",), "the copied skill is still reported"
+
+
 def test_a_pinned_agent_is_never_offered_as_a_copy() -> None:
     """A pinned agent can't be copied (`authorize(FORK)`), so its refusals point at its pin."""
     for reason in ("pinned_elsewhere", "pinned_shared_channel_agent"):
