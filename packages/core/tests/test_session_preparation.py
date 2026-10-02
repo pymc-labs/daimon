@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -16,7 +17,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -85,6 +86,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import QueuePool
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -481,7 +483,7 @@ async def test_compatible_bind_releases_connection_during_vault_io(
         task = asyncio.create_task(_prepare(deps, admission, tenant=tenant, account=account))
         await asyncio.wait_for(started.wait(), timeout=5)
         await asyncio.sleep(0.2)
-        checkedout_during_io = engine.sync_engine.pool.checkedout()
+        checkedout_during_io = cast(QueuePool, engine.sync_engine.pool).checkedout()
         release.set()
         assert isinstance(await task, PreparedTurn)
         assert held_s < 0.1, f"compatible bind held {held_s:.3f} connection-seconds"
@@ -1004,6 +1006,98 @@ async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_ses
     assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
 
 
+@pytest.mark.parametrize(
+    ("pool_size", "gate_limit"),
+    [(20, 6), (2, 1)],
+    ids=["pre-fix-unbounded-reference", "bounded-burst"],
+)
+async def test_fresh_burst_waits_before_pool_checkout(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+    pool_size: int,
+    gate_limit: int,
+) -> None:
+    """Measure the unchanged lock hold, then burst above the bounded pool size."""
+    import daimon.core.turn.prepare as turn_prepare
+    from daimon.core.session_preparation_gate import PreparationGate, preparation_counts
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    engine = create_async_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"],
+        connect_args={"server_settings": {"search_path": f"{db_schema},public"}},
+        pool_size=pool_size,
+        max_overflow=0,
+        pool_timeout=0.05,
+    )
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    transport = _Transport()
+    deps = replace(_deps(sm, transport), preparation_gate=PreparationGate(gate_limit))
+    original = turn_prepare.create_ma_session
+    upstream_calls = 0
+    checked_out_at: dict[int, float] = {}
+    held_s = 0.0
+    peak_checked_out = 0
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        assert cast(QueuePool, engine.sync_engine.pool).checkedout() >= 1
+        await asyncio.sleep(0.12)
+        return await original(*args, **kwargs)
+
+    def checkout(dbapi: object, record: object, proxy: object) -> None:
+        nonlocal peak_checked_out
+        checked_out_at[id(record)] = time.monotonic()
+        peak_checked_out = max(
+            peak_checked_out, cast(QueuePool, engine.sync_engine.pool).checkedout()
+        )
+
+    def checkin(dbapi: object, record: object) -> None:
+        nonlocal held_s
+        held_s += time.monotonic() - checked_out_at.pop(id(record))
+
+    monkeypatch.setattr(turn_prepare, "create_ma_session", slow_create)
+    event.listen(engine.sync_engine.pool, "checkout", checkout)
+    event.listen(engine.sync_engine.pool, "checkin", checkin)
+    try:
+        tasks = [
+            asyncio.create_task(
+                _prepare(
+                    deps,
+                    _admission(account=account),
+                    tenant=tenant,
+                    account=account,
+                    thread_id=f"fresh-{index}",
+                )
+            )
+            for index in range(6)
+        ]
+        await asyncio.sleep(0.04)
+        if gate_limit == 1:
+            assert preparation_counts()["waiting"] >= 4
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        assert all(isinstance(result, PreparedTurn) for result in results)
+        assert upstream_calls == 6
+        assert peak_checked_out <= pool_size
+        assert held_s >= 0.72, "the advisory-lock connection still spans upstream creation"
+        logging.getLogger(__name__).info(
+            "fresh_burst_measurement mode=%s connection_seconds=%.3f "
+            "per_session=%.3f peak_checked_out=%d",
+            "bounded" if gate_limit == 1 else "unbounded_reference",
+            held_s,
+            held_s / 6,
+            peak_checked_out,
+        )
+        assert preparation_counts() == {"waiting": 0, "active": 0}
+    finally:
+        event.remove(engine.sync_engine.pool, "checkout", checkout)
+        event.remove(engine.sync_engine.pool, "checkin", checkin)
+        await engine.dispose()
+
+
 async def test_two_callers_in_one_thread_each_refresh_only_their_own_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1379,7 +1473,7 @@ async def test_tightening_memory_access_never_runs_the_writable_session(
         async with db_session_factory.begin() as session:
             await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
 
-    async def forbidden_checkpoint(**kwargs):
+    async def forbidden_checkpoint(**kwargs: Any) -> Any:
         pytest.fail("a writable session must not execute a checkpoint after policy tightens")
 
     if fresh_start:

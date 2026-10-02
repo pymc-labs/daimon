@@ -366,6 +366,28 @@ async def _replace_dead_session(
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
 ) -> _Replacement:
+    async with deps.preparation_gate.hold():
+        return await _replace_dead_session_locked(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            dead_session_id=dead_session_id,
+            dead_mapping_id=dead_mapping_id,
+        )
+
+
+async def _replace_dead_session_locked(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    dead_session_id: str,
+    dead_mapping_id: uuid.UUID,
+) -> _Replacement:
     """Mark the dead mapping dead and move onto one live replacement.
 
     Runs under the same per-(tenant, platform, thread, account) advisory lock
