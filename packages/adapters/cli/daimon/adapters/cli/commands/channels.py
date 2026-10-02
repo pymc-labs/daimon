@@ -812,9 +812,6 @@ async def _audit_skill_change(
     )
 
 
-_ISOLATION_PLATFORMS = ("discord", "slack")
-
-
 @channels_app.command("isolate")
 def channels_isolate_command(
     platform: str,
