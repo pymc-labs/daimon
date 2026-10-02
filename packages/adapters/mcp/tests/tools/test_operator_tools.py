@@ -33,6 +33,9 @@ from daimon.adapters.mcp.tools.channel_admins import (
     _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.channel_isolation import (
+    _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
     _list_promo_codes_impl,  # pyright: ignore[reportPrivateUsage]
@@ -46,11 +49,13 @@ from daimon.adapters.mcp.tools.tenant_summary import (
     ChannelAdmins,
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope, scope_tag
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
@@ -237,6 +242,38 @@ async def test_tenant_summary_leaves_out_dm_channels(
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
 
     assert [c.channel_id for c in summary.channels] == ["c1"], "DM channels are not listed"
+
+
+async def test_tenant_summary_marks_isolated_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c3",),
+                isolated_channel_ids=("c3",),
+                agent_channel_pins={"local": ("c3",)},
+            ),
+        )
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+    assert [(c.channel_id, c.isolated) for c in summary.channels] == [("c3", True)], (
+        "an isolated channel is listed and marked even with no other setting"
+    )
+
+
+async def test_channel_isolation_requires_channels_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _set_channel_isolation_impl(
+            _runtime(committing_sessionmaker), auth, channel_id="111111111111111111", isolated=True
+        )
 
 
 async def test_operator_without_the_scope_is_refused_by_the_tool_itself(

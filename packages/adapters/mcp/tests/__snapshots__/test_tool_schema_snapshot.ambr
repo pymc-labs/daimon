@@ -2379,7 +2379,7 @@
         Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
         
         Lists every channel with its own agent or environment setting, a
-        spending budget or channel admins, with the agent and environment that
+        spending budget, channel admins or isolation, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one). Money is a
         decimal string.

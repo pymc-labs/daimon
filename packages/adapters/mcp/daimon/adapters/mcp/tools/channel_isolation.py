@@ -3,7 +3,8 @@
 ``register_channel_isolation_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closure; it delegates to ``_set_channel_isolation_impl``, which tests call
 without a FastMCP Context. Isolation is a tenant-wide change, so server
-admins only. The rules live in ``daimon.core.channel_isolation_setup``.
+admins only (and operator tokens with ``channels:write``). The rules live in
+``daimon.core.channel_isolation_setup``.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
@@ -84,6 +87,7 @@ async def _set_channel_isolation_impl(
     isolated: bool,
     fork_from: str | None = None,
 ) -> SetChannelIsolationResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     if auth.platform not in ("discord", "slack"):
         raise ToolError("Channel isolation exists only on Discord and Slack.")
@@ -110,6 +114,7 @@ async def _set_channel_isolation_impl(
             fork=fork,
             fork_from=fork_from,
             public_url=str(public_url) if public_url is not None else None,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
         )
     except DaimonError as exc:
         raise ToolError(f"{exc} Nothing was changed.") from exc
@@ -126,7 +131,7 @@ async def _set_channel_isolation_impl(
 
 
 def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_isolation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
