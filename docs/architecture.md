@@ -403,12 +403,17 @@ To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
 `--clear` is also the way out of that state. There is no setup-panel editor.
 
-**Channel admins.** A tenant can name, per channel, roles and members who run
+**Channel admins.** A tenant can name, per channel, groups and members who run
 that channel on top of the server admins (`channel_admins`,
-`packages/core/daimon/core/channel_admins.py`). `admit()` stores the member's
-live role ids on the account (`accounts.platform_role_ids`) beside the role, so
-MCP tools test a grant without asking the platform; Slack and Teams have no
-roles, so their grants are by user id (on Teams the Entra object id). A channel admin may do what a server admin may for
+`packages/core/daimon/core/channel_admins.py`). A group is a Discord role, a
+Slack user group, or a Teams team, whose owners it admits; a Teams member is
+named by Entra object id. Discord sends the member's roles with each event.
+Slack and Teams look up only the groups some grant names
+(`usergroups.users.list`; Graph's team owner list under the
+`TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
+grants nothing. `admit()` stores the member's matched group ids on the account
+(`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
+without asking the platform. A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions

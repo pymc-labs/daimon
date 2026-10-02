@@ -209,9 +209,9 @@ async def test_set_refuses_bad_ids_empty_lists_and_unknown_tenants(
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic)
     slack = {"rt": rt, "console": _console(), "platform": "slack", "workspace_id": "T0ADMINS"}
 
-    with pytest.raises(typer.BadParameter, match="no roles"):
+    with pytest.raises(typer.BadParameter, match="invalid slack group id"):
         await channels_admins_set(
-            **slack, channel_id="C0GROWTH", roles=["S1"], users=[], as_json=False
+            **slack, channel_id="C0GROWTH", roles=["<!subteam^S1>"], users=[], as_json=False
         )
     with pytest.raises(typer.BadParameter, match="use clear"):
         await channels_admins_set(**slack, channel_id="C0GROWTH", roles=[], users=[], as_json=False)

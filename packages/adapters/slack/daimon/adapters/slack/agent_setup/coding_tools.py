@@ -31,6 +31,7 @@ from daimon.adapters.slack.agent_setup.read import (
     load_panel_roster,
     public_mcp_url,
 )
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -201,7 +202,9 @@ async def handle_coding_tools_click(
             tenant_id=tenant_id,
             channel_id=channel_id or None,
             target=target,
-            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+            caller=await channel_admin_caller(
+                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+            ),
         )
     except AccessPolicyUnreadable:
         await post_ephemeral(
@@ -364,7 +367,7 @@ async def _authorize_mint(
 ) -> tuple[Decision, str | None]:
     """Whether the caller may mint here, and the channel the token is bound to.
 
-    Slack has no roles, so a channel admin is one listed by user id. The agent
+    A channel admin is one listed by user id or through a user group. The agent
     is read only under a pin.
     """
     async with runtime.sessionmaker() as session:

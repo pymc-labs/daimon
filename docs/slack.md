@@ -19,7 +19,9 @@ naming the file instead (Slack's own hard cap is far higher, but large files
 lose thread previews and the upload buffers the whole payload in memory), and
 0-byte files are skipped silently and logged. Delivery requires the
 `files:write` bot scope; adding a scope to an existing install requires
-re-running the install flow. A workspace that has hit its Slack file-storage
+re-running the install flow. Channel admin grants that name a user group need
+the `usergroups:read` bot scope; without it the form can't list groups and a
+group grant admits nobody. A workspace that has hit its Slack file-storage
 limit gets one in-thread notice and no deliveries until space is freed.
 
 ### Skill files

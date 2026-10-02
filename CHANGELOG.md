@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Slack user groups and Teams team owners can be channel admins.** A
+  channel admin grant's `role_ids` now also takes Slack user group ids and a
+  Teams team's Entra group id (whose owners it admits), from
+  `set_channel_admins`, `daimon channels admins set --role` and, on Slack, a
+  user group select in the channel admins form; listings show the groups
+  before the members. Slack and Teams look up only the groups some grant
+  names, each cached for a minute, and a failed lookup grants nothing. Slack
+  needs the new `usergroups:read` bot scope and Teams the `TeamMember.Read.Group`
+  consent, so existing installs reinstall or upload the updated app package.
 - **Forks keep their own uploaded skills.** `fork_agent`, `daimon agents fork`
   and channel isolation used to leave every skill scoped to the source agent
   off the copy, so isolating a channel lost the skills uploaded to its agent.

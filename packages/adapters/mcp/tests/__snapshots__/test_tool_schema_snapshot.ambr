@@ -2801,7 +2801,7 @@
     }),
     'list_channel_admins': dict({
       'description': '''
-        List the channels that have their own admins, with the roles and members
+        List the channels that have their own admins, with the groups and members
         named for each. For example, list the admins of #support. Requires Manage
         Server (admin).
       ''',
@@ -4593,10 +4593,11 @@
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
         
-        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
-        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id; a Slack or Teams thread
-        id names its channel.
+        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
+        Entra object ids. ``role_ids`` names groups whose members all count: Discord
+        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
+        which admits that team's owners. ``channel_id`` MUST be the parent channel's
+        id; a Slack or Teams thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,

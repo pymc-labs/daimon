@@ -40,7 +40,7 @@ def _omitted(value: object) -> bool:
 @dataclass(frozen=True)
 class ChannelAdmins:
     role_ids: list[str]
-    """Discord role ids; always empty on Slack and Teams, which have no roles here."""
+    """Group ids: Discord roles, Slack user groups, or Teams teams (their owners)."""
     user_ids: list[str]
 
 

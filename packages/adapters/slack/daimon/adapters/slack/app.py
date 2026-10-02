@@ -75,6 +75,7 @@ from daimon.adapters.slack.boot_sweep import (
     snapshot_slack_card_intents,
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -1737,6 +1738,13 @@ class SlackApp:
                 channel_id=channel,
                 thread_id=thread_id,
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=()
+                if is_admin
+                else sorted(
+                    await user_group_ids(
+                        self.runtime, web_client, tenant_id=tenant_id, user_id=author_id
+                    )
+                ),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -2684,6 +2692,16 @@ class SlackApp:
             channel_id=channel,
             thread_id=thread_id,
             role=role,
+            platform_role_ids=()
+            if role is Role.ADMIN
+            else sorted(
+                await user_group_ids(
+                    self.runtime,
+                    web_client,
+                    tenant_id=tenant_id,
+                    user_id=row.requester_external_user_id,
+                )
+            ),
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.

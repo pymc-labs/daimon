@@ -122,10 +122,15 @@ async def test_a_teams_admin_names_channel_admins_by_entra_id(
     assert again.channel.channel_id == channel, "a Teams thread id names its channel"
     cleared = await _clear_channel_admins_impl(runtime, admin, channel_id=thread)
     assert (cleared.channel.channel_id, cleared.changed) == (channel, True), "and clears it"
-    with pytest.raises(ToolError, match="no roles"):
+    with pytest.raises(ToolError, match="invalid teams group id"):
         await _set_channel_admins_impl(
             runtime, admin, channel_id=channel, role_ids=["r"], user_ids=[]
         )
+    team = "0F2C8A51-7D3E-4B9A-8C61-2E5F4A9B7C10"
+    owners = await _set_channel_admins_impl(
+        runtime, admin, channel_id=channel, role_ids=[team], user_ids=[]
+    )
+    assert owners.channel.role_ids == [team.lower()], "a team's owners, by its Entra group id"
 
 
 async def test_channel_admin_tools_refuse_members_and_bad_ids(
@@ -137,12 +142,12 @@ async def test_channel_admin_tools_refuse_members_and_bad_ids(
         await _set_channel_admins_impl(
             runtime, _auth(tenant_id), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
         )
-    with pytest.raises(ToolError, match="no roles"):
+    with pytest.raises(ToolError, match="invalid slack group id"):
         await _set_channel_admins_impl(
             runtime,
             _auth(tenant_id, admin=True, platform="slack"),
             channel_id="C0123",
-            role_ids=["S1"],
+            role_ids=["@leads"],
             user_ids=[],
         )
     with pytest.raises(ToolError, match="invalid discord channel id"):

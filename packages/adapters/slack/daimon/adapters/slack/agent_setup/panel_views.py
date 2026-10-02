@@ -89,6 +89,7 @@ __all__ = [
     "CALLBACK_OPERATOR_MINT",
     "CALLBACK_ROUTING",
     "LEGACY_ACTION_IDS",
+    "CHANNEL_ADMINS_GROUPS_INPUT_ID",
     "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
     "build_channel_admins_form",
@@ -152,6 +153,7 @@ CALLBACK_NEW_AGENT: Final = "agent_setup__new_agent"
 CALLBACK_CREATING: Final = "agent_setup__creating"
 CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
 CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
+CHANNEL_ADMINS_GROUPS_INPUT_ID: Final = "channel_admins__groups"
 """Block and action id of the form's member select; the submission reads it."""
 CALLBACK_OPERATOR_MINT: Final = "agent_setup__operator_token_form"
 OPERATOR_SCOPES_INPUT_ID: Final = "operator_token__scopes"
@@ -767,12 +769,19 @@ def _is_channel(channel_id: str) -> bool:
     return bool(channel_id) and not channel_id.startswith("D")
 
 
+def _admin_mentions(row: ChannelAdminsRow) -> list[str]:
+    """User groups first, then members, as Discord lists roles before members."""
+    return [f"<!subteam^{group_id}>" for group_id in row.role_ids] + [
+        f"<@{uid}>" for uid in row.user_ids
+    ]
+
+
 def _channel_admins_blocks(
     grants: Sequence[ChannelAdminsRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
     lines = fit_lines(
         (
-            f"<#{row.channel_id}> → {fold_mentions([f'<@{uid}>' for uid in row.user_ids])}"
+            f"<#{row.channel_id}> → {fold_mentions(_admin_mentions(row))}"
             for row in grants[:MAX_CHANNEL_ADMIN_LINES]
         ),
         max_chars=CHANNEL_ADMINS_LISTING_MAX_CHARS,
@@ -890,10 +899,24 @@ def build_operator_token_form(*, meta: PanelMetadata) -> dict[str, Any]:
     )
 
 
-def build_channel_admins_form(*, meta: PanelMetadata, user_ids: Sequence[str]) -> dict[str, Any]:
+GROUPS_UNLISTED_NOTE: Final = (
+    "User groups couldn't be listed (the app needs the usergroups:read scope), so saving "
+    "keeps this channel's groups as they are."
+)
+
+
+def build_channel_admins_form(
+    *,
+    meta: PanelMetadata,
+    user_ids: Sequence[str],
+    group_ids: Sequence[str] = (),
+    groups: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Name who runs `meta.channel_id` besides the workspace admins; empty clears it.
 
-    Slack has no roles, so members are the only grant here.
+    Members, and user groups whose members all count. `groups` labels the
+    workspace's user groups; None when they couldn't be listed, which leaves
+    the groups out of the form and the stored ones untouched on save.
     """
     element: dict[str, Any] = {
         "type": "multi_users_select",
@@ -903,24 +926,65 @@ def build_channel_admins_form(*, meta: PanelMetadata, user_ids: Sequence[str]) -
     }
     if user_ids:
         element["initial_users"] = list(user_ids)
+    blocks: list[dict[str, Any]] = [
+        _section(f"Who runs <#{meta.channel_id}> besides the workspace admins."),
+        {
+            "type": "input",
+            "block_id": CHANNEL_ADMINS_INPUT_ID,
+            "label": {"type": "plain_text", "text": "Members"},
+            "optional": True,
+            "element": element,
+        },
+    ]
+    if groups is None:
+        blocks.append(_context(GROUPS_UNLISTED_NOTE))
+    elif group_input := _groups_input(groups, group_ids):
+        blocks.append(group_input)
+    blocks.append(_context(f"Empty the lists to clear it. {CHANNEL_ADMINS_NOTE}"))
     return finish_modal(
         title=CHANNEL_ADMINS_LABEL,
-        blocks=[
-            _section(f"Who runs <#{meta.channel_id}> besides the workspace admins."),
-            {
-                "type": "input",
-                "block_id": CHANNEL_ADMINS_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Members"},
-                "optional": True,
-                "element": element,
-            },
-            _context(f"Empty the list to clear it. {CHANNEL_ADMINS_NOTE}"),
-        ],
+        blocks=blocks,
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_CHANNEL_ADMINS,
         close="Cancel",
         submit="Save",
     )
+
+
+def _groups_input(groups: Mapping[str, str], group_ids: Sequence[str]) -> dict[str, Any] | None:
+    """A user group multi-select, or None when the workspace has none to offer.
+
+    A stored group Slack no longer lists stays an option, so saving the
+    form doesn't drop it unseen. A static select holds 100 options.
+    """
+    labels = {gid: groups.get(gid, f"unknown group {gid}") for gid in group_ids}
+    labels |= {gid: label for gid, label in groups.items() if gid not in labels}
+    if not labels:
+        return None
+    options = [
+        {
+            "text": {"type": "plain_text", "text": label[:_MAX_OPTION_TEXT]},
+            "value": gid,
+        }
+        for gid, label in list(labels.items())[:100]
+    ]
+    element: dict[str, Any] = {
+        "type": "multi_static_select",
+        "action_id": CHANNEL_ADMINS_GROUPS_INPUT_ID,
+        "max_selected_items": MAX_CHANNEL_ADMIN_IDS,
+        "placeholder": {"type": "plain_text", "text": "Pick user groups"},
+        "options": options,
+    }
+    initial = [option for option in options if option["value"] in group_ids]
+    if initial:
+        element["initial_options"] = initial
+    return {
+        "type": "input",
+        "block_id": CHANNEL_ADMINS_GROUPS_INPUT_ID,
+        "label": {"type": "plain_text", "text": "User groups"},
+        "optional": True,
+        "element": element,
+    }
 
 
 def _file_list(paths: Sequence[str], *, shown: int = 15) -> str:

@@ -5,7 +5,8 @@ Three parts: the app token (behind `GraphToken`, cached per scope by its owner),
 per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
-message reads here; `teams_sharepoint` sends its file calls through
+message reads here, and `TeamMember.Read.Group` the owner list
+(`list_team_owner_ids`, for channel admin grants); `teams_sharepoint` sends its file calls through
 `send`. Each read is one page; `next_page` follows a page's `next_link`. Any
 failure (no consent, throttling, a timeout, an odd body) raises
 `GraphUnavailable`, whose fields carry no message content.
@@ -105,6 +106,22 @@ class GraphPage(_Model):
     next_link: str | None = Field(default=None, alias="@odata.nextLink")
 
 
+class GraphMember(_Model):
+    """A team member as Graph's `aadUserConversationMember` gives one."""
+
+    user_id: str | None = None
+    roles: list[str] = Field(default_factory=list[str])
+
+
+class GraphMemberPage(_Model):
+    value: list[GraphMember] = Field(default_factory=list[GraphMember])
+    next_link: str | None = Field(default=None, alias="@odata.nextLink")
+
+
+MAX_OWNER_PAGES = 5
+"""Owner pages read before giving up; a team has at most 100 owners."""
+
+
 def is_graph_url(url: httpx.URL) -> bool:
     return url.scheme == "https" and url.host == GRAPH_HOST
 
@@ -200,6 +217,29 @@ class GraphClient:
         if skiptoken:
             extra["$skiptoken"] = skiptoken
         return _parse(GraphPage, await self._get(url, top=top, extra=extra))
+
+    async def list_team_owner_ids(self, group_id: str) -> frozenset[str]:
+        """The Entra object ids (lower-case) of a team's owners.
+
+        Needs `TeamMember.Read.Group`; a team that never granted it raises
+        `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
+        """
+        url: str | None = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/members"
+        params: Mapping[str, str] | None = {"$filter": "roles/any(r:r eq 'owner')"}
+        owners: set[str] = set()
+        for _ in range(MAX_OWNER_PAGES):
+            if url is None:
+                return frozenset(owners)
+            page = _parse(GraphMemberPage, await self.send("GET", url, params=params))
+            owners.update(
+                member.user_id.lower()
+                for member in page.value
+                if member.user_id and "owner" in member.roles
+            )
+            url, params = page.next_link, None
+        if url is None:
+            return frozenset(owners)
+        raise GraphUnavailable("too many owner pages")
 
     async def next_page(self, next_link: str) -> GraphPage:
         """The page a `next_link` names; refused unless it is a Graph URL."""

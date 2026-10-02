@@ -53,7 +53,7 @@ budget_app = typer.Typer(
 )
 channels_app.add_typer(budget_app, name="budget")
 admins_app = typer.Typer(
-    help="A channel's admins: roles and members who run it on top of the server admins."
+    help="A channel's admins: groups and members who run it on top of the server admins."
 )
 channels_app.add_typer(admins_app, name="admins")
 
@@ -379,7 +379,7 @@ class ChannelListing(BaseModel):
 
 
 def _listing(channel: ChannelSummary) -> ChannelListing:
-    admins = [*(f"role {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
+    admins = [*(f"group {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
     budget = channel.budget
     return ChannelListing(
         channel_id=channel.channel_id,
@@ -511,7 +511,10 @@ def channels_admins_set_command(
     channel_id: str,
     role: Annotated[
         list[str] | None,
-        typer.Option(help="Discord role id (repeatable). Slack and Teams have no roles."),
+        typer.Option(
+            help="Group id (repeatable): a Discord role, a Slack user group, or a Teams "
+            "team's Entra group id, which admits its owners."
+        ),
     ] = None,
     user: Annotated[
         list[str] | None,
