@@ -602,11 +602,20 @@ class DiscordREST:
         route = path.split("?", 1)[0]
         lock = self._routes.setdefault(route, asyncio.Lock())
         async with lock:
-            for _ in range(8):
-                response = await self.client.request(method, path, json=body)
+            for attempt in range(8):
+                try:
+                    response = await self.client.request(method, path, json=body)
+                except httpx.TransportError:
+                    if method != "GET" or attempt == 7:
+                        raise
+                    await asyncio.sleep(min(2**attempt, 8))
+                    continue
                 if response.status_code == 429:
                     payload = response.json()
                     await asyncio.sleep(float(payload.get("retry_after", 1)))
+                    continue
+                if method == "GET" and response.status_code >= 500 and attempt < 7:
+                    await asyncio.sleep(min(2**attempt, 8))
                     continue
                 response.raise_for_status()
                 return cast(dict[str, object] | list[dict[str, object]], response.json())
@@ -639,7 +648,10 @@ async def _discord_watch(
         # Discord's 50-request/second global bot allowance.
         await asyncio.sleep(4 if existing_thread_id else 2)
         if result.thread_id is None:
-            response = await rest.client.get(f"/channels/{message_id}")
+            try:
+                response = await rest.client.get(f"/channels/{message_id}")
+            except httpx.TransportError:
+                continue
             if response.status_code == 200:
                 thread = response.json()
                 if str(thread.get("parent_id")) == channel_id:
@@ -648,6 +660,9 @@ async def _discord_watch(
             elif response.status_code != 404:
                 if response.status_code == 429:
                     await asyncio.sleep(float(response.json().get("retry_after", 1)))
+                    continue
+                if response.status_code >= 500:
+                    await asyncio.sleep(1)
                     continue
                 response.raise_for_status()
         target = result.thread_id or channel_id

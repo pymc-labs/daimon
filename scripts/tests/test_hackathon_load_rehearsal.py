@@ -155,3 +155,28 @@ async def test_discord_rest_retries_429_after_retry_after() -> None:
         assert calls == 2
     finally:
         await rest.close()
+
+
+@pytest.mark.asyncio
+async def test_discord_rest_retries_transient_read_but_not_post() -> None:
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503) if calls == 1 else httpx.Response(200, json={"id": "ok"})
+
+    rest = DiscordREST("test-token")
+    await rest.client.aclose()
+    rest.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://discord.test"
+    )
+    try:
+        assert await rest.request("GET", "/channels/1/messages") == {"id": "ok"}
+        assert calls == 2
+        calls = 0
+        with pytest.raises(httpx.HTTPStatusError):
+            await rest.request("POST", "/channels/1/messages", body={"content": "x"})
+        assert calls == 1
+    finally:
+        await rest.close()
