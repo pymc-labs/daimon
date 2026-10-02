@@ -20,6 +20,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable, turn_origin_place
 from daimon.adapters.mcp.tools.agents import (
+    AgentInfo,
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
@@ -431,8 +432,9 @@ async def _setup_thread_origin(
 async def test_the_setup_thread_configures_its_channels_own_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """From C's setup thread, named by its verified origin, the built-in sees and
-    configures C's own agent; without the origin, or on an agent key, it stays outside."""
+    """From C's setup thread, named by its verified origin, the built-in sees C's own
+    agent and an admin configures it there; a member hits the pin guard as anywhere
+    else. Without the origin, or on an agent key, it stays outside."""
     world, runtime = await _world(committing_sessionmaker)
     origin = await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=False, executing="agent_shared")
@@ -442,20 +444,26 @@ async def test_the_setup_thread_configures_its_channels_own_agent(
     found = await _get_agent_impl(runtime, builtin, "local", origin_context_id=origin)
     assert found.name == "local"
     world.state.agents["agent_local"]["metadata"]["daimon_account"] = str(world.account_id)
-    updated = await _update_agent_impl(
-        runtime,
-        builtin,
-        "local",
-        model=None,
-        description="notes for the room",
-        system=None,
-        tools=None,
-        mcp_servers=None,
-        skills=None,
-        expected_ma_agent_id="agent_local",
-        origin_context_id=origin,
-    )
-    assert updated.description == "notes for the room", "a member configures C's agent there"
+
+    async def update(auth: AuthIdentity) -> AgentInfo:
+        return await _update_agent_impl(
+            runtime,
+            auth,
+            "local",
+            model=None,
+            description="notes for the room",
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id="agent_local",
+            origin_context_id=origin,
+        )
+
+    with pytest.raises(ToolError, match="No card was posted"):
+        await update(builtin)
+    updated = await update(world.auth(admin=True, executing="agent_shared"))
+    assert updated.description == "notes for the room", "an admin configures C's agent there"
 
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, builtin, "local")
