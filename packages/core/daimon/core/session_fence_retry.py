@@ -28,7 +28,12 @@ class FenceUnavailable(Exception):
 
 
 async def try_fence(
-    db: AsyncSession, key: str | int, *, shared: bool = False, timeout_s: float | None = None
+    db: AsyncSession,
+    key: str | int,
+    *,
+    shared: bool = False,
+    timeout_s: float | None = None,
+    schema_scoped: bool = False,
 ) -> None:
     # turn.__init__ imports preparation and mutation; keep this import lazy.
     from daimon.core.turn.ceiling import TURN_CEILING_S
@@ -42,7 +47,14 @@ async def try_fence(
     try:
         async with asyncio.timeout_at(deadline):
             function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
-            argument = ":key" if isinstance(key, int) else "hashtextextended(:key, 0)"
+            if isinstance(key, int):
+                argument = ":key"
+            elif schema_scoped:
+                # Advisory locks are database-wide; one schema's tenants never
+                # contend with another's (test workers each own a schema).
+                argument = "hashtextextended(current_schema() || ':' || :key, 0)"
+            else:
+                argument = "hashtextextended(:key, 0)"
             acquired = (
                 await db.execute(text(f"SELECT {function}({argument})"), {"key": key})
             ).scalar_one()

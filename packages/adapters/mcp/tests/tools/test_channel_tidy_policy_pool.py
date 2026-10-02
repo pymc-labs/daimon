@@ -155,7 +155,7 @@ async def test_policy_acquisition_is_bounded_and_releases_resources(
                 "pg_advisory_xact_lock_shared" if caller == "writer" else "pg_advisory_xact_lock"
             )
             await holder.execute(
-                text(f"SELECT {function}(:key)"),
+                text(f"SELECT {function}(hashtextextended(current_schema() || ':' || :key, 0))"),
                 {
                     "key": access_policy._policy_write_key(world.tenant_id),
                 },
@@ -211,7 +211,9 @@ async def test_caller_owned_store_transaction_fails_fast_on_busy(
     world = await d._world(committing_sessionmaker)
     async with committing_sessionmaker.begin() as holder:
         await holder.execute(
-            text("SELECT pg_advisory_xact_lock_shared(:key)"),
+            text(
+                "SELECT pg_advisory_xact_lock_shared(hashtextextended(current_schema() || ':' || :key, 0))"
+            ),
             {
                 "key": access_policy._policy_write_key(world.tenant_id),
             },

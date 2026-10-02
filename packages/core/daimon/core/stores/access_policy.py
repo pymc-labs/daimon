@@ -9,7 +9,6 @@ A missing row is the open default. A row that no longer validates raises
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -37,13 +36,10 @@ class AccessPolicyUnreadable(DaimonError):
         self.tenant_id = tenant_id
 
 
-def _policy_write_key(tenant_id: uuid.UUID) -> int:
+def _policy_write_key(tenant_id: uuid.UUID) -> str:
     # Separate namespace from preparation, mutation, support and tidy fences.
-    return int.from_bytes(
-        hashlib.blake2b(f"policy_writes:{tenant_id}".encode(), digest_size=8).digest(),
-        "big",
-        signed=True,
-    )
+    # Taken with schema_scoped=True, so the lock is per schema and tenant.
+    return f"policy_writes:{tenant_id}"
 
 
 # Longer than tidy's 15-second platform effect, but finite for all policy callers.
@@ -60,7 +56,11 @@ class PolicyBusyError(DaimonError):
 async def lock_policy_writes_shared(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
     """Try once; retry_fences must unwind the tidy transaction AND gate on a miss."""
     await try_fence(
-        session, _policy_write_key(tenant_id), shared=True, timeout_s=POLICY_WRITE_TIMEOUT_S
+        session,
+        _policy_write_key(tenant_id),
+        shared=True,
+        timeout_s=POLICY_WRITE_TIMEOUT_S,
+        schema_scoped=True,
     )
 
 
@@ -73,7 +73,12 @@ async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid
     work. Writers never take tidy, post, preparation/mutation or support fences.
     """
     try:
-        await try_fence(session, _policy_write_key(tenant_id), timeout_s=POLICY_WRITE_TIMEOUT_S)
+        await try_fence(
+            session,
+            _policy_write_key(tenant_id),
+            timeout_s=POLICY_WRITE_TIMEOUT_S,
+            schema_scoped=True,
+        )
     except FenceUnavailable:
         raise PolicyBusyError() from None
 
@@ -93,7 +98,12 @@ async def policy_write_transaction(
         session: AsyncSession | None = None
         try:
             session = await stack.enter_async_context(factory.begin())
-            await try_fence(session, _policy_write_key(tenant_id), timeout_s=POLICY_WRITE_TIMEOUT_S)
+            await try_fence(
+                session,
+                _policy_write_key(tenant_id),
+                timeout_s=POLICY_WRITE_TIMEOUT_S,
+                schema_scoped=True,
+            )
         except BaseException:
             if session is not None:
                 await session.rollback()
