@@ -22,6 +22,8 @@ def main() -> int:
         payload = run_setup(args.env_file)
     except (OSError, UnicodeError, ValueError):
         payload = {
+            "schema_version": 1,
+            "status": "error",
             "completed": [],
             "missing": [],
             "next_step": "Choose a readable regular environment file with --env-file.",

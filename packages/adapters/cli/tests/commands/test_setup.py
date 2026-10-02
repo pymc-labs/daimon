@@ -27,7 +27,7 @@ def _env_values(content: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in content.splitlines() if "=" in line)
 
 
-_PERMISSION_BITS = sum(1 << bit for bit in (11, 14, 16, 34, 35, 38))
+_PERMISSION_BITS = sum(1 << bit for bit in (10, 11, 14, 16, 34, 35, 38))
 
 
 def test_setup_generates_valid_secrets_and_schema(
@@ -42,13 +42,18 @@ def test_setup_generates_valid_secrets_and_schema(
     env_file = tmp_path / ".env"
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
-    assert set(payload) == {"completed", "missing", "next_step", "next_optional"}
+    assert set(payload) == {
+        "schema_version",
+        "status",
+        "completed",
+        "missing",
+        "next_step",
+        "next_optional",
+    }
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "needs_input"
     assert payload["next_optional"] == []
-    assert payload["missing"] == [
-        "DAIMON_ANTHROPIC__API_KEY",
-        "DAIMON_MCP__PUBLIC_URL",
-        "DAIMON_DISCORD__BOT_TOKEN",
-    ]
+    assert payload["missing"] == ["DAIMON_ANTHROPIC__API_KEY"]
     assert (
         payload["next_step"]
         == "Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace."
@@ -61,6 +66,7 @@ def test_setup_generates_valid_secrets_and_schema(
     assert values["DAIMON_DATABASE__URL"].endswith(
         f":{values['POSTGRES_PASSWORD']}@localhost:5432/daimon"
     )
+    assert values["DAIMON_MCP__PUBLIC_URL"] == "http://localhost:8765/mcp"
     assert os.stat(env_file).st_mode & 0o777 == 0o600
     for value in values.values():
         assert value not in json.dumps(payload)
@@ -89,6 +95,7 @@ def test_setup_rejects_symlink(tmp_path: Path) -> None:
     assert rc == 1
     assert actual.read_text() == "POSTGRES_PASSWORD=kept\n"
     assert payload["completed"] == []
+    assert payload["status"] == "error"
 
 
 def test_stdlib_bootstrap_matches_installed_cli(
@@ -120,7 +127,7 @@ def test_stdlib_bootstrap_matches_installed_cli(
     assert (
         set(script_payload)
         == set(cli_payload)
-        == {"completed", "missing", "next_step", "next_optional"}
+        == {"schema_version", "status", "completed", "missing", "next_step", "next_optional"}
     )
     assert script_payload["missing"] == cli_payload["missing"]
     assert script_payload["next_step"] == cli_payload["next_step"]
@@ -148,6 +155,7 @@ def test_ready_step_names_seeded_cli_first_reply(
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
     assert payload["missing"] == []
+    assert payload["status"] == "ready"
     assert payload["next_optional"] == [
         {
             "id": "github_app",
@@ -183,7 +191,8 @@ def test_cli_first_reply_step_precedes_optional_discord_setup(
     )
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
-    assert payload["missing"] == ["DAIMON_DISCORD__BOT_TOKEN"]
+    assert payload["missing"] == []
+    assert payload["status"] == "ready"
     assert payload["next_optional"][0]["available"] is False
     assert "docker compose up --build -d postgres init" in payload["next_step"]
     assert "sessions create --json" in payload["next_step"]
@@ -229,7 +238,16 @@ def test_discord_verification_passes_all_checks(
     )
     rc, payload = _invoke("verify", "discord", "--env-file", str(env_file), "--guild-id", "456")
     assert rc == 0
-    assert set(payload) == {"completed", "missing", "failures", "next_step"}
+    assert set(payload) == {
+        "schema_version",
+        "status",
+        "completed",
+        "missing",
+        "failures",
+        "next_step",
+    }
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "passed"
     assert payload["completed"] == [
         "token",
         "message_content_intent",
@@ -289,3 +307,90 @@ def test_discord_verification_reports_missing_human_steps(
     assert rc == 1
     assert payload["missing"] == ["DAIMON_DISCORD__BOT_TOKEN", "guild_id"]
     assert payload["next_step"].startswith("Set DAIMON_DISCORD__BOT_TOKEN")
+
+
+@pytest.mark.parametrize(
+    ("overwrites", "expected_failure"),
+    [
+        ([], None),
+        ([{"id": "456", "type": 0, "allow": "0", "deny": str(1 << 10)}], "view_channel"),
+        (
+            [
+                {"id": "456", "type": 0, "allow": "0", "deny": str(1 << 11)},
+                {"id": "789", "type": 0, "allow": str(1 << 11), "deny": "0"},
+            ],
+            None,
+        ),
+        (
+            [
+                {"id": "789", "type": 0, "allow": str(1 << 10), "deny": "0"},
+                {"id": "123", "type": 1, "allow": "0", "deny": str(1 << 10)},
+            ],
+            "view_channel",
+        ),
+    ],
+)
+def test_discord_channel_effective_overwrites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrites: list[dict[str, Any]],
+    expected_failure: str | None,
+) -> None:
+    monkeypatch.delenv("DAIMON_DISCORD__BOT_TOKEN", raising=False)
+    env_file = _discord_env(tmp_path)
+    _mock_discord(
+        monkeypatch,
+        {
+            "/api/v10/users/@me": (200, {"id": "123", "bot": True}),
+            "/api/v10/oauth2/applications/@me": (200, {"flags": 1 << 19}),
+            "/api/v10/guilds/456/members/123": (200, {"roles": ["789"]}),
+            "/api/v10/guilds/456/roles": (
+                200,
+                [
+                    {"id": "456", "permissions": "0"},
+                    {"id": "789", "permissions": str(_PERMISSION_BITS)},
+                ],
+            ),
+            "/api/v10/channels/999": (
+                200,
+                {"id": "999", "guild_id": "456", "type": 0, "permission_overwrites": overwrites},
+            ),
+        },
+    )
+    rc, payload = _invoke(
+        "verify", "discord", "--env-file", str(env_file), "--guild-id", "456", "--channel-id", "999"
+    )
+    if expected_failure is None:
+        assert rc == 0
+        assert payload["status"] == "passed"
+        assert "channel_permissions" in payload["completed"]
+    else:
+        assert rc == 1
+        assert payload["status"] == "failed"
+        assert any(expected_failure in failure for failure in payload["failures"])
+    assert "test-token" not in json.dumps(payload)
+
+
+def test_discord_channel_must_belong_to_guild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DAIMON_DISCORD__BOT_TOKEN", raising=False)
+    env_file = _discord_env(tmp_path)
+    _mock_discord(
+        monkeypatch,
+        {
+            "/api/v10/users/@me": (200, {"id": "123", "bot": True}),
+            "/api/v10/oauth2/applications/@me": (200, {"flags": 1 << 19}),
+            "/api/v10/guilds/456/members/123": (200, {"roles": ["789"]}),
+            "/api/v10/guilds/456/roles": (
+                200,
+                [{"id": "789", "permissions": str(_PERMISSION_BITS)}],
+            ),
+            "/api/v10/channels/999": (200, {"guild_id": "other", "permission_overwrites": []}),
+        },
+    )
+    rc, payload = _invoke(
+        "verify", "discord", "--env-file", str(env_file), "--guild-id", "456", "--channel-id", "999"
+    )
+    assert rc == 1
+    assert "channel belongs to another guild" in payload["next_step"]

@@ -15,16 +15,9 @@ _HUMAN_STEPS = (
         "DAIMON_ANTHROPIC__API_KEY",
         "Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace.",
     ),
-    (
-        "DAIMON_MCP__PUBLIC_URL",
-        "Set DAIMON_MCP__PUBLIC_URL in .env to the reachable MCP endpoint.",
-    ),
-    (
-        "DAIMON_DISCORD__BOT_TOKEN",
-        "Create a Discord application and bot, then set DAIMON_DISCORD__BOT_TOKEN in .env.",
-    ),
 )
 _DEFAULT_URL = "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"
+_DEFAULT_MCP_URL = "http://localhost:8765/mcp"
 _READY_STEP = (
     "Run `docker compose up --build -d postgres init`. For a CLI first reply, run "
     "`docker compose run --rm --no-deps --entrypoint daimon init sessions create --json`, "
@@ -85,7 +78,7 @@ def _write_env(path: Path, content: str) -> None:
         temp.unlink(missing_ok=True)
 
 
-def run_setup(env_file: Path) -> dict[str, list[str] | list[dict[str, str | bool]] | str]:
+def run_setup(env_file: Path) -> dict[str, int | list[str] | list[dict[str, str | bool]] | str]:
     """Prepare missing secrets; return a stable, secret-free JSON payload."""
     content = read_env(env_file)
     values = values_from_env(content)
@@ -109,15 +102,21 @@ def run_setup(env_file: Path) -> dict[str, list[str] | list[dict[str, str | bool
             f"postgresql+asyncpg://daimon:{values['POSTGRES_PASSWORD']}@localhost:5432/daimon",
         )
         completed.append("DAIMON_DATABASE__URL")
+    if not values.get("DAIMON_MCP__PUBLIC_URL"):
+        content = _set_value(content, "DAIMON_MCP__PUBLIC_URL", _DEFAULT_MCP_URL)
+        values["DAIMON_MCP__PUBLIC_URL"] = _DEFAULT_MCP_URL
+    completed.append("DAIMON_MCP__PUBLIC_URL")
     if not env_file.exists() or content != read_env(env_file):
         _write_env(env_file, content)
     missing = [
         name for name, _ in _HUMAN_STEPS if not values.get(name) and not os.environ.get(name)
     ]
-    required_missing = {"DAIMON_ANTHROPIC__API_KEY", "DAIMON_MCP__PUBLIC_URL"} & set(missing)
+    required_missing = set(missing)
     next_step = next((step for name, step in _HUMAN_STEPS if name in required_missing), _READY_STEP)
     next_optional = [_GITHUB_OPTIONAL.copy()] if not required_missing else []
     return {
+        "schema_version": 1,
+        "status": "needs_input" if required_missing else "ready",
         "completed": completed,
         "missing": missing,
         "next_step": next_step,

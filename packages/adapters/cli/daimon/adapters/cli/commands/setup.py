@@ -18,6 +18,7 @@ setup_app = typer.Typer(
 _DISCORD_API = "https://discord.com/api/v10"
 _MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19)
 _PERMISSIONS = {
+    "view_channel": 1 << 10,
     "send_messages": 1 << 11,
     "embed_links": 1 << 14,
     "read_message_history": 1 << 16,
@@ -48,6 +49,8 @@ def setup(
     except (OSError, UnicodeError, ValueError):
         _emit(
             {
+                "schema_version": 1,
+                "status": "error",
                 "completed": [],
                 "missing": [],
                 "next_step": "Choose a readable regular environment file with --env-file.",
@@ -92,10 +95,55 @@ def _get(client: httpx.Client, path: str) -> tuple[dict[str, Any] | list[Any] | 
     return cast(dict[str, Any] | list[Any], data), None
 
 
+def _channel_permissions(
+    base: int,
+    overwrites: list[Any],
+    *,
+    guild_id: str,
+    role_ids: set[str],
+    user_id: str,
+) -> int:
+    """Apply Discord's everyone, combined role, then member overwrites."""
+    if base & _ADMINISTRATOR:
+        return base
+    parsed: list[tuple[str, int, int, int]] = []
+    for entry in overwrites:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid channel overwrite")
+        data = cast(dict[str, Any], entry)
+        try:
+            target = data["id"]
+            kind = data["type"]
+            allow = int(data["allow"])
+            deny = int(data["deny"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid channel overwrite") from exc
+        if not isinstance(target, str) or kind not in (0, 1) or allow < 0 or deny < 0:
+            raise ValueError("invalid channel overwrite")
+        parsed.append((target, kind, allow, deny))
+    permissions = base
+    for target, kind, allow, deny in parsed:
+        if kind == 0 and target == guild_id:
+            permissions = (permissions & ~deny) | allow
+    role_allow = role_deny = 0
+    for target, kind, allow, deny in parsed:
+        if kind == 0 and target != guild_id and target in role_ids:
+            role_allow |= allow
+            role_deny |= deny
+    permissions = (permissions & ~role_deny) | role_allow
+    for target, kind, allow, deny in parsed:
+        if kind == 1 and target == user_id:
+            permissions = (permissions & ~deny) | allow
+    return permissions
+
+
 @verify_app.command("discord")
 def verify_discord(
     guild_id: Annotated[
         str | None, typer.Option("--guild-id", help="Target Discord server ID.")
+    ] = None,
+    channel_id: Annotated[
+        str | None, typer.Option("--channel-id", help="Optional test text channel ID.")
     ] = None,
     env_file: Annotated[
         Path, typer.Option("--env-file", help="Dotenv file containing the bot token.")
@@ -121,6 +169,10 @@ def verify_discord(
         failures.append("Pass --guild-id GUILD_ID for the server where the bot should run.")
     elif not guild_id.isdecimal():
         failures.append("--guild-id must be a numeric Discord server ID.")
+    if channel_id and not channel_id.isdecimal():
+        failures.append("--channel-id must be a numeric Discord channel ID.")
+    elif channel_id and not guild_id:
+        failures.append("Pass --guild-id GUILD_ID with --channel-id.")
     if token:
         with httpx.Client(
             base_url=_DISCORD_API, headers={"Authorization": f"Bot {token}"}, timeout=10.0
@@ -210,9 +262,61 @@ def verify_discord(
                                         )
                                     else:
                                         completed.append("guild_permissions")
+                                if channel_id and channel_id.isdecimal():
+                                    channel, error = _get(client, f"/channels/{channel_id}")
+                                    if error:
+                                        failures.append(f"Channel permissions: {error}")
+                                    elif not isinstance(channel, dict):
+                                        failures.append(
+                                            "Channel permissions: unexpected channel response."
+                                        )
+                                    elif channel.get("guild_id") != guild_id:
+                                        failures.append(
+                                            "Channel permissions: channel belongs to another guild."
+                                        )
+                                    else:
+                                        overwrites = channel.get("permission_overwrites")
+                                        if not isinstance(overwrites, list):
+                                            failures.append(
+                                                "Channel permissions: overwrites unavailable."
+                                            )
+                                        else:
+                                            try:
+                                                effective = _channel_permissions(
+                                                    permissions,
+                                                    cast(list[Any], overwrites),
+                                                    guild_id=guild_id,
+                                                    role_ids=role_ids,
+                                                    user_id=str(user["id"]),
+                                                )
+                                            except ValueError:
+                                                failures.append(
+                                                    "Channel permissions: invalid overwrites."
+                                                )
+                                            else:
+                                                absent = sorted(
+                                                    name
+                                                    for name, bit in _PERMISSIONS.items()
+                                                    if not effective & bit
+                                                )
+                                                if absent:
+                                                    failures.append(
+                                                        "Missing channel permissions in "
+                                                        f"{channel_id}: {', '.join(absent)}. "
+                                                        "Update channel overwrites for the bot."
+                                                    )
+                                                else:
+                                                    completed.append("channel_permissions")
     next_step = failures[0] if failures else "Discord verification passed."
     _emit(
-        {"completed": completed, "missing": missing, "failures": failures, "next_step": next_step}
+        {
+            "schema_version": 1,
+            "status": "failed" if failures else "passed",
+            "completed": completed,
+            "missing": missing,
+            "failures": failures,
+            "next_step": next_step,
+        }
     )
     if failures:
         raise typer.Exit(1)
