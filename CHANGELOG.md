@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/here` on Discord and Slack shows a fixed, caller-filtered card for the answering agent, channel access, credential names, and other routing. The `where_am_i` MCP tool returns the same card for conversational questions.
+
 ### Fixed
 
 - Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations.

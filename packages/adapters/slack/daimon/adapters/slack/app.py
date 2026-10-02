@@ -97,6 +97,7 @@ from daimon.adapters.slack.gating import (
     mentions_bot,
 )
 from daimon.adapters.slack.help import handle_help_command
+from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
@@ -940,6 +941,8 @@ class SlackApp:
                 self._spawn(handle_dm_command(self.runtime, payload))
             elif cmd == "/help":
                 self._spawn(handle_help_command(self.runtime, payload))
+            elif cmd == "/here":
+                self._spawn(handle_here_command(self.runtime, payload))
             elif cmd == "/routines":
                 self._spawn(handle_routines_command(self.runtime, payload))
             elif cmd == "/billing":

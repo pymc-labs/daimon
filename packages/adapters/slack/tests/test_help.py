@@ -28,7 +28,7 @@ def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None
     # Flatten to a single string to allow text to span across dicts / nested keys.
     all_text = str(blocks)
 
-    for cmd in ("/routines", "/billing", "/privacy", "/help", "/agent-setup"):
+    for cmd in ("/routines", "/billing", "/privacy", "/help", "/here", "/agent-setup"):
         assert cmd in all_text, (
             f"build_help_blocks() output must contain {cmd!r} "
             f"(found keys: {[b.get('text', {}).get('text', '') if isinstance(b.get('text'), dict) else '' for b in blocks]!r})"

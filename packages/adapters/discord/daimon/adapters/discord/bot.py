@@ -618,12 +618,14 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.help import HelpCog
+        from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
+        await self.add_cog(HereCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))
