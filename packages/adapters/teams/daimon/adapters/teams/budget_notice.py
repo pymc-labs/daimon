@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
+from daimon.adapters.teams.channel_admin_groups import stored_team_owners
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -42,4 +43,7 @@ def with_budget_notifier(runtime: TeamsRuntime, direct: DirectChats | None) -> T
     if direct is None or not isinstance(real, TeamsRuntime) or not isinstance(deps, TurnDeps):
         return runtime
     notifier = teams_budget_notifier(real, direct)
-    return replace(real, turn_deps=replace(deps, budget_notifier=notifier))
+    return replace(
+        real,
+        turn_deps=replace(deps, budget_notifier=notifier, group_members=stored_team_owners(real)),
+    )
