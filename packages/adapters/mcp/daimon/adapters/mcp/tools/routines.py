@@ -45,7 +45,12 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client, split_thread
+from daimon.adapters.mcp.tools.teams._directory import (
+    graph_for,
+    locate_channel,
+    require_client,
+    split_thread,
+)
 from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_isolation import routine_destination_channel
@@ -58,6 +63,7 @@ from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.teams_graph import GraphUnavailable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -228,9 +234,12 @@ async def _resolve_slack_destination(
 async def _resolve_teams_destination(
     runtime: McpRuntime, auth: AuthIdentity, *, destination_id: str
 ) -> str:
-    """The destination's channel, in a team daimon is in, with the caller on its roster."""
+    """The destination's channel, in a team daimon is in, with the caller on its roster.
+
+    A thread's root must exist; when Graph cannot be read, delivery decides.
+    """
     client, caller = require_client(runtime, auth)
-    channel_id, _ = split_thread(destination_id)
+    channel_id, root = split_thread(destination_id)
     ref = await locate_channel(runtime, auth, client, channel_id)
     try:
         is_member = await client.is_member(ref.channel_id, caller)
@@ -243,6 +252,14 @@ async def _resolve_teams_destination(
             f"you are not in {ref.channel_name}, so a routine cannot deliver there for you. "
             "Nothing was saved."
         )
+    if root is not None:
+        try:
+            await graph_for(client).get_message(ref.group_id, ref.channel_id, root)
+        except GraphUnavailable as err:
+            if err.status == 404:
+                raise ToolError(
+                    f"no thread {root} in {ref.channel_name}. Nothing was saved."
+                ) from err
     return ref.channel_id
 
 
@@ -282,9 +299,14 @@ async def _check_destination(
         )
         channel_id = destination_id
     elif platform == "teams":
-        # A thread is checked as its channel; Teams has no categories.
-        parent_channel_id, category_id = None, None
-        channel_id = await _resolve_teams_destination(runtime, auth, destination_id=destination_id)
+        # Teams has no categories; a thread is checked as itself under its channel.
+        category_id = None
+        parent_channel_id = await _resolve_teams_destination(
+            runtime, auth, destination_id=destination_id
+        )
+        channel_id = destination_id
+        if kind == "channel":
+            parent_channel_id = None
     else:
         parent_channel_id, category_id = await _resolve_slack_destination(
             runtime, auth, kind=kind, destination_id=destination_id
