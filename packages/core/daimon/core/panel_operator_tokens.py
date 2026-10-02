@@ -1,7 +1,8 @@
 """Operator tokens a server admin mints, lists and revokes from a setup panel.
 
 The panel offers only the tenant scopes; `promo:create` acts for the whole
-deployment, so only `daimon mcp mint-operator-token` mints it. The adapter
+deployment, so only `daimon mcp mint-operator-token` mints it, and a token
+carrying it is neither listed nor revoked here. The adapter
 checks the clicker is a server admin live before calling in; minting stores
 that role on their account, as a turn does, because the verifier reads the
 stored role on every call.
@@ -97,19 +98,26 @@ async def mint_panel_operator_token(
     )
 
 
+def _is_panel_token(row: McpTokenRow) -> bool:
+    """A tenant-scoped operator token; one with a deployment scope belongs to the CLI."""
+    return row.kind == "operator" and set(row.scopes) <= set(PANEL_SCOPES)
+
+
 async def list_panel_operator_tokens(
     session: AsyncSession, *, tenant_id: uuid.UUID, now: dt.datetime
 ) -> list[McpTokenRow]:
-    """The tenant's live operator tokens, newest first. Rows hold no secret."""
-    return await list_mcp_tokens(session, now=now, tenant_id=tenant_id, kind="operator")
+    """The tenant's live tenant-scoped operator tokens, newest first. Rows hold no secret."""
+    rows = await list_mcp_tokens(session, now=now, tenant_id=tenant_id, kind="operator")
+    return [row for row in rows if _is_panel_token(row)]
 
 
 async def revoke_panel_operator_token(
     session: AsyncSession, *, tenant_id: uuid.UUID, jti: uuid.UUID, now: dt.datetime
 ) -> bool:
-    """Revoke one of the tenant's live operator tokens; False when there is none to revoke."""
+    """Revoke one of the tenant's live tenant-scoped operator tokens; False when there is
+    none to revoke. A token with a deployment scope is revoked only with the CLI."""
     row = await get_mcp_token(session, jti=jti)
-    if row is None or row.tenant_id != tenant_id or row.kind != "operator":
+    if row is None or row.tenant_id != tenant_id or not _is_panel_token(row):
         return False
     return await revoke_mcp_token(session, jti=jti, now=now) is not None
 

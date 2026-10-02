@@ -1391,7 +1391,8 @@ one or more scopes, a TTL of 30 days by default and at most 90 and, with
 `promo:create`, an optional `--max-issued-usd` ceiling in whole cents. Server
 admins also mint, list and revoke them from Who answers where on the Discord,
 Slack and Teams setup panels (`core/panel_operator_tokens.py`): tenant scopes
-only, never `promo:create`, 30 days, shown once; the live admin check is
+only, never `promo:create`, 30 days, shown once, and they list and revoke
+only tokens within those scopes; the live admin check is
 stored as the account's role, as a turn stores it, so the verifier admits it. `daimon mcp list-tokens` and
 `revoke-token` manage every registered token, and `set-token-scopes --jti ...
 --scope ...` narrows an operator token to the scopes given: it only removes
