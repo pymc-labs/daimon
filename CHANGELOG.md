@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `get_tenant_summary` and `daimon channels list --json` list the tenant's live timed promo credit (`timed_credit`: what is left of each grant and when it ends). `daimon channels list --json` also gives each channel's `sealed` and `protected` flags, which an operator can already read with `daimon tenants access-policy get`; the MCP tool leaves both keys out.
 - In a channel with an active budget, the Discord and Slack status card's summary shows what the budget has left instead of the tenant balance (a DM moved with `/dm` shows its source channel's).
 - An admin's `/billing` panel on Discord, Slack and Teams lists the channel budgets, most used first, with each one's spend and share used. Members see only the invoking channel's budget, as before.
 - Discord opening mentions now get a parent-channel notice when thread naming or creation takes more than three seconds. The notice becomes a thread link or retry guidance; `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S=0` posts it immediately. Discord `runtime.health` now counts 429 retries by route and records the longest retry wait in each window.

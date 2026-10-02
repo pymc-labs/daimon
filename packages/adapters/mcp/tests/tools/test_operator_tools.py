@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import pydantic_core
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -52,6 +53,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope, scope_tag
+from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_credit import PromoRedeemed, redeem_promo_code
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.access_policy import set_access_policy
@@ -264,6 +267,56 @@ async def test_tenant_summary_marks_isolated_channels(
     assert [(c.channel_id, c.isolated) for c in summary.channels] == [("c3", True)], (
         "an isolated channel is listed and marked even with no other setting"
     )
+
+
+async def test_tenant_summary_omits_seals_and_protection_and_lists_timed_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    now = datetime.now(UTC)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c3",),
+                protected_channel_ids=("c3",),
+                isolated_channel_ids=("c3",),
+                agent_channel_pins={"local": ("c3",)},
+            ),
+        )
+        terms = build_promo_code_terms(
+            amount_usd=Decimal("7"),
+            timed=True,
+            credit_starts_at=now - timedelta(hours=1),
+            credit_ends_at=now + timedelta(days=1),
+        )
+        await promo_codes.insert_promo_code(
+            session, code_hash=hash_promo_code(normalize_promo_code("TIMEDCREDIT1234")), terms=terms
+        )
+    redeemed = await redeem_promo_code(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=None,
+        code="TIMEDCREDIT1234",
+        now=now,
+    )
+    assert isinstance(redeemed, PromoRedeemed), redeemed
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+    wire = pydantic_core.to_jsonable_python(summary)
+    assert set(wire["channels"][0]) == {
+        "channel_id",
+        "agent_name",
+        "environment_name",
+        "isolated",
+        "admins",
+        "budget",
+    }, "seal and protection are omitted, not sent as false, for a caller that can't read them"
+    assert [(c.remaining_usd, c.ends_at) for c in summary.timed_credit] == [
+        ("7.00", terms.credit_ends_at.isoformat() if terms.credit_ends_at else None)
+    ], "the live timed credit and when it ends"
 
 
 async def test_channel_isolation_requires_channels_write(

@@ -48,7 +48,8 @@ def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Lists every channel with its own agent or environment setting, a
         spending budget, channel admins or isolation, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
-        limit, window and spend (``budget`` is null without one). Money is a
-        decimal string.
+        limit, window and spend (``budget`` is null without one), and the
+        live timed promo credit with when each grant ends. Money is a decimal
+        string.
         """
         return await _get_tenant_summary_impl(runtime, await _auth(ctx))

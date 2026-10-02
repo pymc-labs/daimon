@@ -384,11 +384,17 @@ def channels_list_command(
 async def channels_list(
     *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, as_json: bool
 ) -> None:
-    """The CLI twin of the MCP `get_tenant_summary` tool, with the same JSON."""
+    """The CLI twin of the MCP `get_tenant_summary` tool: the same JSON plus each channel's
+    `sealed` and `protected`."""
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     async with rt.sessionmaker() as session:
+        # An operator reads the whole access policy anyway (`tenants access-policy get`).
         summary = await load_tenant_summary(
-            session, tenant_id=tenant_id, default=rt.deployment_default, now=datetime.now(UTC)
+            session,
+            tenant_id=tenant_id,
+            default=rt.deployment_default,
+            now=datetime.now(UTC),
+            with_access=True,
         )
     if as_json:
         console.print(json.dumps(asdict(summary)), soft_wrap=True, highlight=False, markup=False)

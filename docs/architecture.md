@@ -1316,7 +1316,10 @@ registered and expire too, while older jti-less ones keep working.
 `get_tenant_summary` lists every channel with a default, a budget, admins or
 isolation, and `channels[].isolated` says whether it is isolated. Its read is
 `daimon.core.tenant_summary`, which `daimon channels list PLATFORM
-WORKSPACE_ID [--json]` prints too, with the same JSON.
+WORKSPACE_ID [--json]` prints too, with the same JSON plus each channel's
+`sealed` and `protected`. The MCP tool omits those two keys: no other MCP or
+chat path shows every channel's seal or protection. `timed_credit` lists the
+live timed promo credit.
 `set_channel_isolation` with an operator token acts as that admin: the copy
 it may make is an admin's fork, and its seal and pin writes are the same as
 the panel's.

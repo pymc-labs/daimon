@@ -25,12 +25,14 @@ from daimon.adapters.cli.commands.channels import (
     channels_isolate,
     channels_list,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import channel_budgets
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -527,3 +529,39 @@ async def test_list_shows_the_balance_and_each_configured_channel(
     text = _out(table)
     assert "balance $0.00 (prepaid)" in text, "the table is headed by the balance"
     assert "$5.00" in text and "(monthly)" in text, "and shows the budget"
+
+
+async def test_list_json_carries_each_channels_seal_and_protection(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An operator reads the access policy anyway, so the CLI adds both flags."""
+    rt = build_cli_runtime(db_session_factory)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id="T1")
+    async with db_session_factory.begin() as s:
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("C1",),
+                protected_channel_ids=("C2",),
+                isolated_channel_ids=("C1",),
+                agent_channel_pins={"a": ("C1",)},
+            ),
+        )
+
+    await channels_admins_set(
+        rt=rt,
+        platform="slack",
+        workspace_id="T1",
+        console=_console(),
+        channel_id="C2",
+        roles=[],
+        users=["U1"],
+        as_json=False,
+    )
+    console = _console()
+    await channels_list(rt=rt, platform="slack", workspace_id="T1", console=console, as_json=True)
+    channels = {c["channel_id"]: c for c in json.loads(_out(console))["channels"]}
+    assert (channels["C1"]["sealed"], channels["C1"]["protected"]) == (True, False)
+    assert (channels["C2"]["sealed"], channels["C2"]["protected"]) == (False, True)
