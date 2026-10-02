@@ -555,8 +555,11 @@ origin is `owner/repo/path@branch`, never the URL as typed) and the adding
 account, so no repo sync replaces, deletes or re-attaches it, and removing the
 skill forgets it. `add_skill` previews first and adds only when called again
 with the preview's hash, which is bound to the target agent, and only after the
-person presses Approve on the confirmation card (below). Without tool safety
-there is no card, so a chat confirm adds nothing and points to Add skill in
+person presses Approve on the confirmation card (below). The server checks the
+card can exist: the confirm needs a verified origin whose live session runs the
+origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`).
+Without that, as with tool safety off, an `agent_chat` session or one created
+before the card, a chat confirm adds nothing and points to Add skill in
 the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
@@ -566,8 +569,11 @@ on agents nobody else uses. Sharing is read as widely as a key change
 (`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
 default, or another member's routine or live session. A pinned agent takes a
 chat add only from a verified origin in its channels (`require_pin_write_access`
-with the card's origin); `remove_skill`, like the other direct configuration
-tools, passes none. The target resolves from the turn's channel, so an
+with the card's origin), and a panel add only from its channels' panels
+(`pin_refusal` with the panel's channel and thread) at the button, the submit
+and the Add; `remove_skill`, like the other direct configuration tools, passes
+none. Pins and sharing are checked again on the fresh agent just before the
+upload and the attach, and refusals never name another agent. The target resolves from the turn's channel, so an
 isolated channel's setup thread reaches only its own agents and nothing outside
 reaches them. Their uploads are hidden outside it like its other agent-scoped
 skills, keyed by the upload row's agent.
@@ -650,7 +656,7 @@ one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Gating is fixed when a session is created, so a
 session started before tool safety was turned on keeps running ungated until
-it is replaced. The
+it is replaced; `add_skill` refuses in one. The
 exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
