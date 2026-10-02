@@ -7,6 +7,7 @@ C (``ROOM``) is isolated: sealed, with its default agent ``local`` pinned to it.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from unittest.mock import MagicMock
 
@@ -17,10 +18,11 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable, turn_origin_place
 from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
+    _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
@@ -49,6 +51,7 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
@@ -67,6 +70,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 ROOM = "111111111111111111"
 OTHER = "222222222222222222"
 NEW_ROOM = "333333333333333333"
+SETUP_THREAD = "555555555555555555"
 
 
 class _World:
@@ -397,3 +401,121 @@ async def test_posts_and_direct_messages_stay_on_their_side(
     await require_channel_writable(runtime, world.auth(), channel_id=ROOM)  # no agent: an operator
     with pytest.raises(ToolError, match="sends no direct messages"):
         await send_direct_message_impl(runtime, inside, recipient_id="123", content="hi")
+
+
+async def _setup_thread_origin(
+    sessionmaker: async_sessionmaker[AsyncSession], world: _World
+) -> str:
+    """A setup conversation in C, answered by the built-in (``shared`` here)."""
+    now = dt.datetime.now(dt.UTC)
+    async with sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id=SETUP_THREAD,
+            responder_ma_agent_id="agent_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id="agent_local",
+            configuration_target_name="local",
+            role=Role.USER,
+            expires_at=now + dt.timedelta(minutes=10),
+            now=now,
+            is_setup=True,
+        )
+    return str(origin.id)
+
+
+async def test_the_setup_thread_configures_its_channels_own_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """From C's setup thread, named by its verified origin, the built-in sees and
+    configures C's own agent; without the origin, or on an agent key, it stays outside."""
+    world, runtime = await _world(committing_sessionmaker)
+    origin = await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(admin=False, executing="agent_shared")
+
+    listed = await _list_agents_impl(runtime, builtin, None, origin)
+    assert [a.name for a in listed] == ["local"], "the setup thread sees C's own agents"
+    found = await _get_agent_impl(runtime, builtin, "local", origin_context_id=origin)
+    assert found.name == "local"
+    world.state.agents["agent_local"]["metadata"]["daimon_account"] = str(world.account_id)
+    updated = await _update_agent_impl(
+        runtime,
+        builtin,
+        "local",
+        model=None,
+        description="notes for the room",
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id="agent_local",
+        origin_context_id=origin,
+    )
+    assert updated.description == "notes for the room", "a member configures C's agent there"
+
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, builtin, "local")
+    agent_key = AuthIdentity(
+        account_id=world.account_id,
+        tenant_id=world.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="444444444444444444",
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_shared"),
+    )
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, agent_key, "local", origin_context_id=origin)
+
+
+async def test_the_setup_thread_is_held_to_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The built-in answering C's setup thread posts its cards into the thread and
+    schedules C's agent into C, but sends nothing outside C."""
+    world, runtime = await _world(committing_sessionmaker)
+    origin_id = await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(admin=False, executing="agent_shared")
+    async with committing_sessionmaker() as session:
+        row = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            now=dt.datetime.now(dt.UTC),
+        )
+    assert row is not None
+    origin = turn_origin_place(row)
+
+    await require_channel_writable(
+        runtime, builtin, channel_id=SETUP_THREAD, parent_channel_id=ROOM, origin=origin
+    )
+    with pytest.raises(ToolError, match="only its own agents post"):
+        await require_channel_writable(
+            runtime, builtin, channel_id=SETUP_THREAD, parent_channel_id=ROOM
+        )
+    with pytest.raises(ToolError, match="nothing said here is posted"):
+        await require_channel_writable(runtime, builtin, channel_id=OTHER, origin=origin)
+
+    async def destination(
+        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+    ) -> str | None:
+        return kwargs["destination_id"]
+
+    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    routine = await _create_routine_impl(
+        runtime,
+        builtin,
+        agent_name="local",
+        cron_expr="0 * * * *",
+        timezone="UTC",
+        trigger_message="hi",
+        destination_kind="channel",
+        destination_id=ROOM,
+        origin_context_id=origin_id,
+    )
+    assert routine.agent_name == "local", "C's agent is scheduled into C from its setup thread"

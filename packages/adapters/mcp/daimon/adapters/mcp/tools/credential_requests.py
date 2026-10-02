@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agents import (
@@ -40,7 +41,11 @@ from daimon.adapters.mcp.tools.reachability import (
     channel_admin_caller,
     target_facts,
 )
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    origin_channel_id,
+    require_turn_origin,
+    resolve_setup_agent,
+)
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -258,7 +263,11 @@ async def _resolve_agent_uuid(
         elif agent_name == origin.responder_name:
             expected_ma_agent_id = origin.responder_ma_agent_id
     ma_agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
     agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id))
     return agent_uuid, ma_agent
@@ -430,6 +439,8 @@ async def _mint_and_post(
     # responder name is the headless case, where the built-in agent's name is
     # the only honest thing to print.
     responder_name = origin.responder_name or "Daimon"
+    # The card lands in the origin's own conversation, so it is posted from there.
+    origin_place = turn_origin_place(origin)
     async with runtime.session_factory.begin() as session:
         active_origin = await get_active_origin(
             session,
@@ -494,9 +505,12 @@ async def _mint_and_post(
                 responder_name=responder_name,
                 mcp_server_url=mcp_server_url,
                 branch=branch,
+                origin=origin_place,
             )
         elif auth.platform == "teams":
-            message_id = await _post_teams_credential_card_impl(runtime, auth, row=row)
+            message_id = await _post_teams_credential_card_impl(
+                runtime, auth, row=row, origin=origin_place
+            )
         else:
             message_id = await _post_credential_button_impl(
                 runtime,
@@ -511,6 +525,7 @@ async def _mint_and_post(
                 responder_name=responder_name,
                 mcp_server_url=mcp_server_url,
                 branch=branch,
+                origin=origin_place,
             )
     except ToolError as exc:
         # The row already exists (single-use + TTL bound it regardless), but

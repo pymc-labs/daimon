@@ -191,8 +191,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is built in or answers elsewhere is refused with the reason, unless
   the admin asks for a copy, made without credentials. Inside, only the
   channel's own agents run, post, read and take routines or bindings, with
-  writable memory; they are hidden elsewhere, post nowhere else, send no DMs,
-  and `/dm` there is refused. The panel shows the channel as private,
+  writable memory, and only they read its sessions; they are hidden
+  elsewhere, post nowhere else, send no DMs, and `/dm` there is refused. A
+  conversation in the channel keeps its posts, cards and routines inside it,
+  while its setup thread can still configure the channel's agent. The CLI
+  refuses a pin or seal change that would break an isolated channel. The panel shows the channel as private,
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.

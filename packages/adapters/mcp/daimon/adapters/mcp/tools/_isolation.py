@@ -134,13 +134,16 @@ async def load_caller_isolation(
     (a thread's parent) when the tool knows the turn's channel from its verified origin.
 
     A chat turn's own agent counts (only an isolated channel's own agents run
-    there); an agent key's does not, unless the key is bound to the channel.
+    there); an agent key's does not, and neither does a location, unless the
+    key is bound to the channel.
     """
     policy = await load_isolation(runtime, auth.tenant_id)
     if not policy.isolated_channel_ids:
         return OPEN_ISOLATION
     if agents is None:
         agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    if auth.agent_id is not None:
+        location_channel_id = None
     inside = isolated_channel_of(policy, location_channel_id) or isolated_channel_of(
         policy, token_channel_id(auth)
     )

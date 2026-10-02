@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import CallerIsolation, load_caller_isolation
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
@@ -36,13 +37,14 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.setup_target import origin_channel_id
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_isolation import routine_destination_channel
 from daimon.core.cron import next_slot_at_or_after
@@ -306,9 +308,11 @@ def _check_agent_pin(
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
     destination_channel_id: str | None,
+    origin: Place | None = None,
 ) -> None:
     """Refuse a routine that would run a pinned agent outside its channels, or
-    another agent into an isolated channel (`authorize(SAVE_ROUTINE)`).
+    another agent into an isolated channel (`authorize(SAVE_ROUTINE)`). One
+    saved from a verified ``origin`` inside an isolated channel stays in it.
 
     A pinned agent's routine must post straight into one of its pinned
     channels: the scheduler can't resolve a Discord thread's parent at fire
@@ -333,8 +337,16 @@ def _check_agent_pin(
         surface=Surface.ROUTINE,
         agent=agent,
         place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
+        origin=origin,
     )
     if decision.reason == "channel_isolated":
+        if origin is not None and isolated_channel_of(
+            policy, origin.channel_id, origin.parent_channel_id
+        ):
+            raise ToolError(
+                "This conversation is in an isolated channel, so its routines post only "
+                "into that channel. Nothing was saved."
+            )
         raise ToolError(
             "That channel is isolated, so only its own agents post there. Nothing was saved."
         )
@@ -430,7 +442,10 @@ async def _create_routine_impl(
             runtime.session_factory, auth, origin_context_id
         )
 
-    caller = await load_caller_isolation(runtime, auth)
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    caller = await load_caller_isolation(
+        runtime, auth, location_channel_id=origin_channel_id(origin)
+    )
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
@@ -446,6 +461,7 @@ async def _create_routine_impl(
         kind=destination_kind,
         destination_id=destination_id,
         destination_channel_id=destination_channel_id,
+        origin=turn_origin_place(origin) if origin is not None else None,
     )
     agent_id = match.id
     await _require_agent_in_scope(

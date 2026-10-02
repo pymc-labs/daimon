@@ -6,6 +6,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.core.authz import Place
 from fastmcp.exceptions import ToolError
 
 
@@ -127,6 +128,8 @@ async def _require_discord_channel_writable(  # pyright: ignore[reportUnusedFunc
     runtime: McpRuntime,
     auth: AuthIdentity,
     channel: discord.abc.GuildChannel | discord.Thread,
+    *,
+    origin: Place | None = None,
 ) -> None:
     """The tenant write guard for a Discord target: the channel, the parent of a
     thread, and the category either sits in. A thread whose parent can't be
@@ -140,6 +143,7 @@ async def _require_discord_channel_writable(  # pyright: ignore[reportUnusedFunc
             channel_id=str(channel.id),
             parent_channel_id=str(parent.id),
             category_id=str(parent.category_id) if parent.category_id is not None else None,
+            origin=origin,
         )
         return
     category_id = channel.category_id
@@ -148,4 +152,5 @@ async def _require_discord_channel_writable(  # pyright: ignore[reportUnusedFunc
         auth,
         channel_id=str(channel.id),
         category_id=str(category_id) if category_id is not None else None,
+        origin=origin,
     )

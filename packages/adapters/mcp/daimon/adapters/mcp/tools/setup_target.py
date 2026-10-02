@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
@@ -58,10 +59,14 @@ async def resolve_setup_agent(
     name: str,
     expected_ma_agent_id: str | None = None,
     require_identity: bool = True,
+    location_channel_id: str | None = None,
 ) -> BetaManagedAgentsAgent:
     """Resolve a name without adopting an ambiguous or recreated namesake.
 
     An agent the caller's channel isolation hides resolves as missing.
+    ``location_channel_id`` is the turn's channel from a verified origin
+    (`load_caller_isolation`), so a setup thread in an isolated channel sees
+    that channel's own agents.
     """
     if require_identity and auth.platform in CHAT_PLATFORMS and expected_ma_agent_id is None:
         raise ToolError(
@@ -69,7 +74,7 @@ async def resolve_setup_agent(
             "Which current agent should I configure? Nothing was changed."
         )
     agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_isolation(runtime, auth, location_channel_id=location_channel_id)
     agents = [agent for agent in agents if caller.sees_agent(agent)]
     if expected_ma_agent_id is not None:
         for agent in agents:
@@ -85,6 +90,21 @@ async def resolve_setup_agent(
             "Which current agent should I configure? Nothing was changed."
         )
     return agents[0]
+
+
+async def get_chat_origin(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> TurnOriginRow | None:
+    """A chat turn's verified origin (`get_verified_origin`), or None. An agent
+    key's calls stay outside every channel whatever origin they name."""
+    if auth.agent_id is not None:
+        return None
+    return await get_verified_origin(runtime, auth, origin_context_id)
+
+
+def origin_channel_id(origin: TurnOriginRow | None) -> str | None:
+    """The channel a verified origin runs in (a thread's parent), for `location_channel_id`."""
+    return origin.parent_channel_id if origin is not None else None
 
 
 async def _set_setup_target_impl(

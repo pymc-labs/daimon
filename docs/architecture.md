@@ -469,7 +469,14 @@ messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
-read-only for any other agent there, as in a sealed channel. Isolation
+read-only for any other agent there, as in a sealed channel. A session
+whose seal ids lie in C is read and continued only by C's own agents
+(`READ_SESSION`, `CONTINUE_SESSION`). A verified turn origin in C holds the
+call to C whatever agent runs it (`origin`): its posts, cards and routines
+stay in C and it sends no direct messages; only its setup thread may still
+configure C's own agent. A thread routine saved without its parent channel
+is treated as inside any isolated channel until delivery places it
+(`Place.parent_unresolved`). Isolation
 constrains agents: a caller with no executing agent (an operator token, the
 CLI) may still post into C, which is input, not a leak; the seal keeps reads
 inside.
@@ -477,7 +484,8 @@ inside.
 What callers see follows from where they stand. An MCP call is inside C when
 its verified turn origin is in C, when it carries a channel-bound coding-tool
 token for C, or when its chat turn's agent is one of C's; an agent key is
-never inside by its agent alone. From outside, C's agents are missing from
+never inside by its agent alone. The roster, agent and key tools take the
+turn's `origin_context_id` for this. From outside, C's agents are missing from
 `list_agents` and every by-name lookup, from handoff destinations,
 `explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines and
 routines posting into C; inside C only C's agents show. For members the
@@ -492,10 +500,14 @@ which shows the channel as Private (sealed), Dedicated agent (pinned to it
 alone) and Hidden (isolated), and offers to end isolation or lift the seal
 and pins too; with `set_channel_isolation` (also under `channels:write`); or
 with `--isolated-channel`, which must seal C and pin its default to it alone
-in the same command. Ending warns that the dedicated agents keep what they
+in the same command; any later `--pin` or `--sealed-channel` change that
+would break an isolated channel is refused. A pinned default is never copied:
+change its pin first. Ending warns that the dedicated agents keep what they
 remembered in C and may carry it elsewhere once unpinned. Limits: tools on
 other MCP servers don't see the policy; an agent created inside C isn't C's
-own until it is pinned there; `/dm` from C is refused.
+own until it is pinned there; `/dm` from C is refused; a call is held to C
+only where its tool takes a verified origin (not the send, DM, self-edit or
+routine edit tools), and a call that names none is judged from outside.
 
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in

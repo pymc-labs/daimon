@@ -37,6 +37,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
+from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import (
     CredentialRequestKind,
@@ -88,6 +89,7 @@ async def _post_slack_credential_button_impl(  # pyright: ignore[reportUnusedFun
     mcp_server_url: str | None = None,
     branch: str | None = None,
     thread_ts: str | None = None,
+    origin: Place | None = None,
 ) -> str:
     """Post the `requested` card for one credential request. Returns its ts.
 
@@ -117,7 +119,7 @@ async def _post_slack_credential_button_impl(  # pyright: ignore[reportUnusedFun
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         channel: dict[str, Any] = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
         await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
-        await require_channel_writable(runtime, auth, channel_id=channel_id)
+        await require_channel_writable(runtime, auth, channel_id=channel_id, origin=origin)
         sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             thread_ts=thread_ts,

@@ -20,6 +20,7 @@ from daimon.core.channel_isolation_setup import (
     ChannelIsolationRefused,
     IsolationChange,
     isolated_agent_name,
+    render_isolation_refusal,
     set_channel_isolation,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -106,17 +107,24 @@ async def test_isolating_seals_and_pins_the_channels_own_agent(
 ) -> None:
     tenant = await make_tenant(db_session)
     client, _ = _client(
-        tenant.id, ("local", False), ("shared", False), ("daimon", True), ("roamer", False)
+        tenant.id,
+        ("local", False),
+        ("shared", False),
+        ("daimon", True),
+        ("roamer", False),
+        ("homebody", False),
     )
     await _bind(db_session, tenant.id, "c1", "local")
     await _bind(db_session, tenant.id, "c2", "shared")
     await _bind(db_session, tenant.id, "c3", "shared")
     await _bind(db_session, tenant.id, "c4", "daimon")
     await _bind(db_session, tenant.id, "c6", "roamer")
+    await _bind(db_session, tenant.id, "c8", "homebody")
+    await _bind(db_session, tenant.id, "c9", "homebody")
     await set_access_policy(
         db_session,
         tenant_id=tenant.id,
-        policy=TenantAccessPolicy(agent_channel_pins={"roamer": ("c6", "c7")}),
+        policy=TenantAccessPolicy(agent_channel_pins={"roamer": ("c6", "c7"), "homebody": ("c8",)}),
     )
     await db_session.commit()
 
@@ -131,6 +139,7 @@ async def test_isolating_seals_and_pins_the_channels_own_agent(
     assert await refusal("c2") == "shared_channel_agent", "shared answers in c3 too"
     assert await refusal("c4") == "managed_channel_agent", "a built-in agent never belongs"
     assert await refusal("c6") == "pinned_elsewhere", "roamer is pinned to c7 too"
+    assert await refusal("c8") == "pinned_shared_channel_agent", "homebody is bound in c9"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == (), "a refusal writes nothing"
     assert await refusal("c1") is None, "c1's own agent answers only there"
@@ -157,7 +166,8 @@ async def test_isolating_seals_and_pins_the_channels_own_agent(
     assert lifted.end_warning == LIFT_ISOLATION_WARNING, "lifting warns the agents may roam"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.sealed_channel_ids == () and policy.agent_channel_pins == {
-        "roamer": ("c6", "c7")
+        "roamer": ("c6", "c7"),
+        "homebody": ("c8",),
     }, "asked, ending drops the seal and the channel's own pins"
 
 
@@ -359,3 +369,11 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
         "a skill scoped to the source agent is left off; a library skill is kept"
     )
     assert copy.dropped_skills == ("shared/notes",)
+
+
+def test_a_pinned_agent_is_never_offered_as_a_copy() -> None:
+    """A pinned agent can't be copied (`authorize(FORK)`), so its refusals point at its pin."""
+    for reason in ("pinned_elsewhere", "pinned_shared_channel_agent"):
+        text = render_isolation_refusal(reason, agent_name="roamer")
+        assert "Change its pin first" in text, text
+        assert "copy" not in text.replace("can't be copied", ""), text

@@ -48,7 +48,7 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import routine_destination_channel
+from daimon.core.channel_isolation import routine_destination_place
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -369,11 +369,10 @@ async def _build_fire(
                 action=Action.RUN_AGENT,
                 surface=Surface.ROUTINE,
                 agent=build_agent_ref(ran.name, ran.metadata, row.agent_name),
-                # A thread destination sits under its saved parent channel.
-                place=Place(
-                    channel_id=fire_channel_id,
-                    parent_channel_id=routine_destination_channel(row),
-                ),
+                # A thread destination sits under its saved parent channel; one
+                # saved without it can't be placed here and fails closed while
+                # anything is isolated.
+                place=routine_destination_place(row, channel_id=fire_channel_id),
             )
             if decision.reason is not None:
                 refusal = decision.reason

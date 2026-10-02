@@ -258,6 +258,44 @@ async def test_list_sessions_hides_sealed_conversations_outside_their_channel(
     assert sorted(s.id for s in seen_inside) == ["ses_acme", "ses_b", "ses_headless"]
 
 
+async def test_an_isolated_channels_sessions_are_read_only_by_its_own_agents(
+    world: _World,
+) -> None:
+    """An agent answering C's setup thread runs inside C but is not one of C's own
+    agents, so C's conversations stay out of its reach; C's own agent reads them."""
+    world.add_session(
+        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed=_SEALED
+    )
+    world.add_session("ses_b", daimon_channel=_OPEN, daimon_thread="thr-b")
+    setup_thread = await world.origin(_SEALED, "thr-setup")
+
+    async def isolate(own_agent: str) -> None:
+        await set_access_policy(
+            world.db,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(_SEALED,),
+                isolated_channel_ids=(_SEALED,),
+                agent_channel_pins={own_agent: (_SEALED,)},
+            ),
+        )
+        await world.db.commit()
+
+    await isolate("local")
+    listed = await _list_sessions_impl(world.runtime(), world.auth(), None, None, setup_thread)
+    assert [s.id for s in listed] == ["ses_b"], "C's session is hidden from an outside agent"
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            world.runtime(), world.auth(), "ses_acme", None, None, None, setup_thread
+        )
+
+    await isolate("acme-project")
+    page = await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_acme", None, None, None, setup_thread
+    )
+    assert _SEALED_TOPIC in _events_text(page), "C's own agent reads C's session inside C"
+
+
 async def test_sealing_a_channel_later_covers_its_old_conversations(world: _World) -> None:
     world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
     await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)

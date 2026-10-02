@@ -90,13 +90,45 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     return row.channel_id or row.destination_id.partition(":")[0]
 
 
-def keeps_routine_inside(policy: TenantAccessPolicy, row: RoutineRow) -> bool:
+def is_routine_parent_unknown(row: RoutineRow) -> bool:
+    """A thread destination saved before its parent channel was recorded, whose id
+    doesn't carry it (a Discord thread; a Slack one is ``channel:ts``)."""
+    return (
+        row.destination_kind == "thread"
+        and row.channel_id is None
+        and row.destination_id is not None
+        and ":" not in row.destination_id
+    )
+
+
+def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Place:
+    """Where a routine fires into: `channel_id` under its saved parent channel.
+
+    A thread whose parent is unknown (`is_routine_parent_unknown`) is marked
+    `parent_unresolved`, so `authorize` refuses it while anything is isolated.
+    """
+    return Place(
+        channel_id=channel_id,
+        parent_channel_id=routine_destination_channel(row),
+        parent_unresolved=is_routine_parent_unknown(row),
+    )
+
+
+def keeps_routine_inside(
+    policy: TenantAccessPolicy, row: RoutineRow, *, parent_channel_id: str | None = None
+) -> bool:
     """Whether a routine's result must stay in an isolated channel, so never goes by DM.
 
     The destination decides, so the agent needn't be resolved: an isolated
     channel's own agent fires only into that channel, as its pin refuses every
-    other destination, by every name, at save and at each fire.
+    other destination, by every name, at save and at each fire. Pass
+    `parent_channel_id` once the destination's parent is resolved; until then a
+    thread whose parent is unknown stays inside while anything is isolated.
     """
+    if isolated_channel_of(policy, parent_channel_id) is not None:
+        return True
+    if parent_channel_id is None and is_routine_parent_unknown(row):
+        return bool(policy.isolated_channel_ids)
     return isolated_channel_of(policy, routine_destination_channel(row)) is not None
 
 
@@ -267,7 +299,9 @@ __all__ = [
     "clear_refusal",
     "is_memory_hidden",
     "is_thread_turn_refused",
+    "is_routine_parent_unknown",
     "keeps_routine_inside",
     "load_isolation_viewer",
     "routine_destination_channel",
+    "routine_destination_place",
 ]

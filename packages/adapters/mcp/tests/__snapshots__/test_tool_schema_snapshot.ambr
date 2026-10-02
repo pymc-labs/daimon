@@ -339,6 +339,7 @@
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
         name and URL is a no-op. Other connections are preserved.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -347,6 +348,17 @@
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -1985,6 +1997,7 @@
         failing: a server admin can disconnect from any agent, built-in Daimon
         included; a member can disconnect from an agent that is not a channel or
         workspace default.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1993,6 +2006,17 @@
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -2173,6 +2197,7 @@
         skills have a display name (null if deleted), Anthropic skills have a readable id.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2190,6 +2215,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -2576,6 +2612,7 @@
         Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
         keys or ``remove_agent_key`` to remove them. Stored names on this target
         are not proof that the answering agent can use those keys.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2584,6 +2621,17 @@
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -2605,10 +2653,22 @@
       'description': '''
         List agents in the tenant pool, including each agent's attached
         ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'page': dict({
             'anyOf': list([
               dict({
@@ -3491,6 +3551,7 @@
         message; it does not cancel it at the service or stop work already using it.
         Anyone may add a key, but removing one from an agent that answers a channel
         or the whole workspace needs an admin.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3513,6 +3574,17 @@
             'description': 'Stored environment variable name, UPPER_SNAKE, e.g. TOGGL_TOKEN or OPENAI_API_KEY; never the secret value.',
             'type': 'string',
           }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'required': list([
           'agent_name',
@@ -3530,6 +3602,7 @@
         ``delete_skill`` destroys the shared workspace skill instead;
         ``update_agent`` adds existing skills. Accept a skill name or raw ``skill_id``.
         The resource and other agents stay intact. Changing a default agent needs admin.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3538,6 +3611,17 @@
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -4825,6 +4909,7 @@
         ``["build-models", "compare-models"]``, resolved server-side; explicit
         ``{"type": "custom", "skill_id": "skill_..."}`` entries also work. A model or
         prompt change also returns ``applies``: post it verbatim as part of the reply.
+        Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -5269,6 +5354,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'skills': dict({
             'anyOf': list([

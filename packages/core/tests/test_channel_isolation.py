@@ -22,6 +22,7 @@ from daimon.core.channel_isolation import (
     clear_refusal,
     is_thread_turn_refused,
     keeps_routine_inside,
+    routine_destination_place,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -150,6 +151,23 @@ def test_a_routine_of_an_own_agent_or_into_the_channel_stays_inside() -> None:
     assert keeps_routine_inside(POLICY, _routine("local", "c1")), "never falls back to a DM"
     assert keeps_routine_inside(POLICY, _routine("shared", "c1"))
     assert not keeps_routine_inside(POLICY, _routine("shared", "c2"))
+
+
+def test_a_thread_routine_saved_without_its_parent_stays_inside_until_placed() -> None:
+    """A Discord thread saved before its parent was recorded may lie under C: it
+    never goes by DM while anything is isolated, until its parent is resolved."""
+    legacy = _routine("shared", "t9").model_copy(
+        update={"destination_kind": "thread", "channel_id": None}
+    )
+    assert keeps_routine_inside(POLICY, legacy), "an unknown parent fails closed"
+    assert not keeps_routine_inside(TenantAccessPolicy(), legacy), "nothing isolated"
+    assert keeps_routine_inside(POLICY, legacy, parent_channel_id="c1"), "resolved under C"
+    assert not keeps_routine_inside(POLICY, legacy, parent_channel_id="c2")
+    assert routine_destination_place(legacy, channel_id="t9").parent_unresolved
+    slack = legacy.model_copy(update={"destination_id": "c1:1.2"})
+    assert not routine_destination_place(slack, channel_id="c1").parent_unresolved, (
+        "a Slack thread carries its channel"
+    )
 
 
 def test_a_viewer_sees_only_its_side() -> None:
