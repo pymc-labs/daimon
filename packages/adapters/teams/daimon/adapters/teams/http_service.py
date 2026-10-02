@@ -39,6 +39,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
+from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
 from daimon.adapters.teams.thread_reader import ThreadReader
@@ -268,8 +269,9 @@ def create_teams_http_service(
         "billing": billing.command,
     }
     direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
-    if support_enabled(runtime.settings):
-        commands["support"] = SupportCommand(direct).command
+    support = SupportCommand(runtime, direct) if support_enabled(runtime.settings) else None
+    if support is not None:
+        commands["support"] = support.command
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -311,6 +313,8 @@ def create_teams_http_service(
         runtime, start_turn=turns.start_wizard_turn, draining=lambda: turns.draining
     )
     teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
+    if support is not None:
+        teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)

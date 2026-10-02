@@ -20,7 +20,7 @@ spent (Discord and Slack spend it first, then say so privately; the Teams
 adapter's credential tests assert the unspent request). Removing the app from a
 team forgets that team and archives no tenant: a deployment serves one
 organisation. A bot cannot react, so a completion ping is an @mention alone and
-human support is the `support` command; a post_wizard form has no step images.
+human support is the `support` form; a post_wizard form has no step images.
 Thread participation shares Discord's gates
 (`test_thread_participation_platforms.py`) but needs Graph, so without the
 consent a followed thread stays mention-only; and where Discord's unprompted

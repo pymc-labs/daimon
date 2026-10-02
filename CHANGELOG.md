@@ -87,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not be read. `send_direct_message`, channel budgets and channel
   admins, files through `send_message`, `post_wizard` forms (Adaptive Cards)
   and routine destinations work on Teams. A command typed in a channel is
-  answered in the 1:1 chat, `support <note>` asks a person for help, completion
+  answered in the 1:1 chat, `support` asks a person for help, completion
   pings post the answer fresh with an @mention, admins redeem promo codes from
   the `billing` card, the bot says hello when installed and forgets a team it
   is removed from, and a restart finds channel cards whose post lost its id.
