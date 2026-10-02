@@ -22,7 +22,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -806,6 +806,35 @@ async def test_a_model_change_replaces_the_session_and_bills_the_new_model(
         "the recorder must bill the model the successor froze, not the one it replaced"
     )
     assert [row.managed_session_id for row in rows] == [second.ma_session_id]
+
+
+async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_next_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Create and the drift check build the same skill list; dropping one replaces the session."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    with_skill = replace(_admission(account=account), channel_skills=extra)
+
+    first = await _prepare(deps, with_skill, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    frozen = transport.state.sessions[first.ma_session_id].agent.skills
+    assert [(s.skill_id, s.version) for s in frozen] == [("skill_team", "v7")]
+
+    second = await _prepare(deps, with_skill, tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id, "the channel's skills are not drift"
+    assert transport.creates == 1
+
+    third = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id != first.ma_session_id, "a removed channel skill leaves the session"
+    assert transport.state.sessions[third.ma_session_id].agent.skills == []
 
 
 async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(

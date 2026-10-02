@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names, each cached for a minute, and a failed lookup grants nothing. Slack
   needs the new `usergroups:read` bot scope and Teams the `TeamMember.Read.Group`
   consent, so existing installs reinstall or upload the updated app package.
+- **Per-channel skills.** Server admins and operator tokens can add skills to
+  whatever agent answers in one channel, there only: a library skill, or one
+  uploaded to that agent. Use `add_channel_skill`, `remove_channel_skill` and
+  `list_channel_skills`, `daimon channels skills`, or Channel skills on Who
+  answers where in the Discord and Slack setup panels. A channel's own admins
+  can't change them. The version added is kept; add the skill again for a
+  newer one.
 - **Forks keep their own uploaded skills.** `fork_agent`, `daimon agents fork`
   and channel isolation used to leave every skill scoped to the source agent
   off the copy, so isolating a channel lost the skills uploaded to its agent.

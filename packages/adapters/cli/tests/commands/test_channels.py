@@ -24,8 +24,12 @@ from daimon.adapters.cli.commands.channels import (
     channels_admins_set,
     channels_isolate,
     channels_list,
+    channels_skills_add,
+    channels_skills_list,
+    channels_skills_remove,
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -96,6 +100,50 @@ async def test_set_list_and_clear_a_budget(
         ("cli/channels budget clear", "set_channel_budget", "channel:C1"),
         ("cli/channels budget set", "set_channel_budget", "channel:C1"),
     ], "each change is audited once; clearing nothing records nothing"
+
+
+async def test_add_list_and_remove_a_channel_skill_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    title = tenant_scoped_display_title(tenant_id=tenant.tenant_id, name="pdf-tools")
+    now = datetime(2026, 9, 13, tzinfo=UTC).isoformat()
+    skill = {
+        "id": "skill_lib",
+        "created_at": now,
+        "display_title": title,
+        "latest_version": "v3",
+        "source": "custom",
+        "type": "skill",
+        "updated_at": now,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/skills":
+            return httpx.Response(200, json={"data": [skill], "next_page": None})
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    rt = build_cli_runtime(db_session_factory, anthropic=build_fake_anthropic(handler))
+    console = _console()
+    args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
+
+    await channels_skills_add(**args, channel_id="C1:1717.5", skill="pdf-tools")
+    with pytest.raises(DaimonError, match="No skill of this workspace"):
+        await channels_skills_add(**args, channel_id="C1", skill="missing")
+    json_console = _console()
+    await channels_skills_list(**{**args, "console": json_console}, channel_id=None, as_json=True)
+    (row,) = json.loads(_out(json_console))
+    assert (row["channel_id"], row["skill_id"], row["version"]) == ("C1", "skill_lib", "v3")
+
+    await channels_skills_remove(**args, channel_id="C1", skill="pdf-tools")
+    await channels_skills_remove(**args, channel_id="C1", skill="pdf-tools")
+    assert "channel C1 has no such skill" in _out(console)
+    async with db_session_factory() as s:
+        events = await list_events(s, tenant_id=tenant.tenant_id)
+    assert sorted((e.tool_name, e.operation, e.reason) for e in events) == [
+        ("cli/channels skills add", "set_channel_skills", "channel:C1"),
+        ("cli/channels skills remove", "set_channel_skills", "channel:C1"),
+    ], "each change is audited once; a refusal or a no-op records nothing"
 
 
 async def test_bad_requests_are_refused_before_any_write(

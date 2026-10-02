@@ -1,4 +1,4 @@
-"""daimon channels ... sub-app: per-channel spend budgets, channel admins and isolation."""
+"""daimon channels ... sub-app: per-channel budgets, admins, skills and isolation."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ from daimon.core.channel_budget import (
     parse_budget_spec,
 )
 from daimon.core.channel_isolation_setup import set_channel_isolation
+from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
+from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
@@ -37,6 +39,7 @@ from daimon.core.stores.channel_admins import (
     list_channel_admins,
     set_channel_admins,
 )
+from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
@@ -56,6 +59,10 @@ admins_app = typer.Typer(
     help="A channel's admins: groups and members who run it on top of the server admins."
 )
 channels_app.add_typer(admins_app, name="admins")
+skills_app = typer.Typer(
+    help="A channel's extra skills: added to whatever agent answers there, there only."
+)
+channels_app.add_typer(skills_app, name="skills")
 
 _PLATFORMS = ("discord", "slack", "teams")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
@@ -597,6 +604,190 @@ async def channels_admins_clear(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel
         )
     console.print("cleared" if removed else "no channel admins to clear")
+
+
+_SKILL_COLUMNS = ("channel_id", "name", "skill_id", "version", "owner_agent_name")
+
+
+@skills_app.command("list")
+def channels_skills_list_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: Annotated[str | None, typer.Argument(help="One channel; all when omitted.")] = None,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """List the extra skills channels add to their agent."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_skills_list(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                as_json=as_json,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_skills_list(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str | None,
+    as_json: bool,
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    async with rt.sessionmaker() as session:
+        rows = await list_channel_skills(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=_channel(platform, channel_id) if channel_id else None,
+        )
+    emit_rows(console, rows, columns=_SKILL_COLUMNS, as_json=as_json)
+
+
+@skills_app.command("add")
+def channels_skills_add_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    skill: Annotated[
+        str, typer.Argument(help="A skill id, a library skill's name, or agent/name.")
+    ],
+) -> None:
+    """Add a skill, at its latest version, to whatever agent answers in one channel."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_skills_add(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                skill=skill,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_skills_add(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    skill: str,
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    channel = _channel(platform, channel_id)
+    async with rt.sessionmaker() as session, session.begin():
+        added = await add_skill_to_channel(
+            session,
+            rt.anthropic,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel,
+            skill=skill,
+            default=rt.deployment_default,
+            actor_account_id=None,
+        )
+        if isinstance(added, str):
+            raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
+        await _audit_skill_change(
+            session, command="add", tenant_id=tenant_id, platform=platform, channel_id=channel
+        )
+    console.print(f"channel {channel} adds {added.name} ({added.skill_id} {added.version})")
+
+
+@skills_app.command("remove")
+def channels_skills_remove_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    skill: Annotated[str, typer.Argument(help="The skill's id or name.")],
+) -> None:
+    """Remove one extra skill from a channel."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_skills_remove(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                skill=skill,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_skills_remove(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    skill: str,
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    channel = _channel(platform, channel_id)
+    async with rt.sessionmaker() as session, session.begin():
+        rows = await list_channel_skills(
+            session, tenant_id=tenant_id, platform=platform, channel_id=channel
+        )
+        match = next((row for row in rows if skill.strip() in (row.skill_id, row.name)), None)
+        if match is not None:
+            await remove_channel_skill(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel,
+                skill_id=match.skill_id,
+            )
+            await _audit_skill_change(
+                session,
+                command="remove",
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel,
+            )
+    console.print(f"removed {match.name}" if match else f"channel {channel} has no such skill")
+
+
+async def _audit_skill_change(
+    session: AsyncSession,
+    *,
+    command: Literal["add", "remove"],
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> None:
+    """Record an operator's channel skill change in the same transaction."""
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=None,
+        agent_id=None,
+        platform=platform,
+        platform_user_id=None,
+        tool_name=f"cli/channels skills {command}",
+        operation=Action.SET_CHANNEL_SKILLS,
+        outcome="allowed",
+        reason=f"channel:{channel_id}",
+    )
 
 
 _ISOLATION_PLATFORMS = ("discord", "slack")

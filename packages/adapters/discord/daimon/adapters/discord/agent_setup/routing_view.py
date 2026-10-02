@@ -37,6 +37,11 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
     panel_tenant_id,
     save_environment_choice,
 )
+from daimon.adapters.discord.agent_setup.channel_skills_view import (
+    CHANNEL_SKILLS_LABEL,
+    ChannelSkillsView,
+    load_channel_skills,
+)
 from daimon.adapters.discord.agent_setup.isolation_view import (
     ISOLATION_LABEL,
     IsolationView,
@@ -431,6 +436,14 @@ class RoutingView(PanelViewBase):
             nav_row.add_item(tokens_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
+        if state.is_admin and state.channel_id:
+            skills_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            skills_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=CHANNEL_SKILLS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            skills_button.callback = self._on_channel_skills  # type: ignore[method-assign]  # per-instance callback
+            skills_row.add_item(skills_button)
+            container.add_item(skills_row)
 
         pager = self.page_row(page, on_previous=self._on_previous, on_next=self._on_next)
         if pager is not None:
@@ -540,6 +553,19 @@ class RoutingView(PanelViewBase):
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
                 status=status,
+            ),
+        )
+
+    async def _on_channel_skills(self, interaction: discord.Interaction) -> None:
+        """Open this channel's skills screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        rows = await load_channel_skills(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            ChannelSkillsView(
+                self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id, rows=rows
             ),
         )
 

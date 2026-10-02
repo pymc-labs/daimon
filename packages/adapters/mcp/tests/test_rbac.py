@@ -328,6 +328,9 @@ STILL_ADMIN_TOOL_NAMES = (
     "clear_channel_budget",
     "set_channel_environment",
     "clear_channel_environment",
+    "list_channel_skills",
+    "add_channel_skill",
+    "remove_channel_skill",
 )
 """Tools a plain member never sees.
 
@@ -586,6 +589,8 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
         ("clear_channel_budget", "clear channel budget"),
         ("list_channel_budgets", "list channel budgets"),
         ("redeem_promo_code", "redeem promo code"),
+        ("add_channel_skill", "add channel skill"),
+        ("remove_channel_skill", "remove channel skill"),
     ):
         assert f"### {tool}" not in await _search(app, channel_admin, query), (
             f"{tool} stays with server admins"

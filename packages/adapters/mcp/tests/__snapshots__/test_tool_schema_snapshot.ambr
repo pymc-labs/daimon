@@ -221,6 +221,33 @@
 # ---
 # name: test_rendered_tool_schema_matches_snapshot
   dict({
+    'add_channel_skill': dict({
+      'description': '''
+        Add a skill to whatever agent answers in one channel, there only. Admin-only.
+        
+        ``skill`` is a skill id, a workspace library skill's name, or
+        ``agent/name`` for one uploaded to the agent that answers in this
+        channel; another agent's upload is refused. The latest version is
+        added; add it again to pick up a newer one. It applies from the next
+        message in each conversation there. A thread id resolves to its parent.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'skill': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'add_skill': dict({
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
@@ -2821,6 +2848,21 @@
         'type': 'object',
       }),
     }),
+    'list_channel_skills': dict({
+      'description': "List the extra skills a channel's turns run with, on top of its agent's. Admin-only.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'list_channels': dict({
       'description': '''
         List channels in this server/workspace that you can view.
@@ -3751,6 +3793,25 @@
         'required': list([
           'agent_name',
           'key',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'remove_channel_skill': dict({
+      'description': 'Remove an extra skill from a channel, by id or name. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'skill': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'skill',
         ]),
         'type': 'object',
       }),

@@ -26,7 +26,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsCustomSkill,
+)
 from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
@@ -49,6 +53,7 @@ from daimon.core.billing import is_over_cap
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import notify_budget_exhausted
+from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -142,6 +147,9 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
+    # The channel's extra skills (`daimon.core.channel_skills`), decided once
+    # so creating the session and checking it for drift add the same ones.
+    channel_skills: tuple[BetaManagedAgentsCustomSkill, ...] = ()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -429,6 +437,20 @@ async def admit_impl(
         is_dm and policy.dm_memory_read_only
     )
 
+    channel_skills = (
+        ()
+        if is_dm
+        else await turn_channel_skills(
+            deps.sessionmaker,
+            deps.anthropic,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            agent=agent,
+            agent_names=grant.agent.names,
+        )
+    )
+
     return Admission(
         memory_read_only=memory_read_only,
         source_sealed=source_sealed,
@@ -444,6 +466,7 @@ async def admit_impl(
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
+        channel_skills=channel_skills,
         grant=grant,
     )
 

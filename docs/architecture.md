@@ -561,6 +561,31 @@ default. The channel tools read a Slack or Teams thread id as its channel and
 a Discord thread through a lookup (`tools/_channel_target.py`); budgets and
 environments also check the caller can see the channel.
 
+**Channel skills — `packages/core/daimon/core/channel_skills.py`.** A channel
+can add skills to whatever agent answers there, for its turns only, so a
+shared agent carries one team's skill without every channel getting it.
+Server admins and operator tokens (`channels:write`) add and remove them,
+never a channel's own admins (`authorize(SET_CHANNEL_SKILLS)`), with the
+`*_channel_skill(s)` MCP tools, Who answers where in the Discord and Slack
+setup panels, or the CLI:
+
+```bash
+daimon channels skills list slack TEAM_ID [CHANNEL_ID]
+daimon channels skills add slack TEAM_ID CHANNEL_ID SKILL
+daimon channels skills remove slack TEAM_ID CHANNEL_ID SKILL
+```
+
+A channel may add a library skill of its tenant, or one uploaded to the agent
+answering there now, unless that agent is another isolated channel's own.
+The row (`channel_skills`) pins the latest version at add time; adding it
+again picks up a newer one. Admission reads the rows once per turn
+(`turn_channel_skills`) and drops another agent's upload, a skill the agent
+holds, a clashing mount name and anything past the session cap; the session
+is created with the agent's skills plus these, and the drift check hashes the
+same list (`session_snapshot.session_skills`), so adding or removing one
+replaces the conversation's session on its next message. Routines, headless
+runs and MCP chat don't use them.
+
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
@@ -1283,7 +1308,7 @@ verifier establishes a tenant cannot be safely attributed and are outside this t
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
 Admin-tier setup and billing panel writes on Discord, Slack and Teams (channel
-isolation, channel admins, a channel's environment, coding-tool and operator token
+isolation, channel admins, a channel's environment and skills, coding-tool and operator token
 mint and revoke, promo redeem) each write their own row through
 `core/panel_audit.py`, allowed or refused, with tool name `panel:<op>`; the clicker
 is named only when they have an account, so privacy erasure can reach the row.

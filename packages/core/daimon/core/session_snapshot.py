@@ -285,6 +285,18 @@ def _snapshot_from_session(
     )
 
 
+def session_skills(
+    agent: BetaManagedAgentsAgent, channel_skills: Sequence[BetaManagedAgentsCustomSkill] = ()
+) -> list[MaSkill]:
+    """The skills a session runs: the agent's own, then its channel's extra ones.
+
+    The one definition `create_session` and the drift check both use, so a
+    session started with a channel's skills reads as current on its next turn.
+    The channel's are decided at admission (`daimon.core.channel_skills`).
+    """
+    return [*agent.skills, *channel_skills]
+
+
 def session_tools(
     agent: BetaManagedAgentsAgent,
     hidden_mcp_server_names: frozenset[str],
@@ -339,6 +351,7 @@ def desired_snapshot(
     repo_token_issued_at: int | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
+    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -352,13 +365,14 @@ def desired_snapshot(
     with those overrides reads as drifted on every turn and has the hidden
     servers pushed straight back onto it. `tool_safety` and `public_url` are
     the deployment's, for the same reason: both arrays are hashed as
-    `create_session` gates them (`session_tools`).
+    `create_session` gates them (`session_tools`). `channel_skills` are the
+    turn's channel's extra skills, hashed with the agent's (`session_skills`).
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         system_sha256=hash_system(agent.system),
-        skills_sha256=hash_skills(agent.skills),
+        skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,
         repo_url=repo_url,
         repo_branch=repo_branch,

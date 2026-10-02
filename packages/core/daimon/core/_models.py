@@ -951,6 +951,45 @@ class TenantLedger(Base):
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ChannelSkill(Base):
+    """One extra skill a channel's sessions add to the agent's own, at a pinned version.
+
+    `owner_agent_name` is set for a skill uploaded to one agent: it applies
+    only while that agent answers. No rows means nothing extra.
+    """
+
+    __tablename__ = "channel_skills"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "channel_id", "skill_id", name="pk_channel_skills"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_channel_skills_tenants"
+        ),
+        ForeignKeyConstraint(
+            ["added_by_account_id"],
+            ["accounts.id"],
+            ondelete="SET NULL",
+            name="fk_channel_skills_added_by_account_id",
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_channel_skills_platform"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str] = mapped_column(Text)
+    skill_id: Mapped[str] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ChannelBudget(Base):
     """A spend limit on one channel. No row = no limit.
 

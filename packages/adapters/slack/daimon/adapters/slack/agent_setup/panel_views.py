@@ -60,10 +60,11 @@ from daimon.core.setup_conversations import (
     shared_keys_sentence,
 )
 from daimon.core.skills.ingest import SkillPreview
-from daimon.core.stores.domain import ChannelAdminsRow, McpTokenRow
+from daimon.core.stores.domain import ChannelAdminsRow, ChannelSkillRow, McpTokenRow
 
 __all__ = [
     "ACTION_CHANNEL_ADMINS",
+    "ACTION_CHANNEL_SKILLS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
     "ACTION_ENVIRONMENT",
@@ -83,6 +84,9 @@ __all__ = [
     "ACTION_ROUTING",
     "CALLBACK_AGENTS",
     "CALLBACK_CHANNEL_ADMINS",
+    "CALLBACK_CHANNEL_SKILLS",
+    "CHANNEL_SKILLS_ADD_INPUT_ID",
+    "CHANNEL_SKILLS_REMOVE_INPUT_ID",
     "CALLBACK_CREATING",
     "CALLBACK_DETAILS",
     "CALLBACK_NEW_AGENT",
@@ -93,6 +97,7 @@ __all__ = [
     "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
     "build_channel_admins_form",
+    "build_channel_skills_form",
     "build_created_view",
     "build_creating_view",
     "build_details_view",
@@ -117,6 +122,7 @@ ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
+ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
 ACTION_ENVIRONMENT: Final = "agent_setup__environment"
 """This channel's environment select on Who answers where."""
@@ -152,6 +158,9 @@ CALLBACK_ROUTING: Final = "agent_setup__routing_view"
 CALLBACK_NEW_AGENT: Final = "agent_setup__new_agent"
 CALLBACK_CREATING: Final = "agent_setup__creating"
 CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
+CALLBACK_CHANNEL_SKILLS: Final = "agent_setup__channel_skills_form"
+CHANNEL_SKILLS_ADD_INPUT_ID: Final = "channel_skills__add"
+CHANNEL_SKILLS_REMOVE_INPUT_ID: Final = "channel_skills__remove"
 CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
 CHANNEL_ADMINS_GROUPS_INPUT_ID: Final = "channel_admins__groups"
 """Block and action id of the form's member select; the submission reads it."""
@@ -222,6 +231,11 @@ CHANNEL_ADMINS_NOTE: Final = (
     "Workspace admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
     "the workspace default stay with workspace admins."
+)
+CHANNEL_SKILLS_LABEL: Final = "Channel skills"
+CHANNEL_SKILLS_NOTE: Final = (
+    "Added to whatever agent answers in this channel, here only, from the next message: a "
+    "workspace library skill, or one uploaded to this channel's agent. Workspace admins only."
 )
 OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
 MAX_OPERATOR_TOKEN_LINES: Final = 25
@@ -614,6 +628,7 @@ def build_routing_view(
     environment_picker: EnvironmentPicker | None = None,
     isolation: ChannelIsolationStatus | None = None,
     operator_tokens: Sequence[McpTokenRow] | None = None,
+    channel_skills: Sequence[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
@@ -623,6 +638,7 @@ def build_routing_view(
     channel's admins and a button to edit this channel's. `isolation` is too,
     when the panel has a channel, not a DM: it adds that channel's isolation buttons.
     `operator_tokens` is too: the workspace's live operator tokens, with Mint and Revoke.
+    `channel_skills` is too, with a channel: its extra skills, with Edit.
     The environment each channel runs in resolves on its own and gets its own
     block; `environment_picker` is passed for workspace admins and this
     channel's admins, who get a select for this channel's environment.
@@ -674,6 +690,8 @@ def build_routing_view(
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
     if isolation is not None and _is_channel(channel_id):
         blocks.extend(_isolation_blocks(channel_id=channel_id, status=isolation))
+    if channel_skills is not None and _is_channel(channel_id):
+        blocks.extend(_channel_skills_blocks(channel_skills, channel_id=channel_id))
     if operator_tokens is not None:
         blocks.extend(_operator_token_blocks(operator_tokens))
     blocks.append(
@@ -794,6 +812,18 @@ def _channel_admins_blocks(
     return [
         _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),
+        {"type": "divider"},
+    ]
+
+
+def _channel_skills_blocks(
+    rows: Sequence[ChannelSkillRow], *, channel_id: str
+) -> list[dict[str, Any]]:
+    names = ", ".join(f"`{escape_mrkdwn(row.name)}`" for row in rows) or "_none_"
+    edit = _button(action_id=ACTION_CHANNEL_SKILLS, label="Edit")
+    return [
+        _section(f"*{CHANNEL_SKILLS_LABEL}* of <#{channel_id}>\n{names}", accessory=edit),
+        _context(CHANNEL_SKILLS_NOTE),
         {"type": "divider"},
     ]
 
@@ -946,6 +976,56 @@ def build_channel_admins_form(
         blocks=blocks,
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_CHANNEL_ADMINS,
+        close="Cancel",
+        submit="Save",
+    )
+
+
+def build_channel_skills_form(
+    *, meta: PanelMetadata, rows: Sequence[ChannelSkillRow]
+) -> dict[str, Any]:
+    """Add a skill to `meta.channel_id`, or tick its current ones to remove them."""
+    blocks: list[dict[str, Any]] = [
+        _section(f"Extra skills for whatever agent answers in <#{meta.channel_id}>."),
+        {
+            "type": "input",
+            "block_id": CHANNEL_SKILLS_ADD_INPUT_ID,
+            "label": {"type": "plain_text", "text": "Add a skill"},
+            "optional": True,
+            "element": {
+                "type": "plain_text_input",
+                "action_id": CHANNEL_SKILLS_ADD_INPUT_ID,
+                "max_length": 200,
+                "placeholder": {"type": "plain_text", "text": "name, agent/name or skill id"},
+            },
+        },
+    ]
+    if rows:
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": CHANNEL_SKILLS_REMOVE_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Remove"},
+                "optional": True,
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": CHANNEL_SKILLS_REMOVE_INPUT_ID,
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": row.name[:_MAX_OPTION_TEXT]},
+                            "value": row.skill_id,
+                        }
+                        for row in rows[:10]
+                    ],
+                },
+            }
+        )
+    blocks.append(_context(CHANNEL_SKILLS_NOTE))
+    return finish_modal(
+        title=CHANNEL_SKILLS_LABEL,
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_CHANNEL_SKILLS,
         close="Cancel",
         submit="Save",
     )
