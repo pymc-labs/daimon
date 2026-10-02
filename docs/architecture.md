@@ -372,7 +372,8 @@ and checked by every name a pin can be keyed by (`core/agent_pins.py`), so a
 pin added later or a rename still holds; a target that can't be resolved under
 a pin is refused. The direct configuration tools (`update_agent`,
 `attach_mcp_server`, `detach_mcp_server`, `remove_agent_key`, `remove_skill`)
-take no turn origin, so on a pinned agent they are an admin's or a channel
+check it with no turn origin (an `origin_context_id` only finds the agent), so on
+a pinned agent they are an admin's or a channel
 admin's of every pinned channel; members inside its channels use the request
 tools. An agent key's self-edit tools (`set_repo_binding`/`clear_repo_binding`/
 `self_write_file`/`self_delete_file`) are refused on a pinned agent: an agent

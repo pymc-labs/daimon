@@ -95,7 +95,7 @@ async def _detach_mcp_server_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         location_channel_id=origin_channel_id(origin),
     )
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     # `mcp_remove` sits in `decide_operation`'s attachment family, not the spec
     # family `_reject_system_agent` enforces: the token form attaches a server
     # to the seeded agent for any member, and the defaults reconciler unions
@@ -189,7 +189,7 @@ async def _remove_skill_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(
         runtime, auth, agent_name=agent_name, agent=agent
     )
@@ -291,7 +291,7 @@ async def _remove_agent_key_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         location_channel_id=origin_channel_id(origin),
     )
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     # Every name the agent answers to, live thread bindings and personal
     # defaults: a removal followed by a fresh add is a replacement, so it

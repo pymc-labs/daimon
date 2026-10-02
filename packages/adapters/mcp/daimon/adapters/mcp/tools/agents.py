@@ -586,7 +586,7 @@ async def _update_agent_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
     if tools is not None:
@@ -810,7 +810,7 @@ async def _attach_mcp_server_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(
         runtime, auth, agent_name=agent_name, agent=agent
     )

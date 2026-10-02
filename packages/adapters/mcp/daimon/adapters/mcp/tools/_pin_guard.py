@@ -4,7 +4,7 @@ Every tool that adds to or edits what an agent reaches calls
 `require_pin_write_access` once it has resolved the target: the private-form
 request tools with the turn origin they were called from, and the direct
 configuration tools (`update_agent`, `attach_mcp_server`, `detach_mcp_server`,
-`remove_agent_key`) with none, because they take no origin. With no origin a
+`remove_agent_key`) with none: their `origin_context_id` only finds the agent. With no origin a
 member is outside every pin, so a pinned agent's direct configuration is an
 admin's, or a channel admin's who runs every channel it is pinned to; a member
 inside its channels uses the request tools instead.
