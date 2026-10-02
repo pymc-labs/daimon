@@ -35,6 +35,9 @@ def test_setup_refuses_bot_without_role_management() -> None:
         layout.require_setup_permissions(
             cast("layout.Discord", Guild()), layout.QA_GUILD, layout.QA_BOT_ID
         )
+    layout.require_setup_permissions(
+        cast("layout.Discord", Guild()), layout.QA_GUILD, layout.QA_BOT_ID, no_roles=True
+    )
 
 
 class FakeDiscord:
@@ -93,6 +96,9 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
         fork_from="daimon",
         budget_usd=Decimal("25"),
         threads_per_team=3,
+        no_roles=False,
+        daimon_bot_id=layout.STAGING_DAIMON_BOT_ID,
+        admin_user_id=None,
     )
     state = {"guild_id": args.guild_id, "run_id": args.run_id, "teams": {}}
     api = FakeDiscord()
@@ -107,6 +113,46 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
     assert state["teams"] == {}
     assert ("channels", "isolation", "lift", "discord", args.guild_id, state_id(api)) in calls
     assert any(call[:2] == ("agents", "--guild") and "archive" in call for call in calls)
+
+
+def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_cli(*args: str) -> str:
+        calls.append(args)
+        return (
+            "123: isolated, agent team-a-copy"
+            if args[:3] == ("channels", "isolation", "set")
+            else "ok"
+        )
+
+    monkeypatch.setattr(layout, "cli", fake_cli)
+    args = argparse.Namespace(
+        guild_id=layout.QA_GUILD,
+        state=tmp_path / "state.json",
+        run_id="reh3",
+        fork_from="daimon",
+        budget_usd=Decimal("25"),
+        threads_per_team=3,
+        no_roles=True,
+        daimon_bot_id=layout.STAGING_DAIMON_BOT_ID,
+        admin_user_id=None,
+    )
+    state = {"guild_id": args.guild_id, "run_id": args.run_id, "no_roles": True, "teams": {}}
+    api = FakeDiscord()
+    layout.setup_team(cast("layout.Discord", api), args, state, "Team A", ["123"])
+    assert api.roles == []
+    assert api.channels[0]["permission_overwrites"] == []
+    assert (
+        "channels",
+        "admins",
+        "set",
+        "discord",
+        args.guild_id,
+        state_id(api),
+        "--user",
+        layout.QA_BOT_ID,
+    ) in calls
 
 
 def state_id(api: FakeDiscord) -> str:
