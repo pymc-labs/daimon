@@ -43,7 +43,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.errors import SpecError, StoreError
+from daimon.core.errors import DaimonError, SpecError, StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -1360,7 +1360,7 @@ async def test_agents_fork_refuses_a_pinned_source(
     )
     rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
-    with pytest.raises(StoreError, match="pinned to channels"):
+    with pytest.raises(DaimonError, match="pinned to specific channels"):
         await agents_fork(rt=rt, console=Console(file=StringIO()), src="base-agent", dst="copy")
     assert created == []
 
