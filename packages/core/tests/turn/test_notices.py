@@ -263,3 +263,11 @@ def test_a_dm_refusal_not_bound_to_the_place_reads_as_in_the_channel() -> None:
     in_dm = admission_refusal_text("channel_budget_exceeded", _NOUNS, in_dm=True)
 
     assert in_dm == admission_refusal_text("channel_budget_exceeded", _NOUNS), in_dm
+
+
+def test_the_cap_notice_says_the_cap_is_the_persons_and_an_operator_raises_it() -> None:
+    """The cap is per person and only the operator raises it, as the refusal says."""
+    notice = render_termination_notice(TerminationReason.ADMISSION_CAP_EXCEEDED)
+    assert notice is not None
+    assert notice.cause.startswith("You've reached your monthly usage cap"), notice.cause
+    assert notice.next_step == "An operator can raise it.", "no admin command raises a cap"

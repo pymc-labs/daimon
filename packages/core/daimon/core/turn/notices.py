@@ -148,9 +148,10 @@ _COPY: dict[TerminationReason, _Copy] = {
     ),
     TerminationReason.ADMISSION_CAP_EXCEEDED: _Copy(
         "Usage cap reached",
-        "This workspace reached its monthly usage cap, so the turn did not run.",
+        "You've reached your monthly usage cap, so the turn did not run.",
         _KEPT,
-        "An admin can raise the cap.",
+        # The cap is per person and set by the operator, not by an admin command.
+        "An operator can raise it.",
     ),
     TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED: _Copy(
         "Channel budget reached",
