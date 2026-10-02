@@ -17,12 +17,12 @@ from dataclasses import dataclass
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_environments import (
@@ -70,34 +70,11 @@ class _Target:
 async def _environment_channel(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, *, lenient: bool = False
 ) -> _Target:
-    """The channel an environment is stored under.
-
-    A thread id resolves to its parent: Slack's `<channel>:<thread ts>` by
-    splitting, a Discord thread through a lookup that also checks the caller
-    can see it. `lenient` takes a Discord id the lookup refuses as given, so a
-    deleted channel's pick can still be cleared.
-    """
+    """The channel an environment is stored under; a thread id names its parent."""
     if channel_id is None:
         return _Target(None)
-    target = channel_id.strip()
-    if auth.platform == "slack":
-        target = target.partition(":")[0].strip()
-    if not target:
-        raise ToolError(
-            "channel_id is empty. Omit it for the workspace default, or pass the channel's id."
-        )
-    if auth.platform != "discord":
-        return _Target(target)
-    if not target.isdigit():
-        raise ToolError(f"{target!r} is not a Discord channel id")
-    if lenient:
-        try:
-            parent = await resolve_visible_channel(runtime, auth, target)
-        except ToolError:
-            return _Target(target)
-    else:
-        parent = await resolve_visible_channel(runtime, auth, target)
-    return _Target(parent, target if parent != target else None)
+    target = await resolve_channel(runtime, auth, channel_id, lenient=lenient)
+    return _Target(target.channel_id, target.thread_id)
 
 
 _NEEDS_ADMIN: str = (
@@ -225,7 +202,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
 
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
+        ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
+        id resolves to its parent. The caller must be able to see the channel.
         """
         return await _set_channel_environment_impl(
             runtime, await _auth(ctx), environment_name=environment_name, channel_id=channel_id

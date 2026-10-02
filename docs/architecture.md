@@ -401,8 +401,8 @@ and set the rest again. `set` refuses to overwrite an unreadable row, so
 that channel on top of the server admins (`channel_admins`,
 `packages/core/daimon/core/channel_admins.py`). `admit()` stores the member's
 live role ids on the account (`accounts.platform_role_ids`) beside the role, so
-MCP tools test a grant without asking the platform; Slack has no roles, so a
-Slack grant is by user id. A channel admin may do what a server admin may for
+MCP tools test a grant without asking the platform; Slack and Teams have no
+roles, so their grants are by user id (on Teams the Entra object id). A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
@@ -439,7 +439,8 @@ else wrote. The check reads requesters' rights at edit time, as stored at
 their last chat turn: a requester promoted later runs earlier edits with the
 new rights. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
-panel, or with the CLI:
+panel, or with the CLI (`discord`, `slack` or `teams`; a Slack or Teams thread
+id names its channel):
 
 ```bash
 daimon channels admins get discord GUILD_ID [CHANNEL_ID] [--json]
@@ -504,7 +505,9 @@ outside C. `get_tenant_summary` lists each channel with `isolated`.
 Server admins toggle isolation from Who answers where in the setup panel,
 which shows the channel as Private (sealed), Dedicated agent (pinned to it
 alone) and Hidden (isolated), and offers to end isolation or lift the seal
-and pins too; with `set_channel_isolation` (also under `channels:write`); or
+and pins too; with `set_channel_isolation` (also under `channels:write`) or
+its CLI twin `daimon channels isolate PLATFORM WORKSPACE_ID CHANNEL_ID
+[--fork-from AGENT] [--end [--lift-seal-and-pins]]`; or
 with `--isolated-channel`, which must seal C and pin its default to it alone
 in the same command; any later `--pin` or `--sealed-channel` change that
 would break an isolated channel is refused. A pinned default is never copied:
@@ -542,7 +545,9 @@ a pick isn't recorded. An operator token's
 `channels:write` covers a channel's environment, never the tenant default. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
-default.
+default. The channel tools read a Slack or Teams thread id as its channel and
+a Discord thread through a lookup (`tools/_channel_target.py`); budgets and
+environments also check the caller can see the channel.
 
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
@@ -1309,7 +1314,9 @@ registered and expire too, while older jti-less ones keep working.
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 `get_tenant_summary` lists every channel with a default, a budget, admins or
-isolation, and `channels[].isolated` says whether it is isolated.
+isolation, and `channels[].isolated` says whether it is isolated. Its read is
+`daimon.core.tenant_summary`, which `daimon channels list PLATFORM
+WORKSPACE_ID [--json]` prints too, with the same JSON.
 `set_channel_isolation` with an operator token acts as that admin: the copy
 it may make is an admin's fork, and its seal and pin writes are the same as
 the panel's.

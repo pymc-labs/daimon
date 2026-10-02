@@ -46,7 +46,6 @@ from daimon.adapters.mcp.tools.propagation import (
     _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.tenant_summary import (
-    ChannelAdmins,
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
@@ -62,6 +61,7 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.tenant_summary import ChannelAdmins
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import (
     make_account,

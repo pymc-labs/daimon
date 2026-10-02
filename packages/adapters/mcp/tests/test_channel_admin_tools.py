@@ -114,6 +114,13 @@ async def test_a_teams_admin_names_channel_admins_by_entra_id(
         runtime, admin, channel_id=channel, role_ids=[], user_ids=[user]
     )
     assert result.channel.user_ids == [user.lower()], "Entra ids fold to lower case"
+    thread = f"{channel};messageid=1717"
+    again = await _set_channel_admins_impl(
+        runtime, admin, channel_id=thread, role_ids=[], user_ids=[user]
+    )
+    assert again.channel.channel_id == channel, "a Teams thread id names its channel"
+    cleared = await _clear_channel_admins_impl(runtime, admin, channel_id=thread)
+    assert (cleared.channel.channel_id, cleared.changed) == (channel, True), "and clears it"
     with pytest.raises(ToolError, match="no roles"):
         await _set_channel_admins_impl(
             runtime, admin, channel_id=channel, role_ids=["r"], user_ids=[]

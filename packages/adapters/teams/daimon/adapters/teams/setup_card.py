@@ -52,6 +52,8 @@ VERB = "agent_setup"
 CREATE_DIALOG = "agent_create"
 TOKEN_DIALOG = "agent_coding_tools"
 PAGE_SIZE = 20
+MAX_ENVIRONMENT_LINES = 10
+"""Channel environment lines on Who answers where; the rest fold into "and N more"."""
 ENDED = "Setup conversation ended. Your next message goes back to your usual agent."
 _DETAIL_LIST_MAX_CHARS = 6_000
 # Discord's bounds on the purpose and the places an agent answers in.
@@ -243,6 +245,7 @@ def routing_card(
         if answering_map.tenant_consumes_fallthrough:
             line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
+    body.append(_text(_environments_text(answering_map)))
     names = [setup_thread_name(ref.target_name) for ref in answering_map.setup_threads]
     if answering_map.setup_threads_truncated:
         names.append("…and more")
@@ -253,6 +256,24 @@ def routing_card(
     )
     body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
     return _card("Who answers where", body, [*_pager(page, "routing"), _button("Back", "agents")])
+
+
+def _environments_text(answering_map: AnsweringMap) -> str:
+    """Each channel's own environment, then the defaults, as Discord and Slack list them."""
+    rows = answering_map.channel_environments
+    lines = [
+        f"Channel `{row.channel_id}`: **{row.environment_name}**"
+        for row in rows[:MAX_ENVIRONMENT_LINES]
+    ]
+    if len(rows) > len(lines):
+        lines.append(f"…and {len(rows) - len(lines)} more")
+    tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
+    lines = lines or ["No channel picks its own environment yet."]
+    lines.append(f"**Organisation default:** {tenant or 'Not assigned'}")
+    if deployment is not None:
+        note = " (not in effect while an organisation default is set)" if tenant else ""
+        lines.append(f"**Deployment default:** {deployment}{note}")
+    return "**Environments**\n\n" + "\n\n".join(lines)
 
 
 def new_agent_form(

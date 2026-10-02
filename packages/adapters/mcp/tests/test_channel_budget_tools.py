@@ -1,7 +1,8 @@
 """DB-backed tests for the channel budget MCP tools.
 
-The platform visibility lookup is patched on the tool module; the Discord
-resolver itself is covered in `tools/test_thread_participation_verify.py`.
+The Discord visibility lookup is patched on `_channel_target`; the resolver
+is covered in `tools/test_channel_target.py`, the Discord lookup in
+`tools/test_thread_participation_verify.py`.
 """
 
 from __future__ import annotations
@@ -10,20 +11,17 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import channel_budgets as tool_module
+from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools.channel_budgets import (
     _clear_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channel_budgets_impl,  # pyright: ignore[reportPrivateUsage]
-    _resolve_slack_channel,  # pyright: ignore[reportPrivateUsage]
-    _resolve_teams_channel,  # pyright: ignore[reportPrivateUsage]
     _set_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     origin_budget_channel,
 )
@@ -57,7 +55,7 @@ def visible(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append(channel_id)
         return _PARENT if channel_id == _THREAD else channel_id
 
-    monkeypatch.setattr(tool_module, "_budget_channel", fake)
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", fake)
     return calls
 
 
@@ -315,7 +313,7 @@ async def test_clear_resolves_a_visible_thread_and_takes_any_other_id_as_given(
             return _PARENT
         raise ToolError("cannot see that channel")
 
-    monkeypatch.setattr(tool_module, "_budget_channel", fake)
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", fake)
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
     admin = _auth(tenant, account_id, admin=True)
@@ -370,80 +368,6 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     bound = dataclasses.replace(other_agent, bound_channel_id="c-key")
     assert await channel(bound, None) == "c-key", "a key minted in a channel spends there"
     assert await channel(bound, here) == "c-key", "whatever origin it names"
-
-
-@pytest.mark.parametrize(("is_private", "caller_in_channel"), [(False, False), (True, True)])
-async def test_slack_channel_resolves_when_the_caller_can_see_it(
-    monkeypatch: pytest.MonkeyPatch, is_private: bool, caller_in_channel: bool
-) -> None:
-    client = _slack_client(monkeypatch, is_private=is_private, caller_in_channel=caller_in_channel)
-    resolved = await _resolve_slack_channel(MagicMock(), _slack_auth(), "C1:1717.5")
-    assert resolved == "C1", "a thread resolves to its channel"
-    client.conversations_info.assert_awaited_once_with(channel="C1")
-
-
-async def test_slack_channel_hidden_from_the_caller_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _slack_client(monkeypatch, is_private=True, caller_in_channel=False)
-    with pytest.raises(ToolError, match="missing channel access"):
-        await _resolve_slack_channel(MagicMock(), _slack_auth(), "C1")
-
-
-def _slack_auth() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        platform="slack",
-        external_id="T1",
-        platform_user_id="U1",
-    )
-
-
-def _slack_client(
-    monkeypatch: pytest.MonkeyPatch, *, is_private: bool, caller_in_channel: bool
-) -> MagicMock:
-    client = MagicMock()
-    client.conversations_info = AsyncMock(
-        return_value={"channel": {"id": "C1", "is_member": True, "is_private": is_private}}
-    )
-    client.users_info = AsyncMock(return_value={"user": {"id": "U1"}})
-    client.conversations_members = AsyncMock(
-        return_value={"members": ["U1"] if caller_in_channel else ["U2"]}
-    )
-
-    async def fake_client(runtime: object, *, team_id: str) -> MagicMock:
-        assert team_id == "T1", "resolved in the caller's own workspace"
-        return client
-
-    monkeypatch.setattr(tool_module, "slack_web_client", fake_client)
-    return client
-
-
-@pytest.mark.parametrize("member", [True, False])
-async def test_a_teams_thread_resolves_to_its_channel_for_a_member_only(
-    monkeypatch: pytest.MonkeyPatch, member: bool
-) -> None:
-    channel = "19:c@thread.tacv2"
-    client = MagicMock()
-    client.is_member = AsyncMock(return_value=member)
-    located: list[str] = []
-
-    async def locate(runtime: McpRuntime, auth: AuthIdentity, _client: object, cid: str) -> object:
-        located.append(cid)
-        return SimpleNamespace(channel_id=cid)
-
-    monkeypatch.setattr(tool_module, "require_client", lambda runtime, auth: (client, "u-1"))
-    monkeypatch.setattr(tool_module, "locate_channel", locate)
-    resolve = _resolve_teams_channel(MagicMock(), MagicMock(), f"{channel};messageid=17")
-    if member:
-        assert await resolve == channel
-    else:
-        with pytest.raises(ToolError, match="not a member"):
-            await resolve
-    assert located == [channel], "a thread id is looked up as its channel"
-    client.is_member.assert_awaited_once_with(channel, "u-1")
 
 
 async def test_a_teams_clear_takes_the_threads_channel(

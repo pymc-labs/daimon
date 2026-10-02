@@ -12,7 +12,7 @@ import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import channel_environments as tool_module
+from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools.channel_admins import (
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -49,14 +49,16 @@ HIDDEN = "555555555555555555"
 
 @pytest.fixture(autouse=True)
 def _visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the Discord channel lookup: THREAD's parent is CHANNEL."""
+    """Stand in for the platform lookups: THREAD's parent is CHANNEL, the rest is visible."""
 
     async def fake(_runtime: McpRuntime, _auth: AuthIdentity, channel_id: str) -> str:
         if channel_id == HIDDEN:
             raise ToolError("that channel is not visible to the caller")
         return CHANNEL if channel_id == THREAD else channel_id
 
-    monkeypatch.setattr(tool_module, "resolve_visible_channel", fake)
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", fake)
+    monkeypatch.setattr(channel_target, "_visible_slack_channel", fake)
+    monkeypatch.setattr(channel_target, "_visible_teams_channel", fake)
 
 
 async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[uuid.UUID, uuid.UUID]:
@@ -333,6 +335,26 @@ async def test_a_slack_thread_id_resolves_to_its_channel(
     assert result.scope == "channel:C0GROWTH", "a Slack thread id is stored under its channel"
     row = await get_scope(
         db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C0GROWTH")
+    )
+    assert row is not None and row.environment_name == "science", "the channel row is written"
+
+
+async def test_a_teams_thread_id_resolves_to_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """A Teams thread id is never stored as a channel, where no turn would read it."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    admin = _auth(tenant_id, account_id, admin=True, platform="teams")
+    channel = "19:growth@thread.tacv2"
+
+    result = await _set_channel_environment_impl(
+        runtime, admin, environment_name="science", channel_id=f"{channel};messageid=1717"
+    )
+
+    assert result.scope == f"channel:{channel}", "a Teams thread id is stored under its channel"
+    row = await get_scope(
+        db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel)
     )
     assert row is not None and row.environment_name == "science", "the channel row is written"
 

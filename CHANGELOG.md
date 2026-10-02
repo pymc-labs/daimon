@@ -91,7 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the immediate stop and `set-token-scopes` narrows. Calls are rate limited
   (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`); calls, refusals and token changes
   are audited. Channel budget, agent and admin tools take the scopes. New tools:
-  `get_tenant_summary` (with each channel's admins) and, for `promo:create`,
+  `get_tenant_summary` (with each channel's admins; `daimon channels list`
+  prints the same) and, for `promo:create`,
   `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`
   tokens now expire and can be revoked. Run migration `0036_operator_tokens`.
 
@@ -173,7 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord delivers files generated during tool-using turns into the chat thread,
   with upload-limit notices and protected-channel checks.
-- **Channel budgets.** Admins can cap what one Discord or Slack channel may
+- **Channel budgets.** Admins can cap what one Discord, Slack or Teams channel may
   spend, monthly, in total or over a fixed date range, with
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
@@ -192,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in channels they run (instructions, skills, keys, MCP servers, repos)
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
-  admins. Slack grants are by member only. A routine or wake set up by someone
+  admins. Slack and Teams grants are by member only. A routine or wake set up by someone
   with more rights keeps the agent out of a channel admin's hands, and so do a
   personal default, someone else's live session or routine in another channel
   or in no known one, and, for key, MCP server and skill repo changes,
@@ -218,7 +219,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
 - **Channel isolation.** A server admin can isolate a channel from Who
   answers where in the setup panel, with `set_channel_isolation` (also under
-  an operator token's `channels:write`) or with `--isolated-channel`. That
+  an operator token's `channels:write`), with `daimon channels isolate` (which
+  can copy an agent too) or with `--isolated-channel`. That
   seals it and pins its default agent to it alone in one write; a default
   that is built in or answers elsewhere is refused with the reason, unless
   the admin asks for a copy, made without credentials. Inside, only the
@@ -227,12 +229,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elsewhere, post nowhere else, send no DMs, and `/dm` there is refused. A
   conversation in the channel keeps its posts, cards and routines inside it,
   while its setup thread can still configure the channel's agent. The CLI
-  refuses a pin or seal change that would break an isolated channel. The panel shows the channel as private,
+  refuses a pin or seal change that would break an isolated channel, and
+  refuses isolation on Teams, as the tool does. The panel shows the channel as private,
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
-- **Channel environments.** Admins can pick the environment a Discord or
-  Slack channel's turns run in, or the workspace default, with
+- **Channel environments.** Admins can pick the environment a Discord,
+  Slack or Teams channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
   the workspace's, also under an operator token's `channels:write`); an admin
   of a channel can pick that channel's. In a sealed channel, or one holding a
@@ -242,14 +245,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. Sealing or isolating a channel whose own pick has such a network warns
   that a server admin should confirm or change it. Who answers where in the
   setup panel lists each channel's environment on the reader's side of an
-  isolation and offers a select for it, and `explain_agent_resolution` names
+  isolation and offers a select for it (Teams lists them only), and
+  `explain_agent_resolution` names
   the environment and the tier that chose it.
   A conversation switches from its next message and keeps its files and its
   seal, and a routine runs in its channel's environment. Archiving or deleting
   an environment clears the picks that named it. The missing-environment
   notice now points at the panel instead of the operator. With no channel or
   workspace environment set, nothing changes; see the upgrade notes for
-  routines where one already is.
+  routines where one already is. A thread id names its channel on every
+  platform, and the caller must be able to see the channel.
 - **Skill uploads.** Add one skill to one agent from a pasted SKILL.md, a
   `.md` or `.zip` attached on Discord or Slack, or a GitHub folder, with
   `add_skill` or Add skill on the setup panel's agent details (Slack takes a

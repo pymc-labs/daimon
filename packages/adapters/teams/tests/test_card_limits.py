@@ -31,7 +31,13 @@ from daimon.core.agent_details import (
     RepoBinding,
     SkillEntry,
 )
-from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRef, TenantAnswer
+from daimon.core.answering_map import (
+    AnsweringMap,
+    ChannelAnswer,
+    ChannelEnvironment,
+    SetupThreadRef,
+    TenantAnswer,
+)
 from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
@@ -201,6 +207,12 @@ def _routing() -> AdaptiveCard:
             for index in range(10)
         ),
         setup_threads_truncated=True,
+        channel_environments=tuple(
+            ChannelEnvironment(channel_id=f"{CHANNEL}{index}", environment_name=EMOJI * 256)
+            for index in range(100)
+        ),
+        tenant_environment=EMOJI * 256,
+        deployment_environment=EMOJI * 256,
     )
     page = paginate(overrides, page=1, page_size=setup_card.PAGE_SIZE)
     return setup_card.routing_card(answering_map, page, is_admin=False, request_agent=NAME)
