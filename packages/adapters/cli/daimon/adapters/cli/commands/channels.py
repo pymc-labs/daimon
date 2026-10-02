@@ -1,4 +1,4 @@
-"""daimon channels ... sub-app: per-channel spend budgets and channel admins."""
+"""daimon channels ... sub-app: per-channel spend budgets, channel admins and isolation."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.authz import Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
@@ -21,6 +22,7 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
+from daimon.core.channel_isolation_setup import set_channel_isolation
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -35,8 +37,9 @@ from daimon.core.stores.domain import Platform
 from daimon.core.stores.tenants import get_tenant
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markup import escape
 
-channels_app = typer.Typer(help="Channels: spend budgets and channel admins.")
+channels_app = typer.Typer(help="Channels: spend budgets, channel admins and isolation.")
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
 )
@@ -84,6 +87,29 @@ def _channel(platform: str, value: str) -> str:
     return channel_id
 
 
+async def _fetch_discord_channel(
+    token: str, *, channel_id: str, transport: httpx.AsyncBaseTransport | None
+) -> dict[str, Any] | None:
+    """The channel as Discord returns it to the bot; None when the bot cannot see it."""
+    try:
+        async with httpx.AsyncClient(
+            base_url=_DISCORD_API,
+            headers={"Authorization": f"Bot {token}"},
+            timeout=10.0,
+            transport=transport,
+        ) as http:
+            response = await http.get(f"/channels/{channel_id}")
+    except httpx.HTTPError as exc:
+        raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
+    if response.status_code in _DISCORD_MISSING:
+        return None
+    if not response.is_success:
+        raise DaimonError(
+            f"Discord returned HTTP {response.status_code} looking up channel {channel_id}"
+        )
+    return cast("dict[str, Any]", response.json())
+
+
 async def _discord_budget_channel(
     rt: CliRuntime,
     *,
@@ -108,26 +134,13 @@ async def _discord_budget_channel(
         raise DaimonError(
             "DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to look the channel up"
         )
-    token = rt.settings.discord.bot_token.get_secret_value()
-    try:
-        async with httpx.AsyncClient(
-            base_url=_DISCORD_API,
-            headers={"Authorization": f"Bot {token}"},
-            timeout=10.0,
-            transport=transport,
-        ) as http:
-            response = await http.get(f"/channels/{channel_id}")
-    except httpx.HTTPError as exc:
-        raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
-    if response.status_code in _DISCORD_MISSING:
+    channel = await _fetch_discord_channel(
+        rt.settings.discord.bot_token.get_secret_value(), channel_id=channel_id, transport=transport
+    )
+    if channel is None:
         if missing_ok:
             return channel_id
         raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
-    if not response.is_success:
-        raise DaimonError(
-            f"Discord returned HTTP {response.status_code} looking up channel {channel_id}"
-        )
-    channel = cast("dict[str, Any]", response.json())
     if str(channel.get("guild_id")) != guild_id:
         raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
     if channel.get("type") in _DISCORD_THREAD_TYPES:
@@ -467,3 +480,104 @@ async def channels_admins_clear(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel
         )
     console.print("cleared" if removed else "no channel admins to clear")
+
+
+_ISOLATION_PLATFORMS = ("discord", "slack")
+
+
+@channels_app.command("isolate")
+def channels_isolate_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: Annotated[str, typer.Argument(help="The channel's id, never a thread's.")],
+    fork_from: Annotated[
+        str | None,
+        typer.Option(
+            "--fork-from",
+            help="Copy this agent, without credentials, as the channel's own when it has none.",
+        ),
+    ] = None,
+    end: Annotated[
+        bool, typer.Option("--end", help="End isolation; the seal and pins stay.")
+    ] = False,
+    lift_seal_and_pins: Annotated[
+        bool, typer.Option("--lift-seal-and-pins", help="With --end, lift the seal and pins too.")
+    ] = False,
+) -> None:
+    """Isolate a channel: seal it and pin its default agent to it alone, in one write."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_isolate(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                fork_from=fork_from,
+                end=end,
+                lift_seal_and_pins=lift_seal_and_pins,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_isolate(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    fork_from: str | None = None,
+    end: bool = False,
+    lift_seal_and_pins: bool = False,
+    discord_transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    if platform not in _ISOLATION_PLATFORMS:
+        raise typer.BadParameter("channel isolation exists only on Discord and Slack")
+    if end and fork_from is not None:
+        raise typer.BadParameter("--fork-from only applies when isolating")
+    if lift_seal_and_pins and not end:
+        raise typer.BadParameter("--lift-seal-and-pins only applies with --end")
+    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    label = None
+    if fork_from is not None and platform == "discord" and rt.settings.discord is not None:
+        found = await _fetch_discord_channel(
+            rt.settings.discord.bot_token.get_secret_value(),
+            channel_id=channel,
+            transport=discord_transport,
+        )
+        if found is not None and str(found.get("guild_id")) == workspace_id:
+            label = cast("str | None", found.get("name"))
+    public_url = rt.settings.mcp.public_url if fork_from is not None else None
+    change = await set_channel_isolation(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel,
+        isolated=not end,
+        default=rt.deployment_default,
+        actor_account_id=None,
+        channel_label=label,
+        fork=fork_from is not None,
+        fork_from=fork_from,
+        public_url=str(public_url) if public_url is not None else None,
+        drop_seal_and_pins=lift_seal_and_pins,
+        # The CLI is the deployment operator.
+        subject=Subject(is_admin=True),
+    )
+    where = f"{platform}:{workspace_id} channel {channel}"
+    if not change.isolated:
+        status = "isolation ended" if change.changed else "was not isolated"
+        console.print(f"{where}: {status}. {change.end_warning}")
+        return
+    copied = f", copied from {change.forked_from}" if change.forked_from else ""
+    status = "isolated" if change.changed else "already isolated"
+    console.print(f"{where}: {status}; its own agent is {change.agent_name}{copied}.")
+    for note in (change.dropped_skills_note, change.network_warning):
+        if note:
+            console.print(f"[yellow]{escape(note)}[/yellow]")

@@ -460,8 +460,9 @@ async def _require_isolatable(
         if channel_id in added:
             console.print(
                 f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
-                "alone in the same command, or use the setup panel's Isolate or "
-                "set_channel_isolation, which do both. Nothing was changed.[/red]"
+                "alone in the same command, or use daimon channels isolate, the setup "
+                "panel's Isolate or set_channel_isolation, which do both. Nothing was "
+                "changed.[/red]"
             )
         else:
             console.print(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
@@ -20,12 +21,18 @@ from daimon.adapters.cli.commands.channels import (
     channels_admins_clear,
     channels_admins_get,
     channels_admins_set,
+    channels_isolate,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import channel_budgets
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -147,6 +154,7 @@ GUILD = "900000000000000001"
 CHANNEL = "900000000000000002"
 ROLE = "900000000000000003"
 USER = "900000000000000004"
+OTHER_CHANNEL = "900000000000000005"
 
 
 async def test_set_get_clear_round_trip(
@@ -298,3 +306,69 @@ async def test_a_discord_thread_budgets_its_parent_and_a_foreign_channel_is_refu
     assert "channel 901: budget cleared" in _out(args["console"]), (
         "without a bot token the id is cleared as given"
     )
+
+
+def _ma(tenant_id: uuid.UUID, *names: str) -> AsyncAnthropic:
+    state = FakeMAState()
+    for name in names:
+        agent = ma_agent(id=f"agent_{name}", name=name, tenant_id=tenant_id)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    return build_fake_anthropic(make_fake_ma_handler(state))
+
+
+async def test_isolate_copies_an_agent_seals_and_pins_it_then_ends(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One command does what the panel's Isolate does: copy, seal, pin, mark."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=GUILD)
+        for channel in (CHANNEL, OTHER_CHANNEL):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+                tenant_id=tenant.id,
+                agent_name="shared",
+                mode="agent",
+            )
+    settings = SimpleNamespace(
+        cli=FakeCliSettings.cli,
+        discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
+        mcp=SimpleNamespace(public_url=None),
+    )
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant.id, "shared"), settings=settings
+    )
+    console = _console()
+    where = {"rt": rt, "console": console, "platform": "discord", "workspace_id": GUILD}
+
+    with pytest.raises(DaimonError, match="shared"):
+        await channels_isolate(**where, channel_id=CHANNEL)  # shared answers elsewhere too
+    named = _discord_channels({CHANNEL: {"guild_id": GUILD, "name": "Team Alpha", "type": 0}})
+    await channels_isolate(**where, channel_id=CHANNEL, fork_from="shared", discord_transport=named)
+
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant.id)
+    name = "team-alpha"  # the copy is named after the channel
+    assert policy.isolated_channel_ids == (CHANNEL,), "the channel is isolated"
+    assert policy.sealed_channel_ids == (CHANNEL,), "and sealed in the same write"
+    assert policy.agent_channel_pins == {name: (CHANNEL,)}, "the copy is pinned to it alone"
+    assert f"isolated; its own agent is {name}, copied from shared" in _out(console)
+
+    await channels_isolate(**where, channel_id=CHANNEL, end=True)
+    async with db_session_factory() as s:
+        ended = await load_access_policy(s, tenant_id=tenant.id)
+    assert ended.isolated_channel_ids == (), "isolation ended"
+    assert ended.sealed_channel_ids == (CHANNEL,), "the seal stays unless lifted"
+
+
+async def test_isolate_refuses_teams_and_bad_flag_mixes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    base = {"rt": rt, "console": _console(), "workspace_id": "w", "channel_id": CHANNEL}
+    with pytest.raises(typer.BadParameter, match="only on Discord and Slack"):
+        await channels_isolate(**base, platform="teams")
+    with pytest.raises(typer.BadParameter, match="only applies when isolating"):
+        await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
+    with pytest.raises(typer.BadParameter, match="only applies with --end"):
+        await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)

@@ -212,7 +212,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
 - **Channel isolation.** A server admin can isolate a channel from Who
   answers where in the setup panel, with `set_channel_isolation` (also under
-  an operator token's `channels:write`) or with `--isolated-channel`. That
+  an operator token's `channels:write`), with `daimon channels isolate` (which
+  can copy an agent too) or with `--isolated-channel`. That
   seals it and pins its default agent to it alone in one write; a default
   that is built in or answers elsewhere is refused with the reason, unless
   the admin asks for a copy, made without credentials. Inside, only the
