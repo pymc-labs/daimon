@@ -69,15 +69,10 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
-    AGENT_PINNED_ELSEWHERE_NOTICE,
-    CHANNEL_BUDGET_NOTICE,
-    CHANNEL_ISOLATED_NOTICE,
-    INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
-    _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
-    _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
+    admission_refusal_message,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import generate_request_id, render_error
@@ -512,30 +507,20 @@ async def run_wizard_submit_turn_observed(
                 _log.info(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )
-                await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
             elif err.reason == "agent_pinned_elsewhere":
                 _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
-                await channel.send(
-                    "Your answers were recorded, but " + AGENT_PINNED_ELSEWHERE_NOTICE
-                )
             elif err.reason == "channel_isolated":
                 _log.info("wizard_submit.skipped.channel_isolated", short_id=row.id)
-                await channel.send("Your answers were recorded, but " + CHANNEL_ISOLATED_NOTICE)
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
-                await channel.send(
-                    "Your answers were recorded, but "
-                    + _credit_depleted_message(_resolve_bot_display_name(bot.runtime.settings))
-                )
             elif err.reason == "channel_budget_exceeded":
                 _log.info("wizard_submit.skipped.over_channel_budget", short_id=row.id)
-                await channel.send("Your answers were recorded, but " + CHANNEL_BUDGET_NOTICE)
             else:
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
+            if err.reason != "channel_protected":
                 await channel.send(
-                    "Your answers were recorded, but the monthly usage cap was reached "
-                    "for this guild -- ask again in the thread. An admin can adjust the "
-                    "cap with `/billing` (when available)."
+                    "Your answers were recorded. "
+                    + admission_refusal_message(err.reason, bot.runtime.settings)
                 )
             return
 

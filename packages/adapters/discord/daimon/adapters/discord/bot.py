@@ -99,12 +99,14 @@ from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
+    AdmissionDenialReason,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
@@ -289,27 +291,18 @@ async def _channel_protection_state(
     )
 
 
-INVOKER_NOT_ALLOWED_NOTICE = (
-    "you aren't on this server's list of people who can start a turn. A server admin can add you."
-)
-
-CHANNEL_BUDGET_NOTICE = (
-    "this channel has used its spending budget. A server admin can raise or clear it."
-)
-
-AGENT_PINNED_ELSEWHERE_NOTICE = (
-    "this agent only runs in the channels an operator pinned it to, so it can't answer here."
-)
-
-CHANNEL_ISOLATED_NOTICE = (
-    "this channel is isolated and the agent that would answer isn't one of its own. "
-    "A server admin must set the channel's agent."
-)
+DISCORD_REFUSAL_NOUNS = RefusalNouns(scope="server", admin="a server admin", billing="`/billing`")
 
 
-def _credit_depleted_message(bot_display_name: str) -> str:
-    return (
-        f"This server's {bot_display_name} credit is depleted. An admin can top up with `/billing`."
+def admission_refusal_message(
+    reason: AdmissionDenialReason, settings: Settings, *, in_dm: bool = False
+) -> str:
+    """The shared admission refusal in Discord's nouns, naming this deployment's bot."""
+    return admission_refusal_text(
+        reason,
+        DISCORD_REFUSAL_NOUNS,
+        bot_name=_resolve_bot_display_name(settings),
+        in_dm=in_dm,
     )
 
 
@@ -2495,7 +2488,6 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-                await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
             elif err.reason == "agent_pinned_elsewhere":
                 log.info(
                     "turn.skipped.agent_pinned_elsewhere",
@@ -2503,7 +2495,6 @@ class DaimonBot(commands.Bot):
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-                await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
             elif err.reason == "channel_isolated":
                 log.info(
                     "turn.skipped.channel_isolated",
@@ -2511,29 +2502,22 @@ class DaimonBot(commands.Bot):
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-                await target.send("Sorry, " + CHANNEL_ISOLATED_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
-                await target.send(
-                    _credit_depleted_message(_resolve_bot_display_name(self.runtime.settings))
-                )
             elif err.reason == "channel_budget_exceeded":
                 log.info(
                     "turn.skipped.over_channel_budget",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                 )
-                await target.send("Sorry, " + CHANNEL_BUDGET_NOTICE)
             else:
                 log.info(
                     "turn.skipped.over_cap",
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-                await target.send(
-                    "Monthly usage cap reached for this guild. "
-                    "An admin can adjust the cap with `/billing` (when available)."
-                )
+            if err.reason != "channel_protected":
+                await target.send(admission_refusal_message(err.reason, self.runtime.settings))
             return
 
         # D-03 boundary: the per-turn ceiling clock starts here, once admission
