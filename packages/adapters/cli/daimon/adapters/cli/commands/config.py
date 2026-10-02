@@ -286,14 +286,15 @@ async def _refuse_breaking_isolation(
     agent_name: str | None,
     anthropic: AsyncAnthropic | None,
 ) -> None:
-    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks channel isolation.
+    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks a pin or isolation.
 
+    A pinned agent routed outside its pin would refuse every turn there.
     `anthropic` looks up the agent's other names; without it only `agent_name` counts.
     """
     if isinstance(scope, UserScopeRef):
         return  # the user tier never picks the agent
     policy = await load_access_policy(session, tenant_id=scope.tenant_id)
-    if not policy.isolated_channel_ids:
+    if not (policy.isolated_channel_ids or policy.agent_channel_pins):
         return
     channel_id = scope.channel_id if isinstance(scope, ChannelScopeRef) else None
     if agent_name is None:
