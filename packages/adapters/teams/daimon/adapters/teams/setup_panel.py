@@ -41,14 +41,22 @@ from daimon.adapters.teams.setup_conversation import (
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_lifecycle import create_blank_agent
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
+from daimon.core.authz import AgentRef, build_subject
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import coding_tool_config, mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import (
+    authorize_coding_token,
+    coding_tool_config,
+    mint_agent_mcp_token,
+    token_jti,
+)
 from daimon.core.models_catalog import ModelChoice, list_model_choices
 from daimon.core.roster import Roster, load_roster, paginate
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
@@ -284,8 +292,20 @@ class SetupPanel:
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
             return dialog_message(NOT_CONFIGURED)
-        if not actor.is_admin:
-            log.info("teams.coding_tools.refused_non_admin", agent_name=name)
+        try:
+            async with self._runtime.sessionmaker() as session:
+                policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+        except AccessPolicyUnreadable:
+            return dialog_message(POLICY_UNREADABLE_REFUSAL)
+        # The panel lives in the 1:1 chat, so the token is never bound to a channel.
+        decision, _ = authorize_coding_token(
+            policy,
+            subject=build_subject(is_admin=actor.is_admin, platform_user_id=actor.user_id),
+            agent=AgentRef.of(name),
+            channel_id=None,
+        )
+        if not decision:
+            log.info("teams.coding_tools.refused", agent_name=name, reason=decision.reason)
             return dialog_message(NEEDS_ADMIN.format(name=name))
         roster = await self._roster(actor.tenant_id, None)
         target = next((row for row in roster.rows if row.name == name), None)
