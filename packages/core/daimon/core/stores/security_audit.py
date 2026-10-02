@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from daimon.core._models import Account, SecurityAuditEvent, Tenant
+from daimon.core.security_audit import GitHubTokenAuditKind
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import CursorResult
@@ -45,6 +46,31 @@ class SecurityAuditEntry(BaseModel):
 
 class SecurityAuditRow(SecurityAuditEntry):
     id: uuid.UUID
+
+
+async def append_github_token_event(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    kind: GitHubTokenAuditKind,
+    outcome: Literal["allowed", "denied", "error"],
+    reason: str,
+) -> SecurityAuditRow | None:
+    """Audit a token lifecycle step without recording the token or repo names."""
+    return await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        platform=None,
+        platform_user_id=None,
+        tool_name="github_app_token",
+        operation=kind,
+        outcome=outcome,
+        reason=reason,
+    )
 
 
 async def append_event(

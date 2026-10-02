@@ -833,6 +833,15 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # redeemed_by_account_id with ON DELETE SET NULL, so erasure severs who
             # redeemed a code while the tenant keeps its credit history.
             "promo_redemptions",
+            # Repo authorization and grants belong to the tenant. Their nullable
+            # creator references are erased by ON DELETE SET NULL.
+            "tenant_github_repos",
+            "agent_github_grants",
+            # The account link is removed by ON DELETE CASCADE. A token's
+            # requester reference is erased by SET NULL; its recorded link
+            # generation then fails the inventory sweeper's link check.
+            "account_github_links",
+            "github_issued_tokens",
         }
     )
 
