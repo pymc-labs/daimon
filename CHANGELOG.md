@@ -93,6 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Operator tokens from the setup panels.** Server admins on Discord, Slack
+  and Teams mint, list and revoke operator tokens from Who answers where:
+  `tenant:read`, `channels:write` and `promo:redeem` only (`promo:create`
+  stays with `daimon mcp mint-operator-token`), for 30 days, shown once. The
+  listing never shows a token, and every mint and revoke is audited.
 - **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
   from your coding tools" dialog now asks a channel admin which of their
   channels the token runs in, and binds it there under the same rule as

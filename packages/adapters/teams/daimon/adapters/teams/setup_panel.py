@@ -13,6 +13,7 @@ clicker and re-reads state, so a stale card grants nothing.
 
 from __future__ import annotations
 
+import functools
 import re
 import uuid
 from collections.abc import Awaitable, Mapping
@@ -64,7 +65,13 @@ from daimon.core.mcp_auth import (
     token_jti,
 )
 from daimon.core.models_catalog import ModelChoice, list_model_choices
+from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
+from daimon.core.panel_operator_tokens import (
+    list_panel_operator_tokens,
+    mint_panel_operator_token,
+    revoke_panel_operator_token,
+)
 from daimon.core.roster import Roster, load_roster, paginate
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
@@ -87,6 +94,8 @@ NEEDS_ADMIN = (
     "it is pinned to, binding it to one of them."
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
+OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
+OPERATOR_NOT_CONFIGURED = "This deployment has no MCP signing key, so it mints no operator tokens."
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."
@@ -143,6 +152,101 @@ class SetupPanel:
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         return await _guarded(self._token_submit(ctx.activity), dialog_message(FAILED))
+
+    async def on_operator_open(
+        self, ctx: ActivityContext[TaskFetchInvokeActivity]
+    ) -> TaskModuleInvokeResponse:
+        return await _guarded(self._operator_open(ctx.activity), dialog_message(FAILED))
+
+    async def on_operator_submit(
+        self, ctx: ActivityContext[TaskSubmitInvokeActivity]
+    ) -> TaskModuleInvokeResponse:
+        return await _guarded(self._operator_submit(ctx.activity), dialog_message(FAILED))
+
+    async def _operator_tokens(
+        self, actor: Actor, notice: str | None = None
+    ) -> TaskModuleInvokeResponse:
+        async with self._runtime.sessionmaker() as session:
+            rows = await list_panel_operator_tokens(
+                session, tenant_id=actor.tenant_id, now=datetime.now(UTC)
+            )
+        return dialog("Operator tokens", cards.operator_tokens_card(rows, notice=notice))
+
+    async def _operator_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
+        actor = await card_actor(self._runtime, activity)
+        if actor is None or not actor.is_admin:
+            return dialog_message(OPERATOR_NEEDS_ADMIN)
+        if self._runtime.settings.mcp.jwt_secret is None:
+            return dialog_message(OPERATOR_NOT_CONFIGURED)
+        return await self._operator_tokens(actor)
+
+    async def _operator_submit(
+        self, activity: TaskSubmitInvokeActivity
+    ) -> TaskModuleInvokeResponse:
+        """Mint or revoke for a live admin; every outcome is audited."""
+        actor = await card_actor(self._runtime, activity)
+        if actor is None:
+            return dialog_message(DENIED)
+        data = submitted_fields(activity.value.data)
+        revoking = data.get("op") == "revoke"
+        op: PanelOp = "operator_token_revoke" if revoking else "operator_token_mint"
+        audit = functools.partial(
+            record_panel_write,
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            platform="teams",
+            platform_user_id=actor.user_id,
+            op=op,
+            token_kind="operator",
+        )
+        if not actor.is_admin:
+            await audit(outcome="denied", reason="needs_admin")
+            return dialog_message(OPERATOR_NEEDS_ADMIN)
+        secret = self._runtime.settings.mcp.jwt_secret
+        if secret is None:
+            return dialog_message(OPERATOR_NOT_CONFIGURED)
+        now = datetime.now(UTC)
+        if revoking:
+            try:
+                jti = uuid.UUID(str(data.get("jti")))
+            except ValueError:
+                return await self._operator_tokens(actor, "Pick a token to revoke.")
+            async with self._runtime.sessionmaker.begin() as session:
+                revoked = await revoke_panel_operator_token(
+                    session, tenant_id=actor.tenant_id, jti=jti, now=now
+                )
+            await audit(
+                outcome="allowed" if revoked else "error",
+                reason="completed" if revoked else "already_revoked",
+                token_jti=jti,
+            )
+            return await self._operator_tokens(
+                actor, "Token revoked." if revoked else "That token was already revoked."
+            )
+        scopes = [part for part in str(data.get("scopes") or "").split(",") if part]
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                minted = await mint_panel_operator_token(
+                    session,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    platform_user_id=actor.user_id,
+                    scopes=scopes,
+                    label=str(data.get("label") or ""),
+                    secret=secret.get_secret_value().encode(),
+                    now=now,
+                )
+        except OperatorTokenError as exc:
+            await audit(outcome="denied", reason="scopes")
+            return await self._operator_tokens(actor, f"{exc}. Nothing was minted.")
+        await audit(outcome="allowed", reason="completed", token_jti=minted.jti)
+        log.info("teams.operator_token.minted", jti=str(minted.jti))  # never the token
+        card = cards.operator_token_card(
+            token=minted.token,
+            scopes=sorted(minted.scopes),
+            expires=minted.expires_at.date().isoformat(),
+        )
+        return dialog("Operator token", card)
 
     async def _roster(self, tenant_id: uuid.UUID, chat: str | None) -> Roster:
         async with self._runtime.sessionmaker() as session:

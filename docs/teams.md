@@ -68,7 +68,7 @@ longer goes to the agent. None of them runs an agent turn.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |

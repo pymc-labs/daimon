@@ -21,6 +21,7 @@ from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
+from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.roster import Page, Roster, RosterAgent
 from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
 from daimon.core.scope import AnsweringPlace
@@ -30,6 +31,7 @@ from daimon.core.setup_conversations import (
     setup_thread_name,
     shared_keys_sentence,
 )
+from daimon.core.stores.domain import McpTokenRow
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -51,6 +53,7 @@ from microsoft_teams.cards import (
 VERB = "agent_setup"
 CREATE_DIALOG = "agent_create"
 TOKEN_DIALOG = "agent_coding_tools"
+OPERATOR_DIALOG = "operator_tokens"
 PAGE_SIZE = 20
 MAX_ENVIRONMENT_LINES = 10
 """Channel environment lines on Who answers where; the rest fold into "and N more"."""
@@ -255,7 +258,11 @@ def routing_card(
         agent_name=request_agent or "an agent", channel_label="a channel"
     )
     body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
-    return _card("Who answers where", body, [*_pager(page, "routing"), _button("Back", "agents")])
+    actions: list[Action] = [*_pager(page, "routing"), _button("Back", "agents")]
+    if is_admin:
+        tokens = SubmitAction(title="🔑 Operator tokens", data=OpenDialogData(OPERATOR_DIALOG))
+        actions.append(tokens)
+    return _card("Who answers where", body, actions)
 
 
 def _environments_text(answering_map: AnsweringMap) -> str:
@@ -365,6 +372,52 @@ def token_card(
         ],
         actions=[revoke],
         fallback_text=f"Use {agent_name} from your coding tools",
+    )
+
+
+def operator_tokens_card(rows: Sequence[McpTokenRow], *, notice: str | None = None) -> AdaptiveCard:
+    """The tenant's live operator tokens, a Mint form and a Revoke pick. Never a token."""
+    body: list[CardElement] = [_text(notice)] if notice else []
+    lines = [f"`{operator_token_line(row)}`" for row in rows]
+    body.append(_text("\n".join(lines) or "No live operator tokens.", subtle=not lines))
+    body += [
+        ChoiceSetInput(
+            id="scopes",
+            label="Scopes",
+            is_multi_select=True,
+            choices=[Choice(title=scope, value=scope) for scope in PANEL_SCOPES],
+        ),
+        TextInput(id="label", label="Label", placeholder="what it is for", max_length=100),
+        _text(
+            f"An operator token lets an integration call daimon's tenant tools as you, for "
+            f"{PANEL_TTL_DAYS} days. It is shown once.",
+            subtle=True,
+        ),
+    ]
+    actions: list[Action] = [
+        SubmitAction(title="Mint token", data=SubmitData(OPERATOR_DIALOG, {"op": "mint"}))
+    ]
+    if rows:
+        body.append(
+            ChoiceSetInput(
+                id="jti",
+                label="Revoke",
+                choices=[Choice(title=operator_token_line(r), value=str(r.jti)) for r in rows],
+            )
+        )
+        revoke = SubmitData(OPERATOR_DIALOG, {"op": "revoke"})
+        actions.append(SubmitAction(title="🗑 Revoke", data=revoke))
+    return AdaptiveCard(body=body, actions=actions, fallback_text="Operator tokens")
+
+
+def operator_token_card(*, token: str, scopes: Sequence[str], expires: str) -> AdaptiveCard:
+    """A minted operator token, shown once inside the dialog."""
+    return AdaptiveCard(
+        body=[
+            _text(f"Scopes: {', '.join(scopes)}. Expires {expires}. Shown once, copy it now."),
+            CodeBlock(code_snippet=token, language="PlainText"),
+        ],
+        fallback_text="Operator token",
     )
 
 

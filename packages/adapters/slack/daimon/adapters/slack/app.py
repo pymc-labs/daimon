@@ -39,9 +39,15 @@ from daimon.adapters.slack.agent_setup.channel_admins import (
     evaluate_channel_admins_submission,
     run_channel_admins_submission,
 )
+from daimon.adapters.slack.agent_setup.operator_tokens import (
+    OperatorTokenSubmission,
+    evaluate_operator_token_submission,
+    run_operator_token_submission,
+)
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
     CALLBACK_CHANNEL_ADMINS,
+    CALLBACK_OPERATOR_MINT,
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
@@ -808,6 +814,30 @@ class SlackApp:
                             )
 
                     self._spawn(_run_channel_admins())
+            elif cb_id == CALLBACK_OPERATOR_MINT:
+                # Pure evaluate, then an empty ack closes the form; the token
+                # arrives as an ephemeral and the routing view refreshes.
+                _ot = evaluate_operator_token_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _ot is not None:
+                    _ot_team: dict[str, Any] = payload.get("team") or {}
+                    _ot_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_operator_token(
+                        *,
+                        _t: str = str(_ot_team.get("id") or ""),
+                        _u: str = str(_ot_user.get("id") or ""),
+                        _s: OperatorTokenSubmission = _ot,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_operator_token_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_operator_token())
             elif cb_id == CALLBACK_ADD_SKILL:
                 # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
                 _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)

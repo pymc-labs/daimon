@@ -47,6 +47,7 @@ from daimon.core.channel_isolation import ChannelIsolationStatus
 from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
+from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.roster import Page, Roster, RosterAgent
 from daimon.core.routing_facts import (
     PRECEDENCE_LINE,
@@ -59,7 +60,7 @@ from daimon.core.setup_conversations import (
     shared_keys_sentence,
 )
 from daimon.core.skills.ingest import SkillPreview
-from daimon.core.stores.domain import ChannelAdminsRow
+from daimon.core.stores.domain import ChannelAdminsRow, McpTokenRow
 
 __all__ = [
     "ACTION_CHANNEL_ADMINS",
@@ -74,6 +75,8 @@ __all__ = [
     "ACTION_ISOLATE_COPY",
     "ACTION_LIFT_ISOLATION",
     "ACTION_NEW",
+    "ACTION_OPERATOR_MINT",
+    "ACTION_OPERATOR_REVOKE",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
     "ACTION_REVOKE_TOKEN",
@@ -83,6 +86,7 @@ __all__ = [
     "CALLBACK_CREATING",
     "CALLBACK_DETAILS",
     "CALLBACK_NEW_AGENT",
+    "CALLBACK_OPERATOR_MINT",
     "CALLBACK_ROUTING",
     "LEGACY_ACTION_IDS",
     "CHANNEL_ADMINS_INPUT_ID",
@@ -93,6 +97,7 @@ __all__ = [
     "build_details_view",
     "build_error_view",
     "build_new_agent_form",
+    "build_operator_token_form",
     "build_routing_view",
 ]
 
@@ -136,6 +141,10 @@ identifier belongs with the panel's other action ids so the dispatcher reads
 one list.
 """
 
+ACTION_OPERATOR_MINT: Final = "agent_setup__operator_token:mint"
+ACTION_OPERATOR_REVOKE: Final = "agent_setup__operator_token:revoke"
+"""Open the operator token form, or revoke the token picked in the select. Admins only."""
+
 CALLBACK_AGENTS: Final = "agent_setup"
 CALLBACK_DETAILS: Final = "agent_setup__details_view"
 CALLBACK_ROUTING: Final = "agent_setup__routing_view"
@@ -144,6 +153,10 @@ CALLBACK_CREATING: Final = "agent_setup__creating"
 CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
 CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
 """Block and action id of the form's member select; the submission reads it."""
+CALLBACK_OPERATOR_MINT: Final = "agent_setup__operator_token_form"
+OPERATOR_SCOPES_INPUT_ID: Final = "operator_token__scopes"
+OPERATOR_LABEL_INPUT_ID: Final = "operator_token__label"
+"""Block and action ids of the operator token form's inputs."""
 CALLBACK_ADD_SKILL: Final = "agent_setup__add_skill_form"
 ADD_SKILL_INPUT_ID: Final = "add_skill__text"
 """Block and action id of the Add skill form's SKILL.md input."""
@@ -207,6 +220,13 @@ CHANNEL_ADMINS_NOTE: Final = (
     "Workspace admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
     "the workspace default stay with workspace admins."
+)
+OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
+MAX_OPERATOR_TOKEN_LINES: Final = 25
+OPERATOR_TOKENS_NOTE: Final = (
+    f"An operator token lets an integration call daimon's tenant tools as you, for "
+    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here or with "
+    "`daimon mcp revoke-token`."
 )
 LIFT_ISOLATION_LABEL: Final = "Lift seal and pins"
 ISOLATION_NOTE: Final = (
@@ -591,6 +611,7 @@ def build_routing_view(
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
     environment_picker: EnvironmentPicker | None = None,
     isolation: ChannelIsolationStatus | None = None,
+    operator_tokens: Sequence[McpTokenRow] | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
@@ -599,6 +620,7 @@ def build_routing_view(
     `channel_admins` is passed for workspace admins only, who also see every
     channel's admins and a button to edit this channel's. `isolation` is too,
     when the panel has a channel, not a DM: it adds that channel's isolation buttons.
+    `operator_tokens` is too: the workspace's live operator tokens, with Mint and Revoke.
     The environment each channel runs in resolves on its own and gets its own
     block; `environment_picker` is passed for workspace admins and this
     channel's admins, who get a select for this channel's environment.
@@ -650,6 +672,8 @@ def build_routing_view(
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
     if isolation is not None and _is_channel(channel_id):
         blocks.extend(_isolation_blocks(channel_id=channel_id, status=isolation))
+    if operator_tokens is not None:
+        blocks.extend(_operator_token_blocks(operator_tokens))
     blocks.append(
         _context(
             _routing_request_line(
@@ -798,6 +822,72 @@ def _isolation_blocks(*, channel_id: str, status: ChannelIsolationStatus) -> lis
         _context(" ".join(notes)),
         {"type": "divider"},
     ]
+
+
+def _operator_token_blocks(rows: Sequence[McpTokenRow]) -> list[dict[str, Any]]:
+    shown = rows[:MAX_OPERATOR_TOKEN_LINES]
+    listing = "\n".join(f"`{operator_token_line(row)}`" for row in shown)
+    blocks = [
+        _section(
+            f"*{OPERATOR_TOKENS_LABEL}*\n{listing or '_no live operator tokens_'}",
+            accessory=_button(action_id=ACTION_OPERATOR_MINT, label="Mint a token"),
+        )
+    ]
+    if shown:
+        options = [
+            {
+                "text": {"type": "plain_text", "text": operator_token_line(row)[:_MAX_OPTION_TEXT]},
+                "value": str(row.jti),
+            }
+            for row in shown
+        ]
+        revoke = {
+            "type": "static_select",
+            "action_id": ACTION_OPERATOR_REVOKE,
+            "placeholder": {"type": "plain_text", "text": "Revoke a token"},
+            "options": options,
+        }
+        blocks.append({"type": "actions", "elements": [revoke]})
+    blocks += [_context(OPERATOR_TOKENS_NOTE), {"type": "divider"}]
+    return blocks
+
+
+def build_operator_token_form(*, meta: PanelMetadata) -> dict[str, Any]:
+    """Pick the tenant scopes and an optional label for a new operator token."""
+    options = [
+        {"text": {"type": "plain_text", "text": scope}, "value": scope} for scope in PANEL_SCOPES
+    ]
+    return finish_modal(
+        title="Mint an operator token",
+        blocks=[
+            {
+                "type": "input",
+                "block_id": OPERATOR_SCOPES_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Scopes"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": OPERATOR_SCOPES_INPUT_ID,
+                    "options": options,
+                },
+            },
+            {
+                "type": "input",
+                "block_id": OPERATOR_LABEL_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Label"},
+                "optional": True,
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": OPERATOR_LABEL_INPUT_ID,
+                    "max_length": 100,
+                },
+            },
+            _context(OPERATOR_TOKENS_NOTE),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_OPERATOR_MINT,
+        close="Cancel",
+        submit="Mint",
+    )
 
 
 def build_channel_admins_form(*, meta: PanelMetadata, user_ids: Sequence[str]) -> dict[str, Any]:

@@ -13,6 +13,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -27,6 +28,8 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ISOLATE_COPY,
     ACTION_LIFT_ISOLATION,
     ACTION_NEW,
+    ACTION_OPERATOR_MINT,
+    ACTION_OPERATOR_REVOKE,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
     CALLBACK_CHANNEL_ADMINS,
@@ -54,7 +57,12 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
-from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, ChannelAdminsRow
+from daimon.core.stores.domain import (
+    AgentFileRow,
+    AgentRepoBindingRow,
+    ChannelAdminsRow,
+    McpTokenRow,
+)
 from daimon.testing import ma_agent
 
 _TEAM_ID = "T_PANEL"
@@ -1111,6 +1119,7 @@ def _routing(
     channel_admins: list[ChannelAdminsRow] | None,
     isolation: ChannelIsolationStatus | None = None,
     channel_id: str = _CHANNEL_ID,
+    operator_tokens: list[McpTokenRow] | None = None,
 ) -> dict[str, Any]:
     return build_routing_view(
         _answering_map(),
@@ -1123,6 +1132,33 @@ def _routing(
         unrouted_agent_name=None,
         channel_admins=channel_admins,
         isolation=isolation,
+        operator_tokens=operator_tokens,
+    )
+
+
+def test_routing_view_lists_operator_tokens_with_mint_and_revoke_without_secrets() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    row = McpTokenRow(
+        jti=uuid.UUID("12345678-0000-0000-0000-000000000000"),
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        kind="operator",
+        agent_id=None,
+        scopes=("tenant:read",),
+        label="ci",
+        created_at=now,
+        expires_at=now,
+        revoked_at=None,
+        max_issued_usd=None,
+        issued_usd=Decimal(0),
+    )
+    view = _routing(channel_admins=[], operator_tokens=[row])
+    assert {ACTION_OPERATOR_MINT, ACTION_OPERATOR_REVOKE} <= set(_action_ids(view))
+    assert any("`12345678 · ci · tenant:read · expires 2026-01-01`" in t for t in _texts(view))
+    empty = _routing(channel_admins=[], operator_tokens=[])
+    assert ACTION_OPERATOR_REVOKE not in set(_action_ids(empty)), "nothing to revoke"
+    assert ACTION_OPERATOR_MINT not in set(_action_ids(_routing(channel_admins=None))), (
+        "members never see the entry"
     )
 
 

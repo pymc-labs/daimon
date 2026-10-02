@@ -1309,10 +1309,13 @@ the CLI JSON export in the requested bundle.
 ### Operator tokens
 
 An operator token lets an external integration call a few MCP tools over
-`/mcp` for one server admin. Only `daimon mcp mint-operator-token` mints one
-(there is no chat or setup-panel flow), with one or more scopes, a TTL of 30
-days by default and at most 90 and, with `promo:create`, an optional
-`--max-issued-usd` ceiling in whole cents. `daimon mcp list-tokens` and
+`/mcp` for one server admin. `daimon mcp mint-operator-token` mints one, with
+one or more scopes, a TTL of 30 days by default and at most 90 and, with
+`promo:create`, an optional `--max-issued-usd` ceiling in whole cents. Server
+admins also mint, list and revoke them from Who answers where on the Discord,
+Slack and Teams setup panels (`core/panel_operator_tokens.py`): tenant scopes
+only, never `promo:create`, 30 days, shown once; the live admin check is
+stored as the account's role, as a turn stores it, so the verifier admits it. `daimon mcp list-tokens` and
 `revoke-token` manage every registered token, and `set-token-scopes --jti ...
 --scope ...` narrows an operator token to the scopes given: it only removes
 scopes, so adding one takes a new token. `mint-token` CLI tokens are

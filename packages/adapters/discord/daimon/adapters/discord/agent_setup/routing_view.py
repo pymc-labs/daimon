@@ -43,6 +43,11 @@ from daimon.adapters.discord.agent_setup.isolation_view import (
     load_isolation_status,
 )
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
+from daimon.adapters.discord.agent_setup.operator_tokens_view import (
+    OPERATOR_TOKENS_LABEL,
+    OperatorTokensView,
+    load_operator_tokens,
+)
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
@@ -419,6 +424,11 @@ class RoutingView(PanelViewBase):
                 )
                 isolation_button.callback = self._on_isolation  # type: ignore[method-assign]  # per-instance callback
                 nav_row.add_item(isolation_button)
+            tokens_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=OPERATOR_TOKENS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            tokens_button.callback = self._on_operator_tokens  # type: ignore[method-assign]  # per-instance callback
+            nav_row.add_item(tokens_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
 
@@ -530,6 +540,19 @@ class RoutingView(PanelViewBase):
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
                 status=status,
+            ),
+        )
+
+    async def _on_operator_tokens(self, interaction: discord.Interaction) -> None:
+        """Open the operator tokens screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        rows = await load_operator_tokens(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            OperatorTokensView(
+                self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id, rows=rows
             ),
         )
 

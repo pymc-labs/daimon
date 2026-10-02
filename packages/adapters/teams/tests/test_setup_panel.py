@@ -9,11 +9,12 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import structlog
-from daimon.adapters.teams import setup_panel
+from daimon.adapters.teams import setup_card, setup_panel
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.setup_card import ENDED
 from daimon.core._models import ThreadSession
@@ -26,7 +27,7 @@ from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import ThreadAgentBindingRow
-from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
@@ -354,3 +355,36 @@ async def test_a_server_admin_with_a_channel_grant_keeps_the_unbound_choice(
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=uuid.UUID(jti))
     assert row is not None and row.channel_id is None, "the unbound pick mints an unbound token"
+
+
+async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_cannot(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    dialog_id = setup_card.OPERATOR_DIALOG
+    mint = {"action": dialog_id, "op": "mint", "scopes": "tenant:read,promo:redeem", "label": "ci"}
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+        refused = await post_activity(service, _dialog("submit", mint, user=OTHER_AAD_OBJECT_ID))
+        forged = await post_activity(service, _dialog("submit", mint | {"scopes": "promo:create"}))
+        minted = await post_activity(service, _dialog("submit", mint))
+        listing = await post_activity(service, _dialog("fetch", {"dialog_id": dialog_id}))
+        async with db_session_factory() as session:
+            (row,) = await list_mcp_tokens(session, now=datetime.now(UTC), tenant_id=TENANT)
+        revoke = {"action": dialog_id, "op": "revoke", "jti": str(row.jti)}
+        revoked = await post_activity(service, _dialog("submit", revoke))
+
+    assert refused["task"]["value"] == setup_panel.OPERATOR_NEEDS_ADMIN
+    assert "mint-operator-token" in json.dumps(forged), "the deployment scope stays with the CLI"
+    assert "Shown once" in json.dumps(minted) and row.kind == "operator"
+    assert set(row.scopes) == {"tenant:read", "promo:redeem"}
+    listed = json.dumps(listing)
+    assert str(row.jti)[:8] in listed and "Bearer" not in listed, "the listing has no secret"
+    assert "Token revoked." in json.dumps(revoked)
+    async with db_session_factory() as session:
+        assert await list_mcp_tokens(session, now=datetime.now(UTC), tenant_id=TENANT) == []
+        events = await list_events(session, tenant_id=TENANT)
+    assert [(e.tool_name, e.outcome) for e in events] == [
+        ("panel:operator_token_mint", "denied"),
+        ("panel:operator_token_mint", "denied"),
+        ("panel:operator_token_mint", "allowed"),
+        ("panel:operator_token_revoke", "allowed"),
+    ]
