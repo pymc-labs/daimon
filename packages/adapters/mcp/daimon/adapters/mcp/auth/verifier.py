@@ -61,6 +61,8 @@ def token_row_refusal(
         return "revoked"
     if row.expires_at is not None and row.expires_at <= now:
         return "expired"
+    if row.platform is not None and row.platform != identity.platform:
+        return "platform_mismatch"  # a channel binding this deployment never minted
     if row.kind == "agent":
         return None  # agent keys verify exactly as before this check existed
     if claims.get("kind") != row.kind:
@@ -127,10 +129,6 @@ class DaimonJWTVerifier(JWTVerifier):
                     return None
                 row = await get_mcp_token(session, jti=jti_uuid)
                 if row is None:
-                    return None
-                # A channel of another platform than the account's is no
-                # binding this deployment minted.
-                if row.platform is not None and row.platform != identity_row.platform:
                     return None
             elif access.claims.get("kind") is not None:
                 return None  # only registered tokens carry a kind

@@ -2299,9 +2299,11 @@ async def test_start_turn_returns_the_accepted_events_boundary(
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 
-async def test_continue_turn_gates_on_the_sessions_own_budget_channel() -> None:
-    """The follow-up is charged to the session's budget channel, so that channel's
-    spent budget refuses it whatever channel the caller's key names."""
+@pytest.mark.parametrize("billed", [True, False], ids=["billed", "unbilled"])
+async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bool) -> None:
+    """A billed follow-up is charged to the session's budget channel, so that channel's
+    spent budget refuses it whatever channel the caller's key names. An unbilled caller
+    is never gated, as in admission."""
     sent: list[str] = []
     session = ma_session(
         id="ses_test001",
@@ -2318,17 +2320,31 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel() -> None:
     router.add(
         "POST",
         r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: sent.append("send") or send_events_response(data=[]),
+        lambda _r, _m: (
+            sent.append("send")
+            or send_events_response(
+                data=[
+                    BetaManagedAgentsUserMessageEvent(
+                        id="sevt_followup",
+                        content=[BetaManagedAgentsTextBlock(type="text", text="again")],
+                        type="user.message",
+                        processed_at=None,
+                    ).model_dump(mode="json")
+                ]
+            )
+        ),
     )
     gate = AsyncMock(return_value=True)
+    auth = replace(_auth(), platform="discord", platform_user_id="u-1") if billed else _auth()
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with (
-        patch("daimon.adapters.mcp.tools.agent_chat.is_over_channel_budget", gate),
-        pytest.raises(ToolError, match="used its spending budget"),
-    ):
-        await _continue_turn_impl(
-            _runtime(build_fake_anthropic(router.dispatch)), _auth(), "ses_test001", "again"
-        )
+    with patch("daimon.adapters.mcp.tools.agent_chat.is_over_channel_budget", gate):
+        if not billed:
+            await _continue_turn_impl(runtime, auth, "ses_test001", "again")
+            assert gate.await_count == 0 and sent == ["send"], "an unbilled caller is not gated"
+            return
+        with pytest.raises(ToolError, match="used its spending budget"):
+            await _continue_turn_impl(runtime, auth, "ses_test001", "again")
 
     assert gate.await_args is not None and gate.await_args.kwargs["channel_id"] == "chan-spent"
     assert sent == [], "a refused follow-up must never reach the session"

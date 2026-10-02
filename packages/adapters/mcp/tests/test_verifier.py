@@ -544,3 +544,10 @@ async def test_verifier_rejects_a_binding_on_another_platform(
     assert await verifier.verify_token(token) is None, (
         "a Discord account's key binds no Slack channel"
     )
+    async with sessionmaker() as s:
+        row = await get_mcp_token(s, jti=_jti(token))
+        assert row is not None
+        events = await list_events(s, tenant_id=row.tenant_id)
+    assert [(e.reason, e.token_kind) for e in events] == [("platform_mismatch", "agent")], (
+        "the refusal is audited like every other registry refusal"
+    )
