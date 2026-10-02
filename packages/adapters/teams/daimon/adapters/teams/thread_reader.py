@@ -1,28 +1,44 @@
 """Reads a channel thread's history and the mentioned message from Graph.
 
 The shell around `graph` and `context`: it finds the team's Entra group id
-(`graph.TeamGroups`), picks the window
-(thread, delta since the watermark, or channel backfill) and turns any Graph
-failure into `None` plus one content-free warning, so a turn never fails for
-want of history.
+(`graph.TeamGroups`), picks the window (thread, delta since the watermark, or
+the channel's posts with their replies), attaches the newest replayed images
+and files, and turns any Graph failure into an unavailable block plus one
+content-free warning, so a turn never fails for want of history.
 """
 
 from __future__ import annotations
+
+import dataclasses
+import functools
+from collections.abc import Callable, Mapping, Sequence
 
 import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.context import (
     CHANNEL_BACKFILL_LIMIT,
+    Attached,
     HistoryBlock,
     channel_block,
     channel_media,
+    channel_messages,
     classifier_window,
     delta_block,
+    delta_messages,
+    history_media,
     thread_block,
+    thread_messages,
+    unavailable_block,
 )
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.teams_graph import GraphClient, GraphToken, GraphUnavailable, TeamGroups
+from daimon.core.teams_graph import (
+    GraphClient,
+    GraphMessage,
+    GraphToken,
+    GraphUnavailable,
+    TeamGroups,
+)
 from daimon.core.thread_participation import ClassifierMessage
 
 log = structlog.get_logger(__name__)
@@ -59,12 +75,19 @@ class ThreadReader:
         return await self._teams.group_id(inbound.team_id, known=inbound.team_group_id)
 
     async def read(
-        self, inbound: TeamsInbound, *, watermark: str | None, skip_ids: frozenset[str]
+        self,
+        inbound: TeamsInbound,
+        *,
+        watermark: str | None,
+        skip_ids: frozenset[str],
+        images: Mapping[str, int] | None = None,
     ) -> HistoryBlock | None:
-        """The history to replay, or None for a chat or when Graph cannot be read.
+        """The history to replay; None for a chat, an unavailable block when Graph fails.
 
-        A mention starting a thread gets the channel's recent posts; a reply the
-        thread, or with a numeric `watermark` only what came after it.
+        A mention starting a thread gets the channel's recent posts and their
+        replies; a reply the thread, or with a numeric `watermark` only what came
+        after it. `images` names the images already inlined (a reseed); without
+        it the newest replayed images are picked.
         """
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
@@ -74,17 +97,54 @@ class ThreadReader:
             channel, bot = inbound.channel_id, self._bot_app_id
             if inbound.activity_id == root:
                 posts = await self._graph.list_channel_messages(
-                    group, channel, top=CHANNEL_BACKFILL_LIMIT
+                    group, channel, top=CHANNEL_BACKFILL_LIMIT, expand_replies=True
                 )
-                return channel_block(posts, skip_ids=skip_ids | {root}, bot_app_id=bot)
-            replies = await self._graph.list_replies(group, channel, root)
-            if watermark is not None and watermark.isdigit():
-                return delta_block(replies, after=int(watermark), skip_ids=skip_ids, bot_app_id=bot)
-            root_message = await self._graph.get_message(group, channel, root)
-            return thread_block(root_message, replies, skip_ids=skip_ids, bot_app_id=bot)
+                skip = skip_ids | {root}
+                messages = channel_messages(posts, skip_ids=skip)
+                build = functools.partial(
+                    channel_block, posts, skip_ids=skip, bot_app_id=bot, channel_id=channel
+                )
+            else:
+                replies = await self._graph.list_replies(group, channel, root)
+                if watermark is not None and watermark.isdigit():
+                    after = int(watermark)
+                    messages = delta_messages(replies, after=after, skip_ids=skip_ids)
+                    build = functools.partial(
+                        delta_block, replies, after=after, skip_ids=skip_ids, bot_app_id=bot
+                    )
+                else:
+                    root_message = await self._graph.get_message(group, channel, root)
+                    messages = thread_messages(root_message, replies, skip_ids=skip_ids)
+                    build = functools.partial(
+                        thread_block, root_message, replies, skip_ids=skip_ids, bot_app_id=bot
+                    )
         except GraphUnavailable as err:
             log.warning("teams.history.unavailable", status=err.status, reason=err.reason)
-            return None
+            return unavailable_block(err.reason or f"graph {err.status}")
+        return await self._attach(inbound, group, messages, images, build)
+
+    async def _attach(
+        self,
+        inbound: TeamsInbound,
+        group: str,
+        messages: Sequence[GraphMessage],
+        images: Mapping[str, int] | None,
+        build: Callable[..., HistoryBlock],
+    ) -> HistoryBlock:
+        found, files = history_media(messages, group_id=group, channel_id=inbound.channel_id)
+        downloads: dict[str, str] = {}
+        if files and self._files is not None and await self._files.is_available(inbound):
+            resolved = await self._files.resolve(ChannelMedia(files=tuple(files)), group_id=group)
+            downloads = {
+                f.content_url: f.download_url
+                for f in resolved.files
+                if f.content_url and f.download_url
+            }
+        if images is not None:
+            return build(attached=Attached(images=images, downloads=downloads))
+        order = [m.id for m in messages if m.id in found]
+        block = build(attached=Attached({i: len(found[i]) for i in order}, downloads))
+        return dataclasses.replace(block, image_urls=tuple(u for i in order for u in found[i]))
 
     async def read_window(
         self, inbound: TeamsInbound, *, exclude_ids: frozenset[str], limit: int

@@ -205,3 +205,28 @@ async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained()
         ("graph.microsoft.com", "Bearer graph-token")
     ], "the off-Graph URL is refused before any request"
     assert "`image` was not inlined (evil.example is not an allowed file host)" in prepared.prefix
+
+
+async def test_history_images_follow_the_messages_own_and_a_miss_is_admitted() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_png())
+
+    async def graph_token() -> str:
+        return "graph-token"
+
+    hosted = (
+        "https://graph.microsoft.com/v1.0/teams/g/channels/c/messages/1/hostedContents/h/$value"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        prepared = await prepare_attachments(
+            http,
+            [],
+            bot_token=_bot_token,
+            service_url=SERVICE_URL,
+            channel_media=ChannelMedia(),
+            graph_token=graph_token,
+            history_images=(hosted, "https://evil.example/hostedContents/h/$value"),
+        )
+    assert len(prepared.image_blocks) == 1
+    assert "1 image(s) from earlier messages are attached" in prepared.prefix
+    assert "1 could not be fetched" in prepared.prefix

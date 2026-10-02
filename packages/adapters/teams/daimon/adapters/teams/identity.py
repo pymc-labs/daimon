@@ -30,6 +30,8 @@ GROUP_CHAT_UNSUPPORTED = "I answer in channels and in 1:1 chats, not in group ch
 INPUT_TOO_LONG = "That message is too long for this agent. Please shorten it."
 TEXT_ONLY = "Send your question as text, an image or a file."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
+# The channel whose id is the team's: Teams sends no name for it.
+GENERAL_CHANNEL = "General"
 # Where a quote sits in the text; its sender and preview ride in a `quotedReply` entity.
 _QUOTED = re.compile(r'<quoted\s+messageId="([^"]*)"\s*/>')
 
@@ -58,6 +60,8 @@ class TeamsInbound:
     `unprompted` marks a thread reply nobody addressed to the bot: it may only
     enter organic thread participation, never the mention path.
     `composed_ids` are the earlier queued messages folded into this one.
+    `timestamp` is when it was sent (ISO 8601); the channel and team names
+    come from the activity, General's filled in.
     """
 
     kind: Literal["dm", "channel"]
@@ -76,6 +80,10 @@ class TeamsInbound:
     unprompted: bool = False
     user_name: str | None = None
     composed_ids: tuple[str, ...] = ()
+    timestamp: str | None = None
+    channel_name: str | None = None
+    channel_type: str | None = None
+    team_name: str | None = None
 
     @property
     def thread_id(self) -> str:
@@ -193,12 +201,16 @@ def parse_inbound(
         return Refusal(INPUT_TOO_LONG if addressed else None)
 
     team = channel_data.team if channel_data is not None else None
+    channel = channel_data.channel if channel_data is not None else None
     if kind == "personal":
         conversation_id = channel_id = conversation.id
-        team = None
+        team = channel = None
     else:
         conversation_id = _thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
+    channel_name = channel.name if channel is not None else None
+    if team is not None and channel_id == team.id:
+        channel_name = channel_name or GENERAL_CHANNEL  # Teams names General nowhere
     return TeamsInbound(
         kind="dm" if kind == "personal" else "channel",
         entra_tenant_id=tenant,
@@ -214,6 +226,10 @@ def parse_inbound(
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
         unprompted=not addressed,
         user_name=activity.from_.name,
+        timestamp=activity.timestamp.isoformat() if activity.timestamp else None,
+        channel_name=channel_name,
+        channel_type=channel.type if channel is not None else None,
+        team_name=team.name if team is not None else None,
     )
 
 

@@ -252,6 +252,38 @@ def _resolve_embedded(
     return kept, []
 
 
+async def _inline_history(
+    http: httpx.AsyncClient,
+    urls: Sequence[str],
+    blocks: list[BetaManagedAgentsImageBlockParam],
+    graph_token: BotToken | None,
+) -> str:
+    """Append the history's images to `blocks`; the line that tells the agent so."""
+    inlined = 0
+    for url in urls:
+        try:
+            if len(blocks) >= MAX_VISION_IMAGES or graph_token is None:
+                raise FetchRefused("no room" if graph_token else "no Graph token")
+            data = await fetch_bytes(
+                http,
+                url,
+                is_allowed=is_graph_url,
+                token=await graph_token(),
+                max_bytes=MAX_VISION_IMAGE_BYTES,
+            )
+            blocks.append(image_block(data))
+            inlined += 1
+        except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
+            reason = str(err) if isinstance(err, FetchRefused) else type(err).__name__
+            log.warning("teams.attachment.skipped", kind="history_image", reason=reason)
+    missed = len(urls) - inlined
+    return (
+        f"[attachment] {inlined} image(s) from earlier messages are attached after the "
+        "person's own, in history order; `images_attached` on a replayed message counts its own."
+        + (f" {missed} could not be fetched, so the counts overstate." if missed else "")
+    )
+
+
 async def prepare_attachments(
     http: httpx.AsyncClient,
     files: Sequence[InboundFile],
@@ -261,11 +293,13 @@ async def prepare_attachments(
     channel: bool = False,
     channel_media: ChannelMedia | None = None,
     graph_token: BotToken | None = None,
+    history_images: Sequence[str] = (),
 ) -> PreparedAttachments:
     """Download what can be inlined; describe the rest. One bad file never aborts the turn.
 
     `channel_media` is the channel message as Graph sees it, or None when it
-    could not be read; `graph_token` authorises its hosted images.
+    could not be read; `graph_token` authorises its hosted images and the
+    replayed history's `history_images`, inlined after the message's own.
     """
     service_host = httpx.URL(service_url).host if service_url else None
     files, unnamed = _resolve_embedded(files, channel_media)
@@ -336,4 +370,6 @@ async def prepare_attachments(
                 lines.append(_link_line(file, reason))
                 continue
             lines.append(f"[attachment] pasted image `{file.name}` was not inlined ({reason}).")
+    if history_images:
+        lines.append(await _inline_history(http, history_images, blocks, graph_token))
     return PreparedAttachments(image_blocks=blocks, prefix="".join(f"{line}\n" for line in lines))

@@ -34,7 +34,12 @@ from daimon.adapters.teams.commands import (
     CommandHandler,
     parse_command,
 )
-from daimon.adapters.teams.context import HistoryBlock, newest_message_id, render_user_message
+from daimon.adapters.teams.context import (
+    NOTHING_ATTACHED,
+    HistoryBlock,
+    newest_message_id,
+    render_user_message,
+)
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -857,7 +862,7 @@ class TeamsApp:
         history = await self._history(inbound, watermark=watermark, skip_ids=skip)
         read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.
-        if (bare or inbound.unprompted) and history is None:
+        if (bare or inbound.unprompted) and (history is None or history.unavailable):
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
@@ -893,6 +898,7 @@ class TeamsApp:
             channel=inbound.kind == "channel",
             channel_media=media,
             graph_token=reader.token if reader else None,
+            history_images=history.image_urls if history else (),
         )
         config = admission.config
         async with turn_origin(
@@ -930,7 +936,10 @@ class TeamsApp:
 
             async def reseed() -> str:
                 # A recreated session has seen nothing: replay the whole thread.
-                read.append(await self._history(inbound, watermark=None, skip_ids=skip))
+                images = (history.attached if history else NOTHING_ATTACHED).images
+                read.append(
+                    await self._history(inbound, watermark=None, skip_ids=skip, images=images)
+                )
                 return render(history=read[-1])
 
             outcome = await run_prepared_turn(
@@ -1021,11 +1030,18 @@ class TeamsApp:
         return self._channel_files is not None and await self._channel_files.is_available(inbound)
 
     async def _history(
-        self, inbound: TeamsInbound, *, watermark: str | None, skip_ids: frozenset[str]
+        self,
+        inbound: TeamsInbound,
+        *,
+        watermark: str | None,
+        skip_ids: frozenset[str],
+        images: Mapping[str, int] | None = None,
     ) -> HistoryBlock | None:
         if self._reader is None:
             return None
-        return await self._reader.read(inbound, watermark=watermark, skip_ids=skip_ids)
+        return await self._reader.read(
+            inbound, watermark=watermark, skip_ids=skip_ids, images=images
+        )
 
     async def _key_names(
         self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission

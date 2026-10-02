@@ -48,9 +48,11 @@ def test_root_id_reads_the_thread_root_or_none() -> None:
 
 async def test_a_mention_starting_a_thread_replays_the_channel() -> None:
     paths: list[str] = []
+    queries: list[dict[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
+        queries.append(dict(request.url.params))
         return httpx.Response(200, json={"value": [_message(ROOT), _message("1699999999999")]})
 
     block = await _reader(httpx.MockTransport(handler)).read(
@@ -59,6 +61,7 @@ async def test_a_mention_starting_a_thread_replays_the_channel() -> None:
         skip_ids=frozenset(),
     )
     assert paths == [f"/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages"]
+    assert queries == [{"$top": "25", "$expand": "replies"}], "each post comes with its replies"
     assert block is not None and block.tag == "channel_context"
     assert block.attrs == {"count": "1"}, "the trigger post itself is not context"
 
@@ -79,7 +82,7 @@ async def test_a_continuation_reads_only_the_delta_since_the_watermark() -> None
     assert block is not None and block.tag == "thread_delta" and len(block.lines) == 1
 
 
-async def test_a_refused_read_logs_one_warning_without_content_and_returns_none() -> None:
+async def test_a_refused_read_logs_one_warning_without_content_and_marks_it() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"message": "secret thread text"}})
 
@@ -89,7 +92,8 @@ async def test_a_refused_read_logs_one_warning_without_content_and_returns_none(
             watermark=None,
             skip_ids=frozenset(),
         )
-    assert block is None, "the turn runs without history"
+    assert block is not None and block.unavailable == "http error", "the turn runs, told why"
+    assert block.lines == ()
     assert logs == [
         {
             "event": "teams.history.unavailable",
@@ -144,3 +148,26 @@ async def test_read_media_reads_every_message_a_composed_turn_answers() -> None:
 
     assert paths == [f"{replies}/1700000000004", f"{replies}/1700000000005"], "oldest first"
     assert media is not None and len(media.image_urls) == 2, "the earlier message's image too"
+
+
+async def test_a_reseed_keeps_the_images_already_inlined() -> None:
+    """The images went with the first message; a reseed may not claim new ones."""
+    image = (
+        f"https://graph.microsoft.com/v1.0/teams/{GROUP}/channels/{CHANNEL_ID}/messages/{ROOT}"
+        "/hostedContents/aWQ9eA==/$value"
+    )
+    root = {"id": ROOT, "body": {"contentType": "html", "content": f'<img src="{image}">'}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/replies"):
+            return httpx.Response(200, json={"value": [_message("1700000000005")]})
+        return httpx.Response(200, json=root)
+
+    reader = _reader(httpx.MockTransport(handler))
+    first = await reader.read(_inbound("1700000000010"), watermark=None, skip_ids=frozenset())
+    assert first is not None and first.image_urls == (image,)
+    assert first.attached.images == {ROOT: 1}
+    again = await reader.read(
+        _inbound("1700000000010"), watermark=None, skip_ids=frozenset(), images={}
+    )
+    assert again is not None and again.image_urls == () and not again.attached.images
