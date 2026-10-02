@@ -57,6 +57,27 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PROMPT = "Reply with OK only. Do not call tools."
+REALISTIC_PROMPTS = (
+    (
+        "This is a synthetic hackathon exercise. Generate a reproducible 60-row CSV "
+        "with columns team, hours and score, using three teams and random seed 42. "
+        "Run Python with pandas to report row count and mean score by team. "
+        "Keep the CSV in your workspace and answer briefly with the numbers."
+    ),
+    (
+        "This is a synthetic hackathon exercise. Generate 50 reproducible points "
+        "for x and y=2+0.7*x plus noise with seed 42. Run Python with matplotlib "
+        "to make a labeled scatter plot and fitted line, save it as PNG, and "
+        "attach the chart here. Answer briefly."
+    ),
+    (
+        "This is a synthetic hackathon exercise. Generate 30 reproducible observations "
+        "from y=1+0.5*x plus normal noise with seed 42. Run a tiny PyMC linear "
+        "regression with 1 chain, 50 tune and 50 draws, report posterior means of "
+        "intercept and slope, and note that the sample is too small for inference. "
+        "Answer briefly."
+    ),
+)
 SYNTHETIC_PREFIX = "hackathon-load-"
 DISCORD_QA_GUILDS = frozenset({"1435062989119295640"})
 DISCORD_QA_BOT_ID = "1533049261032341668"
@@ -103,6 +124,11 @@ class Result:
     first_event_s: float | None = None
     status: str = "ok"
     skills_429: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cost_usd: Decimal | None = None
 
 
 class _FirstEventStream(httpx.AsyncByteStream):
@@ -130,9 +156,17 @@ class CountingTransport(httpx.AsyncBaseTransport):
         self.statuses: dict[tuple[int, str], int] = {}
         self.skills_429: dict[str, int] = {}
         self.first_event_at: dict[str, float] = {}
+        self.rate_limit_min: dict[str, int] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self.inner.handle_async_request(request)
+        for key, value in response.headers.items():
+            if key.startswith("anthropic-ratelimit-") and key.endswith("-remaining"):
+                try:
+                    remaining = int(value)
+                except ValueError:
+                    continue
+                self.rate_limit_min[key] = min(self.rate_limit_min.get(key, remaining), remaining)
         if response.status_code in (429, 529):
             key = (response.status_code, request.url.path)
             self.statuses[key] = self.statuses.get(key, 0) + 1
@@ -156,6 +190,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--install", action="store_true")
     p.add_argument("--turn-load", action="store_true")
     p.add_argument("--discord", action="store_true")
+    p.add_argument("--discord-precreated", action="store_true")
+    p.add_argument("--prompt-set", choices=("simple", "realistic"), default="simple")
     p.add_argument("--cleanup", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--i-am-staging", action="store_true")
@@ -181,6 +217,7 @@ def plan(args: argparse.Namespace) -> str:
         f"model={args.model if args.install or args.turn_load else 'n/a'} "
         f"discord={args.discord} discord_turns={args.discord_turns if args.discord else 0} "
         f"discord_concurrency={args.discord_concurrency} discord_model=tenant-default "
+        f"discord_precreated={args.discord_precreated} prompt_set={args.prompt_set} "
         f"arrival_seconds={args.arrival_seconds} max_usd={args.max_usd} "
         f"cleanup={args.cleanup}"
     )
@@ -303,6 +340,7 @@ async def _turn_one(
     name: str,
     label: str,
     transport: CountingTransport,
+    prompt: str,
 ) -> Result:
     from anthropic import APIStatusError
     from daimon.core.billing import is_over_cap
@@ -314,6 +352,7 @@ async def _turn_one(
     from daimon.core.usage_recording import record_turn_usage
 
     started = time.monotonic()
+    started_at = datetime.now(UTC)
     token = ACTIVE_TENANT.set(label)
     user_id = f"{name}-user"
     try:
@@ -347,7 +386,7 @@ async def _turn_one(
             anthropic=client,
             agent_id=agent_id,
             environment_id=environment_id,
-            trigger_message=PROMPT,
+            trigger_message=prompt,
             origin="routine",
             mcp_settings=None,
             account_id=account_id,
@@ -355,13 +394,26 @@ async def _turn_one(
             tenant_id=tenant_id,
             agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id),
             session_factory=sm,
-            deadline=datetime.now(UTC) + timedelta(seconds=120),
+            deadline=datetime.now(UTC) + timedelta(seconds=240),
             tool_safety=ToolSafetyPolicy(enabled=True),
         )
         first = transport.first_event_at.get(label)
-        return Result(
+        result = Result(
             label, time.monotonic() - started, first_event_s=first - started if first else None
         )
+        from daimon.core.stores.turn_outcomes import list_for_tenant
+
+        async with sm() as session:
+            outcomes = await list_for_tenant(session, tenant_id, limit=20)
+        outcome = next((row for row in outcomes if row.started_at >= started_at), None)
+        if outcome is not None:
+            result.status = str(outcome.reason)
+            result.input_tokens = outcome.input_tokens
+            result.output_tokens = outcome.output_tokens
+            result.cache_read_input_tokens = outcome.cache_read_input_tokens
+            result.cache_creation_input_tokens = outcome.cache_creation_input_tokens
+            result.cost_usd = outcome.cost_usd
+        return result
     except APIStatusError as exc:
         first = transport.first_event_at.get(label)
         return Result(
@@ -432,11 +484,17 @@ async def _cleanup(
 
 
 def _print_results(title: str, results: list[Result]) -> None:
-    print(f"\n{title}: name | duration_s | first_event_s | skills_429 | status", flush=True)
+    print(
+        f"\n{title}: name | duration_s | first_event_s | skills_429 | "
+        "input | output | cache_read | cache_create | cost_usd | status",
+        flush=True,
+    )
     for row in results:
         first = "n/a" if row.first_event_s is None else f"{row.first_event_s:.2f}"
         print(
-            f"{row.name} | {row.seconds:.2f} | {first} | {row.skills_429} | {row.status}",
+            f"{row.name} | {row.seconds:.2f} | {first} | {row.skills_429} | "
+            f"{row.input_tokens} | {row.output_tokens} | {row.cache_read_input_tokens} | "
+            f"{row.cache_creation_input_tokens} | {row.cost_usd} | {row.status}",
             flush=True,
         )
 
@@ -450,6 +508,12 @@ class DiscordResult:
     turn_s: float | None = None
     status: str = "timeout"
     attachments: int = 0
+    first_event_s: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cost_usd: Decimal | None = None
 
 
 def _percentile(values: list[float], percentile: float) -> str:
@@ -462,6 +526,33 @@ def _percentile(values: list[float], percentile: float) -> str:
         position - low
     )
     return f"{value:.2f}"
+
+
+def _outcome_tokens(row: object) -> int:
+    return sum(
+        getattr(row, field) or 0
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    )
+
+
+def _peak_tokens_per_minute(rows: list[tuple[datetime, int]]) -> int:
+    """Peak rolling 60-second output plus input token total, by outcome completion."""
+    ordered = sorted(rows)
+    left = 0
+    running = 0
+    peak = 0
+    for right, (ended, tokens) in enumerate(ordered):
+        running += tokens
+        while left <= right and (ended - ordered[left][0]).total_seconds() >= 60:
+            running -= ordered[left][1]
+            left += 1
+        peak = max(peak, running)
+    return peak
 
 
 def _require_discord_model(actual: str, required: str | None) -> None:
@@ -513,11 +604,12 @@ async def _discord_watch(
     message_id: str,
     started: datetime,
     created_threads: set[str],
+    existing_thread_id: str | None = None,
 ) -> DiscordResult:
     from daimon.core.stores.turn_outcomes import list_for_tenant
 
-    result = DiscordResult(message_id)
-    deadline = time.monotonic() + 180
+    result = DiscordResult(message_id, thread_id=existing_thread_id)
+    deadline = time.monotonic() + 300
     outcome_seen = False
     while time.monotonic() < deadline:
         await asyncio.sleep(2)
@@ -550,6 +642,11 @@ async def _discord_watch(
             first = min(bot_messages, key=lambda item: str(item["id"]))
             result.first_s = _message_time(first, started)
             result.final_s = max(_message_time(item, started, latest=True) for item in bot_messages)
+            edited = [item for item in bot_messages if item.get("edited_timestamp")]
+            if edited:
+                result.first_event_s = min(
+                    _message_time(item, started, latest=True) for item in edited
+                )
             result.attachments = sum(
                 len(cast(list[object], item.get("attachments") or [])) for item in bot_messages
             )
@@ -574,6 +671,11 @@ async def _discord_watch(
             if done is not None:
                 result.status = str(done.reason)
                 result.turn_s = max(0.0, (done.ended_at - started).total_seconds())
+                result.input_tokens = done.input_tokens
+                result.output_tokens = done.output_tokens
+                result.cache_read_input_tokens = done.cache_read_input_tokens
+                result.cache_creation_input_tokens = done.cache_creation_input_tokens
+                result.cost_usd = done.cost_usd
                 # Read Discord once more after the outcome to catch final edits and replies.
                 if not outcome_seen:
                     outcome_seen = True
@@ -606,6 +708,7 @@ async def _discord_phase(
     previous: dict[uuid.UUID, int | None] = {}
     created_threads: set[str] = set()
     created_channels: set[str] = set()
+    precreated: list[tuple[str, uuid.UUID]] = []
     tasks: set[asyncio.Task[DiscordResult]] = set()
     try:
         me = await rest.request("GET", "/users/@me")
@@ -639,7 +742,38 @@ async def _discord_phase(
                 channel_id = str(channel["id"])
                 created_channels.add(channel_id)
                 channels.append((channel_id, tenant_id))
+        if args.discord_precreated:
+            # Discord shares a 50-create/300s guild bucket across channels.
+            # Eight per ten seconds also stays below the short burst allowance.
+            made_at: list[float] = []
+            for index in range(args.discord_turns):
+                channel_id, tenant_id = channels[index % len(channels)]
+                while True:
+                    now = time.monotonic()
+                    made_at = [t for t in made_at if now - t < 300]
+                    recent = [t for t in made_at if now - t < 10]
+                    if len(made_at) < 45 and len(recent) < 8:
+                        break
+                    await asyncio.sleep(1)
+                starter = await rest.request(
+                    "POST",
+                    f"/channels/{channel_id}/messages",
+                    body={"content": f"Synthetic load rehearsal {args.run_id} thread {index + 1}"},
+                )
+                assert isinstance(starter, dict)
+                thread = await rest.request(
+                    "POST",
+                    f"/channels/{channel_id}/messages/{starter['id']}/threads",
+                    body={"name": f"load-{args.run_id}-{index + 1}"},
+                )
+                assert isinstance(thread, dict)
+                thread_id = str(thread["id"])
+                created_threads.add(thread_id)
+                precreated.append((thread_id, tenant_id))
+                made_at.append(time.monotonic())
+            print(f"Pre-created {len(precreated)} QA threads", flush=True)
         baseline = await _debits(sm, list(previous))
+        stage_started = datetime.now(UTC)
         for tenant_id in previous:
             async with sm() as session, session.begin():
                 await set_turn_cap(session, tenant_id=tenant_id, cap=args.discord_concurrency)
@@ -657,8 +791,15 @@ async def _discord_phase(
                     f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}", flush=True
                 )
                 break
-            channel_id, tenant_id = channels[index % len(channels)]
-            prompt = "Reply with OK only. Do not call tools."
+            if args.discord_precreated:
+                channel_id, tenant_id = precreated[index]
+            else:
+                channel_id, tenant_id = channels[index % len(channels)]
+            prompt = (
+                REALISTIC_PROMPTS[index % len(REALISTIC_PROMPTS)]
+                if args.prompt_set == "realistic"
+                else PROMPT
+            )
             if args.discord_file_every and (index + 1) % args.discord_file_every == 0:
                 prompt = (
                     "Create and attach a tiny text file named rehearsal.txt containing OK. "
@@ -678,7 +819,14 @@ async def _discord_phase(
             tasks.add(
                 asyncio.create_task(
                     _discord_watch(
-                        rest, sm, tenant_id, channel_id, message_id, started, created_threads
+                        rest,
+                        sm,
+                        tenant_id,
+                        channel_id,
+                        message_id,
+                        started,
+                        created_threads,
+                        existing_thread_id=channel_id if args.discord_precreated else None,
                     )
                 )
             )
@@ -689,13 +837,17 @@ async def _discord_phase(
         for row in results:
             print(
                 f"Discord {row.message_id}: thread={row.thread_id or 'none'} "
-                f"first={row.first_s} final={row.final_s} turn={row.turn_s} "
-                f"status={row.status} "
-                f"attachments={row.attachments}",
+                f"ack={row.first_s} first_event={row.first_event_s} "
+                f"final={row.final_s} turn={row.turn_s} "
+                f"status={row.status} attachments={row.attachments} "
+                f"input={row.input_tokens} output={row.output_tokens} "
+                f"cache_read={row.cache_read_input_tokens} "
+                f"cache_create={row.cache_creation_input_tokens} cost=${row.cost_usd}",
                 flush=True,
             )
         for name, values in (
-            ("first", [r.first_s for r in results if r.first_s is not None]),
+            ("first_status", [r.first_s for r in results if r.first_s is not None]),
+            ("first_event", [r.first_event_s for r in results if r.first_event_s is not None]),
             ("final", [r.final_s for r in results if r.final_s is not None]),
             ("turn", [r.turn_s for r in results if r.turn_s is not None]),
         ):
@@ -703,6 +855,19 @@ async def _discord_phase(
                 f"Discord {name} p50={_percentile(values, 0.5)}s p95={_percentile(values, 0.95)}s",
                 flush=True,
             )
+        from daimon.core.stores.turn_outcomes import list_for_tenant
+
+        async with sm() as session:
+            outcome_rows = [
+                row
+                for tenant_id in previous
+                for row in await list_for_tenant(session, tenant_id, limit=500)
+                if row.started_at >= stage_started
+            ]
+        token_rate = _peak_tokens_per_minute(
+            [(row.ended_at, _outcome_tokens(row)) for row in outcome_rows]
+        )
+        print(f"Discord peak completion-window tokens/min: {token_rate}", flush=True)
         print(
             f"Discord totals: launched={len(results)} "
             f"threads={sum(r.thread_id is not None for r in results)} "
@@ -776,6 +941,7 @@ async def _run(args: argparse.Namespace) -> None:
             ) as client:
                 await _phases(args, client, sm, settings, names, ids, Path(tmp), transport)
         print("upstream 429/529 responses by endpoint:", transport.statuses)
+        print("minimum Anthropic rate-limit remaining:", transport.rate_limit_min)
     finally:
         await engine.dispose()
 
@@ -800,19 +966,21 @@ async def _phases(
     root = _defaults_root(settings, args.model, temp)
     if args.install:
         start = time.monotonic()
+        seed_slots = asyncio.Semaphore(2)
 
         async def scheduled(index: int, offset: float) -> Result:
             await asyncio.sleep(max(0, start + offset - time.monotonic()))
             token = ACTIVE_TENANT.set(names[index])
             try:
-                result = await _install_one(
-                    client,
-                    sm,
-                    root,
-                    names[index],
-                    str(settings.mcp.public_url) if settings.mcp.public_url else None,
-                    args.max_usd / args.tenants,
-                )
+                async with seed_slots:
+                    result = await _install_one(
+                        client,
+                        sm,
+                        root,
+                        names[index],
+                        str(settings.mcp.public_url) if settings.mcp.public_url else None,
+                        args.max_usd / args.tenants,
+                    )
                 result.skills_429 = transport.skills_429.get(names[index], 0)
                 return result
             finally:
@@ -850,6 +1018,7 @@ async def _phases(
         if not resolved:
             raise RuntimeError("no synthetic tenants have the selected model and defaults")
         turns: list[asyncio.Task[Result]] = []
+        stage_started = datetime.now(UTC)
         for i in range(args.turns):
             spent = await _debits(sm, ids)
             if not budget_allows(spent, args.max_usd):
@@ -869,10 +1038,27 @@ async def _phases(
                         name,
                         f"{name}#{i}",
                         transport,
+                        REALISTIC_PROMPTS[i % len(REALISTIC_PROMPTS)]
+                        if args.prompt_set == "realistic"
+                        else PROMPT,
                     )
                 )
             )
-        _print_results("turns", await asyncio.gather(*turns))
+        turn_results = await asyncio.gather(*turns)
+        _print_results("turns", turn_results)
+        from daimon.core.stores.turn_outcomes import list_for_tenant
+
+        async with sm() as session:
+            outcome_rows = [
+                row
+                for _, tenant_id, _, _ in resolved
+                for row in await list_for_tenant(session, tenant_id, limit=20)
+                if row.started_at >= stage_started
+            ]
+        token_rate = _peak_tokens_per_minute(
+            [(row.ended_at, _outcome_tokens(row)) for row in outcome_rows]
+        )
+        print(f"Backend peak completion-window tokens/min: {token_rate}", flush=True)
         print(f"ledger debits: ${await _debits(sm, ids)}; DB pool waits: n/a")
     if args.discord:
         await _discord_phase(args, client, sm, settings)
@@ -896,6 +1082,8 @@ def main() -> None:
         raise SystemExit("require tenants >= 1, turns 1-150, arrival >= 0, max-usd > 0")
     if not (args.install or args.turn_load or args.discord or args.cleanup):
         raise SystemExit("choose --install, --turn-load, --discord, or --cleanup")
+    if args.discord_precreated and not args.discord:
+        raise SystemExit("--discord-precreated requires --discord")
     if args.discord and (
         not args.discord_guild_id or any(g not in DISCORD_QA_GUILDS for g in args.discord_guild_id)
     ):
