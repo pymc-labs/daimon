@@ -19,6 +19,7 @@ from daimon.core.routine_delivery import (
     poll_deliveries_once,
     render_fallback_post,
     render_routine_controls,
+    teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -76,6 +77,18 @@ def test_a_slack_thread_destination_is_channel_and_ts() -> None:
     assert (
         delivery_target(_row(destination_kind=None, destination_id=None), platform="slack") is None
     )
+
+
+def test_a_teams_thread_destination_is_its_channel_and_root() -> None:
+    thread = "19:abc@thread.tacv2;messageid=17"
+    row = _row(destination_kind="thread", destination_id=thread)
+    target = delivery_target(row, platform="teams")
+    assert target == DeliveryTarget("19:abc@thread.tacv2", "17"), "the channel is policy-checked"
+    assert target is not None and teams_thread_id(target) == thread
+    controls = render_routine_controls(row, platform="teams")
+    assert f'"thread_id": "{thread}"' in controls, "the agent posts to the thread by its id"
+    malformed = _row(destination_kind="thread", destination_id="19:abc@thread.tacv2")
+    assert delivery_target(malformed, platform="teams") is None
 
 
 def test_routine_controls_name_the_destination_and_schedule() -> None:
@@ -154,6 +167,11 @@ def test_protected_controls_do_not_invite_a_post() -> None:
         ("slack", "thread", "C0123ABC", False),
         ("slack", "channel", "#general", False),
         ("teams", "channel", "x", False),
+        ("teams", "channel", "19:abc-1@thread.tacv2", True),
+        ("teams", "channel", "19:abc@thread.tacv2;messageid=17", False),
+        ("teams", "thread", "19:abc@thread.tacv2;messageid=17", True),
+        ("teams", "thread", "19:abc@thread.tacv2;messageid=x/../", False),
+        ("cli", "channel", "x", False),
     ],
 )
 def test_destination_shape(platform: str, kind: str, destination_id: str, ok: bool) -> None:

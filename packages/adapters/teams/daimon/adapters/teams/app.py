@@ -85,6 +85,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
+from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -234,6 +235,7 @@ class TeamsApp:
         reader: ThreadReader | None = None,
         channel_files: ChannelFiles | None = None,
         installs: TeamInstalls | None = None,
+        routine_poster: RoutinePoster | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -251,6 +253,8 @@ class TeamsApp:
         self._channel_files = channel_files
         # Records each team for the MCP server's channel reads; None records nothing.
         self._installs = installs
+        # Posts routine results to their channels; None leaves them pending.
+        self._routine_poster = routine_poster
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
         )
@@ -275,6 +279,7 @@ class TeamsApp:
         self._files_offered: dict[str, float] = {}
         self._recovery: asyncio.Task[None] | None = None
         self._wake_poller: asyncio.Task[None] | None = None
+        self._delivery_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Teams cannot list a conversation's history).
         self._last_message_at: dict[str, datetime] = {}
@@ -313,6 +318,16 @@ class TeamsApp:
                     should_stop=lambda: self.draining,
                 )
                 self._wake_poller = asyncio.create_task(poller, name="teams.wake-poller")
+                if self._routine_poster is not None:
+                    deliveries = run_delivery_poller(
+                        self.runtime.sessionmaker,
+                        platform="teams",
+                        post=self._routine_poster,
+                        should_stop=lambda: self.draining,
+                    )
+                    self._delivery_poller = asyncio.create_task(
+                        deliveries, name="teams.routine-delivery"
+                    )
         return self._recovery
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
@@ -372,10 +387,12 @@ class TeamsApp:
         self.draining = True
         if self._participation is not None:
             self._participation.cancel_all()
-        if self._wake_poller is not None:
-            # Dispatches it spawned drain with the turns; due rows wait for the next boot.
-            self._wake_poller.cancel()
-            await asyncio.gather(self._wake_poller, return_exceptions=True)
+        for poller in (self._wake_poller, self._delivery_poller):
+            if poller is not None:
+                # Wake dispatches drain with the turns; due rows wait for the next boot, and
+                # a delivery cut short settles as interrupted, never posted twice.
+                poller.cancel()
+                await asyncio.gather(poller, return_exceptions=True)
         tasks = set(self._tasks)
         if self._recovery is not None and not self._recovery.done():
             tasks.add(self._recovery)

@@ -468,6 +468,13 @@ def no_wake_poller() -> Iterator[AsyncMock]:
         yield poller
 
 
+@pytest.fixture(autouse=True)
+def no_delivery_poller() -> Iterator[AsyncMock]:
+    """The routine delivery poller would share the test connection too."""
+    with patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock) as poller:
+        yield poller
+
+
 @pytest.fixture
 def teams_api_fake() -> TeamsApiFake:
     return TeamsApiFake()

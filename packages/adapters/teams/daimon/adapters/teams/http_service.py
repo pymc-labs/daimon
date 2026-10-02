@@ -28,9 +28,10 @@ from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.installations import TeamInstalls
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
+from daimon.adapters.teams.routine_delivery import SdkRoutineTeams, make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
@@ -270,6 +271,12 @@ def create_teams_http_service(
         reader=reader,
         channel_files=files,
         installs=installs,
+        routine_poster=make_teams_routine_poster(
+            runtime.sessionmaker,
+            SdkRoutineTeams(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id),
+            tenant_id=installs.tenant_id,
+            dm_policies=runtime.settings.direct_message_policies,
+        ),
     )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:

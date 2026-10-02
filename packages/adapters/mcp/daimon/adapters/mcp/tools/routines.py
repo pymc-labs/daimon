@@ -19,6 +19,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
+import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
@@ -44,6 +45,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
+from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client, split_thread
 from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_isolation import routine_destination_channel
@@ -223,6 +225,27 @@ async def _resolve_slack_destination(
     return None, None
 
 
+async def _resolve_teams_destination(
+    runtime: McpRuntime, auth: AuthIdentity, *, destination_id: str
+) -> str:
+    """The destination's channel, in a team daimon is in, with the caller on its roster."""
+    client, caller = require_client(runtime, auth)
+    channel_id, _ = split_thread(destination_id)
+    ref = await locate_channel(runtime, auth, client, channel_id)
+    try:
+        is_member = await client.is_member(ref.channel_id, caller)
+    except (httpx.HTTPError, ValueError) as err:
+        raise ToolError(
+            f"could not confirm you are in {ref.channel_name}. Nothing was saved."
+        ) from err
+    if not is_member:
+        raise ToolError(
+            f"you are not in {ref.channel_name}, so a routine cannot deliver there for you. "
+            "Nothing was saved."
+        )
+    return ref.channel_id
+
+
 async def _check_destination(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -258,6 +281,10 @@ async def _check_destination(
             runtime, auth, kind=kind, destination_id=destination_id
         )
         channel_id = destination_id
+    elif platform == "teams":
+        # A thread is checked as its channel; Teams has no categories.
+        parent_channel_id, category_id = None, None
+        channel_id = await _resolve_teams_destination(runtime, auth, destination_id=destination_id)
     else:
         parent_channel_id, category_id = await _resolve_slack_destination(
             runtime, auth, kind=kind, destination_id=destination_id
@@ -330,6 +357,8 @@ def _check_agent_pin(
             target_channel_id = destination_id
         elif platform == "slack":
             target_channel_id = destination_id.partition(":")[0]
+        elif platform == "teams":
+            target_channel_id = split_thread(destination_id)[0]
     decision = authorize(
         policy,
         subject=Subject(),
@@ -370,6 +399,8 @@ def _saved_destination_channel(auth: AuthIdentity, row: RoutineRow) -> str | Non
         return row.destination_id
     if auth.platform == "slack":
         return row.destination_id.partition(":")[0]
+    if auth.platform == "teams":
+        return split_thread(row.destination_id)[0]
     return None
 
 
@@ -687,7 +718,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
-        ts>``. A protected channel is refused. Without a destination the
+        ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
+        are in. A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``

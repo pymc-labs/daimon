@@ -64,6 +64,10 @@ class TeamInstalls:
         # Team id -> the name last recorded (None when the activity named none).
         self._recorded: dict[str, str | None] = {}
 
+    @property
+    def tenant_id(self) -> uuid.UUID:
+        return self._tenant_id
+
     def is_ours(self, activity: ActivityBase) -> bool:
         """The activity comes from the configured organisation."""
         conversation_tenant = canonical_uuid(activity.conversation.tenant_id)
