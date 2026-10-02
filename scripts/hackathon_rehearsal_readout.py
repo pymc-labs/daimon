@@ -22,6 +22,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 EVENTS = (
+    "turn.failed",
+    "turn.outcome_write_failed",
     "turn.skipped.concurrency_shed",
     "turn.skipped.global_concurrency_shed",
     "turn.anthropic_overloaded",
@@ -211,6 +213,10 @@ def table(
     attempts: dict[str, list[tuple[datetime, float, float]]] = defaultdict(list)
     pool: tuple[int, int] | None = None
     lag_max = lag_p95 = inflight = per_tenant = 0.0
+    prep_active = prep_waiting = 0
+    remaining_min: dict[str, int] = {}
+    discord_429 = 0
+    discord_retry_max = 0.0
     for when, item in health:
         interval = float(item.get("interval_s") or 30)
         for endpoint, statuses in item.get("anthropic_responses", {}).items():
@@ -220,6 +226,17 @@ def table(
         size = int(db_pool.get("size", 0))
         if pool is None or checked > pool[0]:
             pool = (checked, size)
+        gate = item.get("prep_gate", {})
+        if isinstance(gate, dict):
+            gate = cast(dict[str, Any], gate)
+            prep_active = max(prep_active, int(gate.get("active", 0)))
+            prep_waiting = max(prep_waiting, int(gate.get("waiting", 0)))
+        for name, value in item.get("anthropic_ratelimit_remaining_min", {}).items():
+            number = int(value)
+            remaining_min[name] = min(remaining_min.get(name, number), number)
+        for count in item.get("discord_ratelimits", {}).values():
+            discord_429 += int(count.get("count", 0))
+            discord_retry_max = max(discord_retry_max, float(count.get("max_retry_s", 0)))
         lag = item.get("loop_lag_ms", {})
         lag_max = max(lag_max, float(lag.get("max", 0)))
         lag_p95 = max(lag_p95, float(lag.get("p95", 0)))
@@ -254,6 +271,11 @@ def table(
             f"peak loop lag max/p95 ms | {f'{fmt(lag_max)}/{fmt(lag_p95)}' if health else 'n/a'}",
             f"peak turns in flight | {int(inflight) if health else 'n/a'}",
             f"peak per-tenant turns in flight | {int(per_tenant) if health else 'n/a'}",
+            f"prep gate active/waiting peaks | {prep_active}/{prep_waiting}"
+            if health
+            else "prep gate active/waiting peaks | n/a",
+            f"Anthropic remaining minima | {dict(sorted(remaining_min.items())) or 'n/a'}",
+            f"Discord 429 / max retry s | {discord_429}/{discord_retry_max:.2f}",
         ]
     )
     for event in EVENTS:

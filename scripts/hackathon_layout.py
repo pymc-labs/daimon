@@ -1,4 +1,4 @@
-"""Create or remove one private Discord channel and Daimon agent per event team.
+"""Create or remove one Discord channel and Daimon agent per event team.
 
 Run where the ``daimon`` CLI has staging or event deployment credentials. Secrets
 are read only from environment variables. Keep the state file for resuming and
@@ -10,6 +10,9 @@ teardown. Example::
 
 For the event guild, add ``--event --allow-guild-id ID``. This explicit
 allow-list prevents a staging rehearsal from writing to another server.
+``--no-roles`` is a QA-only fallback: channels are visible to the QA guild,
+and the QA bot may lack permission to pin the start message. The script
+records that failure in the state file.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ from typing import Any
 import httpx
 
 QA_GUILD = "1435062989119295640"
+QA_BOT_ID = "1533049261032341668"
+STAGING_DAIMON_BOT_ID = "1530628070405308456"
 API = "https://discord.com/api/v10"
 VIEW = 1 << 10
 SEND = 1 << 11
@@ -37,6 +42,8 @@ READ_HISTORY = 1 << 16
 SEND_IN_THREADS = 1 << 38
 CREATE_PUBLIC_THREADS = 1 << 35
 MANAGE_MESSAGES = 1 << 13
+MANAGE_ROLES = 1 << 28
+MANAGE_CHANNELS = 1 << 4
 
 
 def slug(value: str) -> str:
@@ -89,6 +96,10 @@ class Discord:
                 continue
             if response.status_code == 404 and method == "DELETE":
                 return {}
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Discord {method} {path} returned {response.status_code}: {response.text}"
+                )
             response.raise_for_status()
             return response.json() if response.content else {}
         raise RuntimeError(f"Discord rate limit persisted on {method} {path}")
@@ -127,6 +138,25 @@ def resolve_role(api: Discord, guild: str, name: str) -> str | None:
     return matches[0] if matches else None
 
 
+def require_setup_permissions(
+    api: Discord, guild: str, bot_id: str, no_roles: bool = False
+) -> None:
+    """Fail before any write if the selected bot cannot build the layout."""
+    member = api.request("GET", f"/guilds/{guild}/members/{bot_id}")
+    roles = api.request("GET", f"/guilds/{guild}/roles")
+    held = set(member["roles"]) | {guild}
+    permissions = 0
+    for role in roles:
+        if role["id"] in held:
+            permissions |= int(role["permissions"])
+    needed = [("Manage Channels", MANAGE_CHANNELS)]
+    if not no_roles:
+        needed.append(("Manage Roles", MANAGE_ROLES))
+    missing = [label for label, bit in needed if not permissions & bit]
+    if missing:
+        raise RuntimeError(f"bot lacks {', '.join(missing)} in guild {guild}")
+
+
 def resolve_channel(api: Discord, guild: str, name: str) -> str | None:
     channels = api.request("GET", f"/guilds/{guild}/channels")
     matches = [str(channel["id"]) for channel in channels if channel["name"] == name]
@@ -143,38 +173,39 @@ def setup_team(
     prefix = f"{slug(args.run_id)}-{key}"
     role_name, channel_name = f"team-{prefix}"[:100], f"team-{prefix}"[:100]
     guild = args.guild_id
-    if not entry.get("role_id"):
+    if not args.no_roles and not entry.get("role_id"):
         entry["role_id"] = resolve_role(api, guild, role_name) or str(
             api.request(
                 "POST", f"/guilds/{guild}/roles", json={"name": role_name, "mentionable": True}
             )["id"]
         )
         save(args.state, state)
-    role_id = entry["role_id"]
+    role_id = entry.get("role_id")
     if not entry.get("channel_id"):
         bot_id = str(api.request("GET", "/users/@me")["id"])
-        overwrites = [
-            {"id": guild, "type": 0, "deny": str(VIEW), "allow": "0"},
-            {
-                "id": role_id,
-                "type": 0,
-                "allow": str(VIEW | SEND | READ_HISTORY | SEND_IN_THREADS | CREATE_PUBLIC_THREADS),
-                "deny": "0",
-            },
-            {
-                "id": bot_id,
-                "type": 1,
-                "allow": str(
-                    VIEW
-                    | SEND
-                    | READ_HISTORY
-                    | SEND_IN_THREADS
-                    | CREATE_PUBLIC_THREADS
-                    | MANAGE_MESSAGES
-                ),
-                "deny": "0",
-            },
-        ]
+        overwrites = (
+            []
+            if args.no_roles
+            else [
+                {"id": guild, "type": 0, "deny": str(VIEW), "allow": "0"},
+                {
+                    "id": bot_id,
+                    "type": 1,
+                    "allow": str(
+                        VIEW
+                        | SEND
+                        | READ_HISTORY
+                        | SEND_IN_THREADS
+                        | CREATE_PUBLIC_THREADS
+                        | MANAGE_MESSAGES
+                    ),
+                    "deny": "0",
+                },
+            ]
+        )
+        if role_id:
+            access = VIEW | SEND | READ_HISTORY | SEND_IN_THREADS | CREATE_PUBLIC_THREADS
+            overwrites.append({"id": role_id, "type": 0, "allow": str(access), "deny": "0"})
         entry["channel_id"] = resolve_channel(api, guild, channel_name) or str(
             api.request(
                 "POST",
@@ -184,8 +215,9 @@ def setup_team(
         )
         save(args.state, state)
     channel_id = entry["channel_id"]
-    for member in members:
-        api.request("PUT", f"/guilds/{guild}/members/{member}/roles/{role_id}")
+    if role_id:
+        for member in members:
+            api.request("PUT", f"/guilds/{guild}/members/{member}/roles/{role_id}")
     if not entry.get("agent_name"):
         entry["agent_name"] = parse_agent(
             cli(
@@ -215,7 +247,19 @@ def setup_team(
         entry["budget_set"] = True
         save(args.state, state)
     if not entry.get("admins_set"):
-        cli("channels", "admins", "set", "discord", guild, channel_id, "--role", role_id)
+        if role_id:
+            cli("channels", "admins", "set", "discord", guild, channel_id, "--role", role_id)
+        else:
+            cli(
+                "channels",
+                "admins",
+                "set",
+                "discord",
+                guild,
+                channel_id,
+                "--user",
+                args.admin_user_id or QA_BOT_ID,
+            )
         entry["admins_set"] = True
         save(args.state, state)
     # Discord's active-thread listing lets a rerun recover a create that
@@ -247,14 +291,33 @@ def setup_team(
             f"[Thread {i}](https://discord.com/channels/{guild}/{tid})"
             for i, tid in enumerate(entry["threads"], 1)
         )
-        message = api.request(
-            "POST",
-            f"/channels/{channel_id}/messages",
-            json={"content": f"Start here: mention @Daimon in one of these threads. {links}"},
+        content = f"Start here: mention @Daimon in one of these threads. {links}"
+        bot_id = str(api.request("GET", "/users/@me")["id"])
+        messages = api.request("GET", f"/channels/{channel_id}/messages?limit=50")
+        message = next(
+            (
+                item
+                for item in messages
+                if item.get("content") == content
+                and str(item.get("author", {}).get("id")) == bot_id
+            ),
+            None,
         )
+        if message is None:
+            message = api.request(
+                "POST", f"/channels/{channel_id}/messages", json={"content": content}
+            )
         entry["pinned_message_id"] = str(message["id"])
         save(args.state, state)
-    api.request("PUT", f"/channels/{channel_id}/pins/{entry['pinned_message_id']}")
+    if not entry.get("pin_unavailable"):
+        try:
+            api.request("PUT", f"/channels/{channel_id}/pins/{entry['pinned_message_id']}")
+        except RuntimeError as exc:
+            if not args.no_roles or "50013" not in str(exc):
+                raise
+            entry["pin_unavailable"] = True
+            save(args.state, state)
+            print(f"{name}: pin unavailable (QA bot lacks Manage Messages)", flush=True)
     print(
         f"{name}: role={role_id} channel={channel_id} "
         f"agent={entry['agent_name']} threads={len(entry['threads'])}",
@@ -293,9 +356,14 @@ def main() -> None:
     parser.add_argument("--fork-from", default="daimon")
     parser.add_argument("--bot-token-env", default="DISCORD_QA_BOT_TOKEN")
     parser.add_argument("--teardown", action="store_true")
+    parser.add_argument("--no-roles", action="store_true")
+    parser.add_argument("--admin-user-id")
+    parser.add_argument("--daimon-bot-id", default=STAGING_DAIMON_BOT_ID)
     args = parser.parse_args()
     if args.guild_id != QA_GUILD and not (args.event and args.guild_id in args.allow_guild_id):
         parser.error("non-QA guild requires --event and matching --allow-guild-id")
+    if args.no_roles and args.guild_id != QA_GUILD:
+        parser.error("--no-roles is limited to the QA guild")
     if args.threads_per_team < 1 or args.threads_per_team > 10 or args.budget_usd < 0:
         parser.error("threads-per-team must be 1..10 and budget nonnegative")
     token = os.environ.get(args.bot_token_env)
@@ -305,11 +373,23 @@ def main() -> None:
     state = (
         json.loads(args.state.read_text())
         if args.state.exists()
-        else {"guild_id": args.guild_id, "run_id": args.run_id, "teams": {}}
+        else {
+            "guild_id": args.guild_id,
+            "run_id": args.run_id,
+            "no_roles": args.no_roles,
+            "teams": {},
+        }
     )
     if state["guild_id"] != args.guild_id or state["run_id"] != args.run_id:
         parser.error("state file guild/run id does not match")
+    if state.get("no_roles", False) != args.no_roles:
+        parser.error("state file role mode does not match")
     api = Discord(token)
+    bot = api.request("GET", "/users/@me")
+    if args.guild_id == QA_GUILD and str(bot["id"]) != QA_BOT_ID:
+        parser.error("staging layout requires the QA bot token")
+    if not args.teardown:
+        require_setup_permissions(api, args.guild_id, str(bot["id"]), args.no_roles)
     if args.teardown:
         for key in list(state["teams"]):
             teardown_team(api, args, state, key)

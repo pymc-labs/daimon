@@ -22,6 +22,7 @@ from scripts.hackathon_load_rehearsal import (
     arrival_offsets,
     budget_allows,
     expected_agent_model,
+    round_robin_threads,
     staging_guard,
 )
 
@@ -43,6 +44,14 @@ def test_budget_stops_at_limit() -> None:
     assert budget_allows(Decimal("4.999999"), limit)
     assert not budget_allows(limit, limit)
     assert not budget_allows(Decimal("5.01"), limit)
+
+
+def test_layout_turns_reach_every_team_before_second_thread() -> None:
+    teams = [[f"{team}-{slot}" for slot in range(3)] for team in range(65)]
+    ordered = round_robin_threads(teams)
+    assert len(ordered) == 195
+    assert {thread.split("-")[0] for thread in ordered[:100]} == {str(team) for team in range(65)}
+    assert ordered[65] == "0-1"
 
 
 def test_staging_requires_acknowledgement_and_real_marker() -> None:
@@ -144,5 +153,30 @@ async def test_discord_rest_retries_429_after_retry_after() -> None:
     try:
         assert await rest.request("GET", "/users/@me") == {"id": "ok"}
         assert calls == 2
+    finally:
+        await rest.close()
+
+
+@pytest.mark.asyncio
+async def test_discord_rest_retries_transient_read_but_not_post() -> None:
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503) if calls == 1 else httpx.Response(200, json={"id": "ok"})
+
+    rest = DiscordREST("test-token")
+    await rest.client.aclose()
+    rest.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://discord.test"
+    )
+    try:
+        assert await rest.request("GET", "/channels/1/messages") == {"id": "ok"}
+        assert calls == 2
+        calls = 0
+        with pytest.raises(httpx.HTTPStatusError):
+            await rest.request("POST", "/channels/1/messages", body={"content": "x"})
+        assert calls == 1
     finally:
         await rest.close()

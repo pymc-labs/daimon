@@ -535,7 +535,9 @@ which shows the channel as Private (sealed), Dedicated agent (pinned to it
 alone) and Hidden (isolated), and offers to end isolation or lift the seal
 and pins too; with `set_channel_isolation` (also under `channels:write`) or
 its CLI twin `daimon channels isolate PLATFORM WORKSPACE_ID CHANNEL_ID
-[--fork-from AGENT] [--end [--lift-seal-and-pins]]`; or
+[--fork-from AGENT] [--end [--lift-seal-and-pins]]`, or `daimon channels
+isolation set PLATFORM WORKSPACE_ID CHANNEL_ID [--fork-from AGENT]`
+(`isolation lift` ends it and drops the seal and pins); or
 with `--isolated-channel`, which must seal C and pin its default to it alone
 in the same command; any later `--pin` or `--sealed-channel` change that
 would break an isolated channel is refused. A pinned default is never copied:

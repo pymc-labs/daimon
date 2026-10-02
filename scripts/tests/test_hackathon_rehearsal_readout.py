@@ -22,6 +22,9 @@ def test_stage_counts_windowed_health_and_events() -> None:
         "interval_s": 30,
         "anthropic_responses": {"messages": {"429": 2}},
         "db_pool": {"checkedout": 3, "size": 5},
+        "prep_gate": {"active": 2, "waiting": 1},
+        "anthropic_ratelimit_remaining_min": {"anthropic-ratelimit-requests-remaining": 45},
+        "discord_ratelimits": {"thread": {"count": 2, "max_retry_s": 4.5}},
         "loop_lag_ms": {"max": 12, "p95": 8},
         "turns_in_flight": {"global": 4, "per_tenant_max": 2},
     }
@@ -46,6 +49,8 @@ def test_stage_counts_windowed_health_and_events() -> None:
     assert "peak 429/min by endpoint | messages=6.0" in result
     assert "peak pool checkedout/size | 3/5" in result
     assert "peak per-tenant turns in flight | 2" in result
+    assert "prep gate active/waiting peaks | 2/1" in result
+    assert "Discord 429 / max retry s | 4/4.50" in result
     assert "turn.skipped.concurrency_shed | 1" in result
     assert "turn outcomes by reason | {'completed': 1}" in result
 
