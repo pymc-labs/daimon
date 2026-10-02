@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.agent_fork import fork_agent
 from daimon.core.agent_pins import agent_pin_names
@@ -205,17 +206,23 @@ async def _channel_agent(
     channel_id: str,
     policy: TenantAccessPolicy,
     default: DeploymentDefault,
+    known: Mapping[str, BetaManagedAgentsAgent | None] | None = None,
 ) -> _ChannelAgent:
-    """The channel's default agent and why it can't be the channel's own, if it can't."""
+    """The channel's default agent and why it can't be the channel's own, if it can't.
+
+    `known` holds agents already looked up by name (`_lookup_channel_agent`),
+    so a caller holding the policy lock needn't wait on the network for them.
+    """
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     row = next((row for row in channels if row.channel_id == channel_id), None)
     name = row.agent_name if row is not None and row.mode == "agent" else None
     answering = pick_agent(row, tenant, default)[0]
-    agent = (
-        None
-        if name is None
-        else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
-    )
+    if name is None:
+        agent = None
+    elif known is not None and name in known:
+        agent = known[name]
+    else:
+        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
     if name is None or agent is None:
         return _ChannelAgent(name, answering, "no_channel_agent")
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
@@ -238,6 +245,31 @@ async def _channel_agent(
         )
         return _ChannelAgent(name, answering, refusal, names)
     return _ChannelAgent(name, answering, None, names)
+
+
+async def _lookup_channel_agent(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+) -> dict[str, BetaManagedAgentsAgent | None]:
+    """The channel's default agent looked up by name before the policy lock is taken.
+
+    The lookup leaves the process; doing it first keeps a pooled connection
+    from holding the lock while it waits. The locked read uses it only if the
+    channel's agent is still the one looked up here.
+    """
+    async with sessionmaker() as session:
+        _, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    row = next((row for row in channels if row.channel_id == channel_id), None)
+    if row is None or row.mode != "agent" or row.agent_name is None:
+        return {}
+    return {
+        row.agent_name: await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=row.agent_name
+        )
+    }
 
 
 async def isolation_refusal(
@@ -279,6 +311,7 @@ async def _write_isolation(
     platform: str,
     channel_id: str,
     default: DeploymentDefault,
+    known: Mapping[str, BetaManagedAgentsAgent | None],
 ) -> tuple[_ChannelAgent, bool]:
     """Under the policy lock: isolate with the channel's default agent if it may be its own."""
     await lock_access_policy(session, tenant_id=tenant_id)
@@ -291,6 +324,7 @@ async def _write_isolation(
         channel_id=channel_id,
         policy=policy,
         default=default,
+        known=known,
     )
     if found.refusal is not None or found.name is None:
         return found, False
@@ -356,6 +390,9 @@ async def set_channel_isolation(
             updated != policy,
             lifted_seal_and_pins=drop_seal_and_pins,
         )
+    known = await _lookup_channel_agent(
+        anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id
+    )
     async with sessionmaker.begin() as session:
         found, changed = await _write_isolation(
             anthropic,
@@ -364,6 +401,7 @@ async def set_channel_isolation(
             platform=platform,
             channel_id=channel_id,
             default=default,
+            known=known,
         )
     if found.refusal is None:
         return IsolationChange(
@@ -411,6 +449,7 @@ async def set_channel_isolation(
                 platform=platform,
                 channel_id=channel_id,
                 default=default,
+                known={new_name: copy.agent},
             )
             if found.refusal is not None:
                 raise ChannelIsolationRefused(found.refusal, agent_name=new_name)

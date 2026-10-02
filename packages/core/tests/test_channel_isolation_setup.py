@@ -237,6 +237,49 @@ async def test_isolating_with_a_fork_pins_the_copy(
         )
 
 
+@pytest.mark.parametrize("fork", [False, True], ids=["own-agent", "fork"])
+async def test_isolating_looks_agents_up_before_taking_the_policy_lock(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fork: bool,
+) -> None:
+    """No agent lookup waits on the network while the policy lock is held: the
+    channel's agent, or the fresh copy, is looked up first and reused under it."""
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("local", False), ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared" if fork else "local")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    locked = False
+    lookups_under_lock: list[str] = []
+    real_lock = channel_isolation_setup.lock_access_policy
+    real_find = channel_isolation_setup.find_agent_by_daimon_tag
+
+    async def lock(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+        nonlocal locked
+        await real_lock(session, tenant_id=tenant_id)
+        locked = True
+
+    async def find(anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> Any:
+        if locked:
+            lookups_under_lock.append(name)
+        return await real_find(anthropic, tenant_id=tenant_id, name=name)
+
+    async def fork_unlocked(*args: Any, **kwargs: Any) -> AgentCopy:
+        nonlocal locked
+        locked = False  # the first transaction has ended
+        return await fork_agent(*args, **kwargs)
+
+    monkeypatch.setattr(channel_isolation_setup, "lock_access_policy", lock)
+    monkeypatch.setattr(channel_isolation_setup, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(channel_isolation_setup, "fork_agent", fork_unlocked)
+    change = await _isolate(client, db_session_factory, tenant.id, "c1", fork=fork)
+
+    assert change.isolated and change.changed, "the channel is isolated"
+    assert lookups_under_lock == [], "no lookup ran while the policy lock was held"
+
+
 async def test_a_copy_refused_after_the_fork_is_archived(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
