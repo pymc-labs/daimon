@@ -540,7 +540,14 @@ because zero would falsely claim the turn was free.
 `turn_outcomes` records terminal reasons and timings separately from billing. Its
 content-free usage references join `usage_events` on `(managed_session_id,
 event_id)`; one outcome may refer to multiple model calls or recovered sessions.
-Refused turns have no usage references. The best-effort outcome writer never
+Refused turns have no usage references, and each admission refusal has its own
+reason: `admission_balance_depleted`, `admission_cap_exceeded`,
+`admission_channel_budget_exceeded`, `admission_channel_protected`,
+`admission_agent_pinned_elsewhere`, `admission_channel_isolated` and
+`admission_concurrency_shed`. `admission_denied` covers the invoker allowlist,
+an unreadable access policy and any other gate; rows written before
+`0044_admission_refusal_reasons` record every protection, pin and isolation
+refusal under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).
@@ -550,7 +557,8 @@ not mean no model work was billed. See the turn-outcome contract in
 
 `daimon usage turns TENANT_UUID --days 7 --json` lists content-free turn
 measurements. Add `--channel CHANNEL_ID` or `--origin routine` to filter;
-`--summary` groups by platform, channel and origin. The command reads the local
+`--summary` groups by platform, channel and origin; each listed turn's `reason`
+is its [outcome reason](#turn-outcomes). The command reads the local
 database and makes no upstream API calls. `--limit` bounds the individual-turn
 listing (1–1000); summaries cover the whole selected date range.
 

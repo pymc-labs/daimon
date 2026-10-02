@@ -2352,7 +2352,9 @@ class TurnOutcome(Base):
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
             "'admission_balance_depleted', 'admission_cap_exceeded', "
-            "'admission_channel_budget_exceeded', 'admission_denied', "
+            "'admission_channel_budget_exceeded', 'admission_channel_protected', "
+            "'admission_agent_pinned_elsewhere', 'admission_channel_isolated', "
+            "'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
             "'unknown')",

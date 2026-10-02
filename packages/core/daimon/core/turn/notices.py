@@ -158,6 +158,25 @@ _COPY: dict[TerminationReason, _Copy] = {
         _KEPT,
         "An admin can raise or clear the channel's budget.",
     ),
+    TerminationReason.ADMISSION_CHANNEL_PROTECTED: _Copy(
+        "Channel protected",
+        "This channel is protected, so the agent can't answer in it.",
+        _KEPT,
+        "Ask somewhere else, or ask an admin about the channel's protection.",
+    ),
+    TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE: _Copy(
+        "Agent pinned elsewhere",
+        "This agent only runs in the channels an operator pinned it to, so the turn did not run.",
+        _KEPT,
+        "Ask it in one of those channels.",
+    ),
+    TerminationReason.ADMISSION_CHANNEL_ISOLATED: _Copy(
+        "Channel isolated",
+        "This channel is isolated and the agent that would answer isn't one of its own, "
+        "so the turn did not run.",
+        _KEPT,
+        "An admin must set the channel's agent.",
+    ),
     TerminationReason.ADMISSION_DENIED: _Copy(
         "Not allowed",
         "This turn was refused before it ran.",

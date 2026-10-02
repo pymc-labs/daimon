@@ -761,7 +761,10 @@ both ceiling handlers, set `TurnState.termination` before the terminal hook
 fires, so a lifecycle and the caller's `RunOutcome.termination` always agree.
 Refusals raise before any state exists; `termination_reason(err)` maps the
 exception the adapter caught to its member, and never raises: anything it does
-not recognise is `unknown`. Two members have no exception behind them and are
+not recognise is `unknown`. Each `AdmissionDenied` reason with a member of its
+own (balance, cap, channel budget, protection, pin, isolation) maps to it, and
+`denial_termination_reason` gives the same member to a gate that decides with
+`authorize` instead of raising; the rest are `admission_denied`. Two members have no exception behind them and are
 set outside the mapper: `admission_concurrency_shed` by callers when
 `should_admit_turn` refuses, and `recovery_failed` by `run_prepared_turn` on
 the terminal hook when replacing a lost session raises (the exception it

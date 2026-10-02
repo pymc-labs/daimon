@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Turn outcomes tell protection, pin and isolation refusals apart.** A turn
+  refused because its channel is protected, its agent is pinned to other
+  channels, or the channel is isolated and the agent is not one of its own was
+  recorded as `admission_denied`, the same as the invoker allowlist, so
+  `daimon usage turns` could not say which gate stopped it. These now record
+  `admission_channel_protected`, `admission_agent_pinned_elsewhere` and
+  `admission_channel_isolated`, from chat and MCP turns alike. Migration
+  `0044_admission_refusal_reasons` widens the `turn_outcomes.reason` check;
+  its downgrade folds them back into `admission_denied`. Earlier rows keep
+  `admission_denied`.
 - **Channel admins change only their channels' own agents.** A channel admin
   could configure, rebind and edit any agent answering in their channels,
   including one a member bound there. They now may only when the agent is
