@@ -329,6 +329,7 @@ agent's prompt, skills and connectors under a name with no pin. A fork also
 starts with no credentials (no GitHub access, repo binding or proof, and no
 agent-wide MCP token), so copying an agent never hands out another project's
 access; MCP servers that only work with a stored token are left off the copy.
+The source's own uploaded skills are copied as new skills of the fork's.
 
 An MCP or hub turn (`start_turn`, `ask`, `continue_turn`, on a new session or
 a resumed one) runs in no channel, so it is outside every pin, as a DM is: the
@@ -567,8 +568,11 @@ absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
 uploaded under the agent-scoped title, never the shared library. A name a
 shared or built-in skill already holds, or one that would load under the same
-folder as an attached skill, is refused. A fork drops agent-scoped skills
-(`copy_agent`), but one attached by id or kept by an older fork may still be
+folder as an attached skill, is refused. A fork (`copy_agent`, also behind
+channel isolation) uploads the source's own skills again under the fork's
+title and upload row, so the two never share a skill id; another agent's
+skill, or one that fails to copy, is left off and named, and the fork still
+succeeds. One attached by id or kept by an older fork may still be
 shared, so a skill another agent also has attached is never versioned; the
 upload must take a new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
 origin is `owner/repo/path@branch`, never the URL as typed) and the adding

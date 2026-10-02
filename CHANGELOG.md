@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Forks keep their own uploaded skills.** `fork_agent`, `daimon agents fork`
+  and channel isolation used to leave every skill scoped to the source agent
+  off the copy, so isolating a channel lost the skills uploaded to its agent.
+  The source's own skills are now downloaded and uploaded again under the
+  fork's name, as independent skills with their own ids and upload rows. A
+  skill scoped to another agent is still left off, and one that fails to copy
+  is named while the fork still succeeds.
 - When a channel's budget is used up, its channel admins (or the server admins, when it has none) get one DM per budget window on Discord, Slack and Teams. Setting or raising the budget re-arms it; `DAIMON_BUDGET_NOTICES` turns it off per tenant.
 - Promo codes can raise a channel's budget instead of the tenant balance: `daimon promo create --channel-budget` or `create_promo_code(kind="channel_budget")`. Redeeming one in a channel with a budget (from `/billing` there, or `redeem_promo_code` with `channel_id`) adds its amount to that budget's limit for good. That channel's admins may redeem it too; credit and timed codes stay with server admins.
 - Channel admins can set and clear the budgets of the channels they administer with `set_channel_budget` and `clear_channel_budget`; server admins still set any. `daimon channels budget set` and `clear` now record the change in `security_audit_events`.

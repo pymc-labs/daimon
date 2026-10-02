@@ -127,8 +127,8 @@ class AgentInfo(BaseModel):
     routes to the new agent yet: post it verbatim, so the person learns the
     agent exists but answers nowhere and what to say to change that."""
     dropped_skills: list[str] | None = None
-    """Set only by ``fork_agent``: skills scoped to one agent (``agent/skill``),
-    left off the copy. Tell the person which ones."""
+    """Set only by ``fork_agent``: skills left off the copy (another agent's, or the
+    source's own that failed to copy; its own are otherwise copied). Tell the person."""
 
     @classmethod
     def from_ma(

@@ -137,7 +137,7 @@ class IsolationChange:
     forked_from: str | None
     changed: bool
     dropped_skills: tuple[str, ...] = ()
-    """Skills scoped to one agent, left off the copy."""
+    """Skills left off the copy: another agent's, or the source's own that failed to copy."""
     lifted_seal_and_pins: bool = False
     """Isolation ended along with the channel's seal and its dedicated agents' pins."""
     network_warning: str | None = None
@@ -152,7 +152,7 @@ class IsolationChange:
     def dropped_skills_note(self) -> str | None:
         if not self.dropped_skills:
             return None
-        return f"Left off the copy, as they belong to one agent: {', '.join(self.dropped_skills)}."
+        return f"Left off the copy: {', '.join(self.dropped_skills)}."
 
 
 def isolated_agent_name(
