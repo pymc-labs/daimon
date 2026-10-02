@@ -236,9 +236,10 @@ async def require_agent_creatable(
     if auth.agent_id is None and origin is None:
         record_authz_denial(Action.CREATE_AGENT, "origin_missing")
         raise ToolError(
-            "create_agent needs this turn's origin_context_id while a channel in this "
-            "workspace is isolated: call it again with origin_context_id set. Nothing "
-            "was created."
+            "create_agent needs a verified origin_context_id from a chat turn while a "
+            "channel in this workspace is isolated, and this call has none. Nothing was "
+            "created. Tell the caller to create the agent from a chat conversation. "
+            "Do not retry."
         )
 
 
