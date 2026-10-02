@@ -68,6 +68,11 @@ This brings up Postgres, runs migrations and seeds the default agents,
 environments and skills (the `init` service does both), then starts the
 `mcp`, `discord` and `scheduler` services.
 
+Set `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and
+`DAIMON_DATABASE__POOL_TIMEOUT` per process when sizing Postgres for more
+concurrent turns. Each process can open up to `POOL_SIZE + MAX_OVERFLOW`
+connections; include every worker and MCP instance in the database limit.
+
 Once it settles, send a message that `@mention`s the bot. It replies in a
 new thread. If the bot stays silent, check `docker compose logs discord`; an
 unset `DAIMON_DISCORD__BOT_TOKEN` is the usual cause.

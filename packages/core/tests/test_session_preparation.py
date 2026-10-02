@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -57,7 +58,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import SessionAgentMismatch
+from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     PreparedTurn,
@@ -75,8 +76,13 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -285,6 +291,102 @@ async def test_a_compatible_session_is_reused_without_touching_ma(
     assert transport.calls[before:] == [], (
         "a compatible session must cost no MA call at all on the reuse path"
     )
+
+
+async def test_compatible_bind_releases_connection_during_vault_io(
+    db_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.core.session_preparation as preparation
+
+    _ = db_clean
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sm() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await session.commit()
+    deps = _deps(sm, _Transport())
+    admission = _admission(account=account)
+    await _prepare(deps, admission, tenant=tenant, account=account)
+
+    engine = db_engine
+    checked_out_at: dict[int, float] = {}
+    held_s = 0.0
+
+    def checkout(dbapi: object, record: object, proxy: object) -> None:
+        checked_out_at[id(record)] = time.monotonic()
+
+    def checkin(dbapi: object, record: object) -> None:
+        nonlocal held_s
+        held_s += time.monotonic() - checked_out_at.pop(id(record))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original = preparation.apply_update_ops
+
+    async def slow_vault(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(preparation, "apply_update_ops", slow_vault)
+    event.listen(engine.sync_engine.pool, "checkout", checkout)
+    event.listen(engine.sync_engine.pool, "checkin", checkin)
+    try:
+        task = asyncio.create_task(_prepare(deps, admission, tenant=tenant, account=account))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.sleep(0.2)
+        checkedout_during_io = engine.sync_engine.pool.checkedout()
+        release.set()
+        assert isinstance(await task, PreparedTurn)
+        assert held_s < 0.1, f"compatible bind held {held_s:.3f} connection-seconds"
+        assert checkedout_during_io == 0
+    finally:
+        release.set()
+        event.remove(engine.sync_engine.pool, "checkout", checkout)
+        event.remove(engine.sync_engine.pool, "checkin", checkin)
+
+
+async def test_compatible_bind_rechecks_mapping_after_vault_io(
+    db_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.core.session_preparation as preparation
+
+    _ = db_clean
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sm() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await session.commit()
+    deps = _deps(sm, _Transport())
+    admission = _admission(account=account)
+    await _prepare(deps, admission, tenant=tenant, account=account)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original = preparation.apply_update_ops
+
+    async def slow_vault(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(preparation, "apply_update_ops", slow_vault)
+    task = asyncio.create_task(_prepare(deps, admission, tenant=tenant, account=account))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        row = await _live_row(sm, tenant=tenant, account=account)
+        assert row is not None
+        async with sm.begin() as session:
+            await request_fresh_start(session, id=row.id, at=_NOW)
+        release.set()
+        with pytest.raises(SessionBusyError):
+            await task
+    finally:
+        release.set()
 
 
 async def test_a_new_key_is_swapped_into_the_live_session_without_replacing_it(

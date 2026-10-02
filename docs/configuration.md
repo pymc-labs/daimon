@@ -123,6 +123,26 @@ Required.
 Postgres connection string for the test suite. Points at a dedicated database (e.g.
 daimon_test) so test runs never touch development data. Unset in production.
 
+### `DAIMON_DATABASE__POOL_SIZE`
+
+`int` · optional · default `5`
+
+Persistent Postgres connections per process. Default 5; size against all application
+processes and the database connection limit.
+
+### `DAIMON_DATABASE__MAX_OVERFLOW`
+
+`int` · optional · default `10`
+
+Temporary Postgres connections above pool_size per process. Default 10; include these in
+the database connection budget.
+
+### `DAIMON_DATABASE__POOL_TIMEOUT`
+
+`float` · optional · default `30.0`
+
+Seconds to wait for a free Postgres connection before failing. Default 30 seconds.
+
 ## Anthropic
 
 Read from `daimon.core.config.AnthropicSettings`. Prefix `DAIMON_ANTHROPIC__`.

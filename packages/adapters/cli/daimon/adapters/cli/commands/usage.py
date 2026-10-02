@@ -36,7 +36,12 @@ def usage_turns_command(
     console = Console(highlight=False)
 
     async def query() -> None:
-        engine = build_engine(str(settings.database.url))
+        engine = build_engine(
+            str(settings.database.url),
+            pool_size=settings.database.pool_size,
+            max_overflow=settings.database.max_overflow,
+            pool_timeout=settings.database.pool_timeout,
+        )
         try:
             sm = build_session_factory(engine)
             async with sm() as session:

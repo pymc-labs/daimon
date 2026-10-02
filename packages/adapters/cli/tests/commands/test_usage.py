@@ -69,9 +69,13 @@ def test_usage_command_is_read_only_and_scoped(
 
     engine = SimpleNamespace(dispose=AsyncMock())
     monkeypatch.setattr(
-        usage, "load_settings", lambda: SimpleNamespace(database=SimpleNamespace(url="unused"))
+        usage,
+        "load_settings",
+        lambda: SimpleNamespace(
+            database=SimpleNamespace(url="unused", pool_size=5, max_overflow=10, pool_timeout=30.0)
+        ),
     )
-    monkeypatch.setattr(usage, "build_engine", lambda url: engine)
+    monkeypatch.setattr(usage, "build_engine", lambda url, **kwargs: engine)
     monkeypatch.setattr(usage, "build_session_factory", lambda engine: sessionmaker)
     monkeypatch.setattr(usage, "usage_by_channel" if summary else "list_turn_usage", query)
     args = [
