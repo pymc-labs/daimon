@@ -1307,7 +1307,9 @@ registered and expire too, while older jti-less ones keep working.
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 `get_tenant_summary` lists every channel with a default, a budget, admins or
-isolation, and `channels[].isolated` says whether it is isolated.
+isolation, and `channels[].isolated` says whether it is isolated. Its read is
+`daimon.core.tenant_summary`, which `daimon channels list PLATFORM
+WORKSPACE_ID [--json]` prints too, with the same JSON.
 `set_channel_isolation` with an operator token acts as that admin: the copy
 it may make is an admin's fork, and its seal and pin writes are the same as
 the panel's.

@@ -22,6 +22,7 @@ from daimon.adapters.cli.commands.channels import (
     channels_admins_get,
     channels_admins_set,
     channels_isolate,
+    channels_list,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
@@ -372,3 +373,38 @@ async def test_isolate_refuses_teams_and_bad_flag_mixes(
         await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
     with pytest.raises(typer.BadParameter, match="only applies with --end"):
         await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)
+
+
+async def test_list_shows_the_balance_and_each_configured_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The CLI twin of get_tenant_summary: the same JSON, and a table by default."""
+    rt = build_cli_runtime(db_session_factory)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    args = {"rt": rt, "platform": "slack", "workspace_id": "T1"}
+    await budget_set(
+        **args,
+        console=_console(),
+        channel_id="C1",
+        usd="5",
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+    )
+    await channels_admins_set(
+        **args, console=_console(), channel_id="C2", roles=[], users=["U1"], as_json=False
+    )
+
+    json_console = _console()
+    await channels_list(**args, console=json_console, as_json=True)
+    summary = json.loads(_out(json_console))
+    channels = {c["channel_id"]: c for c in summary["channels"]}
+    assert summary["balance_usd"] == "0.00", "a fresh tenant has no balance"
+    assert channels["C1"]["budget"]["limit_usd"] == "5.00", "C1 is listed for its budget"
+    assert channels["C2"]["admins"] == {"role_ids": [], "user_ids": ["U1"]}, "C2 for its admins"
+
+    table = _console()
+    await channels_list(**args, console=table, as_json=False)
+    text = _out(table)
+    assert "balance $0.00 (prepaid)" in text, "the table is headed by the balance"
+    assert "$5.00" in text and "(monthly)" in text, "and shows the budget"

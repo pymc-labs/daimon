@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, cast
@@ -35,11 +37,12 @@ from daimon.core.stores.channel_admins import (
 )
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.tenant_summary import ChannelSummary, load_tenant_summary
 from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
 
-channels_app = typer.Typer(help="Channels: spend budgets, channel admins and isolation.")
+channels_app = typer.Typer(help="Channels: a summary, spend budgets, channel admins and isolation.")
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
 )
@@ -328,6 +331,75 @@ async def budget_list(
         if s.budget.platform == platform
     ]
     emit_rows(console, rows, columns=("channel_id", "summary", "active"), as_json=as_json)
+
+
+class ChannelListing(BaseModel):
+    channel_id: str
+    agent: str | None
+    environment: str | None
+    isolated: bool
+    admins: str
+    budget: str
+
+
+def _listing(channel: ChannelSummary) -> ChannelListing:
+    admins = [*(f"role {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
+    budget = channel.budget
+    return ChannelListing(
+        channel_id=channel.channel_id,
+        agent=channel.agent_name,
+        environment=channel.environment_name,
+        isolated=channel.isolated,
+        admins=", ".join(admins),
+        budget=f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window})" if budget else "",
+    )
+
+
+@channels_app.command("list")
+def channels_list_command(
+    platform: str,
+    workspace_id: str,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """List the balance and every configured channel: agent, environment, admins, budget."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_list(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                as_json=as_json,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_list(
+    *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, as_json: bool
+) -> None:
+    """The CLI twin of the MCP `get_tenant_summary` tool, with the same JSON."""
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    async with rt.sessionmaker() as session:
+        summary = await load_tenant_summary(
+            session, tenant_id=tenant_id, default=rt.deployment_default, now=datetime.now(UTC)
+        )
+    if as_json:
+        console.print(json.dumps(asdict(summary)), soft_wrap=True, highlight=False, markup=False)
+        return
+    console.print(
+        f"{platform}:{workspace_id}: balance ${summary.balance_usd} ({summary.funding_mode}), "
+        f"default agent {summary.default_agent or 'none'}",
+        markup=False,
+    )
+    emit_rows(
+        console,
+        [_listing(channel) for channel in summary.channels],
+        columns=tuple(ChannelListing.model_fields),
+        as_json=False,
+    )
 
 
 _ADMIN_COLUMNS = ("channel_id", "role_ids", "user_ids", "updated_at")
