@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import json
 import os
 import shutil
 import subprocess
@@ -95,6 +96,16 @@ def arrival_offsets(count: int, seconds: float) -> tuple[float, ...]:
 
 def budget_allows(debits_usd: Decimal, max_usd: Decimal) -> bool:
     return max_usd > 0 and debits_usd < max_usd
+
+
+def round_robin_threads(teams: list[list[str]]) -> list[str]:
+    """Use one thread from every team before reusing a team's next slot."""
+    return [
+        threads[slot]
+        for slot in range(max(map(len, teams), default=0))
+        for threads in teams
+        if slot < len(threads)
+    ]
 
 
 def staging_guard(
@@ -191,6 +202,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--turn-load", action="store_true")
     p.add_argument("--discord", action="store_true")
     p.add_argument("--discord-precreated", action="store_true")
+    p.add_argument("--discord-layout-state", type=Path)
+    p.add_argument("--discord-arrival-seconds", type=float, default=0)
     p.add_argument("--prompt-set", choices=("simple", "realistic"), default="simple")
     p.add_argument("--cleanup", action="store_true")
     p.add_argument("--dry-run", action="store_true")
@@ -718,9 +731,10 @@ async def _discord_phase(
     rest = DiscordREST(token)
     previous: dict[uuid.UUID, int | None] = {}
     created_threads: set[str] = set()
+    extra_threads: set[str] = set()
     created_channels: set[str] = set()
     precreated: list[tuple[str, uuid.UUID]] = []
-    tasks: set[asyncio.Task[DiscordResult]] = set()
+    tasks: set[asyncio.Task[DiscordResult | None]] = set()
     try:
         me = await rest.request("GET", "/users/@me")
         assert isinstance(me, dict)
@@ -743,17 +757,67 @@ async def _discord_phase(
             print(f"Discord QA guild {guild_id} default agent model: {agent.model.id}", flush=True)
             _require_discord_model(agent.model.id, args.discord_require_model)
             previous[tenant_id] = tenant.turn_cap
-            for index in range(min(5, args.discord_concurrency)):
-                channel = await rest.request(
+            if args.discord_layout_state is None:
+                for index in range(min(5, args.discord_concurrency)):
+                    channel = await rest.request(
+                        "POST",
+                        f"/guilds/{guild_id}/channels",
+                        body={"name": f"qa-load-{args.run_id}-{index + 1}", "type": 0},
+                    )
+                    assert isinstance(channel, dict)
+                    channel_id = str(channel["id"])
+                    created_channels.add(channel_id)
+                    channels.append((channel_id, tenant_id))
+        if args.discord_layout_state is not None:
+            layout = cast(dict[str, object], json.loads(args.discord_layout_state.read_text()))
+            if layout.get("guild_id") != guild_ids[0] or len(guild_ids) != 1:
+                raise RuntimeError("layout state guild must match the selected QA guild")
+            layout_channels: list[str] = []
+            team_threads: list[list[str]] = []
+            teams = cast(dict[str, dict[str, object]], layout["teams"])
+            for team in teams.values():
+                channel_id = str(team["channel_id"])
+                layout_channels.append(channel_id)
+                channel = await rest.request("GET", f"/channels/{channel_id}")
+                if not isinstance(channel, dict) or str(channel.get("guild_id")) != guild_ids[0]:
+                    raise RuntimeError(f"layout channel {channel_id} is outside the QA guild")
+                verified: list[str] = []
+                for thread_id in cast(list[str], team["threads"]):
+                    thread = await rest.request("GET", f"/channels/{thread_id}")
+                    if (
+                        not isinstance(thread, dict)
+                        or str(thread.get("guild_id")) != guild_ids[0]
+                        or str(thread.get("parent_id")) != channel_id
+                    ):
+                        raise RuntimeError(f"layout thread {thread_id} is outside its QA channel")
+                    verified.append(str(thread_id))
+                team_threads.append(verified)
+            # Thread slot first, team second: the 100 and 150 stages cover
+            # every team rather than filling the first teams' three threads.
+            precreated.extend(
+                (thread_id, next(iter(previous))) for thread_id in round_robin_threads(team_threads)
+            )
+            if not precreated:
+                raise RuntimeError("layout state has no working threads")
+            # A 65 x 3 layout has 195 threads. For the 200-mention stage,
+            # add five temporary threads so each concurrent mention has its
+            # own thread, then remove only those five during cleanup.
+            for index in range(max(0, args.discord_concurrency - len(precreated))):
+                channel_id = layout_channels[index % len(layout_channels)]
+                thread = await rest.request(
                     "POST",
-                    f"/guilds/{guild_id}/channels",
-                    body={"name": f"qa-load-{args.run_id}-{index + 1}", "type": 0},
+                    f"/channels/{channel_id}/threads",
+                    body={"name": f"load-{args.run_id}-extra-{index + 1}", "type": 11},
                 )
-                assert isinstance(channel, dict)
-                channel_id = str(channel["id"])
-                created_channels.add(channel_id)
-                channels.append((channel_id, tenant_id))
-        if args.discord_precreated:
+                assert isinstance(thread, dict)
+                thread_id = str(thread["id"])
+                extra_threads.add(thread_id)
+                precreated.append((thread_id, next(iter(previous))))
+            print(
+                f"Using {len(teams)} layout channels and {len(precreated)} threads",
+                flush=True,
+            )
+        elif args.discord_precreated:
             # Discord shares a 50-create/300s guild bucket across channels.
             # Eight per ten seconds also stays below the short burst allowance.
             made_at: list[float] = []
@@ -793,8 +857,8 @@ async def _discord_phase(
         )
 
         async def launch(index: int) -> DiscordResult:
-            if args.discord_precreated:
-                channel_id, tenant_id = precreated[index]
+            if args.discord_precreated or args.discord_layout_state is not None:
+                channel_id, tenant_id = precreated[index % len(precreated)]
             else:
                 channel_id, tenant_id = channels[index % len(channels)]
             prompt = (
@@ -827,29 +891,55 @@ async def _discord_phase(
                 str(posted["id"]),
                 started,
                 created_threads,
-                existing_thread_id=channel_id if args.discord_precreated else None,
+                existing_thread_id=channel_id
+                if args.discord_precreated or args.discord_layout_state is not None
+                else None,
                 watch_seconds=args.discord_watch_seconds,
             )
 
         results: list[DiscordResult] = []
-        for batch_start in range(0, args.discord_turns, args.discord_concurrency):
-            spent = await _debits(sm, list(previous)) - baseline
-            if not budget_allows(spent, args.max_usd):
-                print(
-                    f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}", flush=True
+        if args.discord_arrival_seconds:
+            gate = asyncio.Semaphore(args.discord_concurrency)
+            start_clock = time.monotonic()
+
+            async def scheduled(index: int) -> DiscordResult | None:
+                await asyncio.sleep(
+                    max(
+                        0,
+                        start_clock
+                        + index * args.discord_arrival_seconds / args.discord_turns
+                        - time.monotonic(),
+                    )
                 )
-                break
-            tasks = {
-                asyncio.create_task(launch(index))
-                for index in range(
-                    batch_start,
-                    min(batch_start + args.discord_concurrency, args.discord_turns),
-                )
-            }
-            results.extend(await asyncio.gather(*tasks))
+                async with gate:
+                    spent = await _debits(sm, list(previous)) - baseline
+                    if not budget_allows(spent, args.max_usd):
+                        return None
+                    return await launch(index)
+
+            tasks = {asyncio.create_task(scheduled(index)) for index in range(args.discord_turns)}
+            results.extend(row for row in await asyncio.gather(*tasks) if row is not None)
             tasks.clear()
+        else:
+            for batch_start in range(0, args.discord_turns, args.discord_concurrency):
+                spent = await _debits(sm, list(previous)) - baseline
+                if not budget_allows(spent, args.max_usd):
+                    print(
+                        f"Discord budget stop: QA ledger debits ${spent} >= ${args.max_usd}",
+                        flush=True,
+                    )
+                    break
+                tasks = {
+                    asyncio.create_task(launch(index))
+                    for index in range(
+                        batch_start,
+                        min(batch_start + args.discord_concurrency, args.discord_turns),
+                    )
+                }
+                results.extend(row for row in await asyncio.gather(*tasks) if row is not None)
+                tasks.clear()
         created_threads.update(row.thread_id for row in results if row.thread_id)
-        if not args.discord_precreated:
+        if not args.discord_precreated and args.discord_layout_state is None:
             notices = 0
             for channel_id in created_channels:
                 messages = cast(
@@ -860,7 +950,7 @@ async def _discord_phase(
                     author = item.get("author")
                     if (
                         not isinstance(author, dict)
-                        or str(author.get("id")) != DISCORD_DAIMON_BOT_ID
+                        or str(cast(dict[str, object], author).get("id")) != DISCORD_DAIMON_BOT_ID
                     ):
                         continue
                     content = str(item.get("content") or "")
@@ -917,6 +1007,11 @@ async def _discord_phase(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         cleanup_errors: list[str] = []
+        for thread_id in extra_threads:
+            try:
+                await rest.request("DELETE", f"/channels/{thread_id}")
+            except Exception as exc:
+                cleanup_errors.append(f"extra thread {thread_id}: {exc}")
         for channel_id in created_channels:
             try:
                 await rest.request("DELETE", f"/channels/{channel_id}")
@@ -1109,8 +1204,9 @@ def main() -> None:
         or not 1 <= args.turns <= 150
         or args.arrival_seconds < 0
         or args.max_usd <= 0
-        or not 1 <= args.discord_turns <= 150
-        or not 1 <= args.discord_concurrency <= 150
+        or not 1 <= args.discord_turns <= 1000
+        or not 1 <= args.discord_concurrency <= 200
+        or args.discord_arrival_seconds < 0
         or not 1 <= args.discord_watch_seconds <= 900
         or args.discord_file_every < 0
     ):

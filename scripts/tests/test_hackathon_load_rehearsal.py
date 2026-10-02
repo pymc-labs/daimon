@@ -22,6 +22,7 @@ from scripts.hackathon_load_rehearsal import (
     arrival_offsets,
     budget_allows,
     expected_agent_model,
+    round_robin_threads,
     staging_guard,
 )
 
@@ -43,6 +44,14 @@ def test_budget_stops_at_limit() -> None:
     assert budget_allows(Decimal("4.999999"), limit)
     assert not budget_allows(limit, limit)
     assert not budget_allows(Decimal("5.01"), limit)
+
+
+def test_layout_turns_reach_every_team_before_second_thread() -> None:
+    teams = [[f"{team}-{slot}" for slot in range(3)] for team in range(65)]
+    ordered = round_robin_threads(teams)
+    assert len(ordered) == 195
+    assert {thread.split("-")[0] for thread in ordered[:100]} == {str(team) for team in range(65)}
+    assert ordered[65] == "0-1"
 
 
 def test_staging_requires_acknowledgement_and_real_marker() -> None:
