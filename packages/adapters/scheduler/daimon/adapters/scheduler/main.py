@@ -48,7 +48,7 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import routine_destination_place
+from daimon.core.channel_isolation import routine_destination_channel, routine_destination_place
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -342,7 +342,10 @@ async def _build_fire(
         async with sm() as scope_s:
             scoped = await resolve(
                 scope_s,
-                context=ScopeContext(tenant_id=row.tenant_id, channel_id=row.channel_id),
+                context=ScopeContext(
+                    tenant_id=row.tenant_id,
+                    channel_id=routine_destination_channel(row) or row.channel_id,
+                ),
                 default=deployment_default,
             )
         resolved_env_id = await resolve_environment(
