@@ -15,6 +15,7 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
@@ -491,6 +492,31 @@ def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAcc
         console.print(f"[yellow]Isolation ended for {channel_id}. {warning}[/yellow]")
 
 
+async def _warn_sealed_open_network(
+    rt: CliRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    previous: TenantAccessPolicy | None,
+    policy: TenantAccessPolicy,
+) -> None:
+    """Warn of each newly sealed channel whose own pick has an open network: it was
+    made before the seal, so its network rule never judged it."""
+    added = set(policy.sealed_channel_ids) - set(previous.sealed_channel_ids if previous else ())
+    channels = sorted({seal_id.partition(":")[0] for seal_id in added})
+    console = Console(stderr=True, highlight=False)
+    async with rt.sessionmaker() as session:
+        for channel_id in channels:
+            warning = await sealed_network_warning(
+                session,
+                rt.anthropic,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                default=rt.deployment_default,
+            )
+            if warning is not None:
+                console.print(f"[yellow]Sealed {channel_id}. {escape(warning)}[/yellow]")
+
+
 @access_policy_app.command("get")
 def tenants_access_policy_get_command(
     platform: str, external_id: str, as_json: Annotated[bool, JSON_OPTION] = False
@@ -918,6 +944,7 @@ async def tenants_access_policy_set(
                 )
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
     _warn_ended_isolation(previous, policy)
+    await _warn_sealed_open_network(rt, tenant_id=tenant_id, previous=previous, policy=policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)
     if not as_json:
         for name in sorted(set(before) - set(policy.agent_channel_pins)):

@@ -14,6 +14,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_fork import AgentCopy, fork_agent
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.authz import Subject
+from daimon.core.channel_environments import SEALED_OPEN_NETWORK_WARNING
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
     LIFT_ISOLATION_WARNING,
@@ -45,7 +46,7 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ADMIN = Subject(is_admin=True)
@@ -99,6 +100,38 @@ async def _isolate(
         actor_account_id=None,
         subject=ADMIN,
         **kwargs,
+    )
+
+
+async def test_isolating_warns_of_the_channels_own_open_environment(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A pick made before the seal skipped its network rule, so isolating says so; never refuses."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    agent = ma_agent(id="agent_local", name="local", tenant_id=tenant.id)
+    state.agents[agent.id] = agent.model_dump(mode="json")
+    environments = [ma_environment(id="env_open", name="open", tenant_id=tenant.id)]
+
+    def list_environments(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or request.url.path != "/v1/environments":
+            raise NotHandled
+        return list_response([env.model_dump(mode="json") for env in environments])
+
+    client = build_fake_anthropic(combine_handlers(list_environments, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "local")
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+        tenant_id=tenant.id,
+        environment_name="open",
+    )
+    await db_session.commit()
+
+    change = await _isolate(client, db_session_factory, tenant.id, "c1")
+    assert change.isolated, "the warning never refuses"
+    assert change.network_warning == SEALED_OPEN_NETWORK_WARNING, (
+        "its own open environment needs a server admin's confirmation"
     )
 
 

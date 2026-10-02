@@ -1307,6 +1307,42 @@ async def test_a_replacement_after_an_unseal_keeps_the_predecessors_seal(
     assert _sealed_stamp(transport, second.ma_session_id) == "vault"
 
 
+async def test_an_environment_switch_successor_keeps_the_predecessors_seal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel's environment changes under a sealed conversation: the session
+    in the new environment carries the old work, so it keeps the old seal ids,
+    even once the channel was unsealed in between."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    first = await _prepare(
+        deps,
+        _sealed(_admission(account=account), seal_id="vault", also=frozenset({"thread-1"})),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+    switched = replace(
+        _sealed(_admission(account=account), seal_id=None),
+        environment=ma_environment(id="env_gpu", name="gpu", created_at=_NOW.isoformat()),
+    )
+    second = await _prepare(deps, switched, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity.state == "replaced", "a new environment replaces the session"
+    assert transport.state.sessions[second.ma_session_id].environment_id == "env_gpu", (
+        "the successor runs in the channel's new environment"
+    )
+    assert _sealed_stamp(transport, second.ma_session_id) == "thread-1,vault", (
+        "the successor inherits every seal id its predecessor ran under"
+    )
+
+
 async def test_a_transcript_or_bundle_transfer_keeps_the_predecessors_seal(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools.reachability import (
     require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -224,6 +225,15 @@ class AgentResolutionExplanation:
     """The environment that would be used, resolved over the same cascade."""
     environment_winning_tier: str | None
     """Which tier supplied the environment."""
+    channel_environment: str | None
+    """The channel tier's own environment, or None if it has none."""
+    tenant_environment: str | None
+    """The workspace tier's own environment, or None if it has none."""
+    deployment_environment: str | None
+    """The deployment fallback environment from defaults/config.yaml."""
+    environment_explanation: str
+    """One sentence naming the environment and the tier it came from; a thread
+    binding changes who answers, never the environment."""
     responder_ma_agent_id: str | None
     configuration_target_ma_agent_id: str | None
     configuration_target_name: str | None
@@ -357,6 +367,19 @@ async def _explain_agent_resolution_impl(
         deployment_default=_visible(caller, runtime.deployment_default.agent_name),
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
+        channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
+        # An isolated channel's insiders see no workspace picks (`hide_across_isolation`).
+        tenant_environment=tenant_cfg.environment_name
+        if tenant_cfg is not None and caller.inside_channel_id is None
+        else None,
+        deployment_environment=runtime.deployment_default.environment_name
+        if caller.inside_channel_id is None
+        else None,
+        environment_explanation=build_environment_resolution_note(
+            environment_name=resolved.environment_name,
+            tier=resolved.environment_name_tier,
+            channel_id=channel_id,
+        ),
         responder_ma_agent_id=binding.responder_ma_agent_id if binding else None,
         configuration_target_ma_agent_id=binding.configuration_target_ma_agent_id
         if binding
@@ -440,8 +463,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
         thread_id: str | None = None,
     ) -> AgentResolutionExplanation:
-        """Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        """Who answers in this channel, for example #growth? Report who answers, the
+        environment it runs in, and which routing tier decided each.
 
         Supply thread_id to include its setup binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment

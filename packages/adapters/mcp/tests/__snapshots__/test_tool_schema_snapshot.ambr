@@ -253,7 +253,12 @@
       }),
     }),
     'archive_environment': dict({
-      'description': 'Archive the MA environment and delete from the tenant pool.',
+      'description': '''
+        Archive the MA environment and delete from the tenant pool.
+        
+        Channels and the workspace default that picked it are cleared, so they
+        fall through to the next tier; read ``note`` back to the user.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -553,6 +558,35 @@
         'required': list([
           'channel_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'clear_channel_environment': dict({
+      'description': '''
+        Stop a channel picking its own environment, so it uses the workspace default.
+        For example, put #growth back on the default environment. A no-op when the
+        channel has none of its own.
+        
+        Omit ``channel_id`` to clear the workspace default, leaving the deployment
+        default. The workspace default requires Manage Server (admin); an admin of the
+        channel may clear that channel's environment, unless it is sealed and the
+        default has unrestricted networking. A thread id resolves to its parent channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -1140,7 +1174,7 @@
     }),
     'create_environment': dict({
       'description': '''
-        Create a sandbox environment an agent can later be scoped onto.
+        Create a sandbox environment a channel or the workspace can later run in.
         
         Packages are declared under ``spec.config.packages``, one list per
         ecosystem: ``apt``, ``cargo``, ``gem``, ``go``, ``npm``, ``pip``. For
@@ -1153,9 +1187,9 @@
         than merges, so omitting a previously-installed package removes it.
         Always send the full intended list for every ecosystem you care about.
         
-        The new environment is inert until an admin scopes an agent onto it
-        (an admin-only action) — creating one here does not change what any
-        agent runs on yet.
+        The new environment is inert until an admin picks it for a channel or
+        the workspace, or a channel's admin picks it for their channel, with
+        ``set_channel_environment``; creating one here changes nothing yet.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -2008,8 +2042,8 @@
     }),
     'explain_agent_resolution': dict({
       'description': '''
-        Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        Who answers in this channel, for example #growth? Report who answers, the
+        environment it runs in, and which routing tier decided each.
         
         Supply thread_id to include its setup binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment
@@ -4519,6 +4553,47 @@
           'channel_id',
           'limit_usd',
           'window',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_environment': dict({
+      'description': '''
+        Choose the environment a channel's turns run in, or the workspace default.
+        For example, run #growth in the pymc environment. Changes where the agent runs,
+        not which agent answers; use ``set_agent_default`` for that.
+        
+        Omit ``channel_id`` to set the workspace default, which every channel without
+        its own environment uses. The environment must already exist
+        (``list_environments``). Conversations pick it up from their next message.
+        The workspace default requires Manage Server (admin); an admin of the channel
+        may set that channel's environment, except one with unrestricted networking in
+        a sealed channel, which needs a server admin.
+        
+        Pass the parent channel's id: Discord
+        ``<channel platform="discord" id="..." role="parent_channel">``, Slack
+        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'environment_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'environment_name',
         ]),
         'type': 'object',
       }),

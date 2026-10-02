@@ -10,6 +10,7 @@ from daimon.core.access_policy import TenantAccessPolicy, is_isolated, isolation
 from daimon.core.answering_map import (
     AnsweringMap,
     ChannelAnswer,
+    ChannelEnvironment,
     SetupThreadRef,
     hide_across_isolation,
 )
@@ -203,6 +204,33 @@ def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
     assert [row.channel_id for row in outside.channel_overrides] == ["c2"]
     assert outside.deployment_default == "daimon"
     assert [ref.thread_id for ref in outside.setup_threads] == ["t2"]
+
+
+def test_a_viewer_sees_only_its_side_of_the_environments() -> None:
+    """Both setup panels draw environments from this map, so the line holds for them too."""
+    answering = AnsweringMap(
+        channel_environments=(
+            ChannelEnvironment(channel_id="c1", environment_name="private"),
+            ChannelEnvironment(channel_id="c2", environment_name="shared"),
+        ),
+        tenant_environment="workspace",
+        deployment_environment="default",
+    )
+    inside = hide_across_isolation(answering, IsolationViewer(POLICY, "c1"))
+    assert [row.channel_id for row in inside.channel_environments] == ["c1"], (
+        "an insider sees only its own channel's environment"
+    )
+    assert (inside.tenant_environment, inside.deployment_environment) == (None, None), (
+        "the shared fallbacks are across the line, as the agent defaults are"
+    )
+    outside = hide_across_isolation(answering, IsolationViewer(POLICY, None))
+    assert [row.channel_id for row in outside.channel_environments] == ["c2"], (
+        "an outsider never sees the isolated channel's environment"
+    )
+    assert (outside.tenant_environment, outside.deployment_environment) == (
+        "workspace",
+        "default",
+    )
 
 
 async def test_thread_precheck_refuses_a_handed_thread_inside(

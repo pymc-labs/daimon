@@ -14,6 +14,7 @@ from daimon.core.scope import (
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import (
     clear_agent_references,
+    clear_environment_references,
     delete_propagation_row,
     propagate,
     set_fields,
@@ -806,3 +807,64 @@ async def test_clear_agent_references_returns_zero_when_nothing_matches(
     cleared = await clear_agent_references(db_session, tenant_id=t.id, agent_name="doomed")
 
     assert cleared == 0, "a tenant with no scope rows at all must report zero clears"
+
+
+# ---------------------------------------------------------------------------
+# clear_environment_references
+# ---------------------------------------------------------------------------
+
+
+async def test_clear_environment_references_clears_every_pick_and_keeps_other_fields(
+    db_session: AsyncSession,
+) -> None:
+    t = await make_tenant(db_session)
+    only_env = ChannelScopeRef(tenant_id=t.id, channel_id="c1")
+    with_agent = ChannelScopeRef(tenant_id=t.id, channel_id="c2")
+    other_env = ChannelScopeRef(tenant_id=t.id, channel_id="c3")
+    tenant_scope = TenantScopeRef(tenant_id=t.id)
+    await set_fields(db_session, scope=only_env, tenant_id=t.id, environment_name="doomed")
+    await set_fields(
+        db_session, scope=with_agent, tenant_id=t.id, agent_name="a", environment_name="doomed"
+    )
+    await set_fields(db_session, scope=other_env, tenant_id=t.id, environment_name="kept")
+    await set_fields(db_session, scope=tenant_scope, tenant_id=t.id, environment_name="doomed")
+
+    cleared = await clear_environment_references(
+        db_session, tenant_id=t.id, environment_name="doomed"
+    )
+
+    assert cleared == 3, "two channel picks and the workspace pick named the environment"
+    assert await get_scope(db_session, scope=only_env) is None, (
+        "a channel row whose only field was the environment must be removed"
+    )
+    kept_agent = await get_scope(db_session, scope=with_agent)
+    assert kept_agent is not None and kept_agent.agent_name == "a", (
+        "a row that also names an agent must survive with its agent"
+    )
+    assert kept_agent.environment_name is None, "its environment pick must be cleared"
+    assert await get_scope(db_session, scope=tenant_scope) is None, (
+        "the workspace default pick must be cleared"
+    )
+    untouched = await get_scope(db_session, scope=other_env)
+    assert untouched is not None and untouched.environment_name == "kept", (
+        "a pick of a different environment must be untouched"
+    )
+
+
+async def test_clear_environment_references_is_scoped_to_the_given_tenant(
+    db_session: AsyncSession,
+) -> None:
+    t1 = await make_tenant(db_session)
+    t2 = await make_tenant(db_session)
+    scope_t2 = ChannelScopeRef(tenant_id=t2.id, channel_id="c1")
+    await set_fields(db_session, scope=scope_t2, tenant_id=t2.id, environment_name="doomed")
+
+    cleared = await clear_environment_references(
+        db_session, tenant_id=t1.id, environment_name="doomed"
+    )
+
+    assert cleared == 0, "no row in t1 picked the environment"
+    row = await get_scope(db_session, scope=scope_t2)
+    assert row is not None and row.environment_name == "doomed", (
+        "another tenant's pick of the same name must be untouched"
+    )

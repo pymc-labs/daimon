@@ -482,8 +482,8 @@ async def run_wizard_submit_turn_observed(
                 )
             if "environment" in err.missing:
                 hints.append(
-                    "Environment is operator-only -- an operator can set it via the CLI "
-                    "(`daimon config set environment_name=...`)."
+                    "An admin of this server or channel can pick an environment in "
+                    "`/agent-setup` → Who answers where."
                 )
             await channel.send(
                 "Your answers were recorded, but no "
@@ -500,9 +500,8 @@ async def run_wizard_submit_turn_observed(
             )
             await channel.send(
                 "Your answers were recorded, but the configured agent or environment "
-                "no longer exists. An admin can ask Daimon to pick an existing agent; "
-                "then ask again in the thread. The environment is "
-                "operator-only via the CLI (`daimon config set environment_name=...`)."
+                "no longer exists. An admin of this server or channel can pick another in "
+                "`/agent-setup`; then ask again in the thread."
             )
             return
         except AdmissionDenied as err:

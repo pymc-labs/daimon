@@ -163,9 +163,9 @@ RELAXED_TOOL_NAMES = (
 whole tenant — relaxed onto the open (non-admin-visible, non-admin-callable)
 surface. Untagged, so a non-admin chat session's search surfaces them.
 
-`create_environment` is the "nothing at all" case: the environment it creates is
-unreachable until an admin scopes an agent onto it via the gated
-`set_agent_default`."""
+`create_environment` is the "nothing at all" case: nothing runs in the
+environment it creates until an admin, or a channel's admin, picks it with the
+gated `set_channel_environment`."""
 
 AGENT_IDENTITY_SCOPED_TOOL_NAMES = (
     "set_repo_binding",
@@ -326,12 +326,16 @@ STILL_ADMIN_TOOL_NAMES = (
     "list_channel_budgets",
     "set_channel_budget",
     "clear_channel_budget",
+    "set_channel_environment",
+    "clear_channel_environment",
 )
-"""Tools whose blast radius is the whole tenant, and stay admin-only.
+"""Tools a plain member never sees.
 
+Most are tenant-wide and admin-only. The agent default and channel environment
+tools also admit channel admins, but only for channels they run.
 `create_environment` is deliberately absent: a new environment is inert until an
-admin scopes an agent onto it, so its blast radius is nothing until a gated call
-widens it. Mutating an environment others already resolve to is a different
+admin or a channel's admin picks it, so its blast radius is nothing until a gated
+call widens it. Mutating an environment others already resolve to is a different
 matter, which is why `update_environment` and `archive_environment` stay here.
 """
 
@@ -571,6 +575,12 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_agent_default" not in await _search(app, member, "set agent default"), (
         "a member without a grant does not"
     )
+    assert "### set_channel_environment" in await _search(
+        app, channel_admin, "set channel environment"
+    ), "a channel admin may pick their channel's environment"
+    assert "### set_channel_environment" not in await _search(
+        app, member, "set channel environment"
+    ), "a member without a grant may not"
     assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins"), (
         "naming channel admins stays with server admins"
     )

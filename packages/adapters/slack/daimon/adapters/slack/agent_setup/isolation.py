@@ -82,7 +82,8 @@ async def change_isolation(
     name = escape_mrkdwn(change.agent_name or "")
     if change.forked_from is not None:
         source = escape_mrkdwn(change.forked_from)
-        copied = f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
-        note = change.dropped_skills_note
-        return f"{copied} {escape_mrkdwn(note)}" if note else copied
-    return f"<#{channel}> is isolated. *{name}* answers only there."
+        said = f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
+    else:
+        said = f"<#{channel}> is isolated. *{name}* answers only there."
+    notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)
+    return " ".join([said, *(escape_mrkdwn(note) for note in notes if note)])

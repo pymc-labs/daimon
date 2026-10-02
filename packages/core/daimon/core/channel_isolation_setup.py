@@ -26,6 +26,7 @@ from daimon.core.agent_fork import fork_agent
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
 from daimon.core.authz import Subject
+from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -134,6 +135,8 @@ class IsolationChange:
     """Skills scoped to one agent, left off the copy."""
     lifted_seal_and_pins: bool = False
     """Isolation ended along with the channel's seal and its dedicated agents' pins."""
+    network_warning: str | None = None
+    """The channel's own environment has an open network nobody confirmed under the seal."""
 
     @property
     def end_warning(self) -> str:
@@ -298,6 +301,20 @@ async def _write_isolation(
     return found, True
 
 
+async def _network_warning(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    default: DeploymentDefault,
+) -> str | None:
+    async with sessionmaker() as session:
+        return await sealed_network_warning(
+            session, anthropic, tenant_id=tenant_id, channel_id=channel_id, default=default
+        )
+
+
 async def set_channel_isolation(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -349,7 +366,16 @@ async def set_channel_isolation(
             default=default,
         )
     if found.refusal is None:
-        return IsolationChange(channel_id, True, found.name, None, changed)
+        return IsolationChange(
+            channel_id,
+            True,
+            found.name,
+            None,
+            changed,
+            network_warning=await _network_warning(
+                anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id, default=default
+            ),
+        )
     source = fork_from or found.answering
     if not fork or source is None:
         raise ChannelIsolationRefused(found.refusal, agent_name=found.name or source)
@@ -391,7 +417,17 @@ async def set_channel_isolation(
     except ChannelIsolationRefused:
         await anthropic.beta.agents.archive(copy.agent.id)
         raise
-    return IsolationChange(channel_id, True, new_name, source, True, copy.dropped_skills)
+    return IsolationChange(
+        channel_id,
+        True,
+        new_name,
+        source,
+        True,
+        copy.dropped_skills,
+        network_warning=await _network_warning(
+            anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id, default=default
+        ),
+    )
 
 
 __all__ = [

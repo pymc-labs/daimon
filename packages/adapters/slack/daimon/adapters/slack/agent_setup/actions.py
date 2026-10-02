@@ -35,6 +35,9 @@ agent:
   - Channel admins, on Who answers where, pushes the form naming this
     channel's admins, submitted in channel_admins.py. Workspace admins only,
     re-checked live on the click and on the submission.
+  - This channel's environment, on Who answers where, saves the pick through
+    channel_environment.py. Workspace admins and this channel's admins,
+    re-checked live on the pick.
   - The setup-conversation button opens a thread with Daimon. Every change to
     an existing agent, and every routing change, happens in that conversation,
     where the chat tool owns the authorization.
@@ -56,6 +59,13 @@ import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup import panel_views
+from daimon.adapters.slack.agent_setup.channel_environment import (
+    ENVIRONMENT_NEED_ADMIN_MESSAGE,
+    load_environment_picker,
+    load_picker_subject,
+    may_pick_environment,
+    save_environment_choice,
+)
 from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_coding_tools_click,
     handle_revoke_token_click,
@@ -262,6 +272,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
+        panel_views.ACTION_ENVIRONMENT,
         *_ISOLATION_ACTIONS,
     }
 )
@@ -377,9 +388,14 @@ async def load_routing_view(
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
     is_admin: bool,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the Who-answers-where view for `meta`'s page; admins also get the channel
-    admins and this channel's isolation."""
+    admins and this channel's isolation.
+
+    `user_id` lets an admin of this channel see its environment select;
+    workspace admins get it without one.
+    """
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session,
@@ -424,6 +440,14 @@ async def load_routing_view(
         (row.name for row in roster.rows if row.answering_tier is None and not row.is_built_in),
         None,
     )
+    environment_picker = await load_environment_picker(
+        runtime,
+        tenant_id=tenant_id,
+        answering_map=answering_map,
+        channel_id=meta.channel_id,
+        user_id=user_id,
+        is_admin=is_admin,
+    )
     page = paginate(answering_map.channel_overrides, page=meta.page, page_size=PANEL_PAGE_SIZE)
     return build_routing_view(
         answering_map,
@@ -435,6 +459,7 @@ async def load_routing_view(
         channel_id=meta.channel_id,
         unrouted_agent_name=unrouted_agent_name,
         channel_admins=channel_admins,
+        environment_picker=environment_picker,
         isolation=isolation,
     )
 
@@ -497,6 +522,7 @@ async def _update_paged_view(
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
     is_admin: bool,
+    user_id: str,
     delta: int,
 ) -> None:
     """Re-render the current view one page over, in place.
@@ -510,7 +536,9 @@ async def _update_paged_view(
     view_info: dict[str, Any] = payload.get("view") or {}
     target = meta.with_page(max(meta.page + delta, 0))
     view = (
-        await load_routing_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
+        await load_routing_view(
+            runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
+        )
         if meta.view == "routing"
         else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
     )
@@ -596,6 +624,7 @@ async def _dispatch_panel_action(
             tenant_id=tenant_id,
             meta=meta.with_view("routing"),
             is_admin=is_admin,
+            user_id=user_id,
         )
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
@@ -611,6 +640,7 @@ async def _dispatch_panel_action(
             tenant_id=tenant_id,
             meta=meta,
             is_admin=is_admin,
+            user_id=user_id,
             delta=1 if action_id == panel_views.ACTION_PAGE_NEXT else -1,
         )
         return
@@ -687,6 +717,41 @@ async def _dispatch_panel_action(
                 user_ids=grant.user_ids if grant else (),
             ),
         )
+        return
+
+    if action_id == panel_views.ACTION_ENVIRONMENT:
+        selected: dict[str, Any] = action.get("selected_option") or {}
+        value = str(selected.get("value") or "")
+        if not value or not meta.channel_id:
+            return
+        subject = await load_picker_subject(
+            runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+        )
+        if not await may_pick_environment(
+            runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
+        ):
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id,
+                user_id=user_id,
+                text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
+            )
+            return
+        note = await save_environment_choice(
+            runtime,
+            tenant_id=tenant_id,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+            subject=subject,
+            value=value,
+        )
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            view=await load_routing_view(
+                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
+            ),
+        )
+        await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
         return
 
     if action_id in _ISOLATION_ACTIONS:

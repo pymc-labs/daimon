@@ -29,7 +29,8 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE, MINT_CODING_TOKEN and READ_SESSION.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
+and READ_SESSION.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -63,6 +64,10 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
 - **Pinned sends**: wherever a pinned agent was admitted, it posts only into
   its pinned channels (and threads under them) or the requester's own DM,
   and sends direct messages only to the requester.
+- **Channel environments**: a server admin picks any channel's environment
+  or the workspace default; a channel admin picks the channels they
+  administer, except an environment with unrestricted networking in a
+  sealed channel, or one holding a sealed thread (`sealed`).
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -89,10 +94,10 @@ save and fire, handoff, configuration writes, form submits and the OAuth
 callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
-fork, channel default binds, coding-tool token mints, the protection of a
-turn's own notices and of a routine's destination (`POST` with no agent), a
-routine's creator at fire and delivery (`ACT_FOR_CREATOR`), and the
-shared-agent table (`CHANGE_SHARED_AGENT`, asked by
+fork, channel default binds, channel environment picks, coding-tool token
+mints, the protection of a turn's own notices and of a routine's destination
+(`POST` with no agent), a routine's creator at fire and delivery
+(`ACT_FOR_CREATOR`), and the shared-agent table (`CHANGE_SHARED_AGENT`, asked by
 `daimon.core.operation_policy`).
 """
 
@@ -108,6 +113,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_invoker_allowed,
     is_outside_agent_pin,
+    is_sealed_source,
     is_write_protected,
     isolated_channel_of,
     isolation_owner,
@@ -158,6 +164,10 @@ class Action(StrEnum):
     # Mint a coding-tool token for an agent, bound to `Place.channel_id` (no
     # channel: unbound).
     MINT_CODING_TOKEN = "mint_coding_token"
+    # Set or clear the environment of one channel (`Place.channel_id`; None is
+    # the workspace default). `open_network` says the environment it leaves
+    # the channel in has unrestricted networking.
+    SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -364,6 +374,7 @@ class Request:
     session: SessionFacts | None = None
     operation_family: OperationFamily | None = None
     reach: AgentReach | None = None
+    open_network: bool = False
 
 
 def _names_pinned(policy: TenantAccessPolicy, names: tuple[str | None, ...]) -> bool:
@@ -435,6 +446,18 @@ def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
         and subject.platform_user_id is not None
         and not subject.via_agent_key
         and agent.confined_to in subject.administered_channel_ids
+    )
+
+
+def _holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
+    """Whether `channel`, or a thread under it, is sealed: a Slack ``channel:ts``
+    by its id, a Discord thread only when one of `places` names it as a thread."""
+    if any(key.startswith(f"{channel}:") for key in policy.sealed_channel_ids):
+        return True
+    return is_sealed_source(policy, channel_id=channel, thread_id=None) or any(
+        is_sealed_source(policy, channel_id=channel, thread_id=at.channel_id)
+        for at in places
+        if at is not None and at.parent_channel_id == channel and at.channel_id is not None
     )
 
 
@@ -641,6 +664,19 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return _deny("channel_isolated")
         return ALLOW
 
+    if req.action is Action.SET_CHANNEL_ENVIRONMENT:
+        if subject.is_admin and not subject.via_agent_key:
+            return ALLOW
+        channel = place.parent_channel_id or place.channel_id
+        if subject.via_agent_key or channel not in subject.administered_channel_ids:
+            return _deny("admin_required")
+        # A sealed channel's content must not leave through an open network
+        # that the channel admin chose; that is a server admin's call. The
+        # environment covers every thread under the channel, so a sealed one counts.
+        if req.open_network and _holds_seal(policy, channel, place, req.origin):
+            return _deny("sealed")
+        return ALLOW
+
     if req.action is Action.MINT_CODING_TOKEN:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
@@ -833,6 +869,7 @@ def authorize(
     session: SessionFacts | None = None,
     operation_family: OperationFamily | None = None,
     reach: AgentReach | None = None,
+    open_network: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -857,6 +894,7 @@ def authorize(
             session=session,
             operation_family=operation_family,
             reach=reach,
+            open_network=open_network,
         ),
     )
 

@@ -4,7 +4,8 @@ Each row names the guard it pins from `formal/access_control/AccessControl.tla`
 (`G_*`), so a rule that drifts from the model fails here by name. Rows record
 the rules as they stand on main. Action-time re-checks are covered where they
 happen (`tests/turn/test_reauthorize.py`, the OAuth callback and publish tests).
-The channel admin and channel default rows have no guard in the model yet.
+The channel admin, channel default and channel environment rows have no guard
+in the model yet.
 """
 
 from __future__ import annotations
@@ -1228,6 +1229,128 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ISOLATED,
         {"subject": ADMIN, "action": Action.FORK, "agent": SHARED},
         ALLOW,
+    ),
+    # --- channel environments: a channel admin picks their own channels' ---
+    (
+        "server admin sets the workspace default environment",
+        ACME_SEALED,
+        {"subject": ADMIN, "action": Action.SET_CHANNEL_ENVIRONMENT, "open_network": True},
+        ALLOW,
+    ),
+    (
+        "channel admin never sets the workspace default environment",
+        SEALED,
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.SET_CHANNEL_ENVIRONMENT},
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin sets their channel's environment",
+        SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin sets nothing in another channel",
+        SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_OTHER"),
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin sets a limited network in their sealed channel",
+        ACME_SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin never opens the network of their sealed channel",
+        ACME_SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "server admin opens the network of a sealed channel",
+        ACME_SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin never opens the network of a channel holding a sealed slack thread",
+        TenantAccessPolicy(sealed_channel_ids=("C_ACME:1700000000.000100",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "channel admin never opens the network of a sealed discord thread it names",
+        TenantAccessPolicy(sealed_channel_ids=("T_ACME",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "channel admin never opens the network from inside a sealed discord thread",
+        TenantAccessPolicy(sealed_channel_ids=("T_ACME",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "origin": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "a thread sealed under another channel leaves the channel admin's pick open",
+        TenantAccessPolicy(sealed_channel_ids=("C_OTHER:1700000000.000100", "T_OTHER")),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "origin": Place(channel_id="T_OTHER", parent_channel_id="C_OTHER"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "an agent key picks no environment, whoever minted it",
+        PINNED,
+        {
+            "subject": AGENT_KEY_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+        },
+        _deny("admin_required"),
     ),
 ]
 
