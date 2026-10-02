@@ -548,7 +548,11 @@ async def test_the_setup_thread_is_held_to_its_channel(
     assert "notes-bot" not in names, "a new agent would carry the setup thread's text out of C"
 
 
-@pytest.mark.parametrize("origin_id", [None, "not-a-uuid", str(uuid.uuid4())])
+@pytest.mark.parametrize(
+    "origin_id",
+    [None, "not-a-uuid", "6f9c2b1e-4d3a-4f8e-9b7c-1a2d3e4f5a6b"],
+    ids=["none", "not-a-uuid", "unknown-uuid"],
+)
 async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession], origin_id: str | None
 ) -> None:
