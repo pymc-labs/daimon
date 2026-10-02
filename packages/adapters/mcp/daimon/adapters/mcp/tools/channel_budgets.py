@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
+import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
@@ -31,6 +32,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
+from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client, split_thread
 from daimon.core.channel_budget import (
     ChannelBudgetError,
     ChannelBudgetStatus,
@@ -48,7 +50,7 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_PLATFORMS = ("discord", "slack")
+_PLATFORMS = ("discord", "slack", "teams")
 _NEEDS_CHANNEL = (
     "channel_id is required: pass this turn's origin_context_id, the id from "
     '<channel role="parent_channel">, or the channel the user named.'
@@ -108,7 +110,7 @@ def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
 
 def _require_platform(auth: AuthIdentity) -> str:
     if auth.platform not in _PLATFORMS:
-        raise ToolError("channel budgets exist only for Discord servers and Slack workspaces")
+        raise ToolError("channel budgets exist only for Discord, Slack and Teams channels")
     return cast(str, auth.platform)
 
 
@@ -134,12 +136,28 @@ async def _resolve_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channe
     return channel_id
 
 
+async def _resolve_teams_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+    """A Teams channel the caller is in; a thread id resolves to its channel."""
+    client, caller = require_client(runtime, auth)
+    ref = await locate_channel(runtime, auth, client, split_thread(channel_id)[0])
+    try:
+        is_member = await client.is_member(ref.channel_id, caller)
+    except (httpx.HTTPError, ValueError) as err:
+        raise ToolError("could not confirm you are in that channel") from err
+    if not is_member:
+        raise ToolError("you are not a member of that channel")
+    return ref.channel_id
+
+
 async def _budget_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
     """The channel id a budget is stored under, after confirming the caller can see it."""
-    if _require_platform(auth) == "discord":
+    platform = _require_platform(auth)
+    if platform == "discord":
         if not channel_id.isdigit():
             raise ToolError(f"{channel_id!r} is not a Discord channel id")
         return await resolve_visible_channel(runtime, auth, channel_id)
+    if platform == "teams":
+        return await _resolve_teams_channel(runtime, auth, channel_id)
     return await _resolve_slack_channel(runtime, auth, channel_id)
 
 
@@ -297,7 +315,8 @@ async def _clear_channel_budget_impl(
     require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
-    target = _require_channel_id(channel_id).partition(":")[0]
+    target = _require_channel_id(channel_id)
+    target = split_thread(target)[0] if platform == "teams" else target.partition(":")[0]
     if platform == "discord" and target.isdigit():
         with contextlib.suppress(ToolError):
             target = await _budget_channel(runtime, auth, target)
@@ -309,7 +328,7 @@ async def _clear_channel_budget_impl(
 
 
 def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack", *scope_tags("tenant:read")})
+    @mcp.tool(tags={"discord", "slack", "teams", *scope_tags("tenant:read")})
     async def get_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, origin_context_id: str | None = None
     ) -> ChannelBudgetLookup:

@@ -149,7 +149,6 @@ _NOT_INVITED = (
 _PINNED_ELSEWHERE = (
     "This agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
-# Teams sets no channel budgets, so this is unreachable; the reply keeps the map total.
 _CHANNEL_BUDGET = "This channel has used its spending budget. An admin can raise or clear it."
 _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
