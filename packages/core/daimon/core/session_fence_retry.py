@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 RETRY_MIN_S = 0.025
 RETRY_MAX_S = 0.075
 RETRY_CEILING_S = 1.0
-_acquisitions: ContextVar[dict[str, float] | None] = ContextVar(
+_acquisitions: ContextVar[dict[str | int, float] | None] = ContextVar(
     "session_fence_acquisitions", default=None
 )
 
@@ -27,21 +27,24 @@ class FenceUnavailable(Exception):
         self.deadline = deadline
 
 
-async def try_fence(db: AsyncSession, key: str) -> None:
+async def try_fence(
+    db: AsyncSession, key: str | int, *, shared: bool = False, timeout_s: float | None = None
+) -> None:
     # turn.__init__ imports preparation and mutation; keep this import lazy.
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     acquisitions = _acquisitions.get()
-    deadline = asyncio.get_running_loop().time() + TURN_CEILING_S
+    deadline = asyncio.get_running_loop().time() + (
+        TURN_CEILING_S if timeout_s is None else timeout_s
+    )
     if acquisitions is not None:
         deadline = acquisitions.setdefault(key, deadline)
     try:
         async with asyncio.timeout_at(deadline):
+            function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+            argument = ":key" if isinstance(key, int) else "hashtextextended(:key, 0)"
             acquired = (
-                await db.execute(
-                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
-                    {"key": key},
-                )
+                await db.execute(text(f"SELECT {function}({argument})"), {"key": key})
             ).scalar_one()
     except TimeoutError as error:
         raise FenceUnavailable(deadline) from error
@@ -52,11 +55,14 @@ async def try_fence(db: AsyncSession, key: str) -> None:
         acquisitions.pop(key, None)
 
 
-async def retry_fences[T](operation: Callable[[], Awaitable[T]]) -> T:
+async def retry_fences[T](
+    operation: Callable[[], Awaitable[T]], *, busy_error: Callable[[], Exception] | None = None
+) -> T:
     """Retry acquisition-only failures after their contexts release resources.
 
-    Each fence starts its own turn-ceiling deadline at its first try-lock,
-    retaining it across failures until acquired. Gates queue without a timer.
+    Each fence starts its own deadline at its first try-lock (the turn ceiling
+    unless timeout_s is supplied), retaining it across failures until acquired.
+    Gates queue without a timer. busy_error overrides the default session error.
     Callers must raise FenceUnavailable only before protected side effects.
     Failed attempts roll back and re-read/re-authorize on the next attempt.
     """
@@ -69,6 +75,8 @@ async def retry_fences[T](operation: Callable[[], Awaitable[T]]) -> T:
             except FenceUnavailable as error:
                 remaining = error.deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
+                    if busy_error is not None:
+                        raise busy_error() from None
                     from daimon.core.turn.errors import SessionBusyError
 
                     raise SessionBusyError(

@@ -1,6 +1,8 @@
 """Async store for the per-tenant access policy.
 
 Callers own the transaction; writes end with `await session.flush()`.
+Caller-owned writes fail fast on contention and must unwind their transaction.
+Use policy_write_transaction for bounded retries before any reads or writes.
 A missing row is the open default. A row that no longer validates raises
 `AccessPolicyUnreadable` so every caller refuses instead of falling open.
 """
@@ -9,15 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError
+from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class AccessPolicyUnreadable(DaimonError):
@@ -41,21 +46,64 @@ def _policy_write_key(tenant_id: uuid.UUID) -> int:
     )
 
 
+# Longer than tidy's 15-second platform effect, but finite for all policy callers.
+POLICY_WRITE_TIMEOUT_S = 20.0
+
+
+class PolicyBusyError(DaimonError):
+    """The policy fence could not be acquired within this caller's budget."""
+
+    def __init__(self) -> None:
+        super().__init__("policy is busy, try again")
+
+
 async def lock_policy_writes_shared(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
-    """Fence policy changes through a bounded platform effect without locking Tenant."""
-    await session.execute(select(func.pg_advisory_xact_lock_shared(_policy_write_key(tenant_id))))
+    """Try once; retry_fences must unwind the tidy transaction AND gate on a miss."""
+    await try_fence(
+        session, _policy_write_key(tenant_id), shared=True, timeout_s=POLICY_WRITE_TIMEOUT_S
+    )
 
 
 async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
-    """Take BEFORE tenant/other rows, including before a policy read/merge.
+    """Try BEFORE tenant/other rows, including before a policy read/merge.
 
-    Only policy writers use this fence. Preparation/mutation, support's per-user
-    fence, form consume and handoff never acquire it. Tidy takes its agent fence,
-    then the shared fence, then its post row; it never locks Tenant or acquires
-    the other fences. Writers never acquire tidy/post fences, so there is no
-    reverse edge closing a lock cycle.
+    A caller-owned transaction cannot safely be replayed here. Contention fails
+    fast with PolicyBusyError, so its owner unwinds without waiting in the pool.
+    CLI/isolation use policy_write_transaction to retry acquisition before any
+    work. Writers never take tidy, post, preparation/mutation or support fences.
     """
-    await session.execute(select(func.pg_advisory_xact_lock(_policy_write_key(tenant_id))))
+    try:
+        await try_fence(session, _policy_write_key(tenant_id), timeout_s=POLICY_WRITE_TIMEOUT_S)
+    except FenceUnavailable:
+        raise PolicyBusyError() from None
+
+
+@asynccontextmanager
+async def policy_write_transaction(
+    factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID
+) -> AsyncIterator[AsyncSession]:
+    """Acquire exclusive -> tenant row; release every failed transaction before backoff.
+
+    Retry only acquisition, never the caller's writes or MA side effects. Store
+    functions can reacquire this transaction's exclusive lock without waiting.
+    """
+
+    async def acquire() -> tuple[AsyncExitStack, AsyncSession]:
+        stack = AsyncExitStack()
+        session: AsyncSession | None = None
+        try:
+            session = await stack.enter_async_context(factory.begin())
+            await try_fence(session, _policy_write_key(tenant_id), timeout_s=POLICY_WRITE_TIMEOUT_S)
+        except BaseException:
+            if session is not None:
+                await session.rollback()
+            await stack.aclose()
+            raise
+        return stack, session
+
+    stack, session = await retry_fences(acquire, busy_error=PolicyBusyError)
+    async with stack:
+        yield session
 
 
 async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:

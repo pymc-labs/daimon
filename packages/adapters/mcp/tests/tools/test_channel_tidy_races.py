@@ -13,6 +13,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_tidy import content_hash
 from daimon.core.stores.access_policy import (
     load_access_policy,
+    policy_write_transaction,
     set_access_policy,
 )
 from daimon.core.stores.agent_posts import get_post
@@ -35,7 +36,7 @@ def fake(monkeypatch):
 
 async def write_policy(world, policy):
     # Use the real policy writer's lock on a separate pooled connection.
-    async with world.sessionmaker.begin() as session:
+    async with policy_write_transaction(world.sessionmaker, tenant_id=world.tenant_id) as session:
         await set_access_policy(session, tenant_id=world.tenant_id, policy=policy)
 
 
@@ -229,6 +230,15 @@ async def test_slack_bulk_delete_rechecks_each_effect(committing_sessionmaker, c
     auth, origin = await world.turn(parent="ELSEWHERE" if change == "seal" else s._CHANNEL)
     effects = []
     writers = []
+
+    async def dispatch(request):
+        # Try-lock retries do not join PostgreSQL's blocking lock queue. Let
+        # the queued writer publish before the next effect's pre-fence lookup.
+        if effects and writers:
+            await asyncio.gather(*writers)
+        return list_response([agent_payload(world, s._AGENT)])
+
+    world.runtime = dataclasses.replace(world.runtime, client=build_fake_anthropic(dispatch))
     with aioresponses() as m:
         ids = await seed_slack_thread(world, auth, m)
 

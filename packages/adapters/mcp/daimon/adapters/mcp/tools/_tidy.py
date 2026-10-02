@@ -56,9 +56,11 @@ from daimon.core.channel_tidy import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.security_audit import record_denial
+from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_preparation_gate import tidy_pool_headroom
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
+    PolicyBusyError,
     load_access_policy,
     lock_policy_writes_shared,
 )
@@ -380,8 +382,10 @@ async def run_action(
     claiming known content.
     """
     reason = "preparation_error"
-    outcome: Literal["denied", "error"] = "error"
-    try:
+    outcome = cast(Literal["denied", "error"], "error")
+
+    async def attempt() -> None:
+        nonlocal reason, outcome, post, target
         async with (
             tidy_pool_headroom(runtime.session_factory),
             runtime.session_factory.begin() as session,
@@ -462,6 +466,21 @@ async def run_action(
                     )
                 elif operation in ("message.delete", "thread.delete"):
                     await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
+
+    try:
+        await retry_fences(attempt, busy_error=PolicyBusyError)
+    except PolicyBusyError as exc:
+        await _record_after_begin(
+            runtime,
+            ctx,
+            tool_name=tool_name,
+            operation=operation,
+            target=target,
+            outcome="denied",
+            reason="policy_changed",
+        )
+        record_denial("policy_changed")
+        raise ToolError(str(exc)) from exc
     except TidyLimitReached as exc:
         await _record_after_begin(
             runtime,

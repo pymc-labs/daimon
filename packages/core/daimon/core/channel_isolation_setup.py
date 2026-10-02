@@ -33,9 +33,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.errors import DaimonError
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
+    PolicyBusyError,
     load_access_policy,
     lock_access_policy,
     lock_policy_writes_exclusive,
+    policy_write_transaction,
     set_access_policy,
 )
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -342,7 +344,7 @@ async def set_channel_isolation(
     archived.
     """
     if not isolated:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -359,7 +361,7 @@ async def set_channel_isolation(
             updated != policy,
             lifted_seal_and_pins=drop_seal_and_pins,
         )
-    async with sessionmaker.begin() as session:
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         found, changed = await _write_isolation(
             anthropic,
             session,
@@ -397,7 +399,7 @@ async def set_channel_isolation(
         subject=subject,
     )
     try:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             await set_fields(
@@ -418,7 +420,7 @@ async def set_channel_isolation(
             )
             if found.refusal is not None:
                 raise ChannelIsolationRefused(found.refusal, agent_name=new_name)
-    except ChannelIsolationRefused:
+    except (ChannelIsolationRefused, PolicyBusyError):
         await anthropic.beta.agents.archive(copy.agent.id)
         raise
     return IsolationChange(
