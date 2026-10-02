@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 from anthropic import AsyncAnthropic
@@ -1369,13 +1370,23 @@ async def test_settle_promo_credit_swallows_sqlalchemy_error(
         await _settle_promo_credit(db_session_factory)  # must not raise
 
 
+@pytest.mark.parametrize(
+    ("destination_kind", "destination_id", "channel_id"),
+    [("channel", "room", "room"), ("thread", "555000555", None)],
+    ids=["channel", "thread saved without its parent"],
+)
 async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_line(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    destination_kind: Literal["channel", "thread"],
+    destination_id: str,
+    channel_id: str | None,
 ) -> None:
     """Routing may change after a routine is saved: an outside agent's routine
-    posting into a channel isolated since then is skipped, not run."""
+    posting into a channel isolated since then is skipped, not run. A Discord
+    thread saved before its parent was recorded may lie under that channel, so
+    it is skipped too while anything is isolated."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
     from daimon.testing import ma_agent
@@ -1408,9 +1419,9 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
         trigger_message="trigger",
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
-        destination_kind="channel",
-        destination_id="room",
-        channel_id="room",
+        destination_kind=destination_kind,
+        destination_id=destination_id,
+        channel_id=channel_id,
     )
     await db_session.commit()
 

@@ -194,6 +194,8 @@ def make_discord_routine_poster(
             # another guild.
             return await fallback("destination_unavailable")
         parent_channel_id, category_id, _guild_id, permission_source = placement
+        # The parent is known now, also for a thread saved without it.
+        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id)
         creator = row.created_by_user_id
         if (
             creator is None
