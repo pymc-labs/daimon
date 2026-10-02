@@ -1748,3 +1748,33 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     # Every DM-admitted session is stamped private (Teams personal chats too),
     # so no admin reads it from the hub.
     assert admission.private_dm_id == "dm-scope"
+
+
+async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An admin may DM chan-1's own agent; the turn counts toward chan-1 and stops at its budget."""
+    policy = _ISOLATED.model_copy(update={"agent_channel_pins": {"daimon": ("chan-1",)}})
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    args = {
+        "tenant_id": tenant.id,
+        "platform": "discord",
+        "external_user_id": "boss",
+        "channel_id": "dm-1",
+        "is_dm": True,
+        "role": Role.ADMIN,
+    }
+
+    admission = await admit(deps, **args, now=_NOW)
+    assert admission.budget_channel_id == "chan-1", "charged to the agent's channel"
+
+    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
+    await db_session.commit()
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(deps, **args, now=_NOW)
+    assert exc_info.value.reason == "channel_budget_exceeded", "a closed space stops it"

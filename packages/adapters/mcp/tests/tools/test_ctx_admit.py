@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from collections.abc import Coroutine
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -255,3 +256,43 @@ async def test_admission_recheck_refuses_a_bound_key_once_its_pin_moves_away(
 
     with pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned"):
         await recheck()
+
+
+_ISOLATED = TenantAccessPolicy(
+    sealed_channel_ids=("room",),
+    isolated_channel_ids=("room",),
+    agent_channel_pins={"local": ("room",)},
+)
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN], ids=["channel-admin", "server-admin"])
+async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_budget(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], role: Role
+) -> None:
+    member = await _member(db_session, policy=_ISOLATED, role=role)
+    tenant = await get_tenant(db_session, member.tenant_id)
+    assert tenant is not None
+    # A closed space: its budget is $0.
+    await make_channel_budget(db_session, tenant=tenant, channel_id="room", limit_usd=Decimal("0"))
+    await db_session.commit()
+    auth = dataclasses.replace(
+        member, platform=tenant.platform, administered_channel_ids=frozenset({"room"})
+    )
+
+    async def names(agent: str) -> tuple[str | None, ...]:
+        return (agent, None)
+
+    def admit(agent: str) -> Coroutine[object, object, AuthIdentity]:
+        return _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            tool_name="ask",
+            agent_names=lambda: names(agent),
+            pin_exempt=True,
+        )
+
+    with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
+        await admit("local")
+    with _BALANCE_OK:
+        assert await admit("daimon") is auth, "any other agent's hub run is not charged to room"

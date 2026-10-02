@@ -136,7 +136,9 @@ config). The order is load-bearing and documented as such in the module:
 9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
-   no budget. The channel is carried on `Admission.channel_id` so every debit
+   no budget. An isolated channel's own agent counts toward that channel
+   wherever an exempt caller runs it (`isolation_owner`). The channel is
+   carried on `Admission.channel_id` so every debit
    for the turn is attributed to it. The window's first refusal also
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
@@ -940,7 +942,9 @@ against.
   drive a session directly. They do not use the chokepoint either; they re-run
   the same balance and cap gates through `_admit` in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py` and create
-  sessions via `daimon.core.sessions.create_session`. The billed media tool
+  sessions via `daimon.core.sessions.create_session`. A run of an isolated
+  channel's own agent, a hub run by an admin or that channel's admin
+  included, is gated by and charged to that channel's budget. The billed media tool
   runs the same gates, then the budget of the channel named by the calling
   turn's `origin_context_id`, and charges its spend to that channel.
 - **`daimon run`**, in

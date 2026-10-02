@@ -3664,3 +3664,37 @@ async def test_start_turn_refuses_a_bound_keys_session_sealed_inside_session_cre
     ):
         await _start_turn_impl(runtime, _bound_auth("c-1"), "hi")
     assert created == [], "no session is created under a stale seal stamp"
+
+
+@pytest.mark.parametrize(("pinned", "charged"), [("test-agent", "room"), ("other", None)])
+async def test_start_turn_charges_an_isolated_channels_own_agent_to_that_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], pinned: str, charged: str | None
+) -> None:
+    """An exempt caller's hub run of room's own agent is charged to room, not placed in it."""
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, platform="discord", workspace_id=str(_TENANT_ID), id=_TENANT_ID)
+        policy = TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={pinned: ("room",)},
+        )
+        await set_access_policy(session, tenant_id=_TENANT_ID, policy=policy)
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _bound_auth(None), "hi")
+
+    assert create.await_args is not None
+    kwargs = create.await_args.kwargs
+    assert (kwargs["budget_channel_id"], kwargs["origin_channel_id"]) == (charged, None)

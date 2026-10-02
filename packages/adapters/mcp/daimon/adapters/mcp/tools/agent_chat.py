@@ -84,7 +84,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
-from daimon.core.access_policy import is_own_isolated_agent
+from daimon.core.access_policy import is_own_isolated_agent, isolation_owner
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
@@ -286,6 +286,15 @@ async def _bound_posture(
     return frozenset({channel_id}), not own
 
 
+async def _budget_channel(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_names: tuple[str | None, ...]
+) -> str | None:
+    """The channel a turn is charged to: the isolated channel whose own agent this
+    is, wherever an exempt caller runs it, else a key's bound channel."""
+    policy = await load_channel_policy(runtime, auth)
+    return isolation_owner(policy, agent_names) or token_channel_id(auth)
+
+
 async def _verify_agent_owns_session(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -437,10 +446,12 @@ async def _start_turn_impl(
     it: the operator absorbs that usage. The stamp is the creator's posture
     and covers the whole session, including later ``continue_turn`` calls.
 
-    An agent key minted in a channel (``token_channel_id``) opens the session
-    as a turn in that channel would: stamped with the channel as its origin
-    and its budget channel, sealed when the channel is, with read-only memory
-    unless the agent is that isolated channel's own.
+    An isolated channel's own agent is charged to that channel
+    (``_budget_channel``), from the hub too. An agent key minted in a channel
+    (``token_channel_id``) opens the session as a turn in that channel would:
+    stamped with the channel as its origin and otherwise its budget channel,
+    sealed when the channel is, with read-only memory unless the agent is that
+    isolated channel's own.
 
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
 
@@ -467,6 +478,7 @@ async def _start_turn_impl(
 
     is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
     channel_id = token_channel_id(auth)
+    budget_channel_id = await _budget_channel(runtime, auth, agent_names=agent_pin_names(ma_agent))
 
     if bundle is not None:
         if not is_isolated:
@@ -507,7 +519,7 @@ async def _start_turn_impl(
             resources=resources,
             billing_exempt=billing_exempt,
             memory_read_only=memory_read_only,
-            budget_channel_id=channel_id,
+            budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
         )
@@ -553,7 +565,7 @@ async def _start_turn_impl(
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
             memory_read_only=memory_read_only,
-            budget_channel_id=channel_id,
+            budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
             # Vault, repo-token and env work run first: decide again right

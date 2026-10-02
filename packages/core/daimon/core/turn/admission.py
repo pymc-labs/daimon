@@ -31,6 +31,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
     is_own_isolated_agent,
+    isolation_owner,
     source_seal_ids,
 )
 from daimon.core.authz import (
@@ -395,8 +396,12 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
-    budget_channel_id = dm_source_channel_id if is_dm else channel_id
+    # --- Admission gate: channel budget; a DM counts toward the channel it came from,
+    # and an isolated channel's own agent toward that channel wherever an exempt
+    # caller (an admin, or that channel's admin) runs it ---
+    budget_channel_id = isolation_owner(policy, grant.agent.names) or (
+        dm_source_channel_id if is_dm else channel_id
+    )
     if await is_over_channel_budget(
         sessionmaker=deps.sessionmaker,
         tenant_id=tenant_id,
