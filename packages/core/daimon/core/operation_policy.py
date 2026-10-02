@@ -6,8 +6,9 @@ Three call sites (`daimon.adapters.mcp.tools.reachability`,
 `daimon.adapters.slack.agent_policy`) each re-implement the same
 underlying rule — blast radius of one agent -> open to any member; blast
 radius of the whole tenant (a channel or workspace default) -> admin only —
-with a load-bearing difference in what gets checked first. This module is
-the single place that rule and its ordering are written down; the shell
+with a load-bearing difference in what gets checked first. This module names
+the operations and their families; `daimon.core.authz.authorize`
+(`Action.CHANGE_SHARED_AGENT`) decides each family's order; the shell
 gates read a `PolicyOutcome` from here and keep their own copy of the
 strings and I/O, because the readers (a `ToolError`, a Discord ephemeral, a
 Slack ephemeral) differ.
@@ -54,6 +55,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, AgentReach, OperationFamily, Subject, Surface, authorize
 from daimon.core.security_audit import record_policy_decision
 from pydantic import BaseModel
 
@@ -104,37 +107,46 @@ class TargetFacts(BaseModel):
     has_unplaced_run: bool = False
 
 
+def _family(operation: OperationKind) -> OperationFamily:
+    if operation in _POSTED_TOKEN_OPERATIONS:
+        return "posted_token"
+    if operation in _SPEC_OPERATIONS:
+        return "spec"
+    # operation in _ATTACHMENT_OPERATIONS — the only remaining family.
+    return "attachment"
+
+
+#: The table reads no tenant policy: a shared-agent change is decided on the
+#: target's reach and the caller's admin status alone.
+_NO_POLICY = TenantAccessPolicy()
+
+
 def _decide_operation(
     operation: OperationKind, *, is_admin: bool, target: TargetFacts
 ) -> PolicyOutcome:
     """Return the policy outcome for `operation` against `target`.
 
     Every `OperationKind` belongs to exactly one of the three families
-    described in the module docstring; this dispatches to that family's
-    fixed order. See the module docstring for why the order differs between
-    the spec and attachment families and why the posted-token family always
-    allows.
+    described in the module docstring; `authorize` decides that family's
+    fixed order (`Action.CHANGE_SHARED_AGENT`). See the module docstring for
+    why the order differs between the spec and attachment families and why
+    the posted-token family always allows.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS:
+    decision = authorize(
+        _NO_POLICY,
+        subject=Subject(is_admin=is_admin),
+        action=Action.CHANGE_SHARED_AGENT,
+        surface=Surface.CONFIG,
+        operation_family=_family(operation),
+        reach=AgentReach(
+            managed=target.is_daimon_managed,
+            reachable=target.is_reachable_in_tenant,
+            local_to_caller=target.is_local_to_caller_channels,
+        ),
+    )
+    if decision:
         return "allow"
-    if operation in _SPEC_OPERATIONS:
-        if target.is_daimon_managed:
-            return "managed_agent"
-        if is_admin:
-            return "allow"
-        return _reachable_outcome(target)
-    # operation in _ATTACHMENT_OPERATIONS — the only remaining family.
-    if is_admin:
-        return "allow"
-    if target.is_daimon_managed:
-        return "managed_agent"
-    return _reachable_outcome(target)
-
-
-def _reachable_outcome(target: TargetFacts) -> PolicyOutcome:
-    if target.is_reachable_in_tenant and not target.is_local_to_caller_channels:
-        return "needs_admin"
-    return "allow"
+    return "managed_agent" if decision.reason == "managed_agent" else "needs_admin"
 
 
 def decide_operation(

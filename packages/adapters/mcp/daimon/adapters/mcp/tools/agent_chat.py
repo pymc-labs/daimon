@@ -497,6 +497,7 @@ async def _start_turn_impl(
         if recheck is not None:
             await recheck()
         seal = await _bound_seal(runtime, auth)
+
         session = await create_session(
             runtime.client,
             agent=ma_agent,
@@ -515,6 +516,9 @@ async def _start_turn_impl(
             budget_channel_id=channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
+            # Vault, repo-token and env work run first: decide again right
+            # before the session exists, so a pin landing meanwhile leaves none.
+            before_create=recheck,
         )
 
     if (observation := current_outcome.get()) is not None:

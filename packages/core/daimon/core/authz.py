@@ -76,11 +76,11 @@ save and fire, handoff, configuration writes, form submits and the OAuth
 callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
-fork, channel default binds and coding-tool token mints. Still
-decided outside this module, by the same `daimon.core.access_policy`
-predicates: the live protection and invoker checks in the scheduler, routine
-save and delivery and turn-reply protection; and the shared-agent
-replace/remove table (`daimon.core.operation_policy`).
+fork, channel default binds, coding-tool token mints, the protection of a
+turn's own notices and of a routine's destination (`POST` with no agent), a
+routine's creator at fire and delivery (`ACT_FOR_CREATOR`), and the
+shared-agent table (`CHANGE_SHARED_AGENT`, asked by
+`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
@@ -119,10 +119,21 @@ class Action(StrEnum):
     # Change what an agent reaches: keys, connectors, MCP servers, prompt,
     # tools, skills, repo binding.
     CONFIGURE = "configure"
-    # Post into a channel, thread or conversation as the executing agent.
+    # Post into a channel, thread or conversation as the executing agent. With
+    # no agent (`AgentRef.none()`) only protection is decided: an adapter's own
+    # notice around a turn, or a routine's delivery post.
     POST = "post"
+    # Run or deliver a routine on its creator's behalf: only while the creator
+    # may still start a turn (the invoker allowlist; admins always may). A
+    # routine with no recorded creator speaks for no one.
+    ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
     DIRECT_MESSAGE = "direct_message"
+    # Change what a possibly shared agent runs or reaches: a spec edit, an
+    # attachment replace/remove, or a posted-token contribution
+    # (`daimon.core.operation_policy`). Decided per `Request.operation_family`
+    # on `Request.reach`, each family in its own fixed order.
+    CHANGE_SHARED_AGENT = "change_shared_agent"
     # Copy an agent.
     FORK = "fork"
     # Make an agent the default of one channel (`Place.channel_id`).
@@ -249,6 +260,24 @@ class SessionFacts:
     private: bool = False
 
 
+OperationFamily = Literal["spec", "attachment", "posted_token"]
+
+
+@dataclass(frozen=True)
+class AgentReach:
+    """How far a change to an agent reaches (CHANGE_SHARED_AGENT only).
+
+    ``managed`` is a defaults-managed agent; ``reachable`` one that answers
+    for others in the tenant (a channel or workspace default); and
+    ``local_to_caller`` one whose every place lies in the caller's
+    administered channels (`daimon.core.agent_reach`).
+    """
+
+    managed: bool = False
+    reachable: bool = False
+    local_to_caller: bool = False
+
+
 DenyReason = Literal[
     "channel_protected",
     "invoker_not_allowed",
@@ -259,6 +288,7 @@ DenyReason = Literal[
     "agent_pinned",
     "sealed",
     "not_owner",
+    "managed_agent",
 ]
 
 
@@ -292,6 +322,8 @@ class Request:
     recipient_id: str | None = None
     origin_channel_ids: frozenset[str] = frozenset()
     session: SessionFacts | None = None
+    operation_family: OperationFamily | None = None
+    reach: AgentReach | None = None
 
 
 def _names_pinned(policy: TenantAccessPolicy, names: tuple[str | None, ...]) -> bool:
@@ -404,6 +436,33 @@ def _channel_admin_hub_read(subject: Subject, facts: SessionFacts) -> bool:
     )
 
 
+def _decide_shared_agent_change(req: Request) -> Decision:
+    """The blast-radius table (`daimon.core.operation_policy`): a change reaching one
+    agent is any member's, one reaching the tenant is an admin's.
+
+    A posted-token write always passes. A spec edit refuses a managed agent even
+    for an admin, then passes an admin; an attachment write passes an admin
+    before the managed check. Then a reachable agent needs an admin unless it is
+    local to the caller's administered channels.
+    """
+    reach = req.reach or AgentReach()
+    if req.operation_family == "posted_token":
+        return ALLOW
+    if req.operation_family == "spec":
+        if reach.managed:
+            return _deny("managed_agent")
+        if req.subject.is_admin:
+            return ALLOW
+    else:
+        if req.subject.is_admin:
+            return ALLOW
+        if reach.managed:
+            return _deny("managed_agent")
+    if reach.reachable and not reach.local_to_caller:
+        return _deny("admin_required")
+    return ALLOW
+
+
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     subject, agent, place = req.subject, req.agent, req.place
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
@@ -412,6 +471,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if _protected(policy, place):
             return _deny("channel_protected")
         if subject.platform_user_id is not None and not is_invoker_allowed(
+            policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
+        ):
+            return _deny("invoker_not_allowed")
+        return ALLOW
+
+    if req.action is Action.ACT_FOR_CREATOR:
+        if subject.platform_user_id is None or not is_invoker_allowed(
             policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
         ):
             return _deny("invoker_not_allowed")
@@ -495,6 +561,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if req.recipient_id != subject.platform_user_id:
             return _deny("dm_recipient_not_requester")
         return ALLOW
+
+    if req.action is Action.CHANGE_SHARED_AGENT:
+        return _decide_shared_agent_change(req)
 
     if req.action is Action.FORK:
         if not subject.is_admin or subject.via_agent_key:
@@ -626,6 +695,8 @@ def authorize(
     recipient_id: str | None = None,
     origin_channel_ids: frozenset[str] = frozenset(),
     session: SessionFacts | None = None,
+    operation_family: OperationFamily | None = None,
+    reach: AgentReach | None = None,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     return _decide(
@@ -639,6 +710,8 @@ def authorize(
             recipient_id=recipient_id,
             origin_channel_ids=origin_channel_ids,
             session=session,
+            operation_family=operation_family,
+            reach=reach,
         ),
     )
 
@@ -646,9 +719,11 @@ def authorize(
 __all__ = [
     "ALLOW",
     "Action",
+    "AgentReach",
     "AgentRef",
     "Decision",
     "DenyReason",
+    "OperationFamily",
     "Place",
     "Request",
     "SessionFacts",

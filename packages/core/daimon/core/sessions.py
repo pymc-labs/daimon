@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
@@ -126,6 +126,7 @@ async def create_session(
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
+    before_create: Callable[[], Awaitable[None]] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -476,6 +477,9 @@ async def create_session(
             )
         )
 
+    if before_create is not None:
+        # The caller's last access decision, after every await above.
+        await before_create()
     return await anthropic.beta.sessions.create(
         agent=agent_argument,
         environment_id=environment.id,

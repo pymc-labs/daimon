@@ -81,9 +81,14 @@ from daimon.core.stores.thread_session_lineage import (
     mark_superseded,
 )
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
-from daimon.core.turn.admission import Admission
+from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, SessionAgentMismatch
+from daimon.core.turn.errors import (
+    AdmissionDenied,
+    DmSourceSealedError,
+    SessionAgentMismatch,
+    SessionBusyError,
+)
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import ContinuityOutcome, FreshSession, PreparedTurn
 from daimon.core.turn.session_identity import check_session_agent
@@ -317,6 +322,7 @@ async def _run_replacement(
                 destination_agent_name=admission.agent.name,
                 requested_work=None,
                 unsaved_work=row.pending_unsaved_work,
+                before_send=decide_before_send(deps, admission),
             )
             stage = "upload"
             await _advance(
@@ -352,9 +358,9 @@ async def _run_replacement(
             session_id=row.ma_session_id,
             error=str(error),
         )
-        if isinstance(error, AdmissionDenied):
-            # Decided again just before the successor was created: refused,
-            # not a failed preparation to retry.
+        if isinstance(error, AdmissionDenied | DmSourceSealedError | SessionBusyError):
+            # Decided again just before the successor was created: refused or
+            # deferred for a seal, not a failed preparation.
             raise error
         return PreparationFailure(reasons=reasons, stage=stage, retry_after=now)
 
@@ -489,6 +495,10 @@ async def prepare_session_for_turn(
             thread_id=thread_id,
             account_id=session_account_id,
         )
+        # The lock wait can be long: decide again before anything here runs the
+        # old session (a checkpoint) or compares memory access. A pin refuses; a
+        # seal added meanwhile makes this preparation read-only.
+        admission = await reauthorize(deps, admission)
         row = (
             await ops.read_live_row(
                 db,

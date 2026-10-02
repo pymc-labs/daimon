@@ -29,8 +29,8 @@ class CapabilityClaims(BaseModel):
     max_bytes: int
     exp: int
     jti: str
-    # The bot's tenant id. A host without per-notebook origins serves one
-    # tenant only (``admin._admit_tenant``); tokens without one predate this.
+    # The bot's tenant id. A host without per-notebook origins serves only
+    # listed tenants (``admin._admit_tenant``); tokens without one predate this.
     tenant: str | None = None
 
 

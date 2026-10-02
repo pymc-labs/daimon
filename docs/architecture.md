@@ -54,7 +54,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
-| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -149,6 +149,15 @@ who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
+An unmentioned reply in a Discord or Teams thread costs one cascade read of
+`thread_participation_scopes`. In a followed thread it joins a quiet-timer
+batch; once the thread goes quiet the shared gates in
+`packages/core/daimon/core/participation_gates.py` run the hourly cap, balance,
+cap and channel budget checks, then the metered classifier. A `respond`
+verdict runs an ordinary turn through `admit()` as the burst's newest author,
+with every notice withheld. Teams also counts a quote of the bot's message as
+a mention.
+
 Discord checks its per-guild in-flight limit before the optional process-wide
 turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
 replies and DMs count against it; an excess requested turn gets a retry notice.
@@ -160,7 +169,7 @@ Discord, Slack and Teams also limit simultaneous chat turns per tenant before ad
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
 `default` clears it and restores the adapter's deployment setting (3 by default).
 The check covers Discord mentions, thread participation and wizard submits,
-Slack mentions, and Teams messages and wakes. It does not limit MCP or routine turns.
+Slack mentions, and Teams messages, wakes and thread participation. It does not limit MCP or routine turns.
 
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -176,8 +185,8 @@ with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice), and Teams `_handle` (plus the
-refusals `handle_message` posts). The continuation dispatchers (Teams uses
+the thread, and on its ephemeral shed notice), and Teams `_handle` and
+thread participation (plus the refusals `handle_message` posts). The continuation dispatchers (Teams uses
 core `continuity/dispatch.py`), which can post skip or responder-changed copy
 outside any turn (from the wake poller or a credential submission), ask the
 same decision right before each post and settle the row skipped without
@@ -557,8 +566,8 @@ Anything daimon quotes into a turn from someone other than the person asking
 goes through one envelope, `packages/core/daimon/core/untrusted.py`: an
 element marked `trust="untrusted"`, opened by a fixed line saying the content
 is data, not instructions, with every value escaped so the content cannot
-close the element early. The Discord and Slack context builders wrap replayed
-thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
+close the element early. The Discord, Slack and Teams context builders wrap
+replayed thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
 returns its transcript in it; the quoted transcript on a workspace
 replacement (`render_previous_session`) uses it too. The channel read and
 search tools return JSON rows, so their results carry the same marker as
@@ -816,8 +825,9 @@ publisher asks for the editor and the operator allows it
 `DAIMON_NOTEBOOK__ORIGIN_BASE` set, each notebook is served from its own origin
 (`<label>.<origin_base>`); the proxy routes by Host and refuses cross-origin
 requests and WebSockets. Without it, notebooks share one origin, so a public
-host admits uploads from one tenant only, named in the bot's signed upload
-token.
+host admits uploads only from the tenants the operator lists in
+`DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
+signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach daimon over HTTP with capability tokens, and the

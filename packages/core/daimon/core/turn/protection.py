@@ -21,7 +21,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import structlog
-from daimon.core.access_policy import is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.stores.access_policy import load_access_policy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -60,17 +61,19 @@ async def protection_state(
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
         target = thread_id or channel_id
-        if is_write_protected(policy, channel_id=target, parent_channel_id=channel_id):
+        if not _may_post(policy, Place(channel_id=target, parent_channel_id=channel_id)):
             return ProtectionState.PROTECTED
         if resolve_category is None or not policy.protected_category_ids:
             return ProtectionState.UNPROTECTED
         category_id, category_unresolved = await resolve_category()
-        if is_write_protected(
+        if not _may_post(
             policy,
-            channel_id=target,
-            parent_channel_id=channel_id,
-            category_id=category_id,
-            category_unresolved=category_unresolved,
+            Place(
+                channel_id=target,
+                parent_channel_id=channel_id,
+                category_id=category_id,
+                category_unresolved=category_unresolved,
+            ),
         ):
             return ProtectionState.PROTECTED
         return ProtectionState.UNPROTECTED
@@ -82,6 +85,11 @@ async def protection_state(
             error=type(exc).__name__,
         )
         return ProtectionState.UNKNOWN
+
+
+def _may_post(policy: TenantAccessPolicy, place: Place) -> bool:
+    """Protection alone: an adapter's own notice, decided before the agent is known."""
+    return bool(authorize(policy, subject=Subject(), action=Action.POST, place=place))
 
 
 async def turn_target_protected(

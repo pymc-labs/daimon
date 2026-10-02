@@ -372,20 +372,27 @@ async def reply_to_dm(
             async def reseed() -> str:
                 return user_message
 
-            outcome = await run_prepared_turn(
-                deps,
-                prepared,
-                tenant_id=conversation.tenant_id,
-                platform=platform,
-                thread_id=conversation.scope_id,
-                external_user_id=external_user_id,
-                user_message=user_message,
-                lifecycle=_CollectReply(),
-                cancel=asyncio.Event(),
-                reseed_user_message=reseed,
-                recovery_lifecycle=lambda _: _CollectReply(),
-                deadline=deadline,
-            )
+            try:
+                outcome = await run_prepared_turn(
+                    deps,
+                    prepared,
+                    tenant_id=conversation.tenant_id,
+                    platform=platform,
+                    thread_id=conversation.scope_id,
+                    external_user_id=external_user_id,
+                    user_message=user_message,
+                    lifecycle=_CollectReply(),
+                    cancel=asyncio.Event(),
+                    reseed_user_message=reseed,
+                    recovery_lifecycle=lambda _: _CollectReply(),
+                    deadline=deadline,
+                )
+            except DmSourceSealedError:
+                # Decided again during a dead-session recovery: same quarantine.
+                await _quarantine(deps, conversation)
+                raise
+        if isinstance(outcome.state.error, DmSourceSealedError):
+            await _quarantine(deps, conversation)
         if outcome.state.error is not None:
             raise outcome.state.error
         answer = (

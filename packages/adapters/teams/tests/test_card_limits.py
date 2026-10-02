@@ -57,6 +57,7 @@ from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
+from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import (
     Account,
@@ -95,26 +96,25 @@ def _as_sent(source: MessageSource) -> dict[str, Any]:
 
 
 def _turn_state() -> card.CardState:
-    state = card.CardState(agent_name=NAME, started_at=0.0)
-    for index in range(10):
-        state = card.on_tool(state, f"{index}{'t' * 127}")
+    calls: list[ContentBlock] = [
+        ToolUseBlock(
+            kind="tool_use",
+            id=f"tu_{index}",
+            type="agent.mcp_tool_use",
+            name=f"{index}{EMOJI * 127}",
+            input={},
+            mcp_server_name=EMOJI * 100,
+        )
+        for index in range(10)
+    ]
+    state = card.CardState(started_at=0.0)
+    state = card.on_activity(state, TurnState(content=calls))
     return card.on_message(state, EMOJI * 10_000)
-
-
-def _footer() -> str:
-    return card.footer_text(
-        _turn_state(),
-        now=99 * 3600.0,
-        tokens_in=10**9,
-        tokens_out=10**9,
-        cost="$123456.78",
-        balance="$123456.78 left",
-    )
 
 
 def _answer() -> MessageActivityInput:
     chunks = split_fenced(f"```python\n{EMOJI * 10 * card.TEAMS_LIMIT}", card.TEAMS_LIMIT)
-    return card.answer_message(max(chunks, key=len), footer=_footer())
+    return card.answer_message(max(chunks, key=len), is_last=True)
 
 
 def _termination() -> MessageActivityInput:
@@ -128,7 +128,7 @@ def _termination() -> MessageActivityInput:
         finished_tools=10**6,
         request_id=f"req_{'r' * 60}",
     )
-    return card.notice_card(card.termination_text(notice, footer=_footer()))
+    return card.notice_card(card.termination_text(notice))
 
 
 def _roster() -> AdaptiveCard:
@@ -339,7 +339,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "status": lambda: card.status_card(_turn_state(), now=99 * 3600.0, cancel_key="k" * 64),
     "answer": _answer,
     "termination_notice": _termination,
-    "raw_error_notice": lambda: card.notice_card(f"❌ {EMOJI * 10_000} · {_footer()}"),
+    "raw_error_notice": lambda: card.notice_card(f"❌ {EMOJI * 10_000}"),
     "interrupted_notice": lambda: card.notice_card(card.INTERRUPTED_NOTICE),
     "roster": _roster,
     "details_skills": lambda: _details("skills"),

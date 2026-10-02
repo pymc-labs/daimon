@@ -118,6 +118,14 @@ uv run python -m daimon.adapters.discord
 The `export` is required because the `alembic` CLI reads the shell
 environment and does not load `.env`.
 
+### Several MCP instances
+
+The MCP endpoint is stateless: it issues no session id and every request
+carries its own token, so `mcp` replicas need no sticky sessions behind a load
+balancer, and a redeploy does not strand connected clients. The hourly limits
+on notebook publishes and bundle uploads are kept in memory, so each replica
+counts its own.
+
 ## Slack (optional)
 
 Slack needs a publicly reachable `DAIMON_MCP__PUBLIC_URL`. The bot token is

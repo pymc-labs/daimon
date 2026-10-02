@@ -130,12 +130,16 @@ then runs attacker JS on A's page: credentialed fetch, `no-cors` POST and
 WebSocket to B, before and after `history.replaceState` to B's path. None of
 it reaches B's marimo.
 
-**Without `origin_base`, one host serves one tenant.** All notebooks then
-share one origin and there is no browser isolation between them. A public
-host (anything but localhost) therefore admits uploads from a single tenant:
-the first tenant named in an upload token claims it (`tenant.json`, 0600),
-and every other tenant, or a token naming none, gets a 403. It logs a warning
-at boot. Local dev hosts skip the check.
+**Without `origin_base`, a host serves only the tenants you list.** All
+notebooks then share one origin and there is no browser isolation between
+them. A public host (anything but localhost) therefore admits uploads only
+from the tenants in `DAIMON_NOTEBOOK__TENANTS`, comma-separated tenant UUIDs
+or a JSON array, e.g. `<discord-tenant-uuid>,<slack-tenant-uuid>`. List only tenants
+you control (say your own Discord server, Slack workspace and Teams tenant),
+since they can reach each other's notebooks. Any other tenant, or a token
+naming none, gets a 403 that names the setting and the refused id; with the
+list empty every upload is refused. `daimon tenants list --json` shows each
+tenant's `id`. The host logs a warning at boot. Local dev hosts skip the check.
 
 **Known limits.** There is no per-notebook pid or network namespace:
 subprocesses run as separate uids, but an editor notebook can see other
@@ -164,8 +168,9 @@ delimiter.
 | `public_url_base` | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | *(unset — set when behind a TLS terminator that strips the internal port, e.g. Fly's https edge)* |
 | `allow_editable` | `DAIMON_NOTEBOOK__ALLOW_EDITABLE` | `false` *(every notebook read-only)* |
 | `allow_http_links` | `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS` | `false` *(refuse to boot with plain-http links off localhost)* |
-| `origin_base` | `DAIMON_NOTEBOOK__ORIGIN_BASE` | *(unset — one shared origin, one tenant per public host; set to e.g. `nb.example.com` with wildcard DNS + TLS)* |
+| `origin_base` | `DAIMON_NOTEBOOK__ORIGIN_BASE` | *(unset — one shared origin, only listed `tenants` on a public host; set to e.g. `nb.example.com` with wildcard DNS + TLS)* |
 | `origin_scheme` | `DAIMON_NOTEBOOK__ORIGIN_SCHEME` | `https` |
+| `tenants` | `DAIMON_NOTEBOOK__TENANTS` (comma-separated or JSON array) | *(empty — a public host without `origin_base` refuses every upload; ignored with `origin_base`)* |
 | `max_source_bytes` | `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` | `1048576` (1 MiB) |
 | `max_attachment_bytes_ceiling` | `DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES_CEILING` | `104857600` (100 MiB; host-side hard ceiling, defense-in-depth above the daimon-side cap) |
 | `allowed_origins` | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | *(empty — check disabled)* |

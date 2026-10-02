@@ -56,6 +56,7 @@ from daimon.core.continuity.continuation import (
     load_asking_agent_id,
 )
 from daimon.core.continuity.messages import (
+    render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
     render_replacement_summary,
@@ -71,6 +72,7 @@ from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -371,12 +373,9 @@ class _ParticipationBatch:
     timer: asyncio.Task[None] | None = None
 
 
-# A batch keeps only this many newest messages (the classifier window is the
-# same size), and stops restarting its timer once it has waited this many quiet
-# periods, so a thread that never goes quiet is still judged on a bounded delay
-# with a bounded prompt.
-_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
-_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+# Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
+_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
+_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 
 
 async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
@@ -2641,14 +2640,20 @@ class DaimonBot(commands.Bot):
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
-        except SessionBusyError:
+        except SessionBusyError as busy:
             # Nothing failed and nothing is misconfigured: the previous turn in
             # this thread is still running, and the session it is running in
             # belongs to the OUTGOING responder. Making the change around it
             # would answer as one agent inside another agent's workspace, so no
             # turn runs here -- the person is told the in-flight message
-            # finishes first and the switch applies to their next one.
-            busy_text = render_current_work_must_finish(agent.name, handoff=True)
+            # finishes first and the switch applies to their next one. A seal
+            # that landed while the turn was prepared defers it the same way;
+            # the next message is prepared read-only, so it says to send again.
+            busy_text = (
+                render_access_changed_try_again()
+                if "seal" in busy.pending_reasons
+                else render_current_work_must_finish(agent.name, handoff=True)
+            )
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:

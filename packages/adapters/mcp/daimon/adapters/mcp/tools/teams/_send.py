@@ -108,7 +108,12 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     file_handles: list[str] | None = None,
 ) -> TeamsMessageRow:
     if attachments or file_handles:
-        raise ToolError("file posting is not available on Teams yet — send text only")
+        # "Not available yet" read as a promise; say where Teams files do go.
+        raise ToolError(
+            "send_message posts text only on Teams. In a 1:1 chat, save the file under "
+            "/mnt/session/outputs and daimon offers it after your turn; a channel cannot "
+            "take files."
+        )
     _check_text(content)
     conversation_id = _conversation_id(channel_id)
     client = await _authorize(runtime, auth, conversation_id)

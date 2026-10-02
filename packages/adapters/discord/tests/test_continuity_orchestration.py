@@ -912,3 +912,44 @@ async def test_session_busy_posts_must_finish_copy_and_runs_no_turn(
         f"expected the busy copy edited into the status embed, got {edited}"
     )
     await _assert_no_recoverable_cards(db_session_factory)
+
+
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+async def test_session_busy_for_a_seal_says_to_send_again(
+    mock_resolve_config: AsyncMock,
+    mock_resolve_env: AsyncMock,
+    mock_resolve_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A seal landing while the turn is prepared defers it; the copy asks for a resend."""
+    from daimon.core.continuity.messages import render_access_changed_try_again
+
+    guild_id = "700000011"
+    await _seed_tenant(db_session, guild_id=guild_id)
+    mock_resolve_config.return_value = _stub_resolved_config()
+    mock_resolve_agent.return_value = "ag_test"
+    mock_resolve_env.return_value = "env_test"
+
+    bot = make_bot(_make_runtime(db_session_factory))
+    message = _make_thread_message(guild_id=int(guild_id))
+    with (
+        patch(
+            "daimon.adapters.discord.bot.bind_session",
+            new_callable=AsyncMock,
+            side_effect=SessionBusyError(pending_reasons=("seal",), retry_after=datetime.now(UTC)),
+        ),
+        patch(
+            "daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock
+        ) as mock_run_prepared_turn,
+    ):
+        await bot.on_message(message)
+
+    mock_run_prepared_turn.assert_not_called()
+    edited = [
+        c.kwargs.get("content") for c in message.channel.send.return_value.edit.call_args_list
+    ]
+    assert render_access_changed_try_again() in edited, edited
+    await _assert_no_recoverable_cards(db_session_factory)
