@@ -176,6 +176,8 @@ class IsolationView(PanelViewBase):
                 notice = f"-# **{change.agent_name}** answers only here."
             else:
                 notice = f"-# {change.end_warning}"
+            if change.network_warning is not None:
+                notice += f"\n-# {change.network_warning}"
         await self.swap_to(
             interaction,
             IsolationView(
