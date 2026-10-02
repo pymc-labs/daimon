@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import propagation
@@ -188,6 +189,12 @@ async def test_channel_admin_sets_only_their_own_channels_default(
     )
 
 
+def _agent(tenant_id: uuid.UUID, name: str) -> BetaManagedAgentsAgent:
+    """The resolved agent the edit tools pass, so sharing reads its routines and sessions."""
+    metadata = {"daimon_tenant": str(tenant_id), "daimon_name": name}
+    return ma_agent(id=f"agent_{name}", name=name, metadata=metadata)
+
+
 async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -211,14 +218,20 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
         platform_role_ids=(ROLE,),
     )
     with pytest.raises(ToolError, match="an admin must change its setup"):
-        await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
 
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
-    await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
+    await require_admin_for_reachable_agent(
+        runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
     with pytest.raises(ToolError, match="is currently a default agent here .* an admin must"):
-        await require_admin_for_reachable_agent(runtime, role_member, agent_name="shared")
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="shared", agent=_agent(tenant_id, "shared")
+        )
 
 
 async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
@@ -349,7 +362,9 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
     member = _auth(tenant_id)
-    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+    await require_admin_for_reachable_agent(
+        runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
 
     async with committing_sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
@@ -361,7 +376,9 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             agent_name="helper",
             channel_id=CHANNEL,
         )
-    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+    await require_admin_for_reachable_agent(
+        runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
 
     async with committing_sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
@@ -379,7 +396,9 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             session, tenant=tenant, created_by_user_id="666666666666666666", agent_name="helper"
         )
     with pytest.raises(ToolError, match="runs unattended .* so an admin must change its setup"):
-        await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+        await require_admin_for_reachable_agent(
+            runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
 
 
 async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
