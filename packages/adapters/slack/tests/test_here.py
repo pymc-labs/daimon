@@ -10,6 +10,7 @@ from daimon.adapters.slack.here import (  # pyright: ignore[reportPrivateUsage]
     _visible_channel_ids,
     handle_here_command,
 )
+from slack_sdk.errors import SlackApiError
 
 
 async def test_member_sees_public_bot_channels_and_shared_private_channels() -> None:
@@ -51,6 +52,8 @@ def test_card_blocks_keep_names_plain() -> None:
     blocks = _plain_blocks("**Here**\nWho answers: <!here>.")
     assert blocks[1]["text"]["type"] == "plain_text"
     assert "<!here>" in blocks[1]["text"]["text"]
+    setter = _plain_blocks("**Here**\nSet by: <@U123>; at: today.")
+    assert setter[1]["text"]["type"] == "mrkdwn"
 
 
 async def test_here_posts_ephemeral_card() -> None:
@@ -80,6 +83,8 @@ async def test_here_posts_ephemeral_card() -> None:
         await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U1"})
     assert load.await_count == 1
     assert load.await_args.kwargs["bot_can_view"] is False
+    assert load.await_args.kwargs["thread_id"] is None
+    assert load.await_args.kwargs["channel_level_only"] is True
     client.chat_postEphemeral.assert_awaited_once_with(
         channel="C1",
         user="U1",
@@ -88,3 +93,46 @@ async def test_here_posts_ephemeral_card() -> None:
         parse="none",
         link_names=False,
     )
+
+
+async def test_private_channel_without_bot_membership_returns_card_by_response_url() -> None:
+    client = MagicMock()
+    client.conversations_info = AsyncMock(
+        side_effect=SlackApiError("not found", MagicMock(data={"error": "channel_not_found"}))
+    )
+    client.users_conversations = AsyncMock(return_value={"channels": []})
+    client.users_info = AsyncMock(return_value={"user": {}})
+    client.chat_postEphemeral = AsyncMock()
+    runtime = MagicMock()
+    runtime.settings.github.fallback_pat = None
+    runtime.settings.github.app_id = None
+    runtime.settings.github.app_private_key = None
+    runtime.settings.mcp.public_url = None
+    runtime.sessionmaker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    runtime.sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    webhook = MagicMock()
+    webhook.send = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.here.resolve_web_client", new=AsyncMock(return_value=client)),
+        patch("daimon.adapters.slack.here.resolve_is_admin", new=AsyncMock(return_value=False)),
+        patch(
+            "daimon.adapters.slack.here.find_platform_principal", new=AsyncMock(return_value=None)
+        ),
+        patch(
+            "daimon.adapters.slack.here.load_here_card",
+            new=AsyncMock(return_value=SimpleNamespace(text="bot: no")),
+        ) as load,
+        patch("daimon.adapters.slack.here.AsyncWebhookClient", return_value=webhook),
+    ):
+        await handle_here_command(
+            runtime,
+            {
+                "team_id": "T1",
+                "channel_id": "G1",
+                "user_id": "U1",
+                "response_url": "https://example.test/reply",
+            },
+        )
+    assert load.await_args.kwargs["bot_can_view"] is False
+    webhook.send.assert_awaited_once()
+    client.chat_postEphemeral.assert_not_awaited()

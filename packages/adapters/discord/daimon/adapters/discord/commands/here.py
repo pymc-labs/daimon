@@ -25,11 +25,9 @@ BotInteraction = Interaction[commands.Bot]
 
 
 def build_here_view(card_text: str) -> discord.ui.LayoutView:
-    """Render long cards within Discord's per-text-display size limit."""
-    displays: list[discord.ui.TextDisplay[discord.ui.LayoutView]] = [
-        discord.ui.TextDisplay(card_text[i : i + 3500]) for i in range(0, len(card_text), 3500)
-    ]
-    return layout.static_view(discord.ui.Container(*displays))
+    """Stay below the total Components V2 text limit."""
+    text = card_text if len(card_text) <= 3900 else card_text[:3899] + "…"
+    return layout.static_view(discord.ui.Container(discord.ui.TextDisplay(text)))
 
 
 @app_commands.guild_only()
@@ -81,16 +79,10 @@ class HereCog(commands.Cog):
                         continue
                     if member is None or not sibling.permissions_for(member).view_channel:
                         continue
-                    if not sibling.permissions_for(bot_member).view_channel:
-                        category_visible.append((str(sibling.id), f"#{sibling.name}: no"))
-                        continue
-                    try:
-                        await interaction.guild.fetch_channel(sibling.id)
-                        category_visible.append((str(sibling.id), f"#{sibling.name}: yes"))
-                    except discord.Forbidden as exc:
-                        if exc.code != 50001:
-                            raise
-                        category_visible.append((str(sibling.id), f"#{sibling.name}: no"))
+                    bot_can_view = sibling.permissions_for(bot_member).view_channel
+                    category_visible.append(
+                        (str(sibling.id), f"#{sibling.name}: {'yes' if bot_can_view else 'no'}")
+                    )
             github = runtime.settings.github
             async with runtime.sessionmaker() as session:
                 principal = await find_platform_principal(

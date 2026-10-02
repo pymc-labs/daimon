@@ -14,6 +14,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.webhook.async_client import AsyncWebhookClient
 
 
 async def _channels(client: AsyncWebClient, *, user_id: str | None, types: str) -> dict[str, bool]:
@@ -56,8 +57,14 @@ def _plain_blocks(card_text: str) -> list[dict[str, Any]]:
     return [
         {"type": "header", "text": {"type": "plain_text", "text": "Here"}},
         *(
-            {"type": "section", "text": {"type": "plain_text", "text": body[i : i + 2800]}}
-            for i in range(0, len(body), 2800)
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn" if line.startswith("Set by: <@") else "plain_text",
+                    "text": line,
+                },
+            }
+            for line in body.splitlines()
         ),
     ]
 
@@ -71,9 +78,15 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
     if client is None:
         return
     try:
-        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-        channel = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownArgumentType]
-        bot_view = bool(channel.get("is_member"))
+        try:
+            info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+            channel = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownArgumentType]
+            bot_view = bool(channel.get("is_member"))
+        except SlackApiError as exc:
+            error = str(cast(dict[str, Any], exc.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
+            if error not in {"channel_not_found", "not_in_channel"}:
+                raise
+            bot_view = False
         caller_view = True  # Slack delivered this command from the caller's channel.
         visible_ids = await _visible_channel_ids(client, user_id)
         visible_ids.add(channel_id)
@@ -89,7 +102,8 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 tenant_id=tenant_id,
                 platform="slack",
                 channel_id=channel_id,
-                thread_id=payload.get("thread_ts") or None,
+                thread_id=None,
+                channel_level_only=True,
                 default=runtime.deployment_default,
                 github=GitHubDeploymentFacts(
                     has_fallback_pat=github.fallback_pat is not None,
@@ -104,14 +118,22 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 bot_can_view=bot_view,
                 caller_can_view=caller_view,
             )
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id,
-            user=user_id,
-            text="Here status card",
-            blocks=_plain_blocks(card.text),
-            parse="none",
-            link_names=False,
-        )
+        response_url = str(payload.get("response_url") or "")
+        if not bot_view and response_url:
+            await AsyncWebhookClient(response_url).send(
+                text="Here status card",
+                blocks=_plain_blocks(card.text),
+                response_type="ephemeral",
+            )
+        else:
+            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id,
+                user=user_id,
+                text="Here status card",
+                blocks=_plain_blocks(card.text),
+                parse="none",
+                link_names=False,
+            )
     except SlackApiError as exc:
         await surface_command_error(
             client,

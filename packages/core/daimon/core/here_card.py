@@ -30,6 +30,10 @@ from daimon.core.scope import (
 from daimon.core.stores import agent_mcp_credentials, mcp_oauth_flows, scoped_config_read
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import McpOAuthGrantRow, Platform, RoutineRow
+from daimon.core.stores.identity import (
+    get_discord_principal_for_account,
+    get_slack_principal_for_account,
+)
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.core.stores.thread_agent_bindings import get_binding
 from pydantic import BaseModel, ConfigDict
@@ -73,6 +77,8 @@ def assemble_here_card(
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     configuration_target_name: str | None,
+    set_by_label: str | None = None,
+    channel_level_only: bool = False,
     thread_set_by_account_id: uuid.UUID | None = None,
     thread_set_at: datetime | None = None,
     policy: TenantAccessPolicy,
@@ -183,16 +189,13 @@ def assemble_here_card(
                         default=deployment_default,
                     ).agent_name
                     == agent_name
-                )
-            )
-        else:
-            defaults = tuple(
-                sorted(
-                    place.channel_id
-                    for place in details.answers_in
-                    if place.channel_id is not None
-                    and place.channel_id != channel_id
-                    and (visible is None or place.channel_id in visible)
+                    and authorize(
+                        policy,
+                        subject=Subject(),
+                        action=Action.RUN_AGENT,
+                        agent=AgentRef.of(agent_name),
+                        place=Place(channel_id=cid),
+                    ).allowed
                 )
             )
         routine_labels = tuple(
@@ -212,13 +215,19 @@ def assemble_here_card(
                 ).allowed
             )
         )
-    lines = ["**Here**", f"Who answers: {agent_name or 'No agent'} ({tier or 'unconfigured'})."]
+    lines = [
+        "**Here**",
+        f"Who answers: {_short(agent_name or 'No agent')} ({tier or 'unconfigured'}).",
+    ]
     if set_by is not None or set_at is not None:
-        lines.append(
-            f"Set by: {set_by or 'unknown'}; at: {set_at.isoformat() if set_at else 'unknown'}."
-        )
+        when = set_at.isoformat() if set_at else "unknown"
+        lines.append(f"Set by: {set_by_label or 'unknown'}; at: {when}.")
     if configuration_target_name is not None:
-        lines.append(f"Configuration target: {configuration_target_name}.")
+        lines.append(f"Configuration target: {_short(configuration_target_name)}.")
+    if channel_level_only:
+        lines.append(
+            "Slack /here shows channel-level routing; slash commands provide no thread context."
+        )
     lines.extend(
         [
             f"Channel: {'sealed' if channel_id in policy.sealed_channel_ids else 'unsealed'}, "
@@ -229,31 +238,34 @@ def assemble_here_card(
     )
     if category_channels_bot_can_view:
         lines.append(
-            "Bot view in other category channels: "
-            + ", ".join(category_channels_bot_can_view)
-            + "."
+            "Bot view in other category channels: " + _summary(category_channels_bot_can_view) + "."
         )
     lines.append(
         "Credentials (names only): "
         + (
-            "; ".join(
-                f"{item.name} [{item.kind}; "
-                f"{'configured' if item.configured else 'not configured'}; "
-                f"session {_yes(item.usable_in_session)}]"
-                for item in credentials
+            _summary(
+                tuple(
+                    f"{item.name} [{item.kind}; "
+                    f"{'configured' if item.configured else 'not configured'}]"
+                    for item in credentials
+                ),
+                separator="; ",
             )
             if credentials
             else "none known"
         )
         + "."
     )
-    lines.append("Other defaults: " + (", ".join(defaults) if defaults else "none visible") + ".")
-    lines.append("Pin channels: " + (", ".join(pins) if pins else "none visible") + ".")
+    lines.append("Credential session usability: unknown (live mount status is unavailable).")
+    lines.append("Other defaults: " + (_summary(defaults) if defaults else "none visible") + ".")
+    lines.append("Pin channels: " + (_summary(pins) if pins else "none visible") + ".")
     lines.append(
-        "Agents pinned here: " + (", ".join(channel_pins) if channel_pins else "none visible") + "."
+        "Agents pinned here: " + (_summary(channel_pins) if channel_pins else "none visible") + "."
     )
     lines.append(
-        "Routines: " + ("; ".join(routine_labels) if routine_labels else "none visible") + "."
+        "Routines: "
+        + (_summary(routine_labels, separator="; ") if routine_labels else "none visible")
+        + "."
     )
     return HereCard(
         agent_name=agent_name,
@@ -272,12 +284,30 @@ def assemble_here_card(
         credentials=tuple(credentials),
         default_channels=defaults,
         routines=routine_labels,
-        text="\n".join(lines),
+        text="\n".join(lines)[:3900],
     )
 
 
 def _yes(value: bool | None) -> str:
     return "yes" if value is True else "no" if value is False else "unknown"
+
+
+def _short(value: str, limit: int = 120) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _summary(values: Sequence[str], *, separator: str = ", ") -> str:
+    """Bound one rendered list while preserving the omitted count."""
+    shown: list[str] = []
+    length = 0
+    for value in values:
+        item = _short(value, 100)
+        if len(shown) == 8 or length + len(item) + len(separator) > 320:
+            break
+        shown.append(item)
+        length += len(item) + len(separator)
+    omitted = len(values) - len(shown)
+    return separator.join(shown) + (f"{separator}+{omitted} more" if omitted else "")
 
 
 async def load_here_card(
@@ -293,6 +323,7 @@ async def load_here_card(
     public_mcp_url: str | None,
     is_admin: bool,
     caller_account_id: uuid.UUID | None,
+    channel_level_only: bool = False,
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
     caller_can_view: bool | None = None,
@@ -379,6 +410,29 @@ async def load_here_card(
         if thread_id is not None
         else None
     )
+    source = (
+        channel_row
+        if resolved.agent_name_tier == "channel"
+        else tenant_row
+        if resolved.agent_name_tier == "tenant"
+        else None
+    )
+    setter_account_id = (
+        binding.creator_account_id
+        if resolved.agent_name_tier == "thread" and binding is not None
+        else source.agent_name_set_by_account_id
+        if isinstance(source, (ChannelConfigRow, TenantConfigRow))
+        else None
+    )
+    set_by_label = None
+    if setter_account_id is not None:
+        external_id = (
+            await get_discord_principal_for_account(session, account_id=setter_account_id)
+            if platform == "discord"
+            else await get_slack_principal_for_account(session, account_id=setter_account_id)
+        )
+        if external_id is not None:
+            set_by_label = f"<@{external_id}>"
     category_labels = tuple(
         label
         for cid, label in category_channels_bot_can_view
@@ -407,6 +461,8 @@ async def load_here_card(
         else None,
         thread_set_by_account_id=binding.creator_account_id if binding is not None else None,
         thread_set_at=binding.created_at if binding is not None else None,
+        set_by_label=set_by_label,
+        channel_level_only=channel_level_only,
         policy=policy,
         details=details,
         visible_agent_names={
