@@ -52,7 +52,10 @@ from daimon.core.scope import (
     is_agent_reachable,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.agent_creation_channels import get_creation_channel
+from daimon.core.stores.agent_creation_channels import (
+    get_creation_channel,
+    record_creation_channel,
+)
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
 from daimon.core.stores.domain import ChannelAdminsRow, UnattendedRequester
@@ -426,6 +429,38 @@ async def _caller_holds(
     )
 
 
+async def record_created_for_channel(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    channel_id: str | None,
+    caller: ChannelAdminCaller,
+) -> bool:
+    """Record that a channel admin created the agent for `channel_id`, from there.
+
+    Only when the caller administers that channel (a thread's parent) and is
+    no server admin, whose agents reach a channel by being made its default.
+    True when recorded.
+    """
+    if caller.is_server_admin or channel_id is None:
+        return False
+    administered = await load_administered_channel_ids(
+        session, tenant_id=tenant_id, platform=platform, caller=caller
+    )
+    if channel_id not in administered:
+        return False
+    await record_creation_channel(
+        session,
+        tenant_id=tenant_id,
+        ma_agent_id=ma_agent_id,
+        platform=platform,
+        channel_id=channel_id,
+    )
+    return True
+
+
 async def may_bind_as_channel_default(
     session: AsyncSession,
     *,
@@ -588,4 +623,5 @@ __all__ = [
     "load_agent_reach",
     "load_target_facts",
     "may_bind_as_channel_default",
+    "record_created_for_channel",
 ]
