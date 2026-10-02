@@ -14,6 +14,7 @@ from click import Group, Option
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import tenants as tenants_mod
 from daimon.adapters.cli.commands.tenants import (
+    _ended_isolation_warning,  # pyright: ignore[reportPrivateUsage]
     tenants_access_policy_get,
     tenants_access_policy_set,
     tenants_cap,
@@ -999,7 +1000,17 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
         clear=True,
         replace_pins=True,
     )
-    assert f"Isolation ended for {local}" in capsys.readouterr().err, "ending it warns"
+    err = " ".join(capsys.readouterr().err.split())
+    assert f"Isolation ended for {local}" in err, "ending it warns"
+    assert "no longer private" in err, "clearing everything leaves no seal or pin behind"
+
+
+def test_ended_isolation_warning_says_how_to_lift_what_is_left() -> None:
+    """Ending one channel's isolation keeps its seal and pin; the warning names both."""
+    policy = TenantAccessPolicy(sealed_channel_ids=("c1",), agent_channel_pins={"local": ("c1",)})
+    warning = _ended_isolation_warning(policy, "c1")
+    assert "stays private" in warning, warning
+    assert warning.endswith("drop c1 from --sealed-channel; --remove-pin-agent local."), warning
 
 
 @pytest.mark.asyncio

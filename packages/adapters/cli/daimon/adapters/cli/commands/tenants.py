@@ -15,7 +15,12 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
-from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING, isolation_refusal
+from daimon.core.channel_isolation import channel_isolation_status
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    LIFT_ISOLATION_WARNING,
+    isolation_refusal,
+)
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -441,14 +446,24 @@ async def _require_isolatable(
             raise typer.Exit(1)
 
 
+def _ended_isolation_warning(policy: TenantAccessPolicy, channel_id: str) -> str:
+    """What ending `channel_id`'s isolation left in place, and how to lift it from here."""
+    status = channel_isolation_status(policy, channel_id)
+    if not status.is_liftable:
+        return LIFT_ISOLATION_WARNING
+    steps = [f"drop {channel_id} from --sealed-channel"] if status.is_private else []
+    steps += [f"--remove-pin-agent {name}" for name in status.dedicated_agent_names]
+    return f"{END_ISOLATION_WARNING} To lift them from here: {'; '.join(steps)}."
+
+
 def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAccessPolicy) -> None:
     ended = sorted(
         set(previous.isolated_channel_ids if previous else ()) - set(policy.isolated_channel_ids)
     )
-    if ended:
-        Console(stderr=True, highlight=False).print(
-            f"[yellow]Isolation ended for {', '.join(ended)}. {END_ISOLATION_WARNING}[/yellow]"
-        )
+    console = Console(stderr=True, highlight=False)
+    for channel_id in ended:
+        warning = escape(_ended_isolation_warning(policy, channel_id))
+        console.print(f"[yellow]Isolation ended for {channel_id}. {warning}[/yellow]")
 
 
 @access_policy_app.command("get")
@@ -509,7 +524,8 @@ def tenants_access_policy_set_command(
         typer.Option(
             help=(
                 "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
-                "and its default agent pinned to it alone, answering nowhere else."
+                "and its default agent pinned to it alone, answering nowhere else. Ending one "
+                "keeps its seal and pins."
             )
         ),
     ] = None,
