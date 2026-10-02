@@ -35,6 +35,7 @@ from daimon.core.stores import channel_budgets
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -89,6 +90,12 @@ async def test_set_list_and_clear_a_budget(
     await budget_clear(**args, channel_id="C1")
     assert "C1: budget cleared" in _out(console)
     assert "C1: had no budget" in _out(console)
+    async with db_session_factory() as s:
+        events = await list_events(s, tenant_id=tenant.tenant_id)
+    assert sorted((e.tool_name, e.operation, e.reason) for e in events) == [
+        ("cli/channels budget clear", "set_channel_budget", "channel:C1"),
+        ("cli/channels budget set", "set_channel_budget", "channel:C1"),
+    ], "each change is audited once; clearing nothing records nothing"
 
 
 async def test_bad_requests_are_refused_before_any_write(

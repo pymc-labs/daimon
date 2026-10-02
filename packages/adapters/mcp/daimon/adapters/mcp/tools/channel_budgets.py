@@ -2,10 +2,12 @@
 
 A budget caps what one channel may spend (see ``daimon.core.channel_budget``
 for how spend and windows are counted). Reading one is a member action for a
-channel the caller can see. Listing, setting and clearing act on the whole
-server or workspace, so they are admin-tagged and re-checked in the impl.
-Operator tokens read them with ``tenant:read`` and change them with
-``channels:write``. Money crosses this boundary as decimal strings, both ways.
+channel the caller can see. Listing acts on the whole server or workspace, so
+it is admin-only. Setting and clearing are decided by `authorize`
+(SET_CHANNEL_BUDGET): a server admin for any channel, a channel admin for the
+channels they administer. Operator tokens read them with ``tenant:read`` and
+change them with ``channels:write``. Money crosses this boundary as decimal
+strings, both ways.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Literal, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -24,15 +27,18 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.authz import Action
 from daimon.core.channel_budget import (
     ChannelBudgetError,
     ChannelBudgetStatus,
     describe_budget,
     get_channel_budget_status,
     load_budget_status,
+    may_set_channel_budget,
     parse_budget_spec,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_budgets as store
 from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
@@ -81,6 +87,22 @@ class ClearChannelBudgetResult:
     channel_id: str
     cleared: bool
     """False when the channel had no budget to clear."""
+
+
+_NEEDS_BUDGET_ADMIN = (
+    "Changing this channel's budget needs a workspace or server admin, or an admin of "
+    "that channel, and the caller is neither. Tell them who can make it and give them a "
+    "sentence that admin can say, preserving the requested action and channel. Do not retry."
+)
+
+
+def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
+    """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
+    decision = may_set_channel_budget(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
+    if not decision:
+        record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
+        raise ToolError(_NEEDS_BUDGET_ADMIN)
+    record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
 
 
 def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
@@ -240,7 +262,6 @@ async def _set_channel_budget_impl(
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
     require_scope(auth, "channels:write")
-    _require_admin(auth)
     platform = _require_platform(auth)
     try:
         spec = parse_budget_spec(
@@ -249,6 +270,7 @@ async def _set_channel_budget_impl(
     except ChannelBudgetError as err:
         raise ToolError(f"{err}. Nothing was saved.") from err
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
+    require_budget_write(auth, target)
     async with runtime.session_factory.begin() as session:
         budget = await store.set_channel_budget(
             session,
@@ -273,11 +295,11 @@ async def _clear_channel_budget_impl(
     hidden can still be cleared.
     """
     require_scope(auth, "channels:write")
-    _require_admin(auth)
     platform = _require_platform(auth)
     target = (
         await resolve_channel(runtime, auth, _require_channel_id(channel_id), lenient=True)
     ).channel_id
+    require_budget_write(auth, target)
     async with runtime.session_factory.begin() as session:
         cleared = await store.delete_channel_budget(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
@@ -308,7 +330,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List every channel budget in this server or workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
-    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def set_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -317,7 +339,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         starts_at: str | None = None,
         ends_at: str | None = None,
     ) -> ChannelBudgetResult:
-        """Set or replace a channel's spending budget. Admin-only.
+        """Set or replace a channel's spending budget. Admins, and that channel's admins.
 
         Once the channel's spend in the window reaches ``limit_usd`` (a
         decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
@@ -340,11 +362,13 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ends_at=ends_at,
         )
 
-    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str
     ) -> ClearChannelBudgetResult:
-        """Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
+        """Remove a channel's spending budget, so only the balance and caps apply.
+
+        Admins, and that channel's admins, may.
 
         A thread id clears its parent channel's budget.
         """

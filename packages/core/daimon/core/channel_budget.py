@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import get_args
 
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Decision, Place, Subject, authorize
 from daimon.core.errors import DaimonError
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
@@ -269,3 +271,16 @@ async def balance_footer(
             return f"${status.remaining_usd:.2f} of channel budget left"
     balance = await get_prepaid_balance(session, tenant_id=tenant_id)
     return None if balance is None else f"${balance:.2f} left"
+
+
+def may_set_channel_budget(subject: Subject, channel_id: str) -> Decision:
+    """Whether ``subject`` may set, clear or raise ``channel_id``'s budget. Pure.
+
+    No access policy fact counts, so the empty policy stands in for it.
+    """
+    return authorize(
+        TenantAccessPolicy(),
+        subject=subject,
+        action=Action.SET_CHANNEL_BUDGET,
+        place=Place(channel_id=channel_id),
+    )

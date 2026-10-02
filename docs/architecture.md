@@ -409,7 +409,8 @@ run (channel-scope rows, thread bindings, and other people's live sessions
 and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent. A `/dm` conversation counts as the channel it was
+channels' default agent and budget (`SET_CHANNEL_BUDGET`; never the tenant
+balance, and not with an agent key). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run

@@ -28,6 +28,7 @@ from daimon.adapters.mcp.tools.channel_budgets import (
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.security_audit import capture_decision
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.turn_origins import create_origin
@@ -237,7 +238,7 @@ async def test_mutations_and_listing_are_admin_only(
     async with committing_sessionmaker.begin() as session:
         await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
 
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="(requires|needs) a workspace or server admin"):
         if call == "list":
             await _list_channel_budgets_impl(runtime, member)
         elif call == "set":
@@ -387,3 +388,51 @@ async def test_a_teams_clear_takes_the_threads_channel(
         f"{channel};messageid=17",
     )
     assert (cleared.channel_id, cleared.cleared) == (channel, True)
+
+
+async def test_a_channel_admin_sets_and_clears_only_their_channels_budget(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    channel_admin = dataclasses.replace(
+        _auth(tenant, account_id, admin=False),
+        platform_user_id="u-ca",
+        administered_channel_ids=frozenset({_PARENT}),
+    )
+
+    with capture_decision() as allowed:
+        result = await _set_channel_budget_impl(
+            runtime,
+            channel_admin,
+            channel_id=_THREAD,
+            limit_usd="3",
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+        )
+    assert (result.channel_id, result.limit_usd) == (_PARENT, "3.00"), "a thread sets its channel's"
+    assert (allowed.operation, allowed.denied) == ("set_channel_budget", False), "audited"
+
+    for change in ("set", "clear"):
+        with capture_decision() as denied, pytest.raises(ToolError, match="needs a workspace"):
+            if change == "set":
+                await _set_channel_budget_impl(
+                    runtime,
+                    channel_admin,
+                    channel_id="333",
+                    limit_usd="100",
+                    window="monthly",
+                    starts_at=None,
+                    ends_at=None,
+                )
+            else:
+                await _clear_channel_budget_impl(runtime, channel_admin, "333")
+        assert (denied.operation, denied.reason) == ("set_channel_budget", "authz:admin_required")
+    agent_key = dataclasses.replace(channel_admin, agent_id=uuid.uuid4())
+    with pytest.raises(ToolError, match="needs a workspace"):
+        await _clear_channel_budget_impl(runtime, agent_key, _PARENT)
+
+    assert (await _clear_channel_budget_impl(runtime, channel_admin, _PARENT)).cleared
+    async with committing_sessionmaker() as session:
+        assert await channel_budgets.list_channel_budgets(session, tenant_id=tenant.id) == []

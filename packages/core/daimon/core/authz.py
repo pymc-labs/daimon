@@ -29,8 +29,8 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
-and READ_SESSION.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT,
+SET_CHANNEL_BUDGET and READ_SESSION.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -68,6 +68,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   or the workspace default; a channel admin picks the channels they
   administer, except an environment with unrestricted networking in a
   sealed channel, or one holding a sealed thread (`sealed`).
+- **Channel budgets**: a server admin sets or clears any channel's budget; a
+  channel admin those of the channels they administer, never with an agent key.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -168,6 +170,8 @@ class Action(StrEnum):
     # the workspace default). `open_network` says the environment it leaves
     # the channel in has unrestricted networking.
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
+    # Set, clear or raise the budget of one channel (`Place.channel_id`).
+    SET_CHANNEL_BUDGET = "set_channel_budget"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -675,6 +679,15 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # environment covers every thread under the channel, so a sealed one counts.
         if req.open_network and _holds_seal(policy, channel, place, req.origin):
             return _deny("sealed")
+        return ALLOW
+
+    if req.action is Action.SET_CHANNEL_BUDGET:
+        # An admin's own agent key keeps the budget rights it always had.
+        if subject.is_admin:
+            return ALLOW
+        channel = place.parent_channel_id or place.channel_id
+        if subject.via_agent_key or channel not in subject.administered_channel_ids:
+            return _deny("admin_required")
         return ALLOW
 
     if req.action is Action.MINT_CODING_TOKEN:

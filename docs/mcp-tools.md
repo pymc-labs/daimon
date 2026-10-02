@@ -95,10 +95,10 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
+| `clear_channel_budget` | admin only, channel admins too, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
-| `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
+| `set_channel_budget` | admin only, channel admins too, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_environments`
 

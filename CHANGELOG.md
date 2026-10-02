@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Channel admins can set and clear the budgets of the channels they administer with `set_channel_budget` and `clear_channel_budget`; server admins still set any. `daimon channels budget set` and `clear` now record the change in `security_audit_events`.
 - `get_tenant_summary` and `daimon channels list --json` list the tenant's live timed promo credit (`timed_credit`: what is left of each grant and when it ends). `daimon channels list --json` also gives each channel's `sealed` and `protected` flags, which an operator can already read with `daimon tenants access-policy get`; the MCP tool leaves both keys out.
 - In a channel with an active budget, the Discord and Slack status card's summary shows what the budget has left instead of the tenant balance (a DM moved with `/dm` shows its source channel's).
 - An admin's `/billing` panel on Discord, Slack and Teams lists the channel budgets, most used first, with each one's spend and share used. Members see only the invoking channel's budget, as before.

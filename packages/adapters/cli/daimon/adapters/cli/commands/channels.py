@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 import httpx
 import typer
@@ -16,7 +16,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core.authz import Subject
+from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
@@ -38,12 +38,14 @@ from daimon.core.stores.channel_admins import (
     set_channel_admins,
 )
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_summary import ChannelSummary, load_tenant_summary
 from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
+from sqlalchemy.ext.asyncio import AsyncSession
 
 channels_app = typer.Typer(help="Channels: a summary, spend budgets, channel admins and isolation.")
 budget_app = typer.Typer(
@@ -235,8 +237,34 @@ async def budget_set(
             ends_at=spec.ends_at,
             set_by_account_id=None,
         )
+        await _audit_budget_change(
+            session, command="set", tenant_id=tenant_id, platform=platform, channel_id=target
+        )
         status = await load_budget_status(session, budget, now=datetime.now(UTC))
     console.print(f"{platform}:{workspace_id} channel {target}: {describe_budget(status)}")
+
+
+async def _audit_budget_change(
+    session: AsyncSession,
+    *,
+    command: Literal["set", "clear"],
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> None:
+    """Record an operator's budget change in the same transaction, as the MCP tools are."""
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=None,
+        agent_id=None,
+        platform=platform,
+        platform_user_id=None,
+        tool_name=f"cli/channels budget {command}",
+        operation=Action.SET_CHANNEL_BUDGET,
+        outcome="allowed",
+        reason=f"channel:{channel_id}",
+    )
 
 
 @budget_app.command("clear")
@@ -285,6 +313,10 @@ async def budget_clear(
         cleared = await channel_budgets.delete_channel_budget(
             session, tenant_id=tenant_id, platform=platform, channel_id=target
         )
+        if cleared:
+            await _audit_budget_change(
+                session, command="clear", tenant_id=tenant_id, platform=platform, channel_id=target
+            )
     status = "budget cleared" if cleared else "had no budget"
     console.print(f"{platform}:{workspace_id} channel {target}: {status}")
 
