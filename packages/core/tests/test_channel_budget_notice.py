@@ -131,6 +131,26 @@ async def test_setting_or_raising_the_budget_rearms_the_notice(db_session: Async
     assert await _claim(db_session, tenant) is not None, "so is a raised one"
 
 
+async def test_releasing_an_old_window_leaves_the_newer_claim(db_session: AsyncSession) -> None:
+    tenant = await _spent_channel(db_session)
+    august = datetime(2026, 8, 1, tzinfo=UTC)
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=Decimal("-1"), channel_id="chan-1", occurred_at=august
+    )
+    old = await _claim(db_session, tenant)
+    new = await _claim(db_session, tenant, now=august)
+    assert old is not None and new is not None and new.window_key != old.window_key
+
+    await channel_budgets.release_exhausted_notice(
+        db_session, budget_id=old.budget_id, key=old.window_key
+    )
+    assert await _claim(db_session, tenant, now=august) is None, "the newer claim still stands"
+    await channel_budgets.release_exhausted_notice(
+        db_session, budget_id=new.budget_id, key=new.window_key
+    )
+    assert await _claim(db_session, tenant, now=august) is not None, "its own key frees it"
+
+
 async def test_a_failing_notifier_never_raises_and_no_notifier_claims_nothing(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
