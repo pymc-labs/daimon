@@ -322,16 +322,28 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
     assert world.created == [], "nothing was uploaded"
 
 
+_PUBLIC_URL = "https://daimon.example/mcp"
+
+
+@pytest.mark.parametrize("public_url", [None, _PUBLIC_URL], ids=["no-public-url", "public-url"])
 @pytest.mark.parametrize("recorded_policy", ["gated", "open"])
 async def test_a_session_reported_without_its_overrides_confirms_from_the_recorded_tools(
-    db_session_factory: async_sessionmaker[AsyncSession], recorded_policy: str
+    db_session_factory: async_sessionmaker[AsyncSession],
+    recorded_policy: str,
+    public_url: str | None,
 ) -> None:
     """When MA reports the agent's own always_allow tools, the bind's record decides:
-    the gated tools it sent confirm, the agent's ungated ones do not."""
+    the gated tools it sent confirm, the agent's ungated ones do not. With a public
+    URL the agent's `daimon-mcp` is the trusted toolset, gated on add_skill alone,
+    as production runs it."""
     world = await _world(db_session_factory)
+    world.runtime.settings.mcp.public_url = public_url
     world.state.agents["agent_helper"]["tools"] = [_daimon_toolset(gated=False)]
+    if public_url is not None:
+        world.state.agents["agent_helper"]["mcp_servers"] = [
+            {"type": "url", "name": "daimon-mcp", "url": public_url}
+        ]
     agent = BetaManagedAgentsAgent.model_validate(world.state.agents["agent_helper"])
-    policy = ToolSafetyPolicy(enabled=recorded_policy == "gated")
     recorded = desired_snapshot(
         agent,
         hidden_mcp_server_names=frozenset(),
@@ -341,7 +353,8 @@ async def test_a_session_reported_without_its_overrides_confirms_from_the_record
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=policy,
+        tool_safety=ToolSafetyPolicy(enabled=recorded_policy == "gated"),
+        public_url=public_url,
     )
     auth, origin = await _chat_turn(world, live=False)
     await _live_session(
