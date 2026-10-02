@@ -205,6 +205,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--discord-guild-id", action="append", default=[])
     p.add_argument("--discord-turns", type=int, default=20)
     p.add_argument("--discord-concurrency", type=int, default=20)
+    p.add_argument("--discord-watch-seconds", type=int, default=300)
     p.add_argument("--discord-file-every", type=int, default=0)
     p.add_argument("--discord-require-model")
     return p
@@ -217,6 +218,7 @@ def plan(args: argparse.Namespace) -> str:
         f"model={args.model if args.install or args.turn_load else 'n/a'} "
         f"discord={args.discord} discord_turns={args.discord_turns if args.discord else 0} "
         f"discord_concurrency={args.discord_concurrency} discord_model=tenant-default "
+        f"discord_watch_seconds={args.discord_watch_seconds} "
         f"discord_precreated={args.discord_precreated} prompt_set={args.prompt_set} "
         f"arrival_seconds={args.arrival_seconds} max_usd={args.max_usd} "
         f"cleanup={args.cleanup}"
@@ -611,11 +613,12 @@ async def _discord_watch(
     started: datetime,
     created_threads: set[str],
     existing_thread_id: str | None = None,
+    watch_seconds: int = 300,
 ) -> DiscordResult:
     from daimon.core.stores.turn_outcomes import list_for_tenant
 
     result = DiscordResult(message_id, thread_id=existing_thread_id)
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + watch_seconds
     outcome_seen = False
     while time.monotonic() < deadline:
         # At 100 pre-created threads, two-second polling alone would consume
@@ -825,6 +828,7 @@ async def _discord_phase(
                 started,
                 created_threads,
                 existing_thread_id=channel_id if args.discord_precreated else None,
+                watch_seconds=args.discord_watch_seconds,
             )
 
         results: list[DiscordResult] = []
@@ -1107,6 +1111,7 @@ def main() -> None:
         or args.max_usd <= 0
         or not 1 <= args.discord_turns <= 150
         or not 1 <= args.discord_concurrency <= 150
+        or not 1 <= args.discord_watch_seconds <= 900
         or args.discord_file_every < 0
     ):
         raise SystemExit("require tenants >= 1, turns 1-150, arrival >= 0, max-usd > 0")
