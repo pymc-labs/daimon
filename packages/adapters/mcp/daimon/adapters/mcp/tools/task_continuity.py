@@ -9,9 +9,11 @@ has a different id and cannot receive a handoff.
 Neither tool writes channel or workspace routing. A handoff binds one thread;
 who answers everywhere else is untouched. But the thread then runs as the
 destination, with its repo, keys, connectors and memory, so a member may only
-hand a thread to the agent the channel itself answers with. Bringing in any
-other agent is an admin's call, and an agent an operator pinned to other
-channels can't be brought in at all.
+hand a thread to an agent of this channel: the one it answers with, one pinned
+to it, or one of an isolated channel's own agents. Bringing in any other agent
+is a server or channel admin's call, and an agent an operator pinned to other
+channels can't be brought in at all. `daimon.core.thread_handoff` decides and
+writes the switch under the tenant policy lock.
 """
 
 from __future__ import annotations
@@ -26,17 +28,14 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.authz import build_agent_ref
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
     sanitize_requested_work,
 )
-from daimon.core.continuity.handoff import (
-    HandoffRefused,
-    HandoffRefusedInSetupThread,
-    decide_handoff,
-)
+from daimon.core.continuity.handoff import HandoffRefused, HandoffRefusedInSetupThread
 from daimon.core.continuity.messages import render_fresh_start, render_handoff_acknowledged
 from daimon.core.continuity.tool_messages import (
     render_tool_refusal_setup_thread,
@@ -45,16 +44,19 @@ from daimon.core.continuity.tool_messages import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.scope import ScopeContext
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.task_continuations import record_continuation
-from daimon.core.stores.thread_agent_bindings import get_binding, upsert_responder_binding
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     set_pending_unsaved_work,
+)
+from daimon.core.thread_handoff import (
+    HandoffCaller,
+    HandoffDestination,
+    ThreadHandoffRefused,
+    hand_over_thread,
+    render_handoff_refused,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -149,58 +151,12 @@ async def _hand_off_task_impl(
         )
 
     async with runtime.session_factory() as session:
-        reachable = await is_agent_reachable_in_tenant(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_name=destination_name,
-            default=runtime.deployment_default,
-        )
-        binding = await get_binding(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=platform,
-            parent_channel_id=origin.parent_channel_id,
-            thread_id=origin.thread_id,
-        )
-        policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-        # Who the channel answers with, ignoring any thread binding: a member
-        # may hand a thread back to that agent, and to no other.
-        channel_config = await resolve(
-            session,
-            context=ScopeContext(tenant_id=auth.tenant_id, channel_id=origin.parent_channel_id),
-            default=runtime.deployment_default,
-        )
         live_session = await get_live_thread_session(
             session,
             tenant_id=auth.tenant_id,
             platform=platform,
             thread_id=origin.thread_id,
             account_id=auth.account_id,
-        )
-
-    decision = decide_handoff(
-        destination_ma_agent_id=destination.id,
-        destination_name=destination_name,
-        destination_reachable=reachable,
-        existing_binding_kind=binding.kind if binding is not None else None,
-        origin_responder_ma_agent_id=origin.responder_ma_agent_id,
-        # A DM origin runs in no channel, so it is outside every pin.
-        destination_pinned_elsewhere=not authorize(
-            policy,
-            subject=Subject(),
-            action=Action.RUN_AGENT,
-            surface=Surface.HANDOFF,
-            agent=build_agent_ref(destination.name, destination.metadata, destination_name),
-            place=Place.from_origin(
-                parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
-            ),
-        ),
-        destination_answers_channel=channel_config.agent_name == destination_name,
-        caller_is_admin=auth.is_admin,
-    )
-    if isinstance(decision, HandoffRefused):
-        raise ToolError(
-            _refusal_text(decision, channel=_channel_mention(platform, origin.parent_channel_id))
         )
 
     # We cannot know whether the checkout is dirty without spending a turn in
@@ -213,8 +169,6 @@ async def _hand_off_task_impl(
         if live_session is not None and live_session.effective_config is not None
         else None
     )
-    if repo is not None and unsaved_work is None:
-        raise ToolError(render_tool_unsaved_work_question(repo))
 
     queued_work = None if continuation is None else continuation[:MAX_REQUESTED_WORK]
     request = (
@@ -235,29 +189,46 @@ async def _hand_off_task_impl(
         )
     )
 
-    now = datetime.now(UTC)
     try:
-        # One transaction: the confirmation promises both the switch and the
-        # continuation, so a thread must never end up switched with the work
-        # it was told would be picked up missing.
+        # One transaction, decided under the tenant policy lock
+        # (`hand_over_thread`): the confirmation promises both the switch and
+        # the continuation, so a thread must never end up switched with the
+        # work it was told would be picked up missing, and a policy edit
+        # committed before the decision is the one it is decided on.
         async with runtime.session_factory.begin() as session:
+            await hand_over_thread(
+                session,
+                tenant_id=auth.tenant_id,
+                platform=platform,
+                parent_channel_id=origin.parent_channel_id,
+                thread_id=origin.thread_id,
+                caller=HandoffCaller(
+                    account_id=auth.account_id,
+                    channel_admin=ChannelAdminCaller(
+                        platform_user_id=auth.platform_user_id,
+                        role_ids=frozenset(auth.platform_role_ids),
+                        is_server_admin=auth.is_admin,
+                    ),
+                    via_agent_key=auth.agent_id is not None,
+                ),
+                destination=HandoffDestination(
+                    ma_agent_id=destination.id,
+                    name=destination_name,
+                    agent=build_agent_ref(destination.name, destination.metadata, destination_name),
+                ),
+                current_responder_ma_agent_id=origin.responder_ma_agent_id,
+                default=runtime.deployment_default,
+                now=datetime.now(UTC),
+            )
+            if repo is not None and unsaved_work is None:
+                # Raised inside the transaction, so the binding rolls back.
+                raise ToolError(render_tool_unsaved_work_question(repo))
             if unsaved_work is not None and live_session is not None:
                 # The answer outlives this turn: the replacement it governs
                 # happens at this caller's NEXT message, when the destination
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
-            await upsert_responder_binding(
-                session,
-                tenant_id=auth.tenant_id,
-                platform=platform,
-                parent_channel_id=origin.parent_channel_id,
-                thread_id=origin.thread_id,
-                responder_ma_agent_id=destination.id,
-                responder_name=destination_name,
-                created_by_account_id=auth.account_id,
-                now=now,
-            )
             if request is not None:
                 await record_continuation(
                     session,
@@ -273,9 +244,13 @@ async def _hand_off_task_impl(
                     idempotency_key=request.idempotency_key,
                     requested_work=request.requested_work,
                 )
+    except ThreadHandoffRefused as refused:
+        raise ToolError(
+            _refusal_text(
+                refused.refusal, channel=_channel_mention(platform, origin.parent_channel_id)
+            )
+        ) from refused
     except HandoffRefusedInSetupThread as error:
-        # A setup conversation was opened on this location between the decision
-        # and the write; the store re-read it under a row lock and refused.
         raise ToolError(render_tool_refusal_setup_thread(destination_name)) from error
 
     return TaskHandoffResult(
@@ -310,12 +285,20 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
     if refusal.reason == "admin_required":
         return "\n".join(
             [
-                f"{refusal.destination_name} is not the agent this channel answers with, "
-                "and handing a conversation to another agent brings its repository, keys "
-                "and connectors here, so only a workspace or server admin can do it.",
+                f"{refusal.destination_name} is not one of this channel's agents (the one "
+                "it answers with, or one pinned to it), and handing a conversation to "
+                "another agent brings its repository, keys and connectors here, so only "
+                "a server admin or a channel admin of this channel can do it.",
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",
+            ]
+        )
+    if refusal.reason in ("channel_protected", "invoker_not_allowed", "channel_isolated", "sealed"):
+        return "\n".join(
+            [
+                render_handoff_refused(refusal, channel=channel),
+                "Tell the caller. Do not retry.",
             ]
         )
     return "\n".join(
@@ -387,8 +370,9 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
-        already answer in this workspace. Only an admin may hand to an agent other
-        than the one this channel answers with.
+        already answer in this workspace. A member may hand only to an agent of
+        this channel (the one it answers with, or one pinned to it); any other
+        needs a server admin or a channel admin of this channel.
 
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the

@@ -337,8 +337,11 @@ agent. Beyond the pin, whatever an agent can reach (its repo, keys,
 connectors and memory) is also guarded where a member could otherwise borrow
 it:
 
-- `hand_off_task` lets a member hand a thread only to the agent the channel
-  itself answers with; any other destination needs an admin.
+- `hand_off_task` and the Hand over button let a member hand a thread only
+  to an agent of that channel: the one it answers with, one pinned to it, or
+  one of an isolated channel's own agents. Any other destination needs a
+  server admin, or a channel admin of the parent channel when the thread is
+  not sealed (see [Same-thread handoff](#same-thread-handoff)).
 - `create_routine` and `update_routine` let a member schedule only the agent
   they are talking to, or the agent the destination channel answers with.
   Routines are listed and read only by their creator and admins.
@@ -913,6 +916,41 @@ executes — the mapping row stores a `SessionSnapshot` of the configuration the
 session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
+
+### Same-thread handoff
+
+A thread can move to another agent without a new thread. Two triggers:
+
+- Ask the agent in the thread ("hand this to research-bot"). It calls
+  `hand_off_task` with the destination's id. This works on Discord, Slack and
+  Teams.
+- When a channel's agent changes, a thread whose session belongs to the old
+  agent can't run a turn, and its next mention gets a notice instead. On
+  Discord and Slack the notice has a Hand over button that moves the thread to
+  the channel's agent for whoever clicks it. Teams has no button; the notice
+  there says to start a new conversation.
+
+Asking the agent is the default because it is how every other thread change
+works (keys, repo, fresh start). The button exists because no agent can answer
+in that stuck thread, so there is nobody to ask.
+
+Both go through `daimon.core.thread_handoff.hand_over_thread`, which decides
+`authorize(HAND_OFF)` and writes the thread binding in one transaction. It
+takes the tenant policy lock (`lock_access_policy`), then the requester's
+account row FOR KEY SHARE, then the binding row FOR UPDATE, and reads the
+policy after the first lock. A policy edit committed before the switch refuses
+it; an edit that arrives later waits for the commit. The module docstring
+gives the order against every other lock holder.
+
+The switch writes only the binding. On the caller's next message the bind
+replaces the old session with one for the new agent: the old session's
+transcript and files are carried across by the workspace transfer, the
+successor is stamped with the old session's seal ids, memory is read-only when
+the thread is sealed (or a DM with `dm_memory_read_only`), and the old row is
+marked `superseded`. The work is carried only when the new agent could read the
+old session itself from this thread (`authorize(READ_SESSION)`); otherwise the
+new session starts with nothing. A pinned or isolated target is refused by
+admission before any of this runs.
 
 ## Entry points that are not a chat message
 

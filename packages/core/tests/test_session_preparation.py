@@ -1850,3 +1850,264 @@ async def test_a_thread_sealed_with_its_parent_records_both_seals(
 
     assert isinstance(first, PreparedTurn)
     assert _sealed_stamp(transport, first.ma_session_id) == "thread-1,vault"
+
+
+# --- Same-thread handoff: the channel's agent changed under a running thread ---------
+
+
+async def _changed_channel_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    sealed: bool = False,
+) -> tuple[TenantRow, _Transport, TurnDeps, TurnDeps, Any]:
+    """A thread whose first turn ran as `daimon`, then channel-1 switched to research-bot.
+
+    Returns the tenant, the sessions transport, the prepare deps, the admission
+    deps (whose MA serves both agents) and the first prepared turn.
+    """
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.scoped_config_write import set_fields
+    from daimon.core.turn.admission import admit
+    from daimon.testing.factories import make_ledger_entry, make_tenant_config
+    from daimon.testing.ma import MARouter, resolved_agent_env_router
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if sealed:
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(sealed_channel_ids=("channel-1",)),
+        )
+    await db_session.commit()
+    daimon = ma_agent(id=_AGENT_ID, name="daimon", tenant_id=tenant.id)
+    research = ma_agent(id="ag_research", name="research-bot", tenant_id=tenant.id)
+    environment = ma_environment(id=_ENV_ID, name="default", tenant_id=tenant.id)
+    transport = _Transport()
+    _register(transport.state, daimon)
+    _register(transport.state, research)
+    deps = _deps(db_session_factory, transport)
+    router = MARouter()
+    router.add_agent_list(daimon, research)
+    resolved_agent_env_router(daimon, environment, router=router)
+    router.add_agent(research)
+    admission_deps = replace(deps, anthropic=build_fake_anthropic(router.dispatch))
+    first_admission = await admit(
+        admission_deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="channel-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+    account = await _account_of(db_session_factory, first_admission.account_id)
+    first = await _prepare(deps, first_admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="channel-1"),
+            tenant_id=tenant.id,
+            agent_name="research-bot",
+        )
+    return tenant, transport, deps, admission_deps, first
+
+
+async def _account_of(
+    sessionmaker: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> AccountRow:
+    from daimon.core.stores.accounts import get_account
+
+    async with sessionmaker() as session:
+        account = await get_account(session, account_id)
+    assert account is not None
+    return account
+
+
+async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
+    from daimon.core.turn.admission import admit
+
+    return await admit(
+        admission_deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="channel-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+
+
+async def _click_hand_over(admission_deps: TurnDeps, tenant: TenantRow) -> Any:
+    from daimon.core.channel_admins import ChannelAdminCaller
+    from daimon.core.thread_handoff import switch_thread_on_request
+
+    return await switch_thread_on_request(
+        admission_deps.anthropic,
+        admission_deps.sessionmaker,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="channel-1",
+        thread_id="thread-1",
+        ma_agent_id="ag_research",
+        caller=ChannelAdminCaller(platform_user_id="user-1"),
+        default=admission_deps.deployment_default,
+        channel="#channel-1",
+        now=_NOW,
+    )
+
+
+async def test_a_member_hands_the_thread_to_the_channels_new_agent_in_place(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The channel now answers with research-bot. Before the switch every turn in
+    the old thread is refused; after it the next turn runs as research-bot in the
+    same thread, with the old work handed over, and the old session is closed."""
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, db_session_factory
+    )
+    account = await _account_of(db_session_factory, first.admission.account_id)
+
+    stuck = await _admit_next(admission_deps, tenant)
+    assert stuck.agent.id == "ag_research"
+    with pytest.raises(SessionAgentMismatch):
+        await _prepare(deps, stuck, tenant=tenant, account=account)
+
+    outcome = await _click_hand_over(admission_deps, tenant)
+    assert outcome.switched, outcome.text
+
+    carried: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        carried.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(),
+            transfer_file_id=None,
+            transfer_kind="transcript",
+            user_prefix="<previous_session>...</previous_session>",
+        )
+
+    handed = await _prepare(
+        deps,
+        await _admit_next(admission_deps, tenant),
+        tenant=tenant,
+        account=account,
+        transfer=_transfer,
+    )
+    assert isinstance(handed, PreparedTurn)
+    assert handed.admission.agent.id == "ag_research", "the thread now answers as research-bot"
+    assert transport.state.sessions[handed.ma_session_id].agent.id == "ag_research"
+    assert handed.continuity.state == "replaced"
+    assert carried == [first.ma_session_id], "the old conversation was handed over"
+    assert first.mapping_id is not None
+    old = await get_thread_session_by_id(db_session, id=first.mapping_id)
+    assert old is not None and old.status == "superseded", "the old session is closed"
+    assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
+
+    again = await _prepare(
+        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+    )
+    assert isinstance(again, PreparedTurn)
+    assert again.ma_session_id == handed.ma_session_id, "later messages stay with research-bot"
+
+
+async def test_a_sealed_thread_handed_over_keeps_its_seal_and_read_only_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, db_session_factory, sealed=True
+    )
+    account = await _account_of(db_session_factory, first.admission.account_id)
+    assert _sealed_stamp(transport, first.ma_session_id) == "channel-1"
+
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+
+    handed = await _prepare(
+        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+    )
+    assert isinstance(handed, PreparedTurn)
+    assert handed.admission.agent.id == "ag_research"
+    assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1", (
+        "the new session carries the thread's seal ids"
+    )
+    observed = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
+    memory = next(r for r in observed.resources if r.type == "memory_store")
+    assert memory.access == "read_only", "research-bot's memory is read-only in a sealed thread"
+
+
+@pytest.mark.parametrize(
+    ("old_seal", "carried"),
+    [("vault", True), ("vault-elsewhere", False)],
+    ids=["inside-the-seal", "outside-the-seal"],
+)
+async def test_a_handoff_carries_the_old_work_only_to_an_agent_inside_its_seal(
+    old_seal: str,
+    carried: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The old session ran under `old_seal`; the new agent runs in thread-1 under vault.
+    Its transcript reaches the new agent only when the new agent could read it there."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        replace(_sealed(_admission(account=account), seal_id=old_seal), origin_channel_id=old_seal),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+    assert _sealed_stamp(transport, first.ma_session_id) == old_seal
+    successor_agent = _agent(agent_id="ag_successor")
+    _register(transport.state, successor_agent)
+    async with db_session_factory() as session, session.begin():
+        binding = await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="vault",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_successor",
+            responder_name="research-bot",
+            kind="handoff",
+        )
+    calls: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        calls.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
+        )
+
+    handed = await _prepare(
+        deps,
+        _sealed(
+            _admission(account=account, agent=successor_agent, thread_binding_id=binding.id),
+            seal_id="vault",
+        ),
+        tenant=tenant,
+        account=account,
+        transfer=_transfer,
+    )
+
+    assert isinstance(handed, PreparedTurn)
+    assert handed.continuity.state == "replaced"
+    if carried:
+        assert calls == [first.ma_session_id]
+        assert handed.continuity.transfer_kind == "transcript"
+    else:
+        assert calls == [], "nothing from outside the new agent's seal is built or carried"
+        assert handed.continuity.transfer_kind is None
+        assert handed.continuity.user_prefix == ""

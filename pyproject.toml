@@ -212,6 +212,7 @@ source_modules = [
     "daimon.core.teams_threads",
     "daimon.core.tenant_balance",
     "daimon.core.thread_classifier",
+    "daimon.core.thread_handoff",
     "daimon.core.thread_naming",
     "daimon.core.thread_participation",
     "daimon.core.tool_safety",
