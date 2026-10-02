@@ -258,6 +258,17 @@ async def test_agent_default_tools_require_channels_write(
         await _clear_agent_default_impl(runtime, auth, "c1")
 
 
+async def test_agent_default_tools_refuse_the_workspace_default_for_operators(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "channels:write")
+    runtime = _runtime(committing_sessionmaker)
+    with pytest.raises(ToolError, match="changes only a channel's default"):
+        await _set_agent_default_impl(runtime, auth, "helper", None)
+    with pytest.raises(ToolError, match="changes only a channel's default"):
+        await _clear_agent_default_impl(runtime, auth, None)
+
+
 async def test_channel_admin_tools_require_their_scopes(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

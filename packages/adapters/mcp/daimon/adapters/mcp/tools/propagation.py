@@ -81,8 +81,12 @@ class ClearDefaultResult:
 async def _require_scope_admin(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
 ) -> None:
-    """The workspace default needs a server admin; a channel's also admits its channel admins."""
+    """The workspace default needs a server admin; a channel's also admits its channel admins.
+
+    Operator tokens change only channel defaults, never the workspace one."""
     if channel_id is None:
+        if auth.is_operator:
+            raise ToolError("An operator token changes only a channel's default; pass channel_id.")
         _require_admin(auth)
     else:
         await require_channel_admin(runtime, auth, channel_id=channel_id)
