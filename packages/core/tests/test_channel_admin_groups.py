@@ -198,3 +198,21 @@ async def test_channel_admin_dms_reach_a_stored_slack_group_member_only_while_st
         "a member who left the group no longer hears the channel's requests"
     )
     assert await recipients(None) == ["U_GRANTED"], "without a lookup only granted users"
+
+
+async def test_channel_admin_dms_cap_after_dropping_members_who_left_the_group(
+    db_session: AsyncSession,
+) -> None:
+    """Members who left sort first; a cap before the live re-check would keep only them."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0CAP")
+    for n in range(3):
+        await _stored_member(db_session, tenant, f"U_A_LEFT{n}", ["S1"])
+    await _stored_member(db_session, tenant, "U_Z_STAYED", ["S1"])
+    await _grant(db_session, tenant, "S1", [])
+    _, live = _fetcher({"S1": frozenset({"U_Z_STAYED"})})
+
+    found = await channel_admin_user_ids(
+        db_session, tenant_id=tenant.id, platform="slack", channel_id="C1", limit=2, members=live
+    )
+
+    assert found == ["U_Z_STAYED"], "the current member is reached however many have left"

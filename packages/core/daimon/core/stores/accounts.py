@@ -168,13 +168,14 @@ async def list_platform_user_ids(
     *,
     tenant_id: uuid.UUID,
     platform: str,
-    limit: int,
+    limit: int | None,
     admins: bool = False,
     user_ids: Collection[str] = (),
     role_ids: Collection[str] = (),
 ) -> list[str]:
     """Platform user ids of the tenant's stored admins (`admins`), or of the listed
-    users plus anyone whose stored roles overlap `role_ids`; sorted, at most `limit`."""
+    users plus anyone whose stored roles overlap `role_ids`; sorted, at most `limit`
+    (None: all)."""
     if admins:
         match = Account.role == Role.ADMIN.value
     else:

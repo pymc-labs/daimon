@@ -346,22 +346,24 @@ async def channel_admin_user_ids(
 
     The grant's users, plus members whose stored roles or groups match a
     granted one, as of their last chat turn; a Slack group or Teams team match
-    must still hold by `members` now. Sorted, at most `limit`.
+    must still hold by `members` now. Sorted, at most `limit`, counted after
+    that re-check: capped before it, members who left could fill the cap.
     """
     grant = await get_channel_admins(
         session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
     )
     if grant is None or not (grant.user_ids or grant.role_ids):
         return None
+    looked_up = platform in LOOKED_UP_GROUP_PLATFORMS
     found = await list_platform_user_ids(
         session,
         tenant_id=tenant_id,
         platform=platform,
-        limit=limit,
+        limit=None if looked_up else limit,
         user_ids=grant.user_ids,
         role_ids=grant.role_ids,
     )
-    if platform in LOOKED_UP_GROUP_PLATFORMS:
+    if looked_up:
         live = await live_group_member_ids(grant.role_ids, members)
         fold = str.lower if platform == "teams" else str
         found = [uid for uid in found if uid in grant.user_ids or fold(uid) in live]
