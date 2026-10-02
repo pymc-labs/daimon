@@ -48,6 +48,10 @@ def build_cascade_preview_container(
         ex = preview.github_credentials.example or "—"
         n = preview.github_credentials.count
         will_happen_rows.append(f"-# 🔑 Delete **{n}** stored GitHub token(s) (`{ex}`)")
+    if preview.github_user_links.count > 0:
+        will_happen_rows.append(
+            f"-# 🔗 Remove **{preview.github_user_links.count}** GitHub user link(s)"
+        )
     if preview.github_oauth_states.count > 0:
         will_happen_rows.append(
             f"-# 🤝 Remove **{preview.github_oauth_states.count}** GitHub OAuth handshake record(s)"
