@@ -45,7 +45,11 @@ from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
     _list_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.timers import (
+    _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -677,3 +681,33 @@ async def test_an_own_agent_schedules_nothing_outside(
             await _update_routine_impl(
                 runtime, auth, routine_id=elsewhere.id, trigger_message="the client's plans"
             )
+
+
+async def test_a_timer_set_in_an_isolated_channel_lists_only_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A timer's note is the agent's words about C, so listing it from outside, even
+    the same person's own, would carry them out."""
+    world, runtime = await _world(committing_sessionmaker)
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+    for channel, agent_id, name in (
+        (ROOM, "agent_local", "local"),
+        (OTHER, "agent_shared", "shared"),
+    ):
+        await schedule_timer(
+            committing_sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            parent_channel_id=channel,
+            thread_id=channel,
+            requester_account_id=world.account_id,
+            requester_external_user_id="444444444444444444",
+            target_ma_agent_id=agent_id,
+            target_name=name,
+            note=f"check on {name}",
+            fire_at=when,
+        )
+    outside = await _list_timers_impl(runtime, world.auth(executing="agent_shared"))
+    assert [t.note for t in outside] == ["check on shared"], "C's timer stays inside C"
+    inside = await _list_timers_impl(runtime, world.auth(executing="agent_local"))
+    assert [t.note for t in inside] == ["check on local"], "and only C's shows there"
