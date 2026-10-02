@@ -80,7 +80,7 @@ async def test_only_discord_trusts_stored_groups_without_a_lookup() -> None:
     """Slack lets members edit user groups by default; Discord guards roles with Manage Roles."""
     assert {"slack", "teams"} == LOOKED_UP_GROUP_PLATFORMS
     for platform, stands in (("discord", True), ("slack", False), ("teams", False)):
-        kept = await confirm_stored_group_ids(platform, "u1", ["g1"], None)
+        kept = await confirm_stored_group_ids(platform, "u1", ["g1"], None, named={"g1"})
         assert bool(kept) is stands, f"{platform}: a stored group with no lookup"
 
 

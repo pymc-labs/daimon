@@ -505,7 +505,7 @@ async def test_verifier_rechecks_a_stored_slack_group_live(
         await make_platform_principal(
             s, platform="slack", external_id="U1", tenant=tenant, account=account
         )
-        await set_platform_role_ids(s, account.id, ["S1"])
+        await set_platform_role_ids(s, account.id, ["S1", "S_UNGRANTED"])
         await set_channel_admins(
             s,
             tenant_id=tenant.id,
@@ -535,7 +535,9 @@ async def test_verifier_rechecks_a_stored_slack_group_live(
 
     live = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker, group_members=lookup)
     assert await claims(live) == (["C1"], ["S1"]), "still in the group: still C1's admin"
-    assert asked == [("slack", "T0VERIFY", "S1")], "the person's own workspace is asked"
+    assert asked == [("slack", "T0VERIFY", "S1")], (
+        "the person's own workspace is asked, and only about a group some grant names"
+    )
     group["S1"] = frozenset({"U2"})
     assert await claims(live) == ([], []), "removed from the group: no rights before a new turn"
     del group["S1"]

@@ -31,6 +31,7 @@ from daimon.core.channel_admins import (
     GroupMembers,
     GroupMembersFor,
     confirm_stored_group_ids,
+    grant_group_ids,
 )
 from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -171,6 +172,7 @@ class DaimonJWTVerifier(JWTVerifier):
             identity_row.platform_user_id,
             identity_row.platform_role_ids,
             self._group_members(identity_row) if grants else None,
+            named=grant_group_ids(grants),
         )
         administered_channel_ids = sorted(
             administered_channel_ids_for(

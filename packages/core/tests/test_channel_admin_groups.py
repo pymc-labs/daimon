@@ -11,6 +11,7 @@ from daimon.core.channel_admins import (
     GroupLookupFailed,
     GroupMembersCache,
     channel_admin_user_ids,
+    confirm_stored_group_ids,
     load_member_group_ids,
     load_stored_subject,
     member_group_ids,
@@ -247,3 +248,12 @@ async def test_channel_admin_dms_cap_after_dropping_members_who_left_the_group(
     )
 
     assert found == ["U_Z_STAYED"], "the current member is reached however many have left"
+
+
+async def test_only_stored_groups_a_grant_still_names_are_looked_up_again() -> None:
+    """A group no grant names grants nothing, so asking the platform about it is wasted."""
+    asked, fetch = _fetcher({"S1": frozenset({"U1"}), "S_OLD": frozenset({"U1"})})
+
+    kept = await confirm_stored_group_ids("slack", "U1", ["S1", "S_OLD"], fetch, named={"S1"})
+
+    assert (kept, asked) == (frozenset({"S1"}), ["S1"]), "S_OLD is in no grant any more"

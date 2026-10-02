@@ -22,9 +22,11 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.channel_admins import (
+    CHANNEL_ADMIN_PLATFORMS,
     ChannelAdminCaller,
     GroupMembersFor,
     confirm_stored_group_ids,
+    grant_group_ids,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
@@ -37,6 +39,7 @@ from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -171,6 +174,13 @@ async def complete_mcp_oauth_flow(
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
         requester = await get_account_with_tenant(session, account_id=flow.account_id)
+        grants = (
+            await list_channel_admins(
+                session, tenant_id=requester.tenant_id, platform=requester.platform
+            )
+            if requester is not None and requester.platform in CHANNEL_ADMIN_PLATFORMS
+            else []
+        )
     caller = (
         ChannelAdminCaller(platform_user_id=None)
         if requester is None
@@ -181,6 +191,7 @@ async def complete_mcp_oauth_flow(
                 requester.platform_user_id,
                 requester.platform_role_ids,
                 group_members(requester.platform, requester.external_id) if group_members else None,
+                named=grant_group_ids(grants),
             ),
             is_server_admin=requester.role is Role.ADMIN,
         )

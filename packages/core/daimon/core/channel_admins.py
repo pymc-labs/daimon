@@ -23,7 +23,7 @@ import asyncio
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from typing import Final
 
 import structlog
@@ -261,25 +261,34 @@ async def member_group_ids(
     return frozenset(matched)
 
 
+def grant_group_ids(grants: Iterable[ChannelAdminsRow]) -> frozenset[str]:
+    """Every group id some grant names."""
+    return frozenset(group_id for grant in grants for group_id in grant.role_ids)
+
+
 async def confirm_stored_group_ids(
     platform: str | None,
     platform_user_id: str | None,
     stored_ids: Iterable[str],
     members: GroupMembers | None,
+    *,
+    named: Collection[str],
 ) -> frozenset[str]:
     """The stored group ids that still admit the person, for a caller outside a chat turn.
 
     Discord sends roles with every event and guards them with Manage Roles, so
     its stored roles stand. A Slack user group or Teams team is looked up again
     (`members`, cached), so someone who left it, or added themselves where
-    members may edit groups, counts as they are now. No lookup grants nothing.
+    members may edit groups, counts as they are now. Only the groups some
+    grant still names (`named`) are looked up; the rest grant nothing anyway.
+    No lookup grants nothing.
     """
     if platform not in LOOKED_UP_GROUP_PLATFORMS:
         return frozenset(stored_ids)
     if members is None or platform_user_id is None:
         return frozenset()
     user_id = platform_user_id.lower() if platform == "teams" else platform_user_id
-    return await member_group_ids(user_id, stored_ids, members)
+    return await member_group_ids(user_id, (g for g in stored_ids if g in named), members)
 
 
 async def load_member_group_ids(
@@ -296,7 +305,7 @@ async def load_member_group_ids(
     makes no lookup at all.
     """
     grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
-    named = {group_id for grant in grants for group_id in grant.role_ids}
+    named = grant_group_ids(grants)
     if not named:
         return frozenset()
     return await member_group_ids(platform_user_id, named, members)
@@ -351,18 +360,23 @@ async def load_stored_subject(
     account = await get_account(session, account_id)
     if account is None or account.role is Role.ADMIN:
         return build_subject(is_admin=account is not None, platform_user_id=platform_user_id)
-    role_ids = await confirm_stored_group_ids(
-        platform, platform_user_id, account.platform_role_ids, members
+    grants = (
+        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+        if platform in CHANNEL_ADMIN_PLATFORMS
+        else []
     )
+    role_ids = await confirm_stored_group_ids(
+        platform,
+        platform_user_id,
+        account.platform_role_ids,
+        members,
+        named=grant_group_ids(grants),
+    )
+    caller = ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids)
     return build_subject(
         is_admin=False,
         platform_user_id=platform_user_id,
-        administered_channel_ids=await load_administered_channel_ids(
-            session,
-            tenant_id=tenant_id,
-            platform=platform or "",
-            caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
-        ),
+        administered_channel_ids=administered_channel_ids(caller, grants),
     )
 
 
@@ -440,6 +454,7 @@ __all__ = [
     "confirm_stored_group_ids",
     "fit_lines",
     "fold_mentions",
+    "grant_group_ids",
     "is_channel_admin",
     "live_group_member_ids",
     "load_administered_channel_ids",
