@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from daimon.core.errors import SessionRetired as SessionRetired
+from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.stores.thread_sessions import require_writable_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +34,6 @@ async def lock_session_mutation(db: AsyncSession, session_id: str, *, check: boo
 async def session_mutation_fence(
     factory: async_sessionmaker[AsyncSession], session_id: str, *, check: bool = True
 ) -> AsyncIterator[None]:
-    async with factory.begin() as db:
+    async with pool_headroom(factory), factory.begin() as db:
         await lock_session_mutation(db, session_id, check=check)
         yield

@@ -2703,3 +2703,161 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     assert isinstance(result, PreparedTurn)
     assert result.ma_session_id != "sess_missing"
     assert len(transport.paths("GET", "/v1/sessions/sess_missing")) == 1
+
+
+@pytest.mark.parametrize("entry", ["handle", "prepared"])
+async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
+    db_session, db_nullpool_engine, db_schema, monkeypatch, entry
+):
+    """Sol's paused production recheck probe, with preparation and replacement.
+
+    Use the exact default 5+10 pool. Only scheduling and MA transport are
+    controlled; ownership, authorization, retirement and PostgreSQL locks are
+    real. Shorten the pool timeout so the original cycle fails quickly.
+    """
+    from daimon.core import session_preparation_gate
+    from daimon.core.session_mutation import SessionRetired
+    from daimon.core.turn import run as turn_run
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.turn_fakes import RecordingLifecycle
+
+    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, _, first = await _changed_channel_agent(db_session, seed_factory)
+    account = await _account_of(seed_factory, first.admission.account_id)
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"],
+        db_schema,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=2,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    deps = replace(deps, sessionmaker=factory)
+    router = MARouter()
+    router.add_agent_list(first.admission.agent)
+    client = build_fake_anthropic(
+        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
+    )
+    runtime = SimpleNamespace(client=client, session_factory=factory)
+    auth = AuthIdentity(
+        account_id=first.admission.account_id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="user-1",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
+    )
+    real_recheck = _admission_recheck(
+        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def paused_recheck():
+        entered.set()
+        await release.wait()
+        await real_recheck()
+
+    original_decide = turn_run.decide_before_send
+    decisions = 0
+
+    def paused_decide(*args):
+        nonlocal decisions
+        decide = original_decide(*args)
+        decisions += 1
+        first_decision = decisions == 1
+
+        async def checked():
+            if first_decision:
+                entered.set()
+                await release.wait()
+            await decide()
+
+        return checked
+
+    if entry == "prepared":
+        monkeypatch.setattr(turn_run, "decide_before_send", paused_decide)
+
+    async def send(index):
+        if entry == "handle":
+            return await _continue_turn_impl(
+                runtime,
+                auth,
+                first.ma_session_id,
+                f"message {index}",
+                recheck=paused_recheck if index == 0 else real_recheck,
+            )
+
+        async def reseed():
+            return f"message {index}"
+
+        return await turn_run.run_prepared_turn(
+            deps,
+            first,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message=f"message {index}",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            render_interval_s=0.001,
+        )
+
+    async def replacement():
+        async with seed_factory.begin() as db:
+            await request_fresh_start(db, id=first.mapping_id, at=_NOW)
+        return await _prepare(deps, first.admission, tenant=tenant, account=account)
+
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(send(0)))
+        await asyncio.wait_for(entered.wait(), 5)
+        tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
+        # Wait until ALL peers reach the fence: either PostgreSQL wait edges
+        # (unfixed code) or in-memory gate waiters plus PostgreSQL wait edges.
+        async with asyncio.timeout(5):
+            while True:
+                async with seed_factory() as db:
+                    waits = (
+                        await db.execute(
+                            text(
+                                "SELECT count(*) FROM pg_stat_activity "
+                                "WHERE cardinality(pg_blocking_pids(pid)) > 0 "
+                                "AND query LIKE '%pg_advisory_xact_lock%' "
+                                "AND application_name = :schema"
+                            ),
+                            {"schema": db_schema},
+                        )
+                    ).scalar_one()
+                gate = getattr(session_preparation_gate, "_pool_gates", {}).get(engine.pool)
+                queued = len(gate._waiters or ()) if gate is not None else 0
+                if waits + queued == 14:
+                    break
+                await asyncio.sleep(0.01)
+        tasks.append(
+            asyncio.create_task(_prepare(deps, first.admission, tenant=tenant, account=account))
+        )
+        tasks.append(asyncio.create_task(replacement()))
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 15)
+        assert not isinstance(results[0], BaseException), (
+            "fence holder cannot recheck because waiters exhaust its shared pool",
+            results[0],
+        )
+        assert all(
+            not isinstance(r, BaseException) or isinstance(r, SessionRetired) for r in results[:15]
+        ), results
+        assert all(isinstance(r, PreparedTurn) for r in results[15:]), results[15:]
+        assert transport.state.sessions[first.ma_session_id].archived_at is not None
+        assert any(e["type"] == "user.message" for e in transport.state.events[first.ma_session_id])
+    finally:
+        release.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await client.close()
+        await deps.anthropic.close()
+        await engine.dispose()

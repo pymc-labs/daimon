@@ -34,6 +34,7 @@ from daimon.core.handoff_context import (
 )
 from daimon.core.ma import replay_events
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
+from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
@@ -367,7 +368,7 @@ async def _replace_dead_session(
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
 ) -> _Replacement:
-    async with deps.preparation_gate.hold():
+    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker):
         return await _replace_dead_session_locked(
             deps,
             prepared,

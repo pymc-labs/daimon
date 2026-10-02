@@ -53,6 +53,7 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
 )
 from daimon.core.session_mutation import lock_session_mutation
+from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import (
     FreshSessionFactory,
     PreparationStageName,
@@ -502,7 +503,7 @@ async def prepare_session_for_turn(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
-    async with deps.preparation_gate.hold():
+    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker):
         return await _prepare_session_for_turn_locked(
             deps,
             admission,
