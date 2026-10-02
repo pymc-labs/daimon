@@ -289,7 +289,7 @@ class TeamsApp:
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
-        # queued continuation work (Teams cannot list a conversation's history).
+        # queued continuation work (Bot Framework cannot list a chat's history).
         self._last_message_at: dict[str, datetime] = {}
         # Dispatches that found their chat busy, by thread key: the service URL to
         # use and whether the cap holds them back (only wakes; a saved input wins).

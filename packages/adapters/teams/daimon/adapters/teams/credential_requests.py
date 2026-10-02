@@ -532,8 +532,10 @@ class TeamsCredentialRequests:
                 agent_names=agent_pin_names(agent.name, agent.metadata),
                 ma_agent_id=str(agent.id),
                 default=self._runtime.deployment_default,
-                # Teams has no channel admins (see `CHANNEL_ADMIN_PLATFORMS`).
-                caller=ChannelAdminCaller(platform_user_id=None, is_server_admin=is_admin),
+                # Only the requester may submit, so they are the caller.
+                caller=ChannelAdminCaller(
+                    platform_user_id=row.requester_platform_user_id, is_server_admin=is_admin
+                ),
                 is_daimon_managed=managed,
                 # Slack leaves the caller's own sessions out of a skill import's
                 # sharing read, not a repo bind's.
@@ -1044,9 +1046,11 @@ class TeamsCredentialRequests:
                 agent_id=row.agent_id,
                 server_name=row.target,
                 url=row.mcp_server_url,
-                # Teams has no channel admins (see `CHANNEL_ADMIN_PLATFORMS`).
                 platform="teams",
-                caller=ChannelAdminCaller(platform_user_id=None, is_server_admin=is_admin),
+                # Only the requester may submit, so they are the caller.
+                caller=ChannelAdminCaller(
+                    platform_user_id=row.requester_platform_user_id, is_server_admin=is_admin
+                ),
                 default=self._runtime.deployment_default,
                 shares_token=True,
             )

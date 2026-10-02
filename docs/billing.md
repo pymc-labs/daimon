@@ -210,7 +210,7 @@ or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
 budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
 with no row there is no limit, and nothing is created by default. It works
 the same with or without Stripe and for either funding mode. Budgets exist on
-Discord and Slack only; Teams has none.
+Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
