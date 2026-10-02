@@ -9,12 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run of an isolated channel's own agent from the hub or a DM, which only admins and that channel's admins may make, is now gated by and charged to that channel's budget, so closing the channel with a $0 budget stops those runs too.
 - A Teams routine saved before its channel was recorded is placed in the channel its destination id names. Teams ids contain ":", which split the id at the wrong place, so such a routine was treated as outside its channel by the isolation and environment checks.
-- Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations.
+- Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations as `prep_gate`.
 - Compatible session preparation releases its Postgres connection during vault I/O, and the detached turn outcome writer allows ten seconds for a busy pool before logging a failed write.
 
 ### Changed
 
+- **Slack user groups and Teams team owners can be channel admins.** A
+  channel admin grant's `role_ids` now also takes Slack user group ids and a
+  Teams team's Entra group id (whose owners it admits), from
+  `set_channel_admins`, `daimon channels admins set --role` and, on Slack, a
+  user group select in the channel admins form; listings show the groups
+  before the members. Slack and Teams look up only the groups some grant
+  names, each cached for a minute, and a failed lookup grants nothing. Slack
+  needs the new `usergroups:read` bot scope and Teams the `TeamMember.Read.Group`
+  consent, so existing installs reinstall or upload the updated app package.
+- **Forks keep their own uploaded skills.** `fork_agent`, `daimon agents fork`
+  and channel isolation used to leave every skill scoped to the source agent
+  off the copy, so isolating a channel lost the skills uploaded to its agent.
+  The source's own skills are now downloaded and uploaded again under the
+  fork's name, as independent skills with their own ids and upload rows. A
+  skill scoped to another agent is still left off, and one that fails to copy
+  is named while the fork still succeeds.
+- When a channel's budget is used up, its channel admins (or the server admins, when it has none) get one DM per budget window on Discord, Slack and Teams. Setting or raising the budget re-arms it; `DAIMON_BUDGET_NOTICES` turns it off per tenant.
+- `daimon channels budget set` and `clear` now record the change in `security_audit_events`.
+- Promo codes can raise a channel's budget instead of the tenant balance: `daimon promo create --channel-budget` or `create_promo_code(kind="channel_budget")`. Redeeming one in a channel with a budget (from `/billing` there, or `redeem_promo_code` with `channel_id`) adds its amount to that budget's limit for good. Only server admins redeem it, never the channel's own admins.
+- `get_tenant_summary` and `daimon channels list --json` list the tenant's live timed promo credit (`timed_credit`: what is left of each grant and when it ends). `daimon channels list --json` also gives each channel's `sealed` and `protected` flags, which an operator can already read with `daimon tenants access-policy get`; the MCP tool leaves both keys out.
+- In a channel with an active budget, the Discord and Slack status card's summary shows what the budget has left instead of the tenant balance (a DM moved with `/dm` shows its source channel's).
+- An admin's `/billing` panel on Discord, Slack and Teams lists the channel budgets, most used first, with each one's spend and share used. Members see only the invoking channel's budget, as before.
 - Discord opening mentions now get a parent-channel notice when thread naming or creation takes more than three seconds. The notice becomes a thread link or retry guidance; `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S=0` posts it immediately. Discord `runtime.health` now counts 429 retries by route and records the longest retry wait in each window.
 - Postgres pool size, overflow and checkout timeout are configurable per process through `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and `DAIMON_DATABASE__POOL_TIMEOUT`.
 

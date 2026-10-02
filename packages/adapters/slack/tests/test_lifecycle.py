@@ -52,6 +52,7 @@ import dataclasses
 import time
 import types
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -79,7 +80,7 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -209,6 +210,7 @@ def _make_lifecycle(
     render_tables: bool = False,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID | None = None,
+    budget_channel_id: str | None = None,
     ask_human: bool = False,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
@@ -245,6 +247,7 @@ def _make_lifecycle(
         adopt_status_ts=adopt_status_ts,
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
+        budget_channel_id=budget_channel_id,
     )
     return lc, cancel, registered, deregistered
 
@@ -1655,3 +1658,40 @@ async def test_terminal_success_linkifies_emphasized_urls(fake_slack_web_client:
     assert (
         "[https://x.up.railway.app/n/abc](https://x.up.railway.app/n/abc)" in blocks[0]["text"]
     ), "the emphasized bare URL must be rewritten to an explicit [url](url) link"
+
+
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("12.50"))
+    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-1.25"), channel_id="C1")
+    await make_channel_budget(
+        db_session,
+        tenant=tenant,
+        channel_id="C2",
+        window="total",
+        starts_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    await db_session.commit()
+
+    footers: dict[str | None, str] = {}
+    for channel in ("C1", "C2", "C3", None):
+        lc, *_ = _make_lifecycle(
+            fake_slack_web_client,
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            budget_channel_id=channel,
+        )
+        await lc.post_initial()
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+        footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert footers["C1"].endswith("· $3.75 of channel budget left"), "the budget's remainder"
+    for channel in ("C2", "C3", None):
+        assert footers[channel].endswith("· $11.25 left"), (
+            f"{channel}: an inactive or missing budget shows the tenant balance"
+        )

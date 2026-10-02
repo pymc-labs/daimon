@@ -28,6 +28,7 @@ from daimon.adapters.mcp.tools.channel_budgets import (
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.security_audit import capture_decision
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.turn_origins import create_origin
@@ -237,7 +238,7 @@ async def test_mutations_and_listing_are_admin_only(
     async with committing_sessionmaker.begin() as session:
         await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
 
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="(requires|needs) a workspace or server admin"):
         if call == "list":
             await _list_channel_budgets_impl(runtime, member)
         elif call == "set":
@@ -387,3 +388,47 @@ async def test_a_teams_clear_takes_the_threads_channel(
         f"{channel};messageid=17",
     )
     assert (cleared.channel_id, cleared.cleared) == (channel, True)
+
+
+async def test_a_channel_admin_cannot_set_or_clear_even_their_own_channels_budget(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Money stays with server admins: a grant over the channel changes nothing."""
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
+    channel_admin = dataclasses.replace(
+        _auth(tenant, account_id, admin=False),
+        platform_user_id="u-ca",
+        administered_channel_ids=frozenset({_PARENT}),
+    )
+
+    for change, channel in (("set", _PARENT), ("set", _THREAD), ("clear", _PARENT)):
+        with capture_decision() as denied, pytest.raises(ToolError, match="needs a workspace"):
+            if change == "set":
+                await _set_channel_budget_impl(
+                    runtime,
+                    channel_admin,
+                    channel_id=channel,
+                    limit_usd="100",
+                    window="monthly",
+                    starts_at=None,
+                    ends_at=None,
+                )
+            else:
+                await _clear_channel_budget_impl(runtime, channel_admin, channel)
+        assert (denied.operation, denied.reason) == (
+            "set_channel_budget",
+            "authz:admin_required",
+        ), f"the refused {change} is audited"
+    async with committing_sessionmaker() as session:
+        (budget,) = await channel_budgets.list_channel_budgets(session, tenant_id=tenant.id)
+    assert budget.limit_usd == Decimal("5"), "the channel admin changed nothing"
+
+    with capture_decision() as allowed:
+        cleared = await _clear_channel_budget_impl(
+            runtime, _auth(tenant, account_id, admin=True), _PARENT
+        )
+    assert cleared.cleared, "a server admin still clears it"
+    assert (allowed.operation, allowed.denied) == ("set_channel_budget", False), "audited"

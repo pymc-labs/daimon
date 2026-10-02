@@ -18,7 +18,7 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
-from daimon.core.channel_budget import get_channel_budget_status
+from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
@@ -225,4 +225,9 @@ async def load_billing_snapshot(
         timed_credit=timed_credit,
         channel_budget=channel_budget,
         has_redeemable_promo_code=has_redeemable,
+        channel_budgets=tuple(
+            await list_channel_budget_statuses(
+                session, tenant_id=tenant_id, platform="discord", now=now
+            )
+        ),
     )

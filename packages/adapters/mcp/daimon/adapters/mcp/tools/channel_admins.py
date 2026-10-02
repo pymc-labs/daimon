@@ -43,7 +43,7 @@ class ChannelAdmins:
 
     channel_id: str
     role_ids: list[str]
-    """Discord role ids; always empty on Slack and Teams, which have no roles here."""
+    """Group ids: Discord roles, Slack user groups, or Teams teams (their owners)."""
     user_ids: list[str]
 
 
@@ -153,7 +153,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> ChannelAdminsList:
-        """List the channels that have their own admins, with the roles and members
+        """List the channels that have their own admins, with the groups and members
         named for each. For example, list the admins of #support. Requires Manage
         Server (admin).
         """
@@ -175,10 +175,11 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
 
-        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
-        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id; a Slack or Teams thread
-        id names its channel.
+        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
+        Entra object ids. ``role_ids`` names groups whose members all count: Discord
+        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
+        which admits that team's owners. ``channel_id`` MUST be the parent channel's
+        id; a Slack or Teams thread id names its channel.
         """
         return await _set_channel_admins_impl(
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids

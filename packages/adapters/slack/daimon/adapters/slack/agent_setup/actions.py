@@ -101,6 +101,7 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
+from daimon.adapters.slack.channel_admin_groups import list_user_groups
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.errors import render_error
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -113,6 +114,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_reply_button,
 )
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
+from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -396,6 +398,7 @@ async def load_agents_view(
 
 async def load_routing_view(
     runtime: SlackRuntime,
+    client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
@@ -459,6 +462,7 @@ async def load_routing_view(
     )
     environment_picker = await load_environment_picker(
         runtime,
+        client,
         tenant_id=tenant_id,
         answering_map=answering_map,
         channel_id=meta.channel_id,
@@ -555,7 +559,7 @@ async def _update_paged_view(
     target = meta.with_page(max(meta.page + delta, 0))
     view = (
         await load_routing_view(
-            runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
+            runtime, client, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
         )
         if meta.view == "routing"
         else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
@@ -639,6 +643,7 @@ async def _dispatch_panel_action(
     if action_id == panel_views.ACTION_ROUTING:
         view = await load_routing_view(
             runtime,
+            client,
             tenant_id=tenant_id,
             meta=meta.with_view("routing"),
             is_admin=is_admin,
@@ -728,11 +733,18 @@ async def _dispatch_panel_action(
             grant = await get_channel_admins(
                 session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
             )
+        try:
+            groups: dict[str, str] | None = await list_user_groups(client)
+        except GroupLookupFailed:
+            log.warning("slack.agent_setup.channel_admins.groups_unlisted", exc_info=True)
+            groups = None
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=panel_views.build_channel_admins_form(
                 meta=meta.with_view("channel_admins", root_view_id=view_id),
                 user_ids=grant.user_ids if grant else (),
+                group_ids=grant.role_ids if grant else (),
+                groups=groups,
             ),
         )
         return
@@ -786,7 +798,7 @@ async def _dispatch_panel_action(
         if not value or not meta.channel_id:
             return
         subject = await load_picker_subject(
-            runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
         )
         if not await may_pick_environment(
             runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
@@ -818,7 +830,7 @@ async def _dispatch_panel_action(
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
             view=await load_routing_view(
-                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
+                runtime, client, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             ),
         )
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
@@ -852,7 +864,7 @@ async def _dispatch_panel_action(
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
                 view=await load_routing_view(
-                    runtime, tenant_id=tenant_id, meta=meta, is_admin=True
+                    runtime, client, tenant_id=tenant_id, meta=meta, is_admin=True
                 ),
             )
         return

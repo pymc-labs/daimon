@@ -3,8 +3,10 @@
 The copy takes the source's prompt, model, tools, MCP definitions and skills
 from its live MA state, with the default daimon MCP server and base toolset
 guaranteed and the credential guidance applied. It starts with no credentials
-(`agent_lifecycle.strip_credentialed_mcp_servers`) and no skills scoped to
-another agent, which are left off and named. Whether it may be copied is
+(`agent_lifecycle.strip_credentialed_mcp_servers`). Skills scoped to the
+source are uploaded again under the copy's own name, so the two never share a
+skill id; skills scoped to another agent, and any copy that fails, are left
+off and named. Whether it may be copied is
 `authorize(FORK)`'s: an admin's call, and never a pinned agent. The chat
 `fork_agent` tool, the CLI and channel isolation use it.
 """
@@ -16,7 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from anthropic import AsyncAnthropic
+import structlog
+from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
@@ -42,8 +45,11 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skills.add import add_agent_skill
+from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,48 +58,130 @@ _FORK_COPY_FIELDS = frozenset(
 )
 
 
+_log = structlog.get_logger(__name__)
+
+
 @dataclass(frozen=True)
 class AgentCopy:
     agent: BetaManagedAgentsAgent
     dropped_skills: tuple[str, ...]
-    """Skills scoped to an agent (``agent/skill``), left off the copy."""
+    """Skills left off the copy: another agent's, or the source's own that failed to copy."""
+    copied_skills: tuple[str, ...] = ()
+    """The source's own skills, uploaded again under the copy's name."""
 
 
-async def _drop_scoped_skills(
+@dataclass(frozen=True)
+class _OwnSkill:
+    skill_id: str
+    body: str
+    version: str | None
+    upload: UserSkillRow | None
+
+
+@dataclass(frozen=True)
+class _SkillSplit:
+    kept: list[dict[str, object]]
+    own: list[_OwnSkill]
+    dropped: list[str]
+
+
+async def _split_scoped_skills(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
+    source_name: str,
     skills: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+) -> _SkillSplit:
     """Split off the skills scoped to one agent: a copy must not reach into another's."""
     if not any(skill.get("type") == "custom" for skill in skills):
-        return skills, ()
+        return _SkillSplit(skills, [], [])
+    rows = {row.id: row for row in await list_skills_strict(anthropic)}
     body_by_id = {
-        row.id: body
-        for row in await list_skills_strict(anthropic)
+        skill_id: body
+        for skill_id, row in rows.items()
         if (body := strip_tenant_prefix(tenant_id=tenant_id, display_title=row.display_title or ""))
     }
     async with sessionmaker() as session:
         uploads = await list_user_skills_for_tenant(session, tenant_id=tenant_id)
-    owner_by_id = {row.anthropic_id: row.agent_name for row in uploads if row.anthropic_id}
+    upload_by_id = {row.anthropic_id: row for row in uploads if row.anthropic_id}
     agent_names = [
         agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
         for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
     ]
-    kept: list[dict[str, object]] = []
-    dropped: list[str] = []
+    split = _SkillSplit([], [], [])
     for skill in skills:
         skill_id = str(skill.get("skill_id"))
         body = body_by_id.get(skill_id)
+        upload = upload_by_id.get(skill_id)
         owners = skill_owner_candidates(
-            body or "", stored_owner=owner_by_id.get(skill_id), agent_names=agent_names
+            body or "",
+            stored_owner=upload.agent_name if upload is not None else None,
+            agent_names=agent_names,
         )
-        if owners:
-            dropped.append(body or skill_id)
+        if not owners:
+            split.kept.append(skill)
+        elif owners == frozenset({source_name}) and body is not None:
+            pinned = skill.get("version")
+            latest = rows[skill_id].latest_version
+            version = str(pinned) if pinned and pinned != "latest" else latest
+            split.own.append(_OwnSkill(skill_id, body, version, upload))
         else:
-            kept.append(skill)
-    return kept, tuple(dropped)
+            split.dropped.append(body or skill_id)
+    return split
+
+
+async def _no_recheck(_agent: BetaManagedAgentsAgent) -> None:
+    """The copy was authorized as a whole and no channel reaches it yet."""
+
+
+async def _copy_own_skills(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source_name: str,
+    copy: BetaManagedAgentsAgent,
+    new_name: str,
+    own: list[_OwnSkill],
+) -> tuple[list[str], list[str]]:
+    """Upload each of the source's own skills again as `copy`'s: (copied, failed)."""
+    copied: list[str] = []
+    failed: list[str] = []
+    for skill in own:
+        try:
+            if skill.version is None:
+                raise DaimonError(f"{skill.body} has no version to copy.")
+            content = await anthropic.beta.skills.versions.download(
+                skill.version, skill_id=skill.skill_id
+            )
+            try:
+                data = await content.read()
+            finally:
+                await content.close()
+            # A new skill under the copy's title, never a share of the source's id.
+            added = await add_agent_skill(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent=await anthropic.beta.agents.retrieve(copy.id),
+                agent_name=new_name,
+                bundle=bundle_from_upload(data, filename="SKILL.zip"),
+                origin=skill.upload.origin if skill.upload else f"copied from {source_name}",
+                added_by_account_id=skill.upload.added_by_account_id if skill.upload else None,
+                recheck=_no_recheck,
+            )
+        except (DaimonError, APIError) as exc:
+            _log.warning(
+                "agent_fork.skill_copy_failed",
+                tenant_id=str(tenant_id),
+                skill_id=skill.skill_id,
+                error=type(exc).__name__,
+            )
+            failed.append(skill.body)
+            continue
+        copied.append(f"{new_name}/{added.name}")
+    return copied, failed
 
 
 async def copy_agent(
@@ -155,16 +243,32 @@ async def copy_agent(
         tools=cast("list[dict[str, object]] | None", fork_params.get("tools")),
     )
     fork_params["mcp_servers"], fork_params["tools"] = servers, tools
-    skills, dropped = await _drop_scoped_skills(
+    split = await _split_scoped_skills(
         anthropic,
         sessionmaker,
         tenant_id=tenant_id,
+        source_name=source_name,
         skills=cast("list[dict[str, object]]", fork_params.get("skills") or []),
     )
     if "skills" in fork_params:
-        fork_params["skills"] = skills
+        fork_params["skills"] = split.kept
     created = await anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]  # a validated copy of the source's own create fields
-    return AgentCopy(created, dropped)
+    if not split.own:
+        return AgentCopy(created, tuple(split.dropped))
+    copied, failed = await _copy_own_skills(
+        anthropic,
+        sessionmaker,
+        tenant_id=tenant_id,
+        source_name=source_name,
+        copy=created,
+        new_name=new_name,
+        own=split.own,
+    )
+    return AgentCopy(
+        await anthropic.beta.agents.retrieve(created.id),
+        (*split.dropped, *failed),
+        tuple(copied),
+    )
 
 
 async def fork_agent(

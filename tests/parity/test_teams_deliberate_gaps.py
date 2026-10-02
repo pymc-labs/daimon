@@ -112,7 +112,7 @@ def test_a_teams_setup_conversation_lives_inside_its_chat() -> None:
 def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     granted = manifest["authorization"]["permissions"]["resourceSpecific"]
-    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group"], (
+    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group", "TeamMember.Read.Group"], (
         "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
     )
 

@@ -218,6 +218,7 @@ async def test_members_get_no_select_and_no_environment_listing(
 
     view = await load_routing_view(
         _runtime(db_session_factory, tenant_id, calls),
+        _client(),
         tenant_id=tenant_id,
         meta=META,
         is_admin=False,

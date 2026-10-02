@@ -41,6 +41,7 @@ from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     store_inline_pat,
 )
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
@@ -51,7 +52,6 @@ from daimon.core.agent_pins import (
     consume_form_unless_pinned,
     request_pin_refusal,
 )
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
@@ -267,7 +267,9 @@ async def _replacement_refused_at_submit(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            caller=ChannelAdminCaller(platform_user_id=user_id),
+            caller=await channel_admin_caller(
+                runtime, client, tenant_id=row.tenant_id, user_id=user_id, is_admin=False
+            ),
             caller_account_id=row.account_id,
         )
     outcome = decide_operation("key_replace", is_admin=is_admin, target=facts)
@@ -298,9 +300,12 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="slack",
-        caller=ChannelAdminCaller(
-            platform_user_id=user_id,
-            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        caller=await channel_admin_caller(
+            runtime,
+            client,
+            tenant_id=row.tenant_id,
+            user_id=user_id,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
         ),
         default=runtime.deployment_default,
         shares_token=True,

@@ -68,6 +68,8 @@ oauth_config:
       - files:write
       - channels:read
       - groups:read
+      # Channel admin grants that name a user group.
+      - usergroups:read
     # Requested only when a member opts in via "Connect Slack"; reads then run
     # with that member's own permissions. See docs/slack.md for the trust model.
     user:

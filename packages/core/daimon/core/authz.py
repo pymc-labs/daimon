@@ -30,7 +30,8 @@ policy. Two limits to check when adding a rule:
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
 grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
-and READ_SESSION.
+and READ_SESSION. SET_CHANNEL_BUDGET is the counter-example: money stays with
+server admins, so a grant never counts there.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -72,6 +73,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   admin's, even on a channel they administer.
 - **Archiving an isolation copy**: a server admin's call; which copies may go
   is `daimon.core.isolation_copies`'s.
+- **Channel budgets**: only a server admin sets, clears or raises a channel's
+  budget; a channel admin may not, even for the channels they administer.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -177,6 +180,8 @@ class Action(StrEnum):
     SET_CHANNEL_PROTECTION = "set_channel_protection"
     # Archive the copy an isolated channel was given, as that channel closes.
     ARCHIVE_ISOLATION_COPY = "archive_isolation_copy"
+    # Set, clear or raise the budget of one channel (`Place.channel_id`).
+    SET_CHANNEL_BUDGET = "set_channel_budget"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -697,6 +702,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
         return _deny("admin_required")
+    if req.action is Action.SET_CHANNEL_BUDGET:
+        # Money stays with server admins; an admin's own agent key keeps the
+        # budget rights it always had.
+        return ALLOW if subject.is_admin else _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:
         if subject.is_admin and not subject.via_agent_key:

@@ -1731,7 +1731,9 @@
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
-        at the end. Redemption is open between ``redeem_starts_at`` and
+        at the end. ``channel_budget`` codes add the amount to one channel's
+        budget limit for good instead of the balance; that channel's admins
+        may redeem them too. Redemption is open between ``redeem_starts_at`` and
         ``redeem_ends_at`` when given (a timed code's defaults to its credit
         end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
         only in this result.
@@ -1768,6 +1770,7 @@
             'enum': list([
               'credit',
               'timed',
+              'channel_budget',
             ]),
             'type': 'string',
           }),
@@ -2610,8 +2613,9 @@
         Lists every channel with its own agent or environment setting, a
         spending budget, channel admins or isolation, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
-        limit, window and spend (``budget`` is null without one). Money is a
-        decimal string.
+        limit, window and spend (``budget`` is null without one), and the
+        live timed promo credit with when each grant ends. Money is a decimal
+        string.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2845,7 +2849,7 @@
     }),
     'list_channel_admins': dict({
       'description': '''
-        List the channels that have their own admins, with the roles and members
+        List the channels that have their own admins, with the groups and members
         named for each. For example, list the admins of #support. Requires Manage
         Server (admin).
       ''',
@@ -3718,11 +3722,24 @@
         per server or workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        Manage Server (Discord) or workspace admin (Slack).
+        Manage Server (Discord) or workspace admin (Slack). A channel budget
+        code raises one channel's budget limit instead: pass that channel's
+        ``channel_id`` (the id from <channel role="parent_channel">).
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'code': dict({
             'type': 'string',
           }),
@@ -4624,10 +4641,11 @@
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
         
-        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
-        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id; a Slack or Teams thread
-        id names its channel.
+        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
+        Entra object ids. ``role_ids`` names groups whose members all count: Discord
+        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
+        which admits that team's owners. ``channel_id`` MUST be the parent channel's
+        id; a Slack or Teams thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,

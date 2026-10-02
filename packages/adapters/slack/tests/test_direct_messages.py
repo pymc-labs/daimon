@@ -41,6 +41,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     monkeypatch.setattr(dm_module, "require_dm_enabled", AsyncMock())
     monkeypatch.setattr(dm_module, "sealed_channel_ids", AsyncMock(return_value=frozenset()))
     monkeypatch.setattr(dm_module, "admit", admit)
+    monkeypatch.setattr(dm_module, "user_group_ids", AsyncMock(return_value=frozenset()))
     start_dm = AsyncMock()
     monkeypatch.setattr(dm_module, "start_dm", start_dm)
 

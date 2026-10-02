@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import httpx
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -38,6 +39,8 @@ class SlackRuntime:
     # The MCP token form's live check; None (tests) means "do not probe".
     # Production wires `daimon.core.mcp_oauth.probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
+    # Channel admin user groups' members, kept briefly (`channel_admin_groups`).
+    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
 
 
 def resolve_bot_display_name(settings: Settings) -> str:

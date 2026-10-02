@@ -10,6 +10,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -163,6 +164,11 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 external_user_id=user_id,
                 channel_id=channel_id,
                 role=role,
+                platform_role_ids=()
+                if role is Role.ADMIN
+                else sorted(
+                    await user_group_ids(runtime, client, tenant_id=tenant_id, user_id=user_id)
+                ),
                 is_dm=True,
                 dm_source_channel_id=channel_id,
                 now=datetime.now(UTC),

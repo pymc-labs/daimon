@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
@@ -24,6 +25,7 @@ from daimon.adapters.teams import (
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
+from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_settings import ChannelSettingsDialog
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
@@ -245,6 +247,9 @@ def create_teams_http_service(
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
+    runtime = dataclasses.replace(
+        runtime, team_owners=functools.partial(fetch_team_owner_ids, graph)
+    )
     installs = TeamInstalls(
         runtime.sessionmaker,
         groups,

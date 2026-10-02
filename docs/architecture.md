@@ -136,8 +136,12 @@ config). The order is load-bearing and documented as such in the module:
 9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
-   no budget. The channel is carried on `Admission.channel_id` so every debit
-   for the turn is attributed to it.
+   no budget. An isolated channel's own agent counts toward that channel
+   wherever an exempt caller runs it (`isolation_owner`). The channel is
+   carried on `Admission.channel_id` so every debit
+   for the turn is attributed to it. The window's first refusal also
+   DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
+   (`daimon.core.channel_budget_notice`).
 
 The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
@@ -325,6 +329,7 @@ agent's prompt, skills and connectors under a name with no pin. A fork also
 starts with no credentials (no GitHub access, repo binding or proof, and no
 agent-wide MCP token), so copying an agent never hands out another project's
 access; MCP servers that only work with a stored token are left off the copy.
+The source's own uploaded skills are copied as new skills of the fork's.
 
 An MCP or hub turn (`start_turn`, `ask`, `continue_turn`, on a new session or
 a resumed one) runs in no channel, so it is outside every pin, as a DM is: the
@@ -405,19 +410,25 @@ CHANNEL_ID [--protect/--unprotect] [--seal/--unseal]`
 operator tokens may, never a channel admin, and an isolated channel stays
 sealed until its isolation ends.
 
-**Channel admins.** A tenant can name, per channel, roles and members who run
+**Channel admins.** A tenant can name, per channel, groups and members who run
 that channel on top of the server admins (`channel_admins`,
-`packages/core/daimon/core/channel_admins.py`). `admit()` stores the member's
-live role ids on the account (`accounts.platform_role_ids`) beside the role, so
-MCP tools test a grant without asking the platform; Slack and Teams have no
-roles, so their grants are by user id (on Teams the Entra object id). A channel admin may do what a server admin may for
+`packages/core/daimon/core/channel_admins.py`). A group is a Discord role, a
+Slack user group, or a Teams team, whose owners it admits; a Teams member is
+named by Entra object id. Discord sends the member's roles with each event.
+Slack and Teams look up only the groups some grant names
+(`usergroups.users.list`; Graph's team owner list under the
+`TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
+grants nothing. `admit()` stores the member's matched group ids on the account
+(`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
+without asking the platform. A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
 and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent. A `/dm` conversation counts as the channel it was
+channels' default agent (never a budget or the tenant balance, which stay
+with server admins: `SET_CHANNEL_BUDGET`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
@@ -578,8 +589,11 @@ absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
 uploaded under the agent-scoped title, never the shared library. A name a
 shared or built-in skill already holds, or one that would load under the same
-folder as an attached skill, is refused. A fork drops agent-scoped skills
-(`copy_agent`), but one attached by id or kept by an older fork may still be
+folder as an attached skill, is refused. A fork (`copy_agent`, also behind
+channel isolation) uploads the source's own skills again under the fork's
+title and upload row, so the two never share a skill id; another agent's
+skill, or one that fails to copy, is left off and named, and the fork still
+succeeds. One attached by id or kept by an older fork may still be
 shared, so a skill another agent also has attached is never versioned; the
 upload must take a new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
 origin is `owner/repo/path@branch`, never the URL as typed) and the adding
@@ -961,7 +975,9 @@ against.
   drive a session directly. They do not use the chokepoint either; they re-run
   the same balance and cap gates through `_admit` in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py` and create
-  sessions via `daimon.core.sessions.create_session`. The billed media tool
+  sessions via `daimon.core.sessions.create_session`. A run of an isolated
+  channel's own agent, a hub run by an admin or that channel's admin
+  included, is gated by and charged to that channel's budget. The billed media tool
   runs the same gates, then the budget of the channel named by the calling
   turn's `origin_context_id`, and charges its spend to that channel.
 - **`daimon run`**, in
@@ -1048,7 +1064,9 @@ codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
 button, shown only while a code is redeemable, and a modal), the Teams
 `billing` card (a code field and button, shown the same way) or with the MCP
 tool `redeem_promo_code`; each surface calls
-`daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
+`daimon.core.promo_credit.redeem_promo_code`. A channel budget code raises
+the invoking channel's budget limit; only server admins redeem one
+(`SET_CHANNEL_BUDGET`), never a channel admin. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
 
@@ -1348,7 +1366,10 @@ registered and expire too, while older jti-less ones keep working.
 `get_tenant_summary` lists every channel with a default, a budget, admins or
 isolation, and `channels[].isolated` says whether it is isolated. Its read is
 `daimon.core.tenant_summary`, which `daimon channels list PLATFORM
-WORKSPACE_ID [--json]` prints too, with the same JSON.
+WORKSPACE_ID [--json]` prints too, with the same JSON plus each channel's
+`sealed` and `protected`. The MCP tool omits those two keys: no other MCP or
+chat path shows every channel's seal or protection. `timed_credit` lists the
+live timed promo credit.
 `set_channel_isolation` with an operator token acts as that admin: the copy
 it may make is an admin's fork, and its seal and pin writes are the same as
 the panel's.

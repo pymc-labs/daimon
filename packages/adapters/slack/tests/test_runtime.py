@@ -34,9 +34,11 @@ class TestSlackRuntime:
             "turn_deps",
             "deployment_default",
             "mcp_token_probe",
+            "group_members",
         }, (
             "expected exactly settings/anthropic/sessionmaker/billing_config/http_client/"
-            f"resolver_cache/turn_deps/deployment_default/mcp_token_probe fields, got {fields}"
+            f"resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members fields, "
+            f"got {fields}"
         )
 
     def test_frozen(self) -> None:

@@ -586,6 +586,15 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_channel_protection" not in await _search(
         app, channel_admin, "protect or seal channel"
     ), "protection and seals stay with server admins"
+    for tool, query in (
+        ("set_channel_budget", "set channel budget"),
+        ("clear_channel_budget", "clear channel budget"),
+        ("list_channel_budgets", "list channel budgets"),
+        ("redeem_promo_code", "redeem promo code"),
+    ):
+        assert f"### {tool}" not in await _search(app, channel_admin, query), (
+            f"{tool} stays with server admins"
+        )
     assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins"), (
         "naming channel admins stays with server admins"
     )

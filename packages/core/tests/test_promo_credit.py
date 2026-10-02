@@ -9,7 +9,9 @@ from typing import Any
 
 import pytest
 from daimon.core._models import TenantLedger
+from daimon.core.authz import Subject
 from daimon.core.promo_codes import (
+    PromoCodeError,
     PromoCodeTerms,
     build_promo_code_terms,
     hash_promo_code,
@@ -19,6 +21,7 @@ from daimon.core.promo_credit import (
     REDEEM_FAILURE_LIMIT,
     REDEEM_FAILURE_WINDOW,
     ActiveTimedCredit,
+    BudgetChannel,
     PromoRedeemed,
     PromoRedeemRefused,
     PromoRedeemResult,
@@ -28,8 +31,9 @@ from daimon.core.promo_credit import (
 from daimon.core.promo_settlement import LATE_SPEND_GRACE, PromoSettlement, settle_promo_credit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.channel_budgets import get_channel_budget
 from daimon.core.stores.domain import PromoCodeRow, TenantRow
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -611,4 +615,139 @@ async def test_a_rejected_row_in_a_full_batch_is_passed_over_by_the_next(
     )
     assert await tenant_ledger.get_balance(db_session, tenant_id=second.id) == 0, (
         "the rejected grant should credit nothing"
+    )
+
+
+async def _channel_code(session: AsyncSession, code: str = "CHANNEL-RAISE-26") -> PromoCodeRow:
+    return await _create(session, code, amount_usd=Decimal("4"), channel_budget=True)
+
+
+async def test_a_channel_budget_code_raises_one_channels_limit_and_leaves_the_balance(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    code = await _channel_code(db_session)
+    await db_session.commit()
+    here = BudgetChannel(platform=tenant.platform, channel_id="C1")
+    server_admin = Subject(is_admin=True, platform_user_id="U1")
+
+    result = await redeem_promo_code(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code="CHANNEL-RAISE-26",
+        now=T0,
+        channel=here,
+        redeemer=server_admin,
+    )
+
+    assert isinstance(result, PromoRedeemed), result
+    assert (result.kind, result.channel_id, result.channel_limit_usd) == (
+        "channel_budget",
+        "C1",
+        Decimal("9"),
+    ), "the limit rises by the code's amount"
+    async with db_session_factory() as s:
+        assert await tenant_ledger.get_balance(s, tenant_id=tenant.id) == Decimal("0"), (
+            "the balance is untouched"
+        )
+        stored = await promo_store.list_redemptions(s, promo_code_id=code.id)
+    assert [r.channel_id for r in stored] == ["C1"], "the redemption names the channel"
+    again = await redeem_promo_code(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code="CHANNEL-RAISE-26",
+        now=T0,
+        channel=BudgetChannel(platform=tenant.platform, channel_id="C2"),
+    )
+    assert again == PromoRedeemRefused("already_redeemed"), "once per tenant, like any code"
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "redeemer", "credit_code", "reason"),
+    [
+        (None, None, False, "needs_channel"),
+        ("C2", None, False, "no_channel_budget"),
+        (
+            "C1",
+            Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C2"})),
+            False,
+            "not_allowed",
+        ),
+        ("C1", Subject(platform_user_id="U1"), False, "not_allowed"),
+        (
+            "C1",
+            Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"})),
+            False,
+            "not_allowed",
+        ),
+        (
+            "C1",
+            Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"})),
+            True,
+            "not_allowed",
+        ),
+    ],
+    ids=[
+        "no-channel",
+        "no-budget",
+        "other-channels-admin",
+        "member",
+        "own-channels-admin",
+        "channel-admin-credit-code",
+    ],
+)
+async def test_channel_budget_and_credit_codes_refuse_the_wrong_redeemer(
+    db_session: AsyncSession,
+    db_session_factory: Factory,
+    channel_id: str | None,
+    redeemer: Subject | None,
+    credit_code: bool,
+    reason: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    if credit_code:
+        await _create(db_session, "CHANNEL-RAISE-26")
+    else:
+        await _channel_code(db_session)
+    await db_session.commit()
+
+    result = await redeem_promo_code(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code="CHANNEL-RAISE-26",
+        now=T0,
+        channel=None if channel_id is None else BudgetChannel(tenant.platform, channel_id),
+        redeemer=redeemer,
+    )
+
+    assert result == PromoRedeemRefused(reason), "refused"  # type: ignore[arg-type]
+    async with db_session_factory() as s:
+        budget = await get_channel_budget(
+            s, tenant_id=tenant.id, platform=tenant.platform, channel_id="C1"
+        )
+        failures = await promo_store.count_redeem_failures(s, tenant_id=tenant.id, since=T0 - H)
+        balance = await tenant_ledger.get_balance(s, tenant_id=tenant.id)
+    assert budget is not None and budget.limit_usd == Decimal("5"), "the limit is unchanged"
+    assert (failures, balance) == (1, Decimal("0")), "counted for throttling, nothing granted"
+
+
+def test_a_code_is_never_both_timed_and_a_channel_budget_raise() -> None:
+    with pytest.raises(PromoCodeError, match="not both"):
+        build_promo_code_terms(
+            amount_usd=Decimal("1"),
+            timed=True,
+            channel_budget=True,
+            credit_starts_at=T0,
+            credit_ends_at=T0 + H,
+        )
+    terms = build_promo_code_terms(amount_usd=Decimal("1"), timed=False, channel_budget=True)
+    assert (terms.kind, terms.credit_starts_at, terms.credit_ends_at) == (
+        "channel_budget",
+        None,
+        None,
     )

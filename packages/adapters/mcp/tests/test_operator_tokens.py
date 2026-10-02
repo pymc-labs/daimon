@@ -13,9 +13,11 @@ import jwt as pyjwt
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.security_audit import list_events
 from daimon.testing import MARouter, build_fake_anthropic, ma_environment
 from daimon.testing.asgi import call_mcp_tool, mcp_session
@@ -267,3 +269,27 @@ async def test_operator_calls_are_rate_limited_and_audited(
         ("denied", "operator", jti, None),
     ], "each call is audited with the token's kind, jti and the scope checked"
     assert all(e.platform_user_id == "u-admin" for e in calls), "it acts as the admin"
+
+
+async def test_the_tenant_summary_sent_to_an_operator_has_no_seal_or_protection_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _jti, token = await _operator_token(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker() as s, s.begin():
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c3",),
+                isolated_channel_ids=("c3",),
+                agent_channel_pins={"local": ("c3",)},
+            ),
+        )
+
+    result = await call_mcp_tool(
+        _make_app(committing_sessionmaker), token=token, name="get_tenant_summary"
+    )
+
+    text = _text(result)
+    assert "'channel_id': 'c3'" in text and "timed_credit" in text, f"the summary: {result}"
+    assert "sealed" not in text and "protected" not in text, "neither key is on the wire"

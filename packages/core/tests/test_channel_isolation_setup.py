@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -36,9 +37,11 @@ from daimon.core.defaults.metadata import (
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -508,11 +511,12 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
         await fork("team-beta")
 
 
-async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
+async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_skills(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The copy an isolated channel gets holds no token and reaches into no other
-    agent's skills; the skills left off are named."""
+    """The copy an isolated channel gets holds no token, gets the source's own
+    uploaded skills as new skills of its own, reaches into no other agent's
+    skills, and names every skill it left off, including one that failed to copy."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
     source = ma_agent(
@@ -536,28 +540,53 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
             for name in ("crm", "docs")
         ],
         skills=[
-            {"type": "custom", "skill_id": "skill_scoped", "version": "1"},
-            {"type": "custom", "skill_id": "skill_library", "version": "1"},
+            {"type": "custom", "skill_id": skill_id, "version": "1"}
+            for skill_id in ("skill_own", "skill_broken", "skill_other", "skill_library")
         ],
     )
     state = FakeMAState()
     state.agents[source.id] = source.model_dump(mode="json")
-    skills = [
-        SkillListResponse(
+
+    def skill_row(skill_id: str, title: str) -> dict[str, Any]:
+        return SkillListResponse(
             id=skill_id,
             type="custom",
-            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name=body),
+            display_title=title,
             latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
             source="custom",
         ).model_dump(mode="json")
-        for skill_id, body in (("skill_scoped", "shared/notes"), ("skill_library", "notes-lib"))
+
+    skills = [
+        skill_row(skill_id, tenant_scoped_display_title(tenant_id=tenant.id, name=body))
+        for skill_id, body in (
+            ("skill_own", "shared/notes"),
+            ("skill_broken", "shared/broken"),
+            ("skill_other", "other/tips"),
+            ("skill_library", "notes-lib"),
+        )
     ]
+    notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
+    downloads: list[str] = []
 
     def skills_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/skills":
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/skills":
             return list_response(skills)
+        if request.method == "POST" and path == "/v1/skills":
+            found = re.search(rb'name="display_title"\r\n\r\n([^\r]+)', request.content)
+            assert found is not None, "skills.create must send a display_title"
+            created = skill_row(f"sk_new_{len(skills)}", found.group(1).decode())
+            skills.append(created)
+            return httpx.Response(200, json=created)
+        if request.method == "GET" and path.endswith("/content"):
+            downloads.append(path)
+            if "skill_own" in path:
+                return httpx.Response(200, content=notes.zip_bytes)
+            return httpx.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
         raise NotHandled
 
     client = build_fake_anthropic(combine_handlers(skills_handler, make_fake_ma_handler(state)))
@@ -569,6 +598,22 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
         mcp_server_url="https://crm.example.com/mcp",
         plaintext_token="tok",
     )
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_src"),
+        agent_name="shared",
+        name="notes",
+        source_repo_url="",
+        source_repo_branch="",
+        source_path="",
+        content_hash=notes.preview.content_hash,
+        anthropic_id="skill_own",
+        anthropic_latest_version="1",
+        source="upload",
+        origin="pasted",
+    )
+    await db_session.commit()
 
     copy = await fork_agent(
         client,
@@ -583,10 +628,30 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
     assert [server.name for server in copy.agent.mcp_servers] == ["docs"], (
         "a server backed by the source's stored token is left off the copy"
     )
-    assert [skill.skill_id for skill in copy.agent.skills] == ["skill_library"], (
-        "a skill scoped to the source agent is left off; a library skill is kept"
+    new_id = skills[-1]["id"]
+    assert skills[-1]["display_title"] == tenant_scoped_display_title(
+        tenant_id=tenant.id, name="notes", agent_name="team-alpha"
+    ), "the source's own skill is uploaded again under the copy's name"
+    assert {skill.skill_id for skill in copy.agent.skills} == {"skill_library", new_id}, (
+        "the copy keeps library skills and gets a new id for its own; it never shares skill_own"
     )
-    assert copy.dropped_skills == ("shared/notes",)
+    assert copy.copied_skills == ("team-alpha/notes",), copy.copied_skills
+    assert copy.dropped_skills == ("other/tips", "shared/broken"), (
+        "another agent's skill and the one that failed to download are named, not copied"
+    )
+    assert len(downloads) == 2, "only the source's own skills are downloaded"
+    fork_id = copy.agent.id
+    row = await load_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=fork_id),
+        agent_name="team-alpha",
+        name="notes",
+    )
+    assert row is not None and row.source == "upload" and row.anthropic_id == new_id, (
+        "the copy's upload row names the copy, so isolation's listing filters see it as its own"
+    )
+    assert row.origin == "pasted", "the copy keeps where the skill came from"
 
 
 def test_a_pinned_agent_is_never_offered_as_a_copy() -> None:

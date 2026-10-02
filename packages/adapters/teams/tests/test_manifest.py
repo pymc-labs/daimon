@@ -53,5 +53,9 @@ def test_manifest_requests_channel_message_consent_for_the_bot_app() -> None:
     assert manifest["webApplicationInfo"]["id"] == manifest["id"], "RSC is granted to the bot app"
     assert manifest["webApplicationInfo"]["resource"], "Teams rejects RSC without a resource"
     assert manifest["authorization"]["permissions"]["resourceSpecific"] == [
-        {"name": "ChannelMessage.Read.Group", "type": "Application"}
-    ], "only channel messages; files need tenant-wide consent, which daimon does not ask"
+        {"name": "ChannelMessage.Read.Group", "type": "Application"},
+        {"name": "TeamMember.Read.Group", "type": "Application"},
+    ], (
+        "channel messages and the team's owners only; files need tenant-wide consent, "
+        "which daimon does not ask"
+    )

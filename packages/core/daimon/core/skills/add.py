@@ -6,10 +6,10 @@ library skill (`{t8}-{name}`); a name that would mount beside one of those is
 refused. Its `user_skills` row is `source="upload"` under the agent's derived
 identity, so a later skill-repo sync never replaces or re-attaches it.
 
-A fork drops agent-scoped skills (`copy_agent`), but one attached by id, or
-kept by an older fork, may still be held by another agent, so a skill id
-another agent also holds is never given a new version: that would change the
-other agent too.
+A fork uploads the source's own skills again under its own name
+(`copy_agent`), but one attached by id, or kept by an older fork, may still be
+held by another agent, so a skill id another agent also holds is never given a
+new version: that would change the other agent too.
 
 Who may add a skill is the caller's decision (`operation_policy`'s
 `skill_add` and the pin rule); the caller passes it as `recheck`, which runs
@@ -419,8 +419,8 @@ async def _refuse_mount_clash(
 ) -> None:
     """Refuse before uploading when a skill already on the agent mounts at `name`.
 
-    Forks now drop agent-scoped skills (`copy_agent`), but one attached by id,
-    or kept by an older fork, as `{other}/name` would sit beside this agent's
+    A fork gets its own copy of the source's skills (`copy_agent`), but one
+    attached by id, or kept by an older fork, as `{other}/name` would sit beside this agent's
     `{agent}/name` and break its sessions.
     """
     bodies: dict[str, str] = {}

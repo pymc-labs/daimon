@@ -25,8 +25,10 @@ import anthropic
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import enable_files_card
 from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
@@ -245,7 +247,7 @@ class TeamsApp:
         teams = runtime.settings.teams
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
-        self.runtime = runtime
+        self.runtime = runtime = with_budget_notifier(runtime, direct)
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -778,6 +780,11 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 role=self._role(inbound),
+                platform_role_ids=sorted(
+                    await owned_team_ids(self.runtime, tenant_id=tenant_id, user_id=inbound.user_id)
+                )
+                if self._role(inbound) is not Role.ADMIN
+                else (),
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
             )

@@ -117,6 +117,7 @@ async def _create_promo_code_impl(
         terms = build_promo_code_terms(
             amount_usd=Decimal(amount_usd.strip()),
             timed=kind == "timed",
+            channel_budget=kind == "channel_budget",
             credit_starts_at=_instant(credit_starts_at),
             credit_ends_at=_instant(credit_ends_at),
             redeem_starts_at=_instant(redeem_starts_at),
@@ -202,7 +203,7 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def create_promo_code(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         amount_usd: str,
-        kind: Literal["credit", "timed"],
+        kind: Literal["credit", "timed", "channel_budget"],
         credit_starts_at: str | None = None,
         credit_ends_at: str | None = None,
         redeem_starts_at: str | None = None,
@@ -215,7 +216,9 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
-        at the end. Redemption is open between ``redeem_starts_at`` and
+        at the end. ``channel_budget`` codes add the amount to one channel's
+        budget limit for good instead of the balance; that channel's admins
+        may redeem them too. Redemption is open between ``redeem_starts_at`` and
         ``redeem_ends_at`` when given (a timed code's defaults to its credit
         end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
         only in this result.

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 import httpx
 import typer
@@ -16,7 +16,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core.authz import Subject
+from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
@@ -39,12 +39,14 @@ from daimon.core.stores.channel_admins import (
     set_channel_admins,
 )
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_summary import ChannelSummary, load_tenant_summary
 from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
+from sqlalchemy.ext.asyncio import AsyncSession
 
 channels_app = typer.Typer(
     help="Channels: a summary, spend budgets, channel admins, isolation and protection."
@@ -54,7 +56,7 @@ budget_app = typer.Typer(
 )
 channels_app.add_typer(budget_app, name="budget")
 admins_app = typer.Typer(
-    help="A channel's admins: roles and members who run it on top of the server admins."
+    help="A channel's admins: groups and members who run it on top of the server admins."
 )
 channels_app.add_typer(admins_app, name="admins")
 
@@ -238,8 +240,34 @@ async def budget_set(
             ends_at=spec.ends_at,
             set_by_account_id=None,
         )
+        await _audit_budget_change(
+            session, command="set", tenant_id=tenant_id, platform=platform, channel_id=target
+        )
         status = await load_budget_status(session, budget, now=datetime.now(UTC))
     console.print(f"{platform}:{workspace_id} channel {target}: {describe_budget(status)}")
+
+
+async def _audit_budget_change(
+    session: AsyncSession,
+    *,
+    command: Literal["set", "clear"],
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> None:
+    """Record an operator's budget change in the same transaction, as the MCP tools are."""
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=None,
+        agent_id=None,
+        platform=platform,
+        platform_user_id=None,
+        tool_name=f"cli/channels budget {command}",
+        operation=Action.SET_CHANNEL_BUDGET,
+        outcome="allowed",
+        reason=f"channel:{channel_id}",
+    )
 
 
 @budget_app.command("clear")
@@ -288,6 +316,10 @@ async def budget_clear(
         cleared = await channel_budgets.delete_channel_budget(
             session, tenant_id=tenant_id, platform=platform, channel_id=target
         )
+        if cleared:
+            await _audit_budget_change(
+                session, command="clear", tenant_id=tenant_id, platform=platform, channel_id=target
+            )
     status = "budget cleared" if cleared else "had no budget"
     console.print(f"{platform}:{workspace_id} channel {target}: {status}")
 
@@ -350,7 +382,7 @@ class ChannelListing(BaseModel):
 
 
 def _listing(channel: ChannelSummary) -> ChannelListing:
-    admins = [*(f"role {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
+    admins = [*(f"group {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
     budget = channel.budget
     return ChannelListing(
         channel_id=channel.channel_id,
@@ -387,11 +419,17 @@ def channels_list_command(
 async def channels_list(
     *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, as_json: bool
 ) -> None:
-    """The CLI twin of the MCP `get_tenant_summary` tool, with the same JSON."""
+    """The CLI twin of the MCP `get_tenant_summary` tool: the same JSON plus each channel's
+    `sealed` and `protected`."""
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     async with rt.sessionmaker() as session:
+        # An operator reads the whole access policy anyway (`tenants access-policy get`).
         summary = await load_tenant_summary(
-            session, tenant_id=tenant_id, default=rt.deployment_default, now=datetime.now(UTC)
+            session,
+            tenant_id=tenant_id,
+            default=rt.deployment_default,
+            now=datetime.now(UTC),
+            with_access=True,
         )
     if as_json:
         console.print(json.dumps(asdict(summary)), soft_wrap=True, highlight=False, markup=False)
@@ -476,7 +514,10 @@ def channels_admins_set_command(
     channel_id: str,
     role: Annotated[
         list[str] | None,
-        typer.Option(help="Discord role id (repeatable). Slack and Teams have no roles."),
+        typer.Option(
+            help="Group id (repeatable): a Discord role, a Slack user group, or a Teams "
+            "team's Entra group id, which admits its owners."
+        ),
     ] = None,
     user: Annotated[
         list[str] | None,

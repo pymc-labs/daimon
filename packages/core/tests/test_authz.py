@@ -1402,6 +1402,54 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         },
         _deny("admin_required"),
     ),
+    # --- channel budgets: server admins only, never a channel's own admins ---
+    *(
+        (
+            name,
+            TenantAccessPolicy(),
+            {"subject": subject, "action": Action.SET_CHANNEL_BUDGET, "place": place},
+            expected,
+        )
+        for name, subject, place, expected in [
+            ("server admin sets any channel's budget", ADMIN, Place(channel_id="C_X"), ALLOW),
+            (
+                "channel admin can't set their own channel's budget",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "nor through one of its threads",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="T1", parent_channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "channel admin can't set another channel's budget",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_OTHER"),
+                _deny("admin_required"),
+            ),
+            (
+                "a member sets no budget",
+                MEMBER,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "an agent key sets no budget, whoever minted it",
+                AGENT_KEY_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "an admin's agent key keeps its budget rights",
+                AGENT_KEY_ADMIN,
+                Place(channel_id="C_X"),
+                ALLOW,
+            ),
+        ]
+    ),
 ]
 
 

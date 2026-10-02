@@ -89,6 +89,7 @@ async def _refresh(
             view_id=view_id,
             view=await load_routing_view(
                 runtime,
+                client,
                 tenant_id=derive_tenant_uuid(platform="slack", workspace_id=meta.team_id),
                 meta=meta.with_view("routing"),
                 is_admin=True,

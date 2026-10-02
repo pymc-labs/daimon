@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +63,7 @@ async def set_channel_budget(
         "starts_at": starts_at,
         "ends_at": ends_at,
         "set_by_account_id": set_by_account_id,
+        "exhausted_notice_key": None,
     }
     stmt = (
         pg_insert(ChannelBudget)
@@ -93,3 +94,49 @@ async def delete_channel_budget(
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount > 0
+
+
+async def raise_channel_budget(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    amount_usd: Decimal,
+) -> ChannelBudgetRow | None:
+    """Add ``amount_usd`` to the channel's limit in one statement; None when it has no budget."""
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.tenant_id == tenant_id,
+            ChannelBudget.platform == platform,
+            ChannelBudget.channel_id == channel_id,
+        )
+        .values(
+            limit_usd=ChannelBudget.limit_usd + amount_usd,
+            updated_at=func.now(),
+            exhausted_notice_key=None,
+        )
+        .returning(ChannelBudget)
+        .execution_options(populate_existing=True)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    await session.flush()
+    return None if orm is None else ChannelBudgetRow.model_validate(orm)
+
+
+async def claim_exhausted_notice(session: AsyncSession, *, budget_id: uuid.UUID, key: str) -> bool:
+    """Record that window ``key``'s exhausted notice is going out; False if it already has.
+
+    One UPDATE, so of several workers refused in the same window only one wins.
+    """
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.id == budget_id,
+            ChannelBudget.exhausted_notice_key.is_distinct_from(key),
+        )
+        .values(exhausted_notice_key=key, updated_at=ChannelBudget.updated_at)
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    return result.rowcount > 0

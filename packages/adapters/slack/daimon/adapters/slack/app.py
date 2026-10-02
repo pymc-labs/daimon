@@ -74,6 +74,8 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
+from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -312,7 +314,7 @@ class SlackApp:
     """
 
     def __init__(self, *, runtime: SlackRuntime) -> None:
-        self.runtime = runtime
+        self.runtime = with_budget_notifier(runtime)
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}
@@ -1736,6 +1738,13 @@ class SlackApp:
                 channel_id=channel,
                 thread_id=thread_id,
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=()
+                if is_admin
+                else sorted(
+                    await user_group_ids(
+                        self.runtime, web_client, tenant_id=tenant_id, user_id=author_id
+                    )
+                ),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -1920,6 +1929,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2346,6 +2356,7 @@ class SlackApp:
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
+                    budget_channel_id=admission.budget_channel_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
                     client=web_client,
@@ -2681,6 +2692,16 @@ class SlackApp:
             channel_id=channel,
             thread_id=thread_id,
             role=role,
+            platform_role_ids=()
+            if role is Role.ADMIN
+            else sorted(
+                await user_group_ids(
+                    self.runtime,
+                    web_client,
+                    tenant_id=tenant_id,
+                    user_id=row.requester_external_user_id,
+                )
+            ),
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.
@@ -2724,6 +2745,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=follow_admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2807,6 +2829,7 @@ class SlackApp:
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
+                budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,
                 channel=channel,

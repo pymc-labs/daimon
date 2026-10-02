@@ -1,22 +1,30 @@
 """Channel admins: members who administer one channel on top of the server admins.
 
 Server (or workspace) admins administer every channel. A `channel_admins` row
-adds role ids and user ids for one channel; no row adds nobody, so a tenant
-that never configures one behaves exactly as before. Role ids are the ones the
-member held on their last chat turn (`accounts.platform_role_ids`): Discord has
-roles, Slack and Teams have none, so their grants are by user id only (Discord-only
-roles, recorded in tests/parity/test_channel_admin_roles_discord_only.py). A
+adds group ids (`role_ids`) and user ids for one channel; no row adds nobody, so
+a tenant that never configures one behaves exactly as before. A group is a
+Discord role, a Slack user group, or a Teams team, whose owners it admits. A
 Teams user id is the member's Entra object id.
+
+Discord sends a member's roles with every event. Slack and Teams don't, so their
+adapters look up only the groups some grant names (`load_member_group_ids`),
+each through a short cache (`GroupMembersCache`); a lookup that fails grants
+nothing. Either way the ids a chat turn matched are kept
+(`accounts.platform_role_ids`) for callers with no live platform view, such as
+an MCP call. Recorded in tests/parity/test_channel_admin_groups.py.
 """
 
 from __future__ import annotations
 
 import re
+import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Final
 
+import structlog
 from daimon.core.authz import Subject, build_subject
+from daimon.core.errors import DaimonError
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
@@ -37,7 +45,13 @@ _CHANNEL_ID = {
     "teams": r"19:[\w-]+@thread\.(?:tacv2|skype)",
 }
 _USER_ID = {"discord": r"[0-9]{15,21}", "slack": r"[UW][A-Z0-9]+", "teams": _UUID}
-_ROLE_ID = {"discord": r"[0-9]{15,21}"}
+# A Discord role, a Slack user group, or a Teams team's Entra group id.
+_ROLE_ID = {"discord": r"[0-9]{15,21}", "slack": r"S[A-Z0-9]+", "teams": _UUID}
+
+GROUP_MEMBERS_TTL_S: Final = 60.0
+"""How long a Slack user group's or a Teams team's looked-up members are trusted."""
+
+_log = structlog.get_logger(__name__)
 
 
 class InvalidChannelAdminIds(ValueError):
@@ -85,22 +99,21 @@ def normalize_channel_admin_ids(
 ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Strip, de-duplicate and check every id against the platform's format.
 
-    Raises `InvalidChannelAdminIds` naming the first bad id. Slack has no
-    roles, so any Slack role id is refused rather than stored and never matched.
+    Raises `InvalidChannelAdminIds` naming the first bad id. Group ids are
+    the platform's own: a Discord role, a Slack user group (`S...`) or a
+    Teams team's Entra group id.
     """
     if platform not in _CHANNEL_ID:
         raise InvalidChannelAdminIds(f"channel admins are not supported on {platform!r}")
     channel = channel_id.strip()
     if re.fullmatch(_CHANNEL_ID[platform], channel) is None:
         raise InvalidChannelAdminIds(f"invalid {platform} channel id {channel_id!r}")
-    roles = tuple(dict.fromkeys(value.strip() for value in role_ids))
     # Entra object ids compare case-insensitively; Teams sends them lower-case.
     fold = str.lower if platform == "teams" else str
+    roles = tuple(dict.fromkeys(fold(value.strip()) for value in role_ids))
     users = tuple(dict.fromkeys(fold(value.strip()) for value in user_ids))
-    if roles and platform not in _ROLE_ID:
-        raise InvalidChannelAdminIds(f"{platform} has no roles; grant channel admin by user")
     for kind, ids, pattern in (
-        ("role", roles, _ROLE_ID.get(platform, "")),
+        ("role" if platform == "discord" else "group", roles, _ROLE_ID[platform]),
         ("user", users, _USER_ID[platform]),
     ):
         if len(ids) > MAX_CHANNEL_ADMIN_IDS:
@@ -132,6 +145,83 @@ def fit_lines(lines: Iterable[str], *, max_chars: int) -> list[str]:
             break
         kept.append(line)
     return kept
+
+
+class GroupLookupFailed(DaimonError):
+    """A group's members could not be read; the group then grants nothing."""
+
+
+GroupMembers = Callable[[str], Awaitable[frozenset[str]]]
+"""A group id to the user ids it admits; raises `GroupLookupFailed`."""
+
+
+class GroupMembersCache:
+    """Group members by key, kept `ttl_s` seconds, so a busy channel costs one lookup a minute.
+
+    A failed lookup is not kept: the next caller asks again. ``clock`` is
+    injected for tests.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_s: float = GROUP_MEMBERS_TTL_S,
+        max_entries: int = 1_024,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_s = ttl_s
+        self._max_entries = max_entries
+        self._clock = clock
+        self._entries: dict[tuple[str, ...], tuple[float, frozenset[str]]] = {}
+
+    async def members(
+        self, key: tuple[str, ...], fetch: Callable[[], Awaitable[frozenset[str]]]
+    ) -> frozenset[str]:
+        now = self._clock()
+        cached = self._entries.get(key)
+        if cached is not None and now - cached[0] < self._ttl_s:
+            return cached[1]
+        members = await fetch()
+        if len(self._entries) >= self._max_entries:
+            self._entries = {k: v for k, v in self._entries.items() if now - v[0] < self._ttl_s}
+            if len(self._entries) >= self._max_entries:
+                self._entries.clear()
+        self._entries[key] = (now, members)
+        return members
+
+
+async def member_group_ids(
+    platform_user_id: str, group_ids: Iterable[str], members: GroupMembers
+) -> frozenset[str]:
+    """The groups among `group_ids` that admit the user. A failed lookup grants nothing."""
+    matched: set[str] = set()
+    for group_id in sorted(set(group_ids)):
+        try:
+            if platform_user_id in await members(group_id):
+                matched.add(group_id)
+        except GroupLookupFailed as exc:
+            _log.warning("channel_admins.group_lookup_failed", group_id=group_id, reason=str(exc))
+    return frozenset(matched)
+
+
+async def load_member_group_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    members: GroupMembers,
+) -> frozenset[str]:
+    """The groups some grant of this tenant names that admit the user: Slack and Teams.
+
+    Only grant-named groups are looked up, so a tenant with no group grant
+    makes no lookup at all.
+    """
+    grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+    named = {group_id for grant in grants for group_id in grant.role_ids}
+    if not named:
+        return frozenset()
+    return await member_group_ids(platform_user_id, named, members)
 
 
 async def load_administered_channel_ids(
@@ -197,9 +287,13 @@ async def load_stored_subject(
 
 __all__ = [
     "CHANNEL_ADMIN_PLATFORMS",
+    "GROUP_MEMBERS_TTL_S",
     "MAX_CHANNEL_ADMIN_IDS",
     "MAX_LISTED_MENTIONS",
     "ChannelAdminCaller",
+    "GroupLookupFailed",
+    "GroupMembers",
+    "GroupMembersCache",
     "InvalidChannelAdminIds",
     "administered_channel_ids",
     "fit_lines",
@@ -207,6 +301,8 @@ __all__ = [
     "is_channel_admin",
     "load_administered_channel_ids",
     "load_live_subject",
+    "load_member_group_ids",
+    "member_group_ids",
     "load_stored_subject",
     "normalize_channel_admin_ids",
 ]

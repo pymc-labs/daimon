@@ -70,6 +70,15 @@ requester on Discord and Slack. On Teams it closes the status card and posts the
 fresh, mentioning the requester in channels (Teams bots cannot react). Missing/false
 preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON object.
 
+### `DAIMON_BUDGET_NOTICES`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant switch for the channel budget notice, keyed by tenant UUID. When a channel's
+budget is used up, its channel admins (else the server admins) get one DM per budget
+window on Discord, Slack and Teams. Missing/true sends it; false turns it off. Configure
+DAIMON_BUDGET_NOTICES as a JSON object.
+
 ### `DAIMON_DIRECT_MESSAGE_POLICIES`
 
 `dict[UUID, DirectMessagePolicy]` · optional · default `{}`

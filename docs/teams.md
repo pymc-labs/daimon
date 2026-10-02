@@ -86,13 +86,14 @@ and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
-Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
-here), channel budgets (`set_channel_budget`) and channel environments
-(`set_channel_environment`) work as on Discord and Slack. Who answers where
-lists each channel's environment, and its **Channel settings** dialog changes
-one channel picked there, since the panel lives in the 1:1 chat: its
-environment (server admins, or that channel's admins), and its isolation and
-admins by Entra object ID (server admins only).
+Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
+group ID in `role_ids` to admit that team's owners), channel budgets
+(`set_channel_budget`) and channel environments (`set_channel_environment`)
+work as on Discord and Slack. Who answers where lists each channel's
+environment, and its **Channel settings** dialog changes one channel picked
+there, since the panel lives in the 1:1 chat: its environment (server admins,
+or that channel's admins), and its isolation and admins by Entra object ID
+(server admins only).
 Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
 `daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
 counts as its channel, and the isolated agents send nothing to 1:1 chats. The
@@ -116,7 +117,9 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest. A team owner grants it when adding the app to a team, for that
+the manifest, plus `TeamMember.Read.Group` for the owner list a team grant of
+channel admins reads (cached for a minute; without it the team's owners are
+not channel admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
 mention unless their thread is followed. An existing install needs the updated app package uploaded again

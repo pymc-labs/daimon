@@ -213,9 +213,10 @@ the same with or without Stripe and for either funding mode. Budgets exist on
 Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
-  markup included: what the tenant was charged for turns there, not the
-  pre-markup usage `/billing` totals. Debits carry the parent channel, so a
-  thread counts toward its channel. A session records it in its own
+  markup included, whatever paid for them (promo credit too): what the
+  tenant was charged for turns there, not the pre-markup usage `/billing`
+  totals. Debits carry the parent channel, so a thread counts toward its
+  channel. A session records it in its own
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
@@ -227,10 +228,23 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
+- **The notice.** The first chat turn the gate refuses in a window DMs the
+  channel's admins (users granted directly, and members whose roles at
+  their last turn match a granted role), or the server admins when the
+  channel has none, at most ten people, on Discord, Slack and Teams
+  (`daimon.core.channel_budget_notice`). A monthly budget's window is the
+  month; any other budget's is the budget itself. Setting or raising the
+  budget re-arms it (`channel_budgets.exhausted_notice_key`). It follows the
+  tenant's DM policy, never changes the refusal, and is off for a tenant set
+  to `false` in `DAIMON_BUDGET_NOTICES`. Refusals of MCP turns, media calls
+  and routines send none.
 
 Members can read a channel's budget with `get_channel_budget`; listing,
-setting and clearing are admin-only. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`.
+setting and clearing are for server admins only, never a channel's own admins
+(`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
+shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
+lists the five most used budgets on that platform (active ones first, by
+share of the limit spent) with a count of the rest.
 
 What a budget does not cover:
 
@@ -249,7 +263,10 @@ What a budget does not cover:
   `continue_turn` are gated by that channel's budget, and the sessions it
   opens carry `daimon_budget_channel`, so their spend is attributed there.
   Every other key, the hub and bearer tokens record no channel and are not
-  gated. A media tool call without a live `origin_context_id` is not
+  gated, except on an isolated channel's own agent: every run of it, an
+  admin's or that channel's admin's from the hub or a DM included, is gated
+  by and charged to that channel. Its routines can only post there, so they
+  already are. A media tool call without a live `origin_context_id` is not
   attributed either.
 - **Routines with no channel**: made without a destination outside a
   channel (no `origin_context_id`, or from a DM), and Discord thread
@@ -359,6 +376,14 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   only. Spend inside a window draws on timed credit first, the credit that
   ends earliest first, then on ordinary credit. A window that opens and closes
   while the scheduler is down expires without a grant.
+- **Channel budget** codes (`--channel-budget`, `kind=channel_budget`) add
+  their amount to one channel's [budget](#channel-budgets) limit instead of
+  the balance, and write no ledger row. The raise is permanent: on a
+  monthly budget it raises every month's limit. They are redeemed in the
+  channel they raise (`/billing` there, or `redeem_promo_code` with
+  `channel_id`), which must have a budget; only server admins redeem them,
+  like every code, and the redemption records the channel
+  (`promo_redemptions.channel_id`).
 - **Late spend.** Every turn debit stores `occurred_at`, the model call's own
   time, so a call the [sweep](#the-tables) records after the window closed
   still counts as spend inside it. Fifteen minutes after the close a
@@ -376,9 +401,11 @@ many tenants may redeem it. Each tenant redeems a code at most once.
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
 credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
-`billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
+`billing` on Teams, or with the MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
-`already_redeemed` and `throttled`; five refusals in 15 minutes pause a
+`already_redeemed`, `throttled`, `needs_channel` (a channel budget code
+redeemed outside a channel), `no_channel_budget` and `not_allowed` (the
+caller may not redeem that kind of code there); five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses
 cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
@@ -402,7 +429,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`), and the channel a channel budget code raised (`channel_id`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 
@@ -478,7 +505,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 the optional `billing` extra, which is what pulls in `stripe`.
 
 Discord and Slack status cards end on a summary of tokens, cost and, for
-prepaid tenants, the balance left after the turn's debit. The answer replaces
+prepaid tenants, the balance left after the turn's debit. In a channel with an
+active budget (a DM: its source channel's) it shows instead what that budget
+has left, for either funding mode. The answer replaces
 the card (unless a completion ping posts it fresh), so the summary stays only
 above a pinged answer or on a turn with none; answers themselves carry no
 usage line on any platform. Teams cards show no summary.
