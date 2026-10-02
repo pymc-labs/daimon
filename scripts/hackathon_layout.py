@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 QA_GUILD = "1435062989119295640"
+QA_BOT_ID = "1533049261032341668"
 API = "https://discord.com/api/v10"
 VIEW = 1 << 10
 SEND = 1 << 11
@@ -310,6 +311,9 @@ def main() -> None:
     if state["guild_id"] != args.guild_id or state["run_id"] != args.run_id:
         parser.error("state file guild/run id does not match")
     api = Discord(token)
+    bot = api.request("GET", "/users/@me")
+    if args.guild_id == QA_GUILD and str(bot["id"]) != QA_BOT_ID:
+        parser.error("staging layout requires the QA bot token")
     if args.teardown:
         for key in list(state["teams"]):
             teardown_team(api, args, state, key)
