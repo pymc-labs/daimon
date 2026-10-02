@@ -25,6 +25,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_EXPAND_SKILLS,
     ACTION_ISOLATE,
     ACTION_ISOLATE_COPY,
+    ACTION_LIFT_ISOLATION,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
@@ -47,6 +48,7 @@ from daimon.adapters.slack.modal_limits import (
 )
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
 from daimon.core.answering_map import AnsweringMap, build_answering_map
+from daimon.core.channel_isolation import ChannelIsolationStatus
 from daimon.core.github_repo_auth import RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
@@ -1097,10 +1099,17 @@ def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
     )
 
 
+_OPEN = ChannelIsolationStatus(is_private=False, dedicated_agent_names=(), is_hidden=False)
+_ISOLATED = ChannelIsolationStatus(
+    is_private=True, dedicated_agent_names=("alpha",), is_hidden=True
+)
+_ENDED = ChannelIsolationStatus(is_private=True, dedicated_agent_names=("alpha",), is_hidden=False)
+
+
 def _routing(
     *,
     channel_admins: list[ChannelAdminsRow] | None,
-    isolated: bool | None = None,
+    isolation: ChannelIsolationStatus | None = None,
     channel_id: str = _CHANNEL_ID,
 ) -> dict[str, Any]:
     return build_routing_view(
@@ -1113,20 +1122,28 @@ def _routing(
         channel_id=channel_id,
         unrouted_agent_name=None,
         channel_admins=channel_admins,
-        isolated=isolated,
+        isolation=isolation,
     )
 
 
 def test_routing_view_offers_isolation_to_admins_by_state() -> None:
-    open_ids = set(_action_ids(_routing(channel_admins=[], isolated=False)))
+    open_ids = set(_action_ids(_routing(channel_admins=[], isolation=_OPEN)))
     assert {ACTION_ISOLATE, ACTION_ISOLATE_COPY} <= open_ids, "an open channel can be isolated"
-    assert ACTION_END_ISOLATION not in open_ids
-    assert ACTION_END_ISOLATION in _action_ids(_routing(channel_admins=[], isolated=True))
+    assert not open_ids & {ACTION_END_ISOLATION, ACTION_LIFT_ISOLATION}, "nothing to end or lift"
+    isolated = _routing(channel_admins=[], isolation=_ISOLATED)
+    assert {ACTION_END_ISOLATION, ACTION_LIFT_ISOLATION} <= set(_action_ids(isolated))
+    assert any(
+        "Private: yes · Dedicated agent: *alpha* · Hidden: yes" in t for t in _texts(isolated)
+    ), "the panel shows each of isolation's controls"
+    ended = set(_action_ids(_routing(channel_admins=[], isolation=_ENDED)))
+    assert ACTION_LIFT_ISOLATION in ended and ACTION_END_ISOLATION not in ended, (
+        "after ending, the seal and pin can still be lifted"
+    )
     member = set(_action_ids(_routing(channel_admins=None)))
     assert not member & {ACTION_ISOLATE, ACTION_ISOLATE_COPY, ACTION_END_ISOLATION}, (
         "members get no isolation buttons"
     )
-    dm = set(_action_ids(_routing(channel_admins=[], isolated=False, channel_id="D0123456")))
+    dm = set(_action_ids(_routing(channel_admins=[], isolation=_OPEN, channel_id="D0123456")))
     assert not dm & {ACTION_ISOLATE, ACTION_ISOLATE_COPY}, "a DM can't be isolated"
 
 

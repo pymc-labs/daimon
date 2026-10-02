@@ -97,8 +97,8 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
-from daimon.core.access_policy import is_isolated
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
+from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -242,6 +242,7 @@ _ISOLATION_ACTIONS: dict[str, IsolationChoice] = {
     panel_views.ACTION_ISOLATE: "isolate",
     panel_views.ACTION_ISOLATE_COPY: "copy",
     panel_views.ACTION_END_ISOLATION: "end",
+    panel_views.ACTION_LIFT_ISOLATION: "lift",
 }
 
 #: Every action id the three panel views emit. Kept as a set so the dispatcher
@@ -393,9 +394,9 @@ async def load_routing_view(
             if is_admin
             else None
         )
-        isolated = (
-            is_isolated(
-                await load_access_policy(session, tenant_id=tenant_id), channel_id=meta.channel_id
+        isolation = (
+            channel_isolation_status(
+                await load_access_policy(session, tenant_id=tenant_id), meta.channel_id
             )
             if is_admin and meta.channel_id
             else None
@@ -434,7 +435,7 @@ async def load_routing_view(
         channel_id=meta.channel_id,
         unrouted_agent_name=unrouted_agent_name,
         channel_admins=channel_admins,
-        isolated=isolated,
+        isolation=isolation,
     )
 
 

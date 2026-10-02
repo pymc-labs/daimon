@@ -38,6 +38,7 @@ from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
 from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS, fit_lines, fold_mentions
+from daimon.core.channel_isolation import ChannelIsolationStatus
 from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
@@ -64,6 +65,7 @@ __all__ = [
     "ACTION_END_ISOLATION",
     "ACTION_ISOLATE",
     "ACTION_ISOLATE_COPY",
+    "ACTION_LIFT_ISOLATION",
     "ACTION_NEW",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
@@ -107,7 +109,9 @@ ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_ISOLATE: Final = "agent_setup__isolation:isolate"
 ACTION_ISOLATE_COPY: Final = "agent_setup__isolation:copy"
 ACTION_END_ISOLATION: Final = "agent_setup__isolation:end"
-"""Isolate this channel (with a copy of its agent when needed) or end it. Admins only."""
+ACTION_LIFT_ISOLATION: Final = "agent_setup__isolation:lift"
+"""Isolate this channel (with a copy of its agent when needed), end it, or lift its seal
+and pins too. Admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
@@ -181,11 +185,18 @@ CHANNEL_ADMINS_NOTE: Final = (
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
     "the workspace default stay with workspace admins."
 )
+LIFT_ISOLATION_LABEL: Final = "Lift seal and pins"
 ISOLATION_NOTE: Final = (
-    "An isolated channel's own agents answer only there and are hidden everywhere else; "
-    "inside it only they are visible. Its messages are readable only from inside it. "
-    "Isolating needs an agent that answers only here. *Isolate with a copy* makes one from "
-    "the agent answering now when there is none."
+    "Isolating makes this channel private, so its messages read only from inside it, gives "
+    "it a dedicated agent pinned to it alone, so that agent answers only here, and hides "
+    "that agent everywhere else, while inside only the channel's own agents show. It needs "
+    "an agent that answers only here; *Isolate with a copy* makes one from the agent "
+    "answering now."
+)
+LIFT_ISOLATION_NOTE: Final = (
+    f"*{LIFT_ISOLATION_LABEL}* also ends isolation, makes the channel's messages readable "
+    "from elsewhere and unpins its dedicated agents, so they can answer elsewhere, bringing "
+    "what they remembered here."
 )
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
@@ -561,14 +572,14 @@ def build_routing_view(
     channel_id: str,
     unrouted_agent_name: str | None,
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
-    isolated: bool | None = None,
+    isolation: ChannelIsolationStatus | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's. `isolated` is too,
+    channel's admins and a button to edit this channel's. `isolation` is too,
     when the panel has a channel, not a DM: it adds that channel's isolation buttons.
     """
     blocks: list[dict[str, Any]] = []
@@ -615,8 +626,8 @@ def build_routing_view(
     blocks.append({"type": "divider"})
     if channel_admins is not None:
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
-    if isolated is not None and _is_channel(channel_id):
-        blocks.extend(_isolation_blocks(channel_id=channel_id, isolated=isolated))
+    if isolation is not None and _is_channel(channel_id):
+        blocks.extend(_isolation_blocks(channel_id=channel_id, status=isolation))
     blocks.append(
         _context(
             _routing_request_line(
@@ -672,24 +683,37 @@ def _channel_admins_blocks(
     ]
 
 
-def _isolation_blocks(*, channel_id: str, isolated: bool) -> list[dict[str, Any]]:
-    state = "is isolated" if isolated else "is not isolated"
+def isolation_status_line(status: ChannelIsolationStatus) -> str:
+    """Private, dedicated agent and hidden, on one line. Pure."""
+    dedicated = ", ".join(f"*{escape_mrkdwn(name)}*" for name in status.dedicated_agent_names)
+    return (
+        f"Private: {'yes' if status.is_private else 'no'} · Dedicated agent: "
+        f"{dedicated or 'none'} · Hidden: {'yes' if status.is_hidden else 'no'}"
+    )
+
+
+def _isolation_blocks(*, channel_id: str, status: ChannelIsolationStatus) -> list[dict[str, Any]]:
+    state = "is isolated" if status.is_hidden else "is not isolated"
     buttons = (
         [_button(action_id=ACTION_END_ISOLATION, label="End isolation", style="danger")]
-        if isolated
+        if status.is_hidden
         else [
             _button(action_id=ACTION_ISOLATE, label="Isolate", style="primary"),
             _button(action_id=ACTION_ISOLATE_COPY, label="Isolate with a copy"),
         ]
     )
+    notes = [ISOLATION_NOTE]
+    if status.is_hidden:
+        notes.append(f"Ending isolation: {END_ISOLATION_WARNING}")
+    if status.is_liftable:
+        buttons.append(
+            _button(action_id=ACTION_LIFT_ISOLATION, label=LIFT_ISOLATION_LABEL, style="danger")
+        )
+        notes.append(LIFT_ISOLATION_NOTE)
     return [
-        _section(f"*Isolation*\n<#{channel_id}> {state}."),
+        _section(f"*Isolation*\n<#{channel_id}> {state}.\n{isolation_status_line(status)}"),
         {"type": "actions", "elements": buttons},
-        _context(
-            f"{ISOLATION_NOTE} Ending isolation: {END_ISOLATION_WARNING}"
-            if isolated
-            else ISOLATION_NOTE
-        ),
+        _context(" ".join(notes)),
         {"type": "divider"},
     ]
 
