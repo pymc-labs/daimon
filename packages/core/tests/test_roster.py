@@ -5,8 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.roster import Roster, RosterAgent, load_roster, order_roster, paginate
 from daimon.core.scope import ChannelScopeRef, ConfigTier, DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing import ma_agent
@@ -157,6 +160,59 @@ async def test_load_roster_marks_the_channel_default_as_answering_here(
     assert [row.name for row in roster.rows] == ["zulu", "alpha"], (
         "the answering agent leads the roster"
     )
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "is_admin", "expected"),
+    [
+        ("chan-1", False, ["zulu"]),
+        ("chan-2", False, ["alpha"]),
+        ("chan-1", True, ["zulu", "alpha"]),
+    ],
+    ids=["inside", "outside", "admin"],
+)
+async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel(
+    db_session: AsyncSession, channel_id: str, is_admin: bool, expected: list[str]
+) -> None:
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(id="ag_alpha", name="alpha", tenant_id=tenant.id),
+        ma_agent(id="ag_zulu", name="zulu", tenant_id=tenant.id),
+    )
+    for channel, agent in (("chan-1", "zulu"), ("chan-2", "alpha")):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+            tenant_id=tenant.id,
+            agent_name=agent,
+        )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("chan-1",),
+            isolated_channel_ids=("chan-1",),
+            agent_channel_pins={"zulu": ("chan-1",)},
+        ),
+    )
+    default = DeploymentDefault()
+    anthropic = build_fake_anthropic(router.dispatch)
+
+    roster = await load_roster(
+        db_session,
+        anthropic,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id=channel_id,
+        thread_id=None,
+        default=default,
+        viewer=await load_isolation_viewer(
+            db_session, anthropic, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
+        ),
+    )
+
+    assert [row.name for row in roster.rows] == expected, "admins see every agent"
 
 
 async def test_load_roster_reports_no_answering_agent_when_the_channel_is_unknown(

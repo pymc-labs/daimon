@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Literal
 
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import (
@@ -65,11 +67,14 @@ from daimon.adapters.mcp.tools.agent_chat import (
     agent_pin_names,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
+from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.authz import Subject
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_admins import load_stored_subject
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
@@ -77,6 +82,8 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
 
 _NOT_FOUND = "daimon not found"
 _SESSION_NOT_FOUND = "session not found"
@@ -109,10 +116,44 @@ def _summary(tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent)
 async def _agents_by_tenant(
     runtime: McpRuntime, hub: HubIdentity
 ) -> list[tuple[HubTenant, list[BetaManagedAgentsAgent]]]:
+    """Each tenant's agents, less those an isolated channel keeps to itself.
+
+    A hub call runs outside every channel, so an isolated channel's own agents
+    are neither listed nor resolvable here, except for an admin of that
+    workspace or of that channel, as their stored role and grants say (the
+    isolation exemption in their own hub). A tenant whose access policy can't
+    be read is left out whole, so one bad workspace doesn't hide the others.
+    """
     by_id = await list_agents_by_tenants(
         runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
     )
-    return [(tenant, by_id[tenant.tenant_id]) for tenant in hub.tenants]
+    out: list[tuple[HubTenant, list[BetaManagedAgentsAgent]]] = []
+    for tenant in hub.tenants:
+        try:
+            async with runtime.session_factory() as session:
+                policy = await load_access_policy(session, tenant_id=tenant.tenant_id)
+                subject = (
+                    await load_stored_subject(
+                        session,
+                        tenant_id=tenant.tenant_id,
+                        platform=hub.platform,
+                        account_id=tenant.account_id,
+                        platform_user_id=hub.platform_user_id,
+                    )
+                    if policy.isolated_channel_ids
+                    else Subject()
+                )
+        except AccessPolicyUnreadable:
+            log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
+            continue
+        agents = by_id[tenant.tenant_id]
+        out.append((tenant, [a for a in agents if _hub_sees(policy, subject, a)]))
+    return out
+
+
+def _hub_sees(policy: TenantAccessPolicy, subject: Subject, agent: BetaManagedAgentsAgent) -> bool:
+    owner = isolation_owner(policy, agent_pin_names(agent))
+    return owner is None or subject.is_admin or owner in subject.administered_channel_ids
 
 
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:
@@ -229,9 +270,15 @@ def register_hub_tools(
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         subject = await load_hub_subject(runtime, auth)
+        # The grants ride on the identity for the hub branch of `_admit`.
+        auth = replace(auth, administered_channel_ids=subject.administered_channel_ids)
 
         async def names() -> tuple[str | None, ...]:
             return agent_pin_names(agent)
+
+        # A channel admin's hub turn is judged as one too, so an isolated
+        # channel they administer lends them its own agents here.
+        hub_exempt = subject.is_admin or bool(subject.administered_channel_ids)
 
         admitted = await _admit(
             auth,
@@ -239,14 +286,14 @@ def register_hub_tools(
             billing_config=billing_config,
             tool_name=tool_name,
             agent_names=names,
-            pin_exempt=subject.is_admin,
+            pin_exempt=hub_exempt,
         )
         recheck = _admission_recheck(
             admitted,
             sessionmaker=runtime.session_factory,
             tool_name=tool_name,
             agent_names=names,
-            pin_exempt=subject.is_admin,
+            pin_exempt=hub_exempt,
         )
         return admitted, subject, recheck
 

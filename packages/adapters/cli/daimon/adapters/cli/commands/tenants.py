@@ -15,6 +15,13 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.channel_isolation import channel_isolation_status
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    LIFT_ISOLATION_WARNING,
+    ChannelIsolationRefused,
+    isolation_refusal,
+)
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -37,11 +44,17 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
+from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
+from sqlalchemy.ext.asyncio import AsyncSession
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
-    help="A tenant's access policy: who may invoke the agent, protected and sealed channels."
+    help=(
+        "A tenant's access policy: who may invoke the agent, protected, sealed and "
+        "isolated channels."
+    )
 )
 tenants_app.add_typer(access_policy_app, name="access-policy")
 
@@ -389,6 +402,7 @@ def _print_policy(
         ("protected_channel_ids", policy.protected_channel_ids),
         ("protected_category_ids", policy.protected_category_ids),
         ("sealed_channel_ids", policy.sealed_channel_ids),
+        ("isolated_channel_ids", policy.isolated_channel_ids),
     ):
         console.print(f"  {field}: {', '.join(ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
@@ -397,6 +411,84 @@ def _print_policy(
         "  agent_channel_pins: "
         + ("; ".join(f"{name} -> {', '.join(ids)}" for name, ids in sorted(pins.items())) or "-")
     )
+
+
+async def _require_isolatable(
+    rt: CliRuntime,
+    console: Console,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    current: TenantAccessPolicy,
+    policy: TenantAccessPolicy,
+) -> None:
+    """Exit unless every newly isolated channel's default agent is its own in `policy`.
+
+    A change to the pins or seals re-checks every isolated channel: widening its
+    own agent's pin would leave the channel with no agent of its own, refusing
+    every turn there, while the agent carries what it remembered there out.
+    Run under the policy lock, in the transaction that writes.
+    """
+    added = [c for c in policy.isolated_channel_ids if c not in current.isolated_channel_ids]
+    rechecks = (
+        policy.agent_channel_pins != current.agent_channel_pins
+        or policy.sealed_channel_ids != current.sealed_channel_ids
+    )
+
+    async def refusal(channel_id: str, under: TenantAccessPolicy) -> ChannelIsolationRefused | None:
+        return await isolation_refusal(
+            rt.anthropic,
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            policy=under,
+            default=rt.deployment_default,
+        )
+
+    for channel_id in policy.isolated_channel_ids:
+        if channel_id not in added and not rechecks:
+            continue
+        refused = await refusal(channel_id, policy)
+        # An isolation broken already is not this change's doing.
+        if refused is None or (
+            channel_id not in added and await refusal(channel_id, current) is not None
+        ):
+            continue
+        if channel_id in added:
+            console.print(
+                f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
+                "alone in the same command, or use the setup panel's Isolate or "
+                "set_channel_isolation, which do both. Nothing was changed.[/red]"
+            )
+        else:
+            console.print(
+                f"[red]{channel_id} is isolated, and this change would break it: "
+                f"{escape(str(refused))} Keep its own agent pinned to it alone, or end its "
+                "isolation first (drop it from --isolated-channel). Nothing was changed.[/red]"
+            )
+        raise typer.Exit(1)
+
+
+def _ended_isolation_warning(policy: TenantAccessPolicy, channel_id: str) -> str:
+    """What ending `channel_id`'s isolation left in place, and how to lift it from here."""
+    status = channel_isolation_status(policy, channel_id)
+    if not status.is_liftable:
+        return LIFT_ISOLATION_WARNING
+    steps = [f"drop {channel_id} from --sealed-channel"] if status.is_private else []
+    steps += [f"--remove-pin-agent {name}" for name in status.dedicated_agent_names]
+    return f"{END_ISOLATION_WARNING} To lift them from here: {'; '.join(steps)}."
+
+
+def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAccessPolicy) -> None:
+    ended = sorted(
+        set(previous.isolated_channel_ids if previous else ()) - set(policy.isolated_channel_ids)
+    )
+    console = Console(stderr=True, highlight=False)
+    for channel_id in ended:
+        warning = escape(_ended_isolation_warning(policy, channel_id))
+        console.print(f"[yellow]Isolation ended for {channel_id}. {warning}[/yellow]")
 
 
 @access_policy_app.command("get")
@@ -449,6 +541,16 @@ def tenants_access_policy_set_command(
             help=(
                 "Channel id readable only from a turn inside it (repeatable). A single "
                 "thread: its Discord id, or Slack channel_id:thread_ts."
+            )
+        ),
+    ] = None,
+    isolated_channel: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
+                "and its default agent pinned to it alone, answering nowhere else. Ending one "
+                "keeps its seal and pins."
             )
         ),
     ] = None,
@@ -531,6 +633,7 @@ def tenants_access_policy_set_command(
                 protected_channel=protected_channel,
                 protected_category=protected_category,
                 sealed_channel=sealed_channel,
+                isolated_channel=isolated_channel,
                 dm_memory_read_only=dm_memory_read_only,
                 pin_agent=pin_agent,
                 add_pin_agent=add_pin_agent,
@@ -664,6 +767,7 @@ async def tenants_access_policy_set(
     protected_channel: list[str] | None = None,
     protected_category: list[str] | None = None,
     sealed_channel: list[str] | None = None,
+    isolated_channel: list[str] | None = None,
     dm_memory_read_only: bool | None = None,
     pin_agent: list[str] | None = None,
     add_pin_agent: list[str] | None = None,
@@ -679,6 +783,7 @@ async def tenants_access_policy_set(
         ("protected_channel_ids", protected_channel),
         ("protected_category_ids", protected_category),
         ("sealed_channel_ids", sealed_channel),
+        ("isolated_channel_ids", isolated_channel),
     ):
         if ids is not None:
             if not ids:
@@ -697,6 +802,9 @@ async def tenants_access_policy_set(
                     # A Slack thread is sealed on its own as channel_id:thread_ts.
                     else r"[CGD][A-Z0-9]+(?::[0-9]+\.[0-9]+)?"
                     if field == "sealed_channel_ids"
+                    # An isolated channel is a whole channel, never a DM.
+                    else r"[CG][A-Z0-9]+"
+                    if field == "isolated_channel_ids"
                     else r"[CGD][A-Z0-9]+"
                 )
                 if not cleaned or (
@@ -748,11 +856,13 @@ async def tenants_access_policy_set(
             },
         )
     before: dict[str, tuple[str, ...]] = {}
+    previous: TenantAccessPolicy | None = None
     async with rt.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
             try:
-                before = (await load_access_policy(session, tenant_id=tenant_id)).agent_channel_pins
+                previous = await load_access_policy(session, tenant_id=tenant_id)
+                before = previous.agent_channel_pins
             except AccessPolicyUnreadable:
                 # --clear is the way out of an unreadable row, but the row may
                 # hold pins nobody can list: ask for --replace-pins all the same.
@@ -774,7 +884,7 @@ async def tenants_access_policy_set(
         else:
             # An unreadable stored row raises here rather than being overwritten
             # blind; --clear is the way out of that state.
-            current = await load_access_policy(session, tenant_id=tenant_id)
+            current = previous = await load_access_policy(session, tenant_id=tenant_id)
             before = current.agent_channel_pins
             if edits_pins:
                 changes["agent_channel_pins"] = _merge_pins(
@@ -791,8 +901,23 @@ async def tenants_access_policy_set(
                         f"{', '.join(dropped)}. Use --add-pin-agent to keep them, or "
                         "--replace-pins to drop them. Nothing was changed."
                     )
-            policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
+            try:
+                policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
+            except ValidationError as exc:
+                message = "; ".join(str(error["msg"]) for error in exc.errors())
+                raise typer.BadParameter(f"{message}. Nothing was changed.") from None
+            if policy.isolated_channel_ids:
+                await _require_isolatable(
+                    rt,
+                    console,
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    current=current,
+                    policy=policy,
+                )
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
+    _warn_ended_isolation(previous, policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)
     if not as_json:
         for name in sorted(set(before) - set(policy.agent_channel_pins)):

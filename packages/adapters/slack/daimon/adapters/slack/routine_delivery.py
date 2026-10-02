@@ -26,6 +26,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
+from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -170,11 +171,18 @@ def make_slack_routine_poster(
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
+        keep_inside = keeps_routine_inside(cleared, row)
+
+        async def fallback(reason: str) -> DeliveryOutcome:
+            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+                return DeliveryOutcome(status="skipped", note=reason)
+            return await _dm_fallback(
+                client, row, reason, team_id=tenant.external_id, policy=dm_policy
+            )
+
         target = delivery_target(row, platform="slack")
         if target is None:
-            return await _dm_fallback(
-                client, row, "destination_unavailable", team_id=tenant.external_id, policy=dm_policy
-            )
+            return await fallback("destination_unavailable")
         if not authorize(
             cleared,
             subject=Subject(),
@@ -183,15 +191,11 @@ def make_slack_routine_poster(
             place=Place(channel_id=target.channel_id),
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
-            return await _dm_fallback(
-                client, row, "protected_channel", team_id=tenant.external_id, policy=dm_policy
-            )
+            return await fallback("protected_channel")
         refusal = await _destination_refusal(client, row, target)
         if refusal is not None:
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
-            return await _dm_fallback(
-                client, row, refusal, team_id=tenant.external_id, policy=dm_policy
-            )
+            return await fallback(refusal)
         text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
         try:
             if target.thread_ts is not None:
@@ -205,13 +209,7 @@ def make_slack_routine_poster(
         except SlackApiError as err:
             error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
             if error in _UNUSABLE_DESTINATION:
-                return await _dm_fallback(
-                    client,
-                    row,
-                    "destination_unavailable",
-                    team_id=tenant.external_id,
-                    policy=dm_policy,
-                )
+                return await fallback("destination_unavailable")
             raise
         return DeliveryOutcome(status="delivered")
 

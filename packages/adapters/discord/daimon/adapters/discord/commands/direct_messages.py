@@ -56,6 +56,9 @@ _DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
         "You aren't on this workspace's list of people who can start a turn. An admin can add you."
     ),
     "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "channel_isolated": (
+        "This channel is isolated, so its conversations stay in it and can't move to a DM."
+    ),
     "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
     "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
     "channel_budget_exceeded": "Sorry, " + CHANNEL_BUDGET_NOTICE,

@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
 from daimon.adapters.mcp.tools.agents import (
     _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
 )
@@ -421,11 +422,21 @@ async def _sync_impl(
     )
 
 
+async def _hidden(runtime: McpRuntime, auth: AuthIdentity, skill: SkillListResponse) -> bool:
+    """Whether `skill` belongs, or may belong, to an agent across an isolated channel's line."""
+    caller = await load_caller_isolation(runtime, auth)
+    owners = await load_skill_owners(runtime, caller, auth.tenant_id)
+    body = strip_tenant_prefix(tenant_id=auth.tenant_id, display_title=skill.display_title or "")
+    return caller.hides_skill(owners, skill_id=skill.id, body=body or "")
+
+
 async def _list_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> list[SkillInfo]:
     rows, _truncated = await list_skills_lenient(runtime.client)
+    caller = await load_caller_isolation(runtime, auth)
+    owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     result: list[SkillInfo] = []
     for row in rows:
         if row.source == "anthropic":
@@ -436,7 +447,7 @@ async def _list_impl(
             bare = strip_tenant_prefix(
                 tenant_id=auth.tenant_id, display_title=row.display_title or ""
             )
-            if bare is not None:
+            if bare is not None and not caller.hides_skill(owners, skill_id=row.id, body=bare):
                 # Own-namespace skill: display the bare name.
                 result.append(SkillInfo.from_ma(row, display_name=bare))
             # Foreign-tenant skills are excluded from the result.
@@ -450,7 +461,7 @@ async def _get_impl(
 ) -> SkillDetail:
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None:
+    if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
     async for _ in runtime.client.beta.skills.versions.list(skill.id):
@@ -480,7 +491,7 @@ async def _delete_impl(
         )
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None:
+    if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     await delete_skill_and_versions(runtime.client, skill.id)
 

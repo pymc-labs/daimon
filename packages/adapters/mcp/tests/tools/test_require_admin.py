@@ -123,7 +123,9 @@ async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin(
     assert isinstance(result, AgentInfo), "non-admin create must succeed and return AgentInfo"
 
 
-async def test_list_agents_impl_does_not_raise_for_non_admin() -> None:
+async def test_list_agents_impl_does_not_raise_for_non_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Reads are ungated — non-admin callers can list agents."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -149,7 +151,9 @@ async def test_list_agents_impl_does_not_raise_for_non_admin() -> None:
         role=Role.USER,
         is_admin=False,
     )
-    result = await _list_agents_impl(_agents_runtime(client), auth, page=None)
+    result = await _list_agents_impl(
+        _agents_runtime(client, session_factory=db_session_factory), auth, page=None
+    )
     assert isinstance(result, list), "non-admin read must succeed and return a list"
 
 
@@ -236,7 +240,9 @@ async def test_sync_impl_raises_when_not_admin() -> None:
     )
 
 
-async def test_list_impl_does_not_raise_admin_gate_for_non_admin() -> None:
+async def test_list_impl_does_not_raise_admin_gate_for_non_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Reads are ungated — non-admin callers can list skills."""
     from anthropic.types.beta import SkillListResponse
 
@@ -267,7 +273,7 @@ async def test_list_impl_does_not_raise_admin_gate_for_non_admin() -> None:
         is_admin=False,
     )
     runtime = McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=db_session_factory,
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),

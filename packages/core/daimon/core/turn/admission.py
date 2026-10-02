@@ -7,7 +7,7 @@ frozen `Admission` or raising a typed error. No boolean gate result crosses this
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> agent pin -> balance -> cap -> channel budget. A tenant that is both
+-> agent pin -> channel isolation -> balance -> cap -> channel budget. A tenant that is both
 over-balance and mis-configured must see the config error (matches both
 adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
@@ -27,7 +27,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy, is_dm_source_sealed
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    is_dm_source_sealed,
+    isolated_channel_of,
+    isolation_owner,
+)
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -365,7 +370,10 @@ async def admit_impl(
         agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
         run_place=Place()
         if is_dm
-        else build_turn_place(channel_id=channel_id, thread_id=thread_id),
+        else replace(
+            build_turn_place(channel_id=channel_id, thread_id=thread_id),
+            setup_thread=config.thread_binding_kind == "setup",
+        ),
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
@@ -402,7 +410,9 @@ async def admit_impl(
     # them are recorded, so unsealing one later leaves the others holding.
     seal_ids = _seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
-    memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
+    memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
+        is_dm and policy.dm_memory_read_only
+    )
 
     return Admission(
         memory_read_only=memory_read_only,
@@ -435,7 +445,7 @@ def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Pla
 
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
-    """The agent pin; any denial refuses the turn."""
+    """The agent pin, then channel isolation; any denial refuses the turn."""
     decision = authorize(
         policy,
         subject=grant.subject,
@@ -445,7 +455,19 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
         place=grant.run_place,
     )
     if not decision:
-        raise AdmissionDenied(reason="agent_pinned_elsewhere")
+        raise AdmissionDenied(
+            reason="channel_isolated"
+            if decision.reason == "channel_isolated"
+            else "agent_pinned_elsewhere"
+        )
+
+
+def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
+    """An isolated channel's own agent at work there, whose memory stays writable."""
+    inside = isolated_channel_of(
+        policy, grant.run_place.channel_id, grant.run_place.parent_channel_id
+    )
+    return inside is not None and isolation_owner(policy, grant.agent.names) == inside
 
 
 def _seal_ids(
@@ -502,7 +524,9 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     # new seals: a DM turn picks up `dm_memory_read_only` switched on since
     # admission. Read-only never relaxes back to writable here.
     memory_read_only = (
-        admission.memory_read_only or bool(seal_ids) or (grant.is_dm and policy.dm_memory_read_only)
+        admission.memory_read_only
+        or (bool(seal_ids) and not _is_own_agent(policy, grant))
+        or (grant.is_dm and policy.dm_memory_read_only)
     )
     if seal_ids == admission.origin_seal_ids and memory_read_only == admission.memory_read_only:
         return admission

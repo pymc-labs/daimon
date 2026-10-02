@@ -938,6 +938,70 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
     )
 
 
+@pytest.mark.parametrize(
+    ("parent", "reachable"),
+    [("C_ROOM", False), ("C_PARENT", True)],
+    ids=["inside-isolated", "outside"],
+)
+async def test_handoff_stays_on_its_side_of_an_isolated_channel(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    parent: str,
+    reachable: bool,
+) -> None:
+    """research-bot is shared (the deployment default), so a thread under the
+    isolated C_ROOM can't hand to it, while one elsewhere still can."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ROOM"),
+        tenant_id=tenant.id,
+        agent_name="room-bot",
+        mode="agent",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C_ROOM",),
+            isolated_channel_ids=("C_ROOM",),
+            agent_channel_pins={"room-bot": ("C_ROOM",)},
+        ),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id=parent,
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="room-bot",
+        role=Role.USER,
+    ) as origin:
+        if reachable:
+            result = await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+            assert result.destination_name == _DESTINATION_NAME, "outside, shared agents stay"
+        else:
+            with pytest.raises(ToolError, match="not in this workspace"):
+                await _hand_off_task_impl(
+                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                )
+
+
 async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_nothing(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],

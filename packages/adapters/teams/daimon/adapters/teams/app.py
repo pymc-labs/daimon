@@ -149,6 +149,7 @@ _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
     "1:1 chat with me, or ask an admin to restore it."
 )
+_ISOLATED = "This channel is isolated: only its own agents answer here."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -163,6 +164,8 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "channel_budget_exceeded": ("turn.skipped.channel_budget_exceeded", _CHANNEL_BUDGET),
     # A protected channel hears nothing, a refusal included.
     "channel_protected": ("turn.skipped.channel_protected", None),
+    # Teams isolates no channels, so this is unreachable; the reply keeps the map total.
+    "channel_isolated": ("turn.skipped.channel_isolated", _ISOLATED),
 }
 
 _NO_CONTEXT = (

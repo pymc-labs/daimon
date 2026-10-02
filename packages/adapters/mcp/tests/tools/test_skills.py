@@ -48,7 +48,9 @@ def _runtime(
     )
 
 
-async def test_list_impl_returns_skill_info_list() -> None:
+async def test_list_impl_returns_skill_info_list(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -73,14 +75,16 @@ async def test_list_impl_returns_skill_info_list() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
     assert isinstance(result, list), "should return a list"
     assert len(result) == 1, "should return one skill"
     assert isinstance(result[0], SkillInfo), "should return SkillInfo items"
     assert result[0].name == "my-skill", "should return bare name stripped of tenant prefix"
 
 
-async def test_get_impl_returns_skill_detail_with_version_count() -> None:
+async def test_get_impl_returns_skill_detail_with_version_count(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -110,7 +114,7 @@ async def test_get_impl_returns_skill_detail_with_version_count() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _get_impl(_runtime(client), auth, "found")
+    result = await _get_impl(_runtime(client, session_factory=db_session_factory), auth, "found")
     assert isinstance(result, SkillDetail), "should return a SkillDetail"
     assert result.name == "found", "should return the bare skill name"
     assert result.version_count == 3, "should count all versions"
@@ -129,7 +133,9 @@ async def test_get_impl_raises_tool_error_not_found() -> None:
         await _get_impl(_runtime(client), auth, "nope")
 
 
-async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_builtins() -> None:
+async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_builtins(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """list_skills returns only the caller's namespace + anthropic built-ins."""
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
@@ -177,7 +183,7 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     result_names = [r.name for r in result]
     assert "my-skill" in result_names, "own-namespace skill must appear with bare name"
@@ -190,7 +196,9 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     )
 
 
-async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name() -> None:
+async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Synced skills are stored as `{agent}/{name}` body — strip returns `{agent}/{name}`."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -216,7 +224,7 @@ async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name() -> N
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     assert len(result) == 1, "synced skill must appear in list"
     assert result[0].name == "daimon/tool-x", (

@@ -48,6 +48,13 @@ ACME_DISPLAY = AgentRef.of("acme-config", "Acme Display", "acme-config")
 INSIDE = Place(channel_id="C_ACME", parent_channel_id="C_ACME")
 THREAD_INSIDE = Place(channel_id="T1", parent_channel_id="C_ACME")
 OUTSIDE = Place(channel_id="C_OTHER", parent_channel_id="C_OTHER")
+ISOLATED = TenantAccessPolicy(
+    sealed_channel_ids=("C_ACME",),
+    isolated_channel_ids=("C_ACME",),
+    agent_channel_pins={"acme": ("C_ACME",)},
+)
+SHARED = AgentRef.of("shared", "shared")
+SETUP_ORIGIN = Place(channel_id="T_SETUP", parent_channel_id="C_ACME", setup_thread=True)
 
 
 def _deny(reason: str) -> Decision:
@@ -912,6 +919,315 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
         },
         _deny("agent_pinned_elsewhere"),
+    ),
+    # --- Isolation: an isolated channel's own agents stay in, others stay out ---
+    (
+        "isolation shared agent inside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.RUN_AGENT, "agent": SHARED, "place": THREAD_INSIDE},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent inside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.RUN_AGENT, "agent": ACME, "place": THREAD_INSIDE},
+        ALLOW,
+    ),
+    (
+        "isolation own agent by its MA name",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.RUN_AGENT,
+            "agent": AgentRef.of("alias", "Team Acme", "acme"),
+            "place": INSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation unresolved agent inside fails closed",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.RUN_AGENT,
+            "agent": AgentRef.unresolved(),
+            "place": INSIDE,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation setup thread answers as the built-in",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.RUN_AGENT,
+            "agent": SHARED,
+            "place": Place(channel_id="T1", parent_channel_id="C_ACME", setup_thread=True),
+        },
+        ALLOW,
+    ),
+    (
+        "isolation server admin in their own DM",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
+        ALLOW,
+    ),
+    (
+        "isolation channel admin of the channel in their hub",
+        ISOLATED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.RUN_AGENT,
+            "surface": Surface.HUB,
+            "agent": ACME,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation channel admin elsewhere is held",
+        ISOLATED,
+        {
+            "subject": Subject(
+                platform_user_id="U_CA", administered_channel_ids=frozenset({"C_X"})
+            ),
+            "action": Action.RUN_AGENT,
+            "surface": Surface.HUB,
+            "agent": ACME,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "isolation channel admin on an agent key is held",
+        ISOLATED,
+        {
+            "subject": AGENT_KEY_CHANNEL_ADMIN,
+            "action": Action.RUN_AGENT,
+            "surface": Surface.HUB,
+            "agent": ACME,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "isolation own agent never posts outside",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.POST, "agent": ACME, "place": Place(own_dm=True)},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation shared agent never posts inside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.POST, "agent": SHARED, "place": THREAD_INSIDE},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent sends no DM",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.DIRECT_MESSAGE,
+            "agent": ACME,
+            "recipient_id": "U_MEM",
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation shared agent reads nothing inside",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_CHANNEL,
+            "agent": SHARED,
+            "place": INSIDE,
+            "origin_channel_ids": frozenset({"C_ACME"}),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent reads inside",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_CHANNEL,
+            "agent": ACME,
+            "place": INSIDE,
+            "origin_channel_ids": frozenset({"C_ACME"}),
+        },
+        ALLOW,
+    ),
+    (
+        "isolation shared agent saves no routine into a thread inside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.SAVE_ROUTINE, "agent": SHARED, "place": THREAD_INSIDE},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation shared agent is no channel default inside",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.BIND_CHANNEL_DEFAULT, "agent": SHARED, "place": INSIDE},
+        _deny("channel_isolated"),
+    ),
+    # --- Isolation: C's setup thread and the sessions that ran in C ---
+    (
+        "isolation built-in in the setup thread reads none of the channel's sessions",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "agent": SHARED,
+            "origin_channel_ids": frozenset({"C_ACME", "T_SETUP"}),
+            "session": SessionFacts(channel="C_ACME", thread="T1", seal_ids=frozenset({"C_ACME"})),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation built-in continues no session of the channel",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.CONTINUE_SESSION,
+            "agent": SHARED,
+            "origin_channel_ids": frozenset({"C_ACME", "T1"}),
+            "session": SessionFacts(channel="C_ACME", thread="T1", seal_ids=frozenset({"T1"})),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent reads the channel's sessions",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "agent": ACME,
+            "origin_channel_ids": frozenset({"C_ACME", "T1"}),
+            "session": SessionFacts(channel="C_ACME", thread="T1", seal_ids=frozenset({"C_ACME"})),
+        },
+        ALLOW,
+    ),
+    (
+        "isolation no agent reads a slack thread sealed under the channel",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "origin_channel_ids": frozenset({"C_ACME", "C_ACME:1.2"}),
+            "session": SessionFacts(seal_ids=frozenset({"C_ACME:1.2"}), channel="C_X"),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation setup thread holds the built-in to the channel",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.POST,
+            "agent": SHARED,
+            "place": OUTSIDE,
+            "origin": SETUP_ORIGIN,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation setup thread built-in posts into its own thread",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.POST,
+            "agent": SHARED,
+            "place": SETUP_ORIGIN,
+            "origin": SETUP_ORIGIN,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation a plain origin inside lets no outside agent post there",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.POST,
+            "agent": SHARED,
+            "place": THREAD_INSIDE,
+            "origin": THREAD_INSIDE,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation setup thread built-in sends no DM",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.DIRECT_MESSAGE,
+            "agent": SHARED,
+            "recipient_id": "U_MEM",
+            "origin": SETUP_ORIGIN,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a routine saved in the setup thread stays in the channel",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.SAVE_ROUTINE,
+            "agent": SHARED,
+            "place": OUTSIDE,
+            "origin": SETUP_ORIGIN,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a routine saved in the setup thread for the own agent",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.SAVE_ROUTINE,
+            "agent": ACME,
+            "place": INSIDE,
+            "origin": SETUP_ORIGIN,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation a thread with no known parent fails closed",
+        ISOLATED,
+        {
+            "subject": Subject(),
+            "action": Action.RUN_AGENT,
+            "surface": Surface.ROUTINE,
+            "agent": SHARED,
+            "place": Place(channel_id="T9", parent_channel_id="T9", parent_unresolved=True),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "a thread with no known parent runs while nothing is isolated",
+        PINNED,
+        {
+            "subject": Subject(),
+            "action": Action.RUN_AGENT,
+            "surface": Surface.ROUTINE,
+            "agent": SHARED,
+            "place": Place(channel_id="T9", parent_channel_id="T9", parent_unresolved=True),
+        },
+        ALLOW,
+    ),
+    # --- Fork: admins only, never a pinned agent ---
+    (
+        "fork by a member",
+        TenantAccessPolicy(),
+        {"subject": MEMBER, "action": Action.FORK, "agent": SHARED},
+        _deny("admin_required"),
+    ),
+    (
+        "fork of a pinned agent",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.FORK, "agent": ACME},
+        _deny("agent_pinned"),
+    ),
+    (
+        "fork of a shared agent by an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.FORK, "agent": SHARED},
+        ALLOW,
     ),
 ]
 

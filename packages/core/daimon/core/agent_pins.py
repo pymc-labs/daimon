@@ -12,7 +12,7 @@ and its names can't drift.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -49,6 +49,21 @@ POLICY_UNREADABLE_REFUSAL = (
 def agent_pin_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | None, ...]:
     """Every name a pin on an agent may be keyed by (`daimon.core.authz.agent_names`)."""
     return agent_names(name, metadata)
+
+
+def agent_aliases(agents: Iterable[BetaManagedAgentsAgent]) -> dict[str, tuple[str | None, ...]]:
+    """Every name each agent answers to, keyed by each of those names. Pure.
+
+    For a place that records one name (a routing row, a binding, a routine),
+    so a pin on the agent's other name still counts there.
+    """
+    aliases: dict[str, tuple[str | None, ...]] = {}
+    for agent in agents:
+        names = agent_pin_names(agent.name, agent.metadata)
+        for name in names:
+            if name:
+                aliases[name] = (*aliases.get(name, ()), *names)
+    return aliases
 
 
 async def request_pin_refusal(

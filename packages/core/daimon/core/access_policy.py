@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TenantAccessPolicy(BaseModel):
@@ -31,9 +31,21 @@ class TenantAccessPolicy(BaseModel):
     sealed_channel_ids: tuple[str, ...] = ()
     # Whether turns started from a DM get read-only memory mounts.
     dm_memory_read_only: bool = False
+    # A marker on sealed channels whose own agents (those pinned to that
+    # channel alone, `isolation_owner`) are the only ones answering and seen
+    # there; see `daimon.core.channel_isolation`.
+    isolated_channel_ids: tuple[str, ...] = ()
     # Agent name -> the only channels (and threads under them) it may run in.
     # An agent not named here runs wherever the cascade sends it.
     agent_channel_pins: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _isolated_channels_are_sealed(self) -> TenantAccessPolicy:
+        # Isolation adds to a seal; it never stands without one.
+        unsealed = sorted(set(self.isolated_channel_ids) - set(self.sealed_channel_ids))
+        if unsealed:
+            raise ValueError(f"isolated channels must also be sealed: {', '.join(unsealed)}")
+        return self
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
@@ -79,6 +91,42 @@ def is_sealed(
     if channel_id in policy.sealed_channel_ids:
         return True
     return parent_channel_id is not None and parent_channel_id in policy.sealed_channel_ids
+
+
+def isolated_channel_of(
+    policy: TenantAccessPolicy, channel_id: str | None, parent_channel_id: str | None = None
+) -> str | None:
+    """The isolated channel a place lies in (a thread counts as its parent), or None."""
+    for candidate in (parent_channel_id, channel_id):
+        if candidate is not None and candidate in policy.isolated_channel_ids:
+            return candidate
+    return None
+
+
+def is_isolated(
+    policy: TenantAccessPolicy, *, channel_id: str, parent_channel_id: str | None = None
+) -> bool:
+    """Whether `channel_id`, or the channel a thread sits under, is isolated."""
+    return isolated_channel_of(policy, channel_id, parent_channel_id) is not None
+
+
+def isolation_owner(policy: TenantAccessPolicy, agent_names: tuple[str | None, ...]) -> str | None:
+    """The isolated channel this agent belongs to, or None for every other agent.
+
+    An agent belongs to isolated channel C when it is pinned to C alone: every
+    pin on any of its names (pass them all, as for `is_outside_agent_pin`)
+    lies in C, and at least one names C.
+    """
+    pinned = [
+        policy.agent_channel_pins[name]
+        for name in agent_names
+        if name is not None and name in policy.agent_channel_pins
+    ]
+    channels = {channel for pin in pinned for channel in pin}
+    if len(channels) != 1:
+        return None
+    (channel,) = channels
+    return channel if channel in policy.isolated_channel_ids else None
 
 
 def is_sealed_source(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:

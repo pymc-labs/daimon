@@ -325,57 +325,6 @@ def _runtime_with_settings(
     )
 
 
-def _runtime_with_db(
-    anthropic: Any,
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet_key: str,
-    public_url: HttpUrl | None = None,
-) -> DiscordRuntime:
-    """Build a DiscordRuntime with a real sessionmaker + crypto keys for fork credential tests."""
-    settings = MagicMock()
-    settings.mcp.public_url = public_url
-    settings.crypto.keys = (MagicMock(get_secret_value=lambda: fernet_key),)
-    settings.github.oauth_scopes = ("repo", "read:user")
-    return DiscordRuntime(
-        settings=settings,
-        anthropic=anthropic,
-        sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
-    )
-
-
-def _fork_handler(
-    *,
-    source_payload: dict[str, Any],
-    fork_id: str,
-    fork_name: str,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    created: list[dict[str, Any]],
-) -> Any:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return httpx.Response(200, json={"data": [source_payload], "next_page": None})
-        if request.method == "GET" and request.url.path == f"/v1/agents/{source_payload['id']}":
-            return httpx.Response(200, json=source_payload)
-        if request.method == "POST" and request.url.path == "/v1/agents":
-            created.append(json.loads(request.content))
-            return httpx.Response(
-                200,
-                json=_agent_dict(
-                    id_=fork_id, name=fork_name, tenant_id=tenant_id, account_id=account_id
-                ),
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
-
-    return handler
-
-
 async def test_call_reconcile_for_panel_propagates_public_url_and_account_id(
     monkeypatch: pytest.MonkeyPatch,
     tenant_id: uuid.UUID,

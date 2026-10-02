@@ -170,9 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change it from outside them, and from the hub may list and read the sealed
   conversations of the channels they run, as a server admin may of any, when
   every seal on one lies in those channels; DMs stay private. No chat
-  tool or panel can make a pinned agent the default of a channel outside its
-  pin; the operator CLI still can. Nothing changes until a channel admin is
-  named.
+  tool, panel or CLI `config` write can make a pinned agent the default of a
+  channel outside its pin. Nothing changes until a channel admin is named.
 - **Channel-bound coding-tool tokens.** "Use from your coding tools" pressed
   in a sealed channel, or in a channel the agent is pinned to (a thread counts
   as its parent), now mints a token bound to that channel, and the reply says
@@ -184,6 +183,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants. A channel admin of every channel an agent is pinned to may now mint
   one from inside those channels, always bound. Tokens minted elsewhere, and
   existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
+- **Channel isolation.** A server admin can isolate a channel from Who
+  answers where in the setup panel, with `set_channel_isolation` (also under
+  an operator token's `channels:write`) or with `--isolated-channel`. That
+  seals it and pins its default agent to it alone in one write; a default
+  that is built in or answers elsewhere is refused with the reason, unless
+  the admin asks for a copy, made without credentials. Inside, only the
+  channel's own agents run, post, read and take routines or bindings, with
+  writable memory, and only they read its sessions; they are hidden
+  elsewhere, post nowhere else, send no DMs, and `/dm` there is refused. A
+  conversation in the channel keeps its posts, cards and routines inside it,
+  while its setup thread can still configure the channel's agent. The CLI
+  refuses a pin or seal change that would break an isolated channel. The panel shows the channel as private,
+  dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
+  and warns that the agents keep what they remembered there. No migration;
+  clear isolation before rolling back, as older releases reject the field.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

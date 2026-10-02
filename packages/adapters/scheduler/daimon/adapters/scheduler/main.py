@@ -48,6 +48,7 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_isolation import routine_destination_place
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -265,14 +266,19 @@ async def _build_fire(
                 policy_error = None if allowed else "invoker_not_allowed"
                 # A pinned agent fires only when it posts straight into one of
                 # its pinned channels; `_check_agent_pin` refuses anything else
-                # at save time, and this holds for a pin added since.
-                if policy_error is None and not authorize(
-                    policy,
-                    subject=Subject(),
-                    action=Action.RUN_AGENT,
-                    surface=Surface.ROUTINE,
-                    agent=AgentRef.of(row.agent_name),
-                    place=Place(channel_id=target.channel_id if target is not None else None),
+                # at save time, and this holds for a pin added since. Isolation
+                # needs every name, so it waits for the resolved agent below.
+                if (
+                    policy_error is None
+                    and authorize(
+                        policy,
+                        subject=Subject(),
+                        action=Action.RUN_AGENT,
+                        surface=Surface.ROUTINE,
+                        agent=AgentRef.of(row.agent_name),
+                        place=Place(channel_id=target.channel_id if target is not None else None),
+                    ).reason
+                    == "agent_pinned_elsewhere"
                 ):
                     policy_error = "agent_pinned_elsewhere"
             if policy_error is not None:
@@ -341,28 +347,35 @@ async def _build_fire(
             ),
             cache=resolver_cache,
         )
-        # The pin is checked again on the agent that will actually run, by
-        # every name a pin can be keyed by, after self-healing may have picked
-        # a replacement: the saved routine name alone can miss a pin on the
-        # display name or a rename.
-        if fire_policy is not None and fire_policy.agent_channel_pins:
+        # The pin and channel isolation are checked again on the agent that
+        # will actually run, by every name a pin can be keyed by, after
+        # self-healing may have picked a replacement: the saved routine name
+        # alone can miss a pin on the display name or a rename.
+        if fire_policy is not None and (
+            fire_policy.agent_channel_pins or fire_policy.isolated_channel_ids
+        ):
             ran = await client.beta.agents.retrieve(resolved_agent_id)
-            if not authorize(
+            decision = authorize(
                 fire_policy,
                 subject=Subject(),
                 action=Action.RUN_AGENT,
                 surface=Surface.ROUTINE,
                 agent=build_agent_ref(ran.name, ran.metadata, row.agent_name),
-                place=Place(channel_id=fire_channel_id),
-            ):
+                # A thread destination sits under its saved parent channel; one
+                # saved without it can't be placed here and fails closed while
+                # anything is isolated.
+                place=routine_destination_place(row, channel_id=fire_channel_id),
+            )
+            if decision.reason is not None:
+                refusal = decision.reason
                 log.info(
                     "routine.skipped.invoker_policy",
                     routine_id=str(row.id),
                     tenant_id=str(row.tenant_id),
-                    reason="agent_pinned_elsewhere",
+                    reason=refusal,
                 )
                 async with sm() as pin_s, pin_s.begin():
-                    await record_result(pin_s, row.id, tail=None, error="agent_pinned_elsewhere")
+                    await record_result(pin_s, row.id, tail=None, error=refusal)
                 return
         # Admission gate: the routine's channel budget, after the cap (run_one_tick),
         # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is

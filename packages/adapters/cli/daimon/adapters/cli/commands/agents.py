@@ -18,16 +18,15 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
-from daimon.core import agent_lifecycle
+from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
-from daimon.core.authz import Action, Subject, authorize, build_agent_ref
+from daimon.core.authz import Subject
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
     list_agents_by_tenant,
 )
-from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -42,7 +41,6 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -434,7 +432,10 @@ async def agents_archive(
 
 @agents_app.command(
     "fork",
-    help=("Create a new MA agent seeded from the source's content and a local row pointing at it."),
+    help=(
+        "Copy an agent under a new name. The copy holds no MCP credentials and no skill "
+        "scoped to another agent; the skills left off are named."
+    ),
 )
 def agents_fork_command(
     ctx: typer.Context,
@@ -481,57 +482,21 @@ async def agents_fork(
     source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
-    # Same rules as the chat fork_agent tool: a pinned agent can't be copied
-    # (the copy would carry no pin), and a copy starts credential-less.
-    async with rt.sessionmaker() as session:
-        policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not authorize(
-        policy,
+    public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
+    copy = await copy_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        source=source,
+        new_name=dst,
+        public_url=public_url,
         # The CLI is the deployment operator.
         subject=Subject(is_admin=True),
-        action=Action.FORK,
-        agent=build_agent_ref(source.name, source.metadata),
-    ):
-        raise StoreError(
-            f"agent {src!r} is pinned to channels in the access policy, so it can't be copied."
-        )
-    source_ma = await rt.anthropic.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params = {k: params[k] for k in _CREATE_FIELDS if k in params}
-    fork_params["name"] = dst
-    fork_params["metadata"] = build_metadata(
-        tenant_id=tenant_id,
-        name=dst,
-        account_id=derive_guild_account_uuid(tenant_id),
     )
-    public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
-    # Add daimon-mcp server + toolset BOTH halves — MA validates that every
-    # server in mcp_servers is referenced by some mcp_toolset tool (400 otherwise).
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        public_url,
-    )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
-        sessionmaker=rt.sessionmaker,
-        tenant_id=tenant_id,
-        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
-        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        tools=fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    fork_params["mcp_servers"] = servers
-    fork_params["tools"] = tools
-    await rt.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
+    if copy.dropped_skills:
+        left_off = ", ".join(copy.dropped_skills)
+        console.print(f"[yellow]Left off skills scoped to another agent: {left_off}[/yellow]")
 
 
 class _BackfillRow(BaseModel):

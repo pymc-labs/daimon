@@ -5,10 +5,13 @@ from __future__ import annotations
 import uuid
 
 from anthropic import AsyncAnthropic
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_isolation import is_memory_hidden
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -28,7 +31,8 @@ async def get_channel_memory_store(
 ) -> tuple[str, str] | None:
     """`(agent_name, memory_store_id)` for the agent answering in `channel_id`.
 
-    None when no agent is configured there or it has no memory store yet.
+    None when no agent is configured there, it has no memory store yet, or its
+    pin or channel isolation hides it from `channel_id`.
     Raises DaimonError when the configured agent is missing on the MA side.
     """
     # Never committed: a first-contact principal only scopes this read.
@@ -40,11 +44,15 @@ async def get_channel_memory_store(
             account_id=principal.account_id, tenant_id=tenant_id, channel_id=channel_id
         )
         config = await resolve_config(session, context=scope, default=default)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=config.agent_name)
     if agent is None:
         raise DaimonError(f"Configured agent '{config.agent_name}' not found.")
+    names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))
+    if is_memory_hidden(policy, agent_names=names, channel_id=channel_id):
+        return None
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     async with sessionmaker() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)

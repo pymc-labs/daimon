@@ -3,13 +3,12 @@
 Covers:
 - do_propagate persists agent_name at the scope (set_fields); second call returns prior name
 - do_unpropagate clears the agent_name (unset_fields)
-- fork_agent copies no credential or repo binding (mirrors Discord)
+- mask_tail covers the full-length and short-string cases
 - delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from collections.abc import Callable
@@ -310,7 +309,7 @@ async def test_do_unpropagate_clears_agent_name_at_scope(
 
 
 # ---------------------------------------------------------------------------
-# fork_agent / delete_agent — core.agent_lifecycle repoint (mirrors Discord)
+# delete_agent — core.agent_lifecycle repoint (mirrors Discord)
 # ---------------------------------------------------------------------------
 
 
@@ -344,56 +343,6 @@ def _agent_dict(
         tools=[],
         system=None,
     ).model_dump(mode="json")
-
-
-def _fork_handler(
-    *,
-    source_payload: dict[str, Any],
-    fork_id: str,
-    fork_name: str,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    created: list[dict[str, Any]],
-) -> Callable[[httpx.Request], httpx.Response]:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return httpx.Response(200, json={"data": [source_payload], "next_page": None})
-        if request.method == "GET" and request.url.path == f"/v1/agents/{source_payload['id']}":
-            return httpx.Response(200, json=source_payload)
-        if request.method == "POST" and request.url.path == "/v1/agents":
-            created.append(json.loads(request.content))
-            return httpx.Response(
-                200,
-                json=_agent_dict(
-                    id_=fork_id, name=fork_name, tenant_id=tenant_id, account_id=account_id
-                ),
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
-
-    return handler
-
-
-def _runtime_with_db(
-    anthropic: Any,
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet_key: str,
-) -> SlackRuntime:
-    """Build a SlackRuntime with a real sessionmaker + crypto keys for fork/delete tests."""
-    settings = MagicMock()
-    settings.mcp.public_url = None
-    settings.crypto.keys = (MagicMock(get_secret_value=lambda: fernet_key),)
-    settings.github.oauth_scopes = ("repo", "read:user")
-    return SlackRuntime(
-        settings=settings,
-        anthropic=anthropic,
-        sessionmaker=sessionmaker,
-        billing_config=None,
-        http_client=MagicMock(),
-        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        deployment_default=DeploymentDefault(),
-    )
 
 
 async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:

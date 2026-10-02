@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 101 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 102 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -99,6 +99,14 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | `get_channel_budget` | Discord callers, Slack callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
+
+## `channel_isolation`
+
+Channel isolation tool: keep a channel's own agents inside it.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
 
 ## `channels`
 

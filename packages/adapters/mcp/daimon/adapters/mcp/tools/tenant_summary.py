@@ -8,6 +8,7 @@ or channel admins. The private channels DM conversations run in are left out.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -20,6 +21,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.channel_budgets import list_channel_budgets
 from daimon.core.stores.direct_messages import list_dm_channel_ids
@@ -89,15 +91,18 @@ def build_channel_summaries(
     budgets: dict[str, ChannelBudgetStatus],
     admins: dict[str, ChannelAdmins],
     dm_channel_ids: set[str],
+    isolated_channel_ids: Collection[str] = (),
 ) -> list[ChannelSummary]:
-    """One entry per channel with a setting, a budget or admins, ordered by channel id.
+    """One entry per channel with a setting, a budget, admins or isolation, by channel id.
 
     A DM's channel gets a config row when the DM starts; it is not a channel
     of the workspace, so ``dm_channel_ids`` are skipped.
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    for channel_id in sorted((configs.keys() | budgets.keys() | admins.keys()) - dm_channel_ids):
+    isolated = set(isolated_channel_ids)
+    listed = configs.keys() | budgets.keys() | admins.keys() | isolated
+    for channel_id in sorted(listed - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         status = budgets.get(channel_id)
         summaries.append(
@@ -105,8 +110,7 @@ def build_channel_summaries(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
                 environment_name=resolved.environment_name,
-                # A later isolation feature fills this in build_channel_summaries.
-                isolated=False,
+                isolated=channel_id in isolated,
                 admins=admins.get(channel_id, ChannelAdmins(role_ids=[], user_ids=[])),
                 budget=_budget_summary(status) if status is not None else None,
             )
@@ -138,6 +142,10 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             )
         }
         dm_channel_ids = await list_dm_channel_ids(session, tenant_id=auth.tenant_id)
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as exc:
+            raise ToolError("the workspace access policy could not be read") from exc
     default = merge(channel=None, tenant=tenant_row, default=runtime.deployment_default)
     return TenantSummary(
         balance_usd=f"{balance:.2f}",
@@ -150,6 +158,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             budgets=budgets,
             admins=admins,
             dm_channel_ids=dm_channel_ids,
+            isolated_channel_ids=policy.isolated_channel_ids,
         ),
     )
 
@@ -160,7 +169,7 @@ def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
 
         Lists every channel with its own agent or environment setting, a
-        spending budget or channel admins, with the agent and environment that
+        spending budget, channel admins or isolation, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one). Money is a
         decimal string.

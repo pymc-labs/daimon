@@ -20,6 +20,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
@@ -69,7 +70,7 @@ def _check_text(content: str) -> None:
 
 
 async def _authorize(
-    runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
+    runtime: McpRuntime, auth: AuthIdentity, conversation_id: str, origin: Place | None = None
 ) -> TeamsBotClient:
     """The client, once the requester is on the target's roster and it is writable."""
     client = runtime.teams_client
@@ -87,7 +88,7 @@ async def _authorize(
     if not is_member:
         raise ToolError(_NOT_A_MEMBER)
     await require_channel_writable(
-        runtime, auth, channel_id=conversation_id, parent_channel_id=channel
+        runtime, auth, channel_id=conversation_id, parent_channel_id=channel, origin=origin
     )
     return client
 
@@ -157,11 +158,11 @@ async def _post_teams_app_install_link_impl(  # pyright: ignore[reportUnusedFunc
 
 
 async def _post_teams_credential_card_impl(  # pyright: ignore[reportUnusedFunction]  # used by tools/credential_requests.py
-    runtime: McpRuntime, auth: AuthIdentity, *, row: CredentialRequestRow
+    runtime: McpRuntime, auth: AuthIdentity, *, row: CredentialRequestRow, origin: Place | None
 ) -> str:
     """Post the `requested` card into the request's origin conversation. Returns its id."""
     conversation_id = conversation_of(row.channel_id)
-    client = await _authorize(runtime, auth, conversation_id)
+    client = await _authorize(runtime, auth, conversation_id, origin)
     card = build_adaptive_card(card_for_request(row, state="requested"), token=row.token)
     try:
         return await client.send_card(conversation_id, card)

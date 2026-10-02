@@ -19,6 +19,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
+from daimon.core.scope import DeploymentDefault
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_participation import ClassifierMessage, ResolvedParticipation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,6 +42,7 @@ class ThreadParticipant:
         bot_display_name: str,
         billing_config: BillingConfig | None,
         markup: Decimal,
+        deployment_default: DeploymentDefault,
     ) -> None:
         self._settings = settings
         self._bot_user_id = bot_user_id
@@ -52,6 +54,7 @@ class ThreadParticipant:
             bot_display_name=bot_display_name,
             billing_config=billing_config,
             markup=markup,
+            deployment_default=deployment_default,
         )
 
     async def resolve(

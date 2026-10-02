@@ -17,7 +17,7 @@ import uuid
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
-from daimon.adapters.discord.agent_setup.hydrate import load_details_for
+from daimon.adapters.discord.agent_setup.hydrate import load_details_for, panel_viewer
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.agent_setup.write import create_blank_agent, validate_model_id
@@ -163,6 +163,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     channel_id=str(self.state.channel_id),
                     thread_id=self.state.thread_id,
                     default=self.state.deployment_default,
+                    viewer=(viewer := await panel_viewer(session, self.runtime, state=self.state)),
                 )
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(
@@ -174,6 +175,11 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             agent = next(
                 (row for row in roster.rows if row.ma_agent_id == created.anthropic_id), None
             )
+            if agent is None and viewer is not None and viewer.inside_channel_id is not None:
+                raise DaimonError(
+                    f"**{new_name}** was created. This channel is isolated, so it shows here "
+                    "once it is set as the channel's agent."
+                )
             if agent is None:
                 raise DaimonError(
                     f"**{new_name}** was created but is not listed yet. "

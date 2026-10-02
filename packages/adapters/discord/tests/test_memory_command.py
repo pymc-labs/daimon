@@ -144,3 +144,24 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
     sent = interaction.followup.send.call_args
     text = sent.args[0] if sent.args else sent.kwargs.get("content", "")
     assert "no memories" in text.lower()
+
+
+async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_factory) -> None:
+    """In an isolated channel only its own agents are visible, so a shared agent's memory isn't."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    runtime = await _setup(db_session, db_session_factory, seed={"/notes/a.md": "alpha"})
+    await set_access_policy(
+        db_session,
+        tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID)),
+        policy=TenantAccessPolicy(sealed_channel_ids=("42",), isolated_channel_ids=("42",)),
+    )
+    await db_session.commit()
+    cog = MemoryCog(MagicMock())
+    interaction = _interaction(runtime)
+
+    await cog.memory.callback(cog, interaction, path=None)
+
+    text = interaction.followup.send.call_args.args[0]
+    assert "no memories" in text.lower(), "the deployment default answers elsewhere too"

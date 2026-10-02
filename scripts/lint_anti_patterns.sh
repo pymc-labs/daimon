@@ -130,6 +130,7 @@ ALLOWLIST_T5=(
   "cli/commands/agents.py"
   "discord/agent_setup/write.py"
   "slack/agent_setup/write.py"
+  "core/agent_fork.py"
   # preflight probe agents are archived immediately — never host sessions/skills.
   "core/defaults/preflight.py"
   # reader variant create/update both go through dump_agent_spec(reader_spec).

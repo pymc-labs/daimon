@@ -71,6 +71,7 @@ import structlog
 from daimon.adapters.discord.bot import (
     AGENT_PINNED_ELSEWHERE_NOTICE,
     CHANNEL_BUDGET_NOTICE,
+    CHANNEL_ISOLATED_NOTICE,
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
@@ -518,6 +519,9 @@ async def run_wizard_submit_turn_observed(
                 await channel.send(
                     "Your answers were recorded, but " + AGENT_PINNED_ELSEWHERE_NOTICE
                 )
+            elif err.reason == "channel_isolated":
+                _log.info("wizard_submit.skipped.channel_isolated", short_id=row.id)
+                await channel.send("Your answers were recorded, but " + CHANNEL_ISOLATED_NOTICE)
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(

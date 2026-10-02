@@ -198,3 +198,44 @@ async def test_a_dm_source_sealed_after_admission_refuses_the_dm_session(
 
     with pytest.raises(DmSourceSealedError):
         await reauthorize(deps, admission)
+
+
+async def test_an_isolation_added_after_admission_refuses_a_shared_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps, admission = await _admit(db_session_factory, tmp_path, tenant)
+
+    await _set_policy(
+        db_session,
+        tenant,
+        TenantAccessPolicy(
+            sealed_channel_ids=("chan-1",),
+            isolated_channel_ids=("chan-1",),
+            agent_channel_pins={"local": ("chan-1",)},
+        ),
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await reauthorize(deps, admission)
+    assert exc_info.value.reason == "channel_isolated"
+
+
+async def test_an_isolated_channels_own_agent_keeps_its_memory_writable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    isolated = TenantAccessPolicy(
+        sealed_channel_ids=("chan-1",),
+        isolated_channel_ids=("chan-1",),
+        agent_channel_pins={"daimon": ("chan-1",)},
+    )
+    tenant = await _seed_admittable_tenant(db_session, policy=isolated)
+    deps, admission = await _admit(db_session_factory, tmp_path, tenant)
+    assert admission.source_sealed and not admission.memory_read_only
+
+    current = await reauthorize(deps, admission)
+    assert current.source_sealed and not current.memory_read_only

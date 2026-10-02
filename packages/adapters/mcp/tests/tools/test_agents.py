@@ -109,7 +109,12 @@ def _runtime(
 # ---------------------------------------------------------------------------
 
 
-def _agents_mcp_app(client: AsyncAnthropic, token: str, claims: dict[str, str]) -> ASGIApp:
+def _agents_mcp_app(
+    client: AsyncAnthropic,
+    token: str,
+    claims: dict[str, str],
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> ASGIApp:
     """Assemble a minimal FastMCP app with the agents tool group registered
     behind the real auth + identity middleware pipeline."""
     mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
@@ -125,7 +130,7 @@ def _agents_mcp_app(client: AsyncAnthropic, token: str, claims: dict[str, str]) 
             sessionmaker=mock_sessionmaker,
         )
     )
-    register_agent_tools(mcp, _runtime(client))
+    register_agent_tools(mcp, _runtime(client, session_factory=session_factory))
     return mcp.http_app()
 
 
@@ -156,7 +161,9 @@ def _make_agent_payload_with_skill_type(
 # ---------------------------------------------------------------------------
 
 
-async def test_get_agent_admits_novel_skill_type_through_fastmcp() -> None:
+async def test_get_agent_admits_novel_skill_type_through_fastmcp(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """get_agent must not output-validation-error when an attached skill's
     ``type`` is a string the pinned SDK's Literal["anthropic", "custom"] does
     not model (e.g. a new upstream skill category).
@@ -182,7 +189,7 @@ async def test_get_agent_admits_novel_skill_type_through_fastmcp() -> None:
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    app = _agents_mcp_app(client, token, claims)
+    app = _agents_mcp_app(client, token, claims, db_session_factory)
 
     result = await call_mcp_tool(app, token=token, name="get_agent", arguments={"name": "demo"})
 
@@ -198,7 +205,9 @@ async def test_get_agent_admits_novel_skill_type_through_fastmcp() -> None:
     )
 
 
-async def test_list_agents_impl_returns_tenant_agents() -> None:
+async def test_list_agents_impl_returns_tenant_agents(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -218,12 +227,16 @@ async def test_list_agents_impl_returns_tenant_agents() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _list_agents_impl(_runtime(client), auth, page=None)
+    result = await _list_agents_impl(
+        _runtime(client, session_factory=db_session_factory), auth, page=None
+    )
     assert isinstance(result, list), "should return a list"
     assert [a.name for a in result] == ["demo"], "should list the tenant's agent"
 
 
-async def test_get_agent_impl_returns_agent_info() -> None:
+async def test_get_agent_impl_returns_agent_info(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -247,12 +260,14 @@ async def test_get_agent_impl_returns_agent_info() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
     assert result.name == "a", "should return the requested agent"
     assert isinstance(result, AgentInfo), "should return an AgentInfo"
 
 
-async def test_get_agent_impl_returns_mcp_servers_and_skills() -> None:
+async def test_get_agent_impl_returns_mcp_servers_and_skills(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Issue: get_agent returned only name/id/description/model, so chat could
     never see which MCP servers or skills an agent has attached."""
     tenant_id = uuid.uuid4()
@@ -298,7 +313,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert [(s.name, s.url) for s in result.mcp_servers] == [
         ("ctx7", "https://ctx7.example/mcp")
@@ -313,7 +328,9 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills() -> None:
     assert anthropic_skill.skill_id == "xlsx", "anthropic skill ref must carry its slug id"
 
 
-async def test_list_agents_impl_includes_mcp_servers_and_skills() -> None:
+async def test_list_agents_impl_includes_mcp_servers_and_skills(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -354,7 +371,9 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    rows = await _list_agents_impl(_runtime(client), auth, page=None)
+    rows = await _list_agents_impl(
+        _runtime(client, session_factory=db_session_factory), auth, page=None
+    )
 
     assert [(s.name, s.url) for s in rows[0].mcp_servers] == [
         ("docs", "https://docs.example/mcp")
@@ -364,7 +383,9 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills() -> None:
     )
 
 
-async def test_get_agent_impl_raises_tool_error_not_found() -> None:
+async def test_get_agent_impl_raises_tool_error_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -374,7 +395,7 @@ async def test_get_agent_impl_raises_tool_error_not_found() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="not found"):
-        await _get_agent_impl(_runtime(client), auth, "nope")
+        await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "nope")
 
 
 def _get_one(tenant_id: uuid.UUID, metadata: dict[str, str], system: str | None) -> AsyncAnthropic:
@@ -395,7 +416,9 @@ def _get_one(tenant_id: uuid.UUID, metadata: dict[str, str], system: str | None)
     return build_fake_anthropic(router.dispatch)
 
 
-async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent() -> None:
+async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Setup flows must save the prompt before replacing it; get_agent was the
     only read path and it never returned ``system``."""
     tenant_id = uuid.uuid4()
@@ -403,29 +426,33 @@ async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert result.system == "You are A.", "admin must read the prompt it could replace"
 
 
-async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_prompt() -> None:
+async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_prompt(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, None)
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert result.system == "", "an empty prompt must be distinguishable from a withheld one"
 
 
-async def test_get_agent_impl_withholds_system_prompt_from_non_admin() -> None:
+async def test_get_agent_impl_withholds_system_prompt_from_non_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "secret prompt")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER)
 
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert result.system is None, "a non-admin caller must not read the system prompt"
     assert result.name == "a", "the rest of get_agent stays open to non-admins"
@@ -440,6 +467,7 @@ async def test_get_agent_impl_withholds_system_prompt_from_non_admin() -> None:
 )
 async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_from_admin(
     metadata: dict[str, str],
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
     client = _get_one(tenant_id, metadata, "daimon prompt")
@@ -447,7 +475,7 @@ async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_f
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
 
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert result.system is None, (
         "Daimon/defaults-managed prompts follow update_agent's no-edit rule"
@@ -460,6 +488,7 @@ async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_f
 )
 async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
     expected_ma_agent_id: str | None,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A tenant-A admin naming tenant B's agent, or pinning its MA id, gets
     neither the agent nor its prompt -- the org-wide MA list holds both."""
@@ -489,19 +518,26 @@ async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
 
     with pytest.raises(ToolError) as excinfo:
         await _get_agent_impl(
-            _runtime(client), auth, "shared-name", expected_ma_agent_id=expected_ma_agent_id
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            "shared-name",
+            expected_ma_agent_id=expected_ma_agent_id,
         )
 
     assert "tenant B prompt" not in str(excinfo.value), "the error must not carry the prompt"
 
 
-async def test_list_agents_impl_never_returns_system_prompt() -> None:
+async def test_list_agents_impl_never_returns_system_prompt(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    result = await _list_agents_impl(_runtime(client), auth, page=None)
+    result = await _list_agents_impl(
+        _runtime(client, session_factory=db_session_factory), auth, page=None
+    )
 
     assert [a.system for a in result] == [None], (
         "list_agents is a summary; the prompt is get_agent-only"
@@ -612,7 +648,9 @@ async def test_create_agent_impl_rejects_non_empty_skills() -> None:
         )
 
 
-async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
+async def test_update_agent_impl_forwards_only_non_none_fields(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -662,7 +700,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     row = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -680,7 +718,9 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
     assert row.applies is None, "a description-only update touches neither model nor system"
 
 
-async def test_update_agent_impl_returns_applies_for_model_change() -> None:
+async def test_update_agent_impl_returns_applies_for_model_change(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     metadata = {
@@ -717,7 +757,7 @@ async def test_update_agent_impl_returns_applies_for_model_change() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     row = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model="claude-opus-5",
@@ -735,7 +775,9 @@ async def test_update_agent_impl_returns_applies_for_model_change() -> None:
     )
 
 
-async def test_update_agent_impl_returns_applies_for_system_change() -> None:
+async def test_update_agent_impl_returns_applies_for_system_change(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     metadata = {
@@ -772,7 +814,7 @@ async def test_update_agent_impl_returns_applies_for_system_change() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     row = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -790,9 +832,9 @@ async def test_update_agent_impl_returns_applies_for_system_change() -> None:
     )
 
 
-async def test_update_agent_impl_returns_applies_for_model_then_instructions_when_both_change() -> (
-    None
-):
+async def test_update_agent_impl_returns_applies_for_model_then_instructions_when_both_change(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     metadata = {
@@ -833,7 +875,7 @@ async def test_update_agent_impl_returns_applies_for_model_then_instructions_whe
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     row = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model="claude-opus-5",
@@ -894,7 +936,9 @@ async def test_update_agent_impl_rejects_empty_patch() -> None:
         )
 
 
-async def test_update_agent_impl_forwards_empty_list_to_clear() -> None:
+async def test_update_agent_impl_forwards_empty_list_to_clear(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """``tools=[]`` clears; ``tools=None`` omits."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -938,7 +982,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -1940,7 +1984,9 @@ async def test_fork_agent_impl_copies_no_credential_binding_or_mcp_token(
     assert forked_tokens == (), "the fork must not hold the source's MCP tokens"
 
 
-async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
+async def test_update_agent_impl_passes_skills_to_ma_when_provided(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -1982,7 +2028,7 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
     skills: list[dict[str, Any]] = [{"type": "anthropic", "skill_id": "cli-auth"}]
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -1997,7 +2043,9 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
     )
 
 
-async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
+async def test_update_agent_impl_omits_skills_from_patch_when_none(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2038,7 +2086,7 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -2051,7 +2099,9 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none() -> None:
     assert "skills" not in captured, "skills=None must be omitted from patch (preserves existing)"
 
 
-async def test_update_agent_impl_accepts_skills_only_patch() -> None:
+async def test_update_agent_impl_accepts_skills_only_patch(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2094,7 +2144,7 @@ async def test_update_agent_impl_accepts_skills_only_patch() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     # All other fields are None — must not raise "at least one field" guard.
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -2107,7 +2157,9 @@ async def test_update_agent_impl_accepts_skills_only_patch() -> None:
     assert captured.get("skills") == skills, "skills-only patch must reach MA"
 
 
-async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
+async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2165,7 +2217,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -2180,7 +2232,9 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
     )
 
 
-async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
+async def test_update_agent_impl_rejects_custom_skill_dict(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Raw custom skill-id dicts are rejected — skills attach by bare name only."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -2224,7 +2278,7 @@ async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -2300,9 +2354,9 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
     ], "existing entry preserved first, new entry appended last"
 
 
-async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_already_attached() -> (
-    None
-):
+async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_already_attached(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2338,7 +2392,7 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _attach_mcp_server_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
         server_name="ctx7",
@@ -2498,7 +2552,9 @@ def _list_one(agent_kwargs: dict[str, Any]) -> tuple[MARouter, AsyncAnthropic]:
 # personal — is admin-mutable. The per-user ownership check is retired (issue #115).
 
 
-async def test_update_agent_impl_rejects_system_agent_no_daimon_account() -> None:
+async def test_update_agent_impl_rejects_system_agent_no_daimon_account(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2514,7 +2570,7 @@ async def test_update_agent_impl_rejects_system_agent_no_daimon_account() -> Non
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="system agent"):
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="daimon",
             model=None,
@@ -2526,7 +2582,9 @@ async def test_update_agent_impl_rejects_system_agent_no_daimon_account() -> Non
         )
 
 
-async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamped() -> None:
+async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """The real shape of a seeded agent: daimon_managed AND daimon_account both set.
 
     The guild seed path account-stamps seeded agents, so keying the guard on a
@@ -2557,7 +2615,7 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="managed by defaults") as refused:
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="daimon",
             model=None,
@@ -2574,7 +2632,9 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
     assert "/agent-setup" not in str(refused.value), "refusal must name a callable tool"
 
 
-async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent() -> None:
+async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Panel forks stamp managed=False, so they must stay editable.
 
     Guards the other side of the daimon_managed check: widening protection to
@@ -2618,7 +2678,7 @@ async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent() -> None
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     info = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="daimon-fork",
         model=None,
@@ -2631,7 +2691,9 @@ async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent() -> None
     assert info is not None, "an unmanaged fork must remain editable by chat tools"
 
 
-async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
+async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin must be able to mutate any stamped tenant agent regardless of which account owns it."""
     tenant_id = uuid.uuid4()
     caller_account_id = uuid.uuid4()
@@ -2680,7 +2742,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
         account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="alices-agent",
         model=None,
@@ -2695,7 +2757,9 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin() -> None:
     )
 
 
-async def test_update_agent_impl_allows_owned_agent() -> None:
+async def test_update_agent_impl_allows_owned_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2735,7 +2799,7 @@ async def test_update_agent_impl_allows_owned_agent() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -2748,7 +2812,9 @@ async def test_update_agent_impl_allows_owned_agent() -> None:
     assert captured.get("description") == "new", "owner's update must reach MA"
 
 
-async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account() -> None:
+async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2763,7 +2829,7 @@ async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account() -
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="system agent"):
         await _attach_mcp_server_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             agent_name="daimon",
             server_name="ctx7",
@@ -2835,7 +2901,9 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
     assert "mcp_servers" in captured, "admin must be able to mutate any stamped tenant agent"
 
 
-async def test_archive_agent_impl_rejects_system_agent_no_daimon_account() -> None:
+async def test_archive_agent_impl_rejects_system_agent_no_daimon_account(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2849,7 +2917,9 @@ async def test_archive_agent_impl_rejects_system_agent_no_daimon_account() -> No
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="system agent"):
-        await _archive_agent_impl(_runtime(client), auth, "daimon")
+        await _archive_agent_impl(
+            _runtime(client, session_factory=db_session_factory), auth, "daimon"
+        )
 
 
 async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
@@ -2913,7 +2983,9 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
 #   panel's `apply_mcp_modal` (state.py): write both halves atomically.
 
 
-async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None:
+async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2965,7 +3037,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills() -> None
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -3048,7 +3120,9 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
     assert "daimon-mcp" in sent_names, "existing MA mcp_server must be preserved (bug 2)"
 
 
-async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
+async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3124,7 +3198,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -3145,7 +3219,9 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools() -> None:
     assert ("mcp_toolset", "ctx7") in tool_kinds, "caller's new mcp_toolset must reach MA"
 
 
-async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
+async def test_update_agent_impl_caller_wins_on_skill_id_collision(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Union keys by skill_id; the caller's entry replaces MA's same-id entry."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3192,7 +3268,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -3456,7 +3532,9 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
     assert len(toolset_for_ctx7) == 1, "no duplicate mcp_toolset entry for the same server name"
 
 
-async def test_attach_mcp_server_impl_raises_when_agent_not_found() -> None:
+async def test_attach_mcp_server_impl_raises_when_agent_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3467,7 +3545,7 @@ async def test_attach_mcp_server_impl_raises_when_agent_not_found() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="agent 'missing-agent' not found"):
         await _attach_mcp_server_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             agent_name="missing-agent",
             server_name="ctx7",
@@ -3505,7 +3583,9 @@ async def test_build_create_spec_raises_tool_error_when_mcp_server_lacks_toolset
         )
 
 
-async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap() -> None:
+async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3558,7 +3638,7 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap()
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="exceeds this organization"):
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -3741,7 +3821,9 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
 # --- skill-boundary tests -----------------------------------------------------
 
 
-async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tenant() -> None:
+async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tenant(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """update_agent with tenant B's canonical title as tenant A raises ToolError.
 
     The error message must contain tenant A's available bare skill titles and must NOT
@@ -3803,7 +3885,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -3825,7 +3907,9 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
     )
 
 
-async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -> None:
+async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Raw custom skill-id dicts raise ToolError at the chat surface."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3854,7 +3938,7 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -3866,7 +3950,9 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -
         )
 
 
-async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
+async def test_agent_info_skill_names_are_bare_for_own_namespace_pins(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """AgentInfo.skills[].name shows bare names, never the tenant prefix."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3907,7 +3993,7 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _get_agent_impl(_runtime(client), auth, "a")
+    result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     custom = next(s for s in result.skills if s.type == "custom")
     assert custom.name == "cli-auth", (
@@ -4118,7 +4204,9 @@ async def test_attach_mcp_server_allows_unrelated_server(
 # ---------------------------------------------------------------------------
 
 
-async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_agent() -> None:
+async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#141: skills-only update on an agent with no agent_toolset_20260401 adds the base toolset.
 
     Without this guard the next session create would 400 ("skills require the read tool").
@@ -4183,7 +4271,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -4200,7 +4288,9 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
     )
 
 
-async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() -> None:
+async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#141: skills-only update on an agent already bearing agent_toolset_20260401 sends NO tools key."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4259,7 +4349,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() ->
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -4279,7 +4369,9 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset() ->
 # ---------------------------------------------------------------------------
 
 
-async def test_update_agent_retries_once_on_version_conflict() -> None:
+async def test_update_agent_retries_once_on_version_conflict(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2: conflict on first update attempt retries with a fresh agent; result is success."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4338,7 +4430,7 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,
@@ -4355,7 +4447,9 @@ async def test_update_agent_retries_once_on_version_conflict() -> None:
     assert len(retrieve_calls) == 2, "#144-2: must re-retrieve agent after conflict"
 
 
-async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
+async def test_update_agent_maps_residual_conflict_to_tool_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """#144-2: two consecutive 409 conflicts surface as ToolError, not a raw SDK error."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -4402,7 +4496,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="modified concurrently"):
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -4769,14 +4863,13 @@ async def test_update_agent_impl_allows_non_admin_system_patch_when_agent_unreac
     )
 
 
-async def test_update_agent_impl_allows_admin_system_patch_when_agent_reachable_without_db_read() -> (
-    None
-):
+async def test_update_agent_impl_allows_admin_system_patch_without_a_reach_read(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin short-circuits the reachability gate entirely — no config read required.
 
-    session_factory defaults to an unconfigured MagicMock(); if the gate tried
-    to open `async with runtime.session_factory()`, this test would error out
-    rather than merely fail an assertion.
+    The tenant has no rows at all; the only read is channel isolation's empty
+    access policy.
     """
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -4786,7 +4879,7 @@ async def test_update_agent_impl_allows_admin_system_patch_when_agent_reachable_
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="scoped-agent",
         model=None,
@@ -5059,7 +5152,9 @@ def _cap_router(
     return router
 
 
-async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap() -> None:
+async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_skills = [_anthropic_skill(f"existing-{i}") for i in range(AGENT_SKILL_CAP - 1)]
@@ -5077,7 +5172,7 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap() 
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             name="a",
             model=None,
@@ -5096,7 +5191,9 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap() 
     assert not update_calls, "the merged-count refusal must fire before any agents.update request"
 
 
-async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap() -> None:
+async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     existing_skills = [_anthropic_skill(f"existing-{i}") for i in range(AGENT_SKILL_CAP - 1)]
@@ -5113,7 +5210,7 @@ async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
     result = await _update_agent_impl(
-        _runtime(client),
+        _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
         model=None,

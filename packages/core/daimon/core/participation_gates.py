@@ -22,8 +22,10 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_isolation import is_thread_turn_refused
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
     get_participation_modes,
@@ -81,6 +83,7 @@ class ParticipationGates:
         bot_display_name: str,
         billing_config: BillingConfig | None,
         markup: Decimal,
+        deployment_default: DeploymentDefault | None = None,
     ) -> None:
         self._platform = platform
         self._settings = settings
@@ -89,6 +92,7 @@ class ParticipationGates:
         self._bot_display_name = bot_display_name
         self._billing_config = billing_config
         self._markup = markup
+        self._deployment_default = deployment_default
 
     async def resolve(
         self, *, tenant_id: uuid.UUID, channel_id: str, thread_id: str
@@ -124,7 +128,8 @@ class ParticipationGates:
         """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
 
         The balance, cap and channel budget gates run before the classifier, on
-        `caller_id`, the person the turn would run as: a tenant that could not
+        `caller_id`, the person the turn would run as, and with a deployment
+        default so do the pin and isolation ones: a tenant that could not
         be admitted must not pay for the question of whether to admit it. The
         call that does run is metered to the tenant like any other model spend.
         `recent` is read only once every gate has passed.
@@ -174,6 +179,17 @@ class ParticipationGates:
             log.info(
                 "thread_participation.skipped", reason="over_channel_budget", thread_id=thread_id
             )
+            return False
+        if self._deployment_default is not None and await is_thread_turn_refused(
+            self._sessionmaker,
+            self._anthropic,
+            tenant_id=tenant_id,
+            platform=self._platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            default=self._deployment_default,
+        ):
+            log.info("thread_participation.skipped", reason="agent_refused", thread_id=thread_id)
             return False
         outcome = await classify(
             self._anthropic,
