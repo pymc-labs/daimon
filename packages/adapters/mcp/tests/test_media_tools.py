@@ -389,3 +389,49 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
     debits = [row.channel_id for row in rows if row.delta_usd < 0]
     assert debits == ([] if refused else ["222"]), "the debit carries the turn's channel"
     assert len(gemini_calls) == (0 if refused else 1), "a refused call never reaches Gemini"
+
+
+@pytest.mark.parametrize(("limit_usd", "refused"), [(Decimal("5"), False), (Decimal("0"), True)])
+async def test_a_channel_bound_keys_transcript_counts_toward_its_channel_budget(
+    tmp_path: Path,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    limit_usd: Decimal,
+    refused: bool,
+) -> None:
+    """A key minted in a channel needs no origin: its media spend is gated and attributed there."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+        await make_ledger_entry(session, tenant=tenant)
+        await make_channel_budget(session, tenant=tenant, channel_id="222", limit_usd=limit_usd)
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="u1",
+        agent_id=uuid.uuid4(),
+        bound_channel_id="222",
+    )
+    gemini_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gemini_calls.append(request)
+        return _transcript_response("[00:00:01] hello")
+
+    mcp = await _registered_billing_mcp(
+        tmp_path, auth=auth, sessionmaker=committing_sessionmaker, handler=handler
+    )
+    call = {"url": "https://youtu.be/dQw4w9WgXcQ"}
+    async with Client(mcp) as client:
+        if refused:
+            with pytest.raises(ToolError, match="TERMINAL ERROR: This channel has used its"):
+                await client.call_tool("fetch_youtube_transcript", call)
+        else:
+            await client.call_tool("fetch_youtube_transcript", call)
+
+    async with committing_sessionmaker() as session:
+        rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    debits = [row.channel_id for row in rows if row.delta_usd < 0]
+    assert debits == ([] if refused else ["222"]), "the debit carries the key's channel"
+    assert len(gemini_calls) == (0 if refused else 1), "a refused call never reaches Gemini"

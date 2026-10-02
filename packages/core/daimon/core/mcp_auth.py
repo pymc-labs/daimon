@@ -23,6 +23,18 @@ import uuid
 from decimal import Decimal
 
 import jwt as pyjwt
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Decision,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_subject,
+    build_turn_place,
+)
 from daimon.core.operator_tokens import OperatorScope
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -123,6 +135,8 @@ async def mint_agent_mcp_token(
     secret: bytes,
     now: dt.datetime,
     ttl_days: int = 90,
+    platform: str | None = None,
+    channel_id: str | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -138,9 +152,14 @@ async def mint_agent_mcp_token(
 
     `ttl_days` defaults to 90 days (long-lived, revoked via revoke_mcp_token
     rather than token rotation).
+
+    `platform` and `channel_id` bind the token to the channel it was minted in
+    (`coding_token_channel`). They live on the row only, never in the JWT, so
+    the verifier reads the binding from the database like the revocation.
     """
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
+    assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
@@ -152,6 +171,8 @@ async def mint_agent_mcp_token(
         label=label,
         created_at=now,
         expires_at=expires_at,
+        platform=platform,
+        channel_id=channel_id,
     )
     return pyjwt.encode(
         {
@@ -253,6 +274,59 @@ async def mint_cli_mcp_token(
         secret,
         algorithm="HS256",
     )
+
+
+def coding_token_channel(
+    policy: TenantAccessPolicy, *, agent: AgentRef, channel_id: str | None
+) -> str | None:
+    """The channel a coding-tool token minted in `channel_id` is bound to, or None.
+
+    `channel_id` is where the panel was opened (a thread's parent channel).
+    The token is bound there when the channel is sealed, or when the agent is
+    pinned and the channel is inside its pin: those are the places where an
+    agent key from outside every channel could not reach what the channel's
+    own turns do. Anywhere else the token stays unbound, as before. The pin
+    is decided as the key's own turns will be (`build_subject` with
+    ``via_agent_key``, the channel as a `build_turn_place`).
+    """
+    if channel_id is None:
+        return None
+    if channel_id in policy.sealed_channel_ids:
+        return channel_id
+    pinned = any(name is not None and name in policy.agent_channel_pins for name in agent.names)
+    if pinned and authorize(
+        policy,
+        subject=build_subject(is_admin=False, platform_user_id=None, via_agent_key=True),
+        action=Action.RUN_AGENT,
+        surface=Surface.AGENT_CHAT,
+        agent=agent,
+        place=build_turn_place(channel_id=channel_id, thread_id=None),
+    ):
+        return channel_id
+    return None
+
+
+def authorize_coding_token(
+    policy: TenantAccessPolicy, *, subject: Subject, agent: AgentRef, channel_id: str | None
+) -> tuple[Decision, str | None]:
+    """Whether `subject` may mint a coding-tool token pressed in `channel_id`, and its binding.
+
+    The binding is `coding_token_channel`'s; `authorize(MINT_CODING_TOKEN)`
+    then decides the mint at that place, so a server admin mints as before and
+    a channel admin only a token bound to a channel they administer.
+    """
+    bound_channel_id = coding_token_channel(policy, agent=agent, channel_id=channel_id)
+    decision = authorize(
+        policy,
+        subject=subject,
+        action=Action.MINT_CODING_TOKEN,
+        surface=Surface.CONFIG,
+        agent=agent,
+        place=Place()
+        if bound_channel_id is None
+        else build_turn_place(channel_id=bound_channel_id, thread_id=None),
+    )
+    return decision, bound_channel_id
 
 
 def token_jti(token: str) -> uuid.UUID:

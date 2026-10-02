@@ -6,10 +6,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
+from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
@@ -140,6 +141,7 @@ async def _policy_gate(
             action=Action.RUN_AGENT,
             surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
             agent=AgentRef.of(*names),
+            place=mcp_place(auth),
         )
     ):
         log.info(
@@ -234,8 +236,10 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       the stored role is the only admin signal every caller has). A refusal,
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
     - Then, when ``agent_names`` is given and the tenant pins any agent,
-      refuses a turn on a pinned agent. An MCP turn has no channel, so it is
-      outside every pin, exactly as a DM is in ``admit()``. The pin is a
+      refuses a turn on a pinned agent outside its pin. An MCP turn has no
+      channel, so it is outside every pin, exactly as a DM is in ``admit()``,
+      unless its agent key was minted in a channel (``token_channel_id``),
+      which is then where it runs. The pin is a
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
@@ -244,10 +248,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
-    - Then runs ``is_over_balance`` then ``is_over_cap``; either denial
-      raises a ``TERMINAL ERROR:`` ``ToolError`` naming ``/billing`` and logs
-      a deny event carrying only ids (tenant/user/tool/gate) — never prompt
-      content or raw Gemini text (Pitfall 9).
+    - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel
+      budget of a key's bound channel; each denial raises a ``TERMINAL
+      ERROR:`` ``ToolError`` and logs a deny event carrying only ids
+      (tenant/user/tool/gate) — never prompt content or raw Gemini text
+      (Pitfall 9).
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -298,6 +303,26 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         raise ToolError(
             "TERMINAL ERROR: Monthly usage cap reached for this guild. "
             "An admin can adjust the cap with /billing."
+        )
+
+    if await is_over_channel_budget(
+        sessionmaker=sessionmaker,
+        tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
+        channel_id=token_channel_id(auth),
+        now=datetime.now(UTC),
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="channel_budget",
+        )
+        refused(TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+        raise ToolError(
+            "TERMINAL ERROR: This channel has used its spending budget. "
+            "An admin can raise or clear it."
         )
 
     return auth

@@ -903,6 +903,9 @@ class McpTokenRow(BaseModel):
     revoked_at: datetime | None
     max_issued_usd: Decimal | None
     issued_usd: Decimal
+    # The channel the token was minted in (`mcp_auth.coding_token_channel`).
+    platform: str | None = None
+    channel_id: str | None = None
 
 
 class FileUploadRow(BaseModel):

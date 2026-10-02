@@ -27,8 +27,8 @@ from daimon.adapters.discord.agent_setup.details_view import (
     SHOW_MORE_LABEL,
     DetailsView,
     build_details_container,
-    coding_tools_refusal,
 )
+from daimon.adapters.discord.agent_setup.mcp_access import coding_tools_refusal
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT, DetailListName
@@ -47,7 +47,7 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
 from daimon.core.setup_conversations import setup_target_label, shared_keys_sentence
 from daimon.core.stores.domain import AccountRow, TenantRow
-from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
@@ -735,45 +735,35 @@ async def test_rendered_details_actions_keep_the_card_agent_after_selection_chan
     )
 
 
-async def test_coding_tools_refuses_a_demoted_admin_without_minting(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("snapshot_is_admin", [True, False], ids=["demoted-admin", "member"])
+async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    snapshot_is_admin: bool,
 ) -> None:
-    """The view's is_admin is a snapshot; the click reads the live interaction."""
-    import daimon.adapters.discord.agent_setup.details_view as details_view_mod
+    """The view's is_admin is a snapshot; the click decides on the live member and mints nothing.
 
-    async def _unexpected(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("a non-admin caller must never reach the minting handler")
-
-    monkeypatch.setattr(details_view_mod, "send_coding_tools_access", _unexpected)
-
-    details = _details()
-    state = _state(details, account_id=account_id, is_admin=True)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
-    interaction = _member_interaction()
-
-    await _find_button(view, "🧰 Use from your coding tools").callback(interaction)
-
-    interaction.response.send_message.assert_called_once()
-    message = interaction.response.send_message.call_args.args[0]
-    assert "Manage Server" in message, "the refusal must name the permission the caller lacks"
-    assert "Bearer" not in message, "a refused caller must receive no token material"
-    interaction.response.defer.assert_not_called()
-
-
-async def test_coding_tools_gives_a_member_the_explanatory_refusal(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The button is visible to members on purpose, so its refusal has to explain itself."""
-    import daimon.adapters.discord.agent_setup.details_view as details_view_mod
-
-    async def _unexpected(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("a member's click must mint nothing")
-
-    monkeypatch.setattr(details_view_mod, "send_coding_tools_access", _unexpected)
-
+    The button is visible to members on purpose, so its refusal has to explain itself.
+    """
+    await _seed_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-details-member"
+    )
+    router = MARouter()
+    router.add_agent(ma_agent(id="ag_research", name="churn-explorer", tenant_id=tenant_id))
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
     details = _details(name="churn-explorer")
-    state = _state(details, account_id=account_id, is_admin=False)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    state = _state(details, account_id=account_id, is_admin=snapshot_is_admin)
+    runtime = _make_runtime(
+        db_session_factory,
+        settings=_mcp_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+    )
+    view = DetailsView(state, runtime=runtime, allowed_user_id=42)
     interaction = _member_interaction()
 
     button = _find_button(view, "🧰 Use from your coding tools")
@@ -785,8 +775,12 @@ async def test_coding_tools_gives_a_member_the_explanatory_refusal(
     assert message == coding_tools_refusal("churn-explorer"), (
         "a member gets the explanatory refusal naming the agent and the way round it"
     )
+    assert "Manage Server" in message, "the refusal must name the permission the caller lacks"
     assert "Ask an admin to open Details" in message, "the refusal must name the way forward"
     assert kwargs.get("ephemeral") is True, "the refusal is ephemeral"
+    assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
+        "a refused caller must reach no token material"
+    )
 
 
 async def test_coding_tools_mints_for_a_live_admin_in_a_separate_ephemeral(

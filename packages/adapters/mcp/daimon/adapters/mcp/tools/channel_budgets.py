@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -154,11 +154,15 @@ async def origin_budget_channel(
 ) -> str | None:
     """The channel a tool call's spend counts against: its turn's parent channel.
 
-    A DM counts toward the channel it was started from. None without a live
-    origin of this caller and responder, or in an older DM, so the call is
-    simply not attributed; tools that need a channel use `require_turn_origin`
-    instead, which explains the refusal.
+    A DM counts toward the channel it was started from, and an agent key
+    minted in a channel toward that channel. None without a live origin of
+    this caller and responder, or in an older DM, so the call is simply not
+    attributed; tools that need a channel use `require_turn_origin` instead,
+    which explains the refusal.
     """
+    bound = token_channel_id(auth)
+    if bound is not None:
+        return bound
     if not origin_context_id or auth.platform not in _PLATFORMS:
         return None
     try:

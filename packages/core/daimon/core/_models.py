@@ -1406,6 +1406,10 @@ class McpToken(Base):
             "issued_usd >= 0 AND (max_issued_usd IS NULL OR max_issued_usd > 0)",
             name="ck_mcp_tokens_issued",
         ),
+        CheckConstraint(
+            "(platform IS NULL) = (channel_id IS NULL) AND (channel_id IS NULL OR kind = 'agent')",
+            name="ck_mcp_tokens_channel",
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1437,6 +1441,10 @@ class McpToken(Base):
     issued_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, server_default=text("0")
     )
+    # The channel the token was minted in, whose calls then run inside it; both
+    # NULL for a token bound to no channel.
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):

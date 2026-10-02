@@ -338,6 +338,7 @@ class IdentityMiddleware(Middleware):
             if isinstance(raw_administered, list) and not is_admin and agent_id is None
             else frozenset[str]()
         )
+        raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
         identity = AuthIdentity(
             account_id=account_id,
             tenant_id=tenant_id,
@@ -351,6 +352,12 @@ class IdentityMiddleware(Middleware):
             is_admin=is_admin,
             platform_role_ids=platform_role_ids,
             administered_channel_ids=administered_channel_ids,
+            # Set by the verifier from the token's row; an agent key's only.
+            bound_channel_id=(
+                raw_bound_channel
+                if isinstance(raw_bound_channel, str) and agent_id is not None
+                else None
+            ),
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)

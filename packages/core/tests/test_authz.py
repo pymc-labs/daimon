@@ -284,6 +284,132 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         {"subject": ACME_CHANNEL_ADMIN, "action": Action.FORK, "agent": ACME},
         _deny("admin_required"),
     ),
+    # --- coding-tool tokens: a channel admin mints only bound, for their own agent ---
+    (
+        "channel admin mints for their channel's own agent, bound there",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin never mints an unbound token",
+        PINNED,
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME},
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin mints nothing bound to another channel",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": OUTSIDE,
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin mints nothing for an agent pinned elsewhere",
+        TenantAccessPolicy(agent_channel_pins={"acme": ("C_OPS",)}),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin of one pinned channel of two mints nothing",
+        TWO_CHANNELS,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin of two channels mints nothing outside the agent's pin",
+        PINNED,
+        {
+            "subject": Subject(
+                platform_user_id="U_CA", administered_channel_ids=frozenset({"C_ACME", "C_OTHER"})
+            ),
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": OUTSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin mints nothing for an unpinned agent, which may answer anywhere",
+        ACME_SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin and a pin to no channel mints nothing",
+        NOWHERE,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("agent_pinned_elsewhere"),
+    ),
+    (
+        "channel admin and a vanished agent mints nothing",
+        PINNED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": AgentRef.unresolved(),
+            "place": INSIDE,
+        },
+        _deny("agent_unresolved"),
+    ),
+    (
+        "an agent key never mints, whatever its grants",
+        PINNED,
+        {
+            "subject": AGENT_KEY_CHANNEL_ADMIN,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "member mints nothing, even inside the pin",
+        PINNED,
+        {"subject": MEMBER, "action": Action.MINT_CODING_TOKEN, "agent": ACME, "place": INSIDE},
+        _deny("admin_required"),
+    ),
+    (
+        "server admin mints unbound, as before",
+        PINNED,
+        {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME},
+        ALLOW,
+    ),
+    (
+        "server admin mints bound anywhere, as before",
+        ACME_SEALED,
+        {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME, "place": INSIDE},
+        ALLOW,
+    ),
     # --- channel default: nobody binds a pinned agent outside its pin ---
     (
         "bind default outside the pin, even an admin",

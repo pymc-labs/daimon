@@ -173,6 +173,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool or panel can make a pinned agent the default of a channel outside its
   pin; the operator CLI still can. Nothing changes until a channel admin is
   named.
+- **Channel-bound coding-tool tokens.** "Use from your coding tools" pressed
+  in a sealed channel, or in a channel the agent is pinned to (a thread counts
+  as its parent), now mints a token bound to that channel, and the reply says
+  so. Its calls run as a turn there: the agent's pin admits it, it reads that
+  channel's sealed conversations and continues those opened under the seal,
+  and it uses the channel's environment and budget. Its sessions are stamped
+  with the channel (sealed, with read-only memory, in a sealed one), so their
+  spend counts there. The token never carries its minter's channel admin
+  grants. A channel admin of every channel an agent is pinned to may now mint
+  one from inside those channels, always bound. Tokens minted elsewhere, and
+  existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

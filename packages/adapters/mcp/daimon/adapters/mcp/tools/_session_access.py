@@ -286,7 +286,8 @@ async def sessions_outside_seals(
     where an admin's hub read keeps sealed channel sessions, anyone's, and a
     channel admin's those of their channels (ownership is still checked by the
     caller first). Only a chat turn's own credential can claim one:
-    an agent key (``agent_id``) runs outside every channel. Call after the
+    an agent key (``agent_id``) runs outside every channel, unless it was minted
+    in one (`token_channel_id`), which then counts as its origin. Call after the
     ownership filter.
     """
     if not sessions:

@@ -61,6 +61,8 @@ def token_row_refusal(
         return "revoked"
     if row.expires_at is not None and row.expires_at <= now:
         return "expired"
+    if row.platform is not None and row.platform != identity.platform:
+        return "platform_mismatch"  # a channel binding this deployment never minted
     if row.kind == "agent":
         return None  # agent keys verify exactly as before this check existed
     if claims.get("kind") != row.kind:
@@ -84,7 +86,8 @@ class DaimonJWTVerifier(JWTVerifier):
     On success, stashes `tenant_id` (from the account's DB row) into
     `AccessToken.claims` so downstream middleware can read it without a
     second DB query. A token with a jti must have a live registry row; its
-    kind, jti and (for an operator token) scopes are stashed from the row.
+    kind, jti, scopes (for an operator token) and bound channel (for an agent
+    key minted in one) are stashed from the row.
     """
 
     def __init__(
@@ -103,7 +106,8 @@ class DaimonJWTVerifier(JWTVerifier):
         access = await super().verify_token(token)
         if access is None:
             return None
-        for key in (TOKEN_KIND_CLAIM, TOKEN_JTI_CLAIM, SCOPES_CLAIM):
+        # Only the registry row sets these, never a claim.
+        for key in (TOKEN_KIND_CLAIM, TOKEN_JTI_CLAIM, SCOPES_CLAIM, "bound_channel_id"):
             access.claims.pop(key, None)
         sub = access.claims.get("sub")
         if not isinstance(sub, str):
@@ -164,6 +168,8 @@ class DaimonJWTVerifier(JWTVerifier):
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
             if row.kind == "operator":
                 access.claims[SCOPES_CLAIM] = list(row.scopes)
+            if row.channel_id is not None:
+                access.claims["bound_channel_id"] = row.channel_id
         return access
 
     async def _audit_refusal(

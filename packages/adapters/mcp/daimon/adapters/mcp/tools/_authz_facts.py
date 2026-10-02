@@ -3,12 +3,13 @@
 Every MCP gate describes its caller with `mcp_subject`, so a field added to
 `Subject` (and populated in `daimon.core.authz.build_subject`) reaches every
 MCP decision -- admission, configuration, sends, seals, fork -- at once.
+`mcp_place` is where an MCP turn runs.
 """
 
 from __future__ import annotations
 
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.authz import Subject, build_subject
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
+from daimon.core.authz import Place, Subject, build_subject, build_turn_place
 
 
 def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
@@ -25,3 +26,15 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
         via_agent_key=auth.agent_id is not None,
         administered_channel_ids=auth.administered_channel_ids,
     )
+
+
+def mcp_place(auth: AuthIdentity) -> Place:
+    """Where an MCP turn runs: no channel, or a channel-bound agent key's channel.
+
+    Only the key's own channel: an unbound key, a chat turn's credential and a
+    hub login stay outside every channel (`token_channel_id`).
+    """
+    channel_id = token_channel_id(auth)
+    if channel_id is None:
+        return Place()
+    return build_turn_place(channel_id=channel_id, thread_id=None)

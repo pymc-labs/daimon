@@ -26,7 +26,7 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE and READ_SESSION.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN and READ_SESSION.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -50,10 +50,13 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   they administer (`Subject.administered_channel_ids`, from stored grants;
   never `is_admin`). Configuring a pinned agent is theirs when they
   administer every channel of every pin on it; a pin to no channel stays
-  with server admins. On their own hub they read any conversation that ran
-  in a channel they administer when every id that sealed it lies there too
-  (the channel, a thread under it, or a Slack ``channel:ts`` under it);
-  never a private DM, an unstamped session, or to continue a sealed one.
+  with server admins. So is minting a coding-tool token for such an agent,
+  always bound to one of their channels inside its pin; an unbound token
+  or an unpinned agent stays with server admins. On their own hub they
+  read any conversation that ran in a channel they administer when every
+  id that sealed it lies there too (the channel, a thread under it, or a
+  Slack ``channel:ts`` under it); never a private DM, an unstamped
+  session, or to continue a sealed one.
 - **Pinned sends**: wherever a pinned agent was admitted, it posts only into
   its pinned channels (and threads under them) or the requester's own DM,
   and sends direct messages only to the requester.
@@ -73,10 +76,11 @@ save and fire, handoff, configuration writes, form submits and the OAuth
 callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
-fork, channel default binds, the protection of a turn's own notices and of a
-routine's destination (`POST` with no agent), a routine's creator at fire and
-delivery (`ACT_FOR_CREATOR`), and the shared-agent table
-(`CHANGE_SHARED_AGENT`, asked by `daimon.core.operation_policy`).
+fork, channel default binds, coding-tool token mints, the protection of a
+turn's own notices and of a routine's destination (`POST` with no agent), a
+routine's creator at fire and delivery (`ACT_FOR_CREATOR`), and the
+shared-agent table (`CHANGE_SHARED_AGENT`, asked by
+`daimon.core.operation_policy`).
 """
 
 from __future__ import annotations
@@ -134,6 +138,9 @@ class Action(StrEnum):
     FORK = "fork"
     # Make an agent the default of one channel (`Place.channel_id`).
     BIND_CHANNEL_DEFAULT = "bind_channel_default"
+    # Mint a coding-tool token for an agent, bound to `Place.channel_id` (no
+    # channel: unbound).
+    MINT_CODING_TOKEN = "mint_coding_token"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -514,6 +521,22 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     if req.action is Action.BIND_CHANNEL_DEFAULT:
         if _outside_pin(policy, agent, place):
+            return _deny("agent_pinned_elsewhere")
+        return ALLOW
+
+    if req.action is Action.MINT_CODING_TOKEN:
+        if subject.is_admin and not subject.via_agent_key:
+            return ALLOW
+        # A channel admin's token is always bound, to a channel they administer
+        # inside a pin they administer wholly; an unpinned agent may answer anywhere.
+        administered = subject.administered_channel_ids
+        if subject.via_agent_key or place.channel_id not in administered:
+            return _deny("admin_required")
+        if not agent.resolved:
+            return _deny("agent_unresolved")
+        if not _names_pinned(policy, agent.names):
+            return _deny("admin_required")
+        if not _pin_administered(policy, agent, administered) or _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
         return ALLOW
 

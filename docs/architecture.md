@@ -273,7 +273,20 @@ its content out: agent chat's `start_turn`, `ask` and `continue_turn` are off
 the surface a chat turn's token (`chat_agent_id`) sees, and refuse that
 credential outright if they are ever reached with it
 (`_require_outside_chat_turn`), so every session they create comes from a
-headless caller outside every channel. Operators edit the policy with the CLI:
+headless caller outside every channel. The one exception is an agent key
+minted with "Use from your coding tools" in a sealed channel, or in a channel
+its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
+records that channel (`coding_token_channel`), and its calls run as a turn
+there -- under the channel's pin, seal, environment and budget, with its
+sessions stamped to the channel (`token_channel_id`). `authorize` sees it as
+the place of the key's turns (`mcp_place`) and as the read origin, nowhere
+else, and re-decides both at the moment of action; the seal is read right
+before a session is created, and a conversation opened before its channel was
+sealed can be read but not continued. Keys minted anywhere else are
+unchanged. A server admin mints anywhere; a channel admin of every channel an
+agent is pinned to mints for it only from inside one of those channels, and
+that token is always bound there (`authorize(MINT_CODING_TOKEN)`, through
+`authorize_coding_token`). Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -400,7 +413,8 @@ removals and skill repo connects count as shared, never past it. In `daimon.core
 is `Subject.administered_channel_ids`, filled from the stored grants and never
 `is_admin`: configuring a pinned agent from anywhere is theirs once they
 administer every channel of every pin on it (a pin to no channel stays with
-server admins). A channel admin binds only a shared agent
+server admins), and so is minting it a coding-tools token bound to one of
+those channels (never an unbound one). A channel admin binds only a shared agent
 (managed or tenant-wide), one answering nowhere yet, or one already local
 to them, never another channel's own agent. No chat tool or panel binds a
 pinned agent as the default of a channel outside its pin, for server admins
@@ -583,7 +597,9 @@ but them:
 | Hub `continue_turn` / `ask(handle)` on a sealed channel conversation | refused | refused: continue it in its channel |
 | Credential and configuration tools on a pinned agent | from inside its channels only | allowed (a chat turn's admin, or channel admin of every pinned channel) |
 | `fork_agent` of a pinned agent | refused | refused |
+| "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
+| An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
 
 The pin, seal, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
@@ -612,7 +628,8 @@ then, where it matters:
   publishing a pinned agent's reader needs an admin or an `origin_context_id`
   from inside its channels.
 - An agent-scoped key is never exempt as an admin inside `authorize`,
-  whoever minted it.
+  whoever minted it, and never holds its minter's channel admin grants
+  (`build_subject`), so a channel-bound key reaches no channel but its own.
 
 A demoted admin keeps their stored role until their next platform turn
 refreshes it; that is accepted.
