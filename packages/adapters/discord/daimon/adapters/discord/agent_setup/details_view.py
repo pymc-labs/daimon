@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 from urllib.parse import quote
 
+import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.add_skill import (
     ADD_SKILL_LABEL,
@@ -27,6 +28,7 @@ from daimon.adapters.discord.agent_setup.conversations import open_setup_convers
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_detail_lists import (
@@ -35,6 +37,7 @@ from daimon.core.agent_detail_lists import (
     format_detail_lists,
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
+from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace
@@ -366,9 +369,17 @@ class DetailsView(PanelViewBase):
         agent = self.agent
         if agent is None:
             return
-        refusal = await skill_change_refusal(
-            interaction, runtime=self.runtime, state=self.state, agent=agent
-        )
+        try:
+            refusal = await skill_change_refusal(
+                interaction, runtime=self.runtime, state=self.state, agent=agent
+            )
+        except (DaimonError, anthropic.APIError) as exc:
+            request_id = generate_request_id()
+            log.exception("agent_setup.add_skill.check_failed", request_id=request_id)
+            await interaction.response.send_message(
+                render_error(exc, request_id=request_id), ephemeral=True
+            )
+            return
         if refusal is not None:
             await interaction.response.send_message(refusal, ephemeral=True)
             return

@@ -26,7 +26,9 @@ from daimon.adapters.discord.agent_setup.add_skill import (
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails
+from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -35,6 +37,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
@@ -154,7 +157,7 @@ def _details_view(world: _World, agent: RosterAgent) -> DetailsView:
     )
 
 
-def _interaction(*, admin: bool = False) -> MagicMock:
+def _interaction(*, admin: bool = False, channel_id: int = CHANNEL_ID) -> MagicMock:
     interaction = MagicMock()
     interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = USER_ID
@@ -163,6 +166,8 @@ def _interaction(*, admin: bool = False) -> MagicMock:
     interaction.user.guild_permissions.manage_guild = False
     interaction.user.guild.owner_id = 1
     interaction.guild_id = GUILD_ID
+    interaction.channel = MagicMock(spec=discord.TextChannel)
+    interaction.channel_id = channel_id
     interaction.response.is_done = MagicMock(return_value=False)
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
@@ -429,3 +434,120 @@ async def test_add_re_reads_the_agent_and_refuses_one_that_became_built_in(
 
     assert _followups(interaction) == [BUILT_IN_MESSAGE]
     assert world.created == []
+
+
+OTHER_CHANNEL_ID = 900000000000000002
+
+
+async def _pin(world: _World, *channels: int) -> None:
+    async with world.factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(
+                agent_channel_pins={"helper": tuple(str(c) for c in channels)}
+            ),
+        )
+
+
+async def _make_channel_admin(world: _World, channel_id: int) -> None:
+    async with world.factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=str(channel_id),
+            role_ids=[],
+            user_ids=[str(USER_ID)],
+            actor_account_id=None,
+        )
+
+
+async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The panel's channel is the place, as a chat add's origin is."""
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    await _pin(world, OTHER_CHANNEL_ID)
+
+    outside = _interaction()
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(outside)
+    outside.response.send_modal.assert_not_awaited()
+    assert outside.response.send_message.await_args.args[0] == PIN_WRITE_REFUSAL
+
+    for allowed in (_interaction(channel_id=OTHER_CHANNEL_ID), _interaction(admin=True)):
+        await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(allowed)
+        allowed.response.send_modal.assert_awaited_once()
+
+    await _make_channel_admin(world, OTHER_CHANNEL_ID)
+    channel_admin = _interaction()
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
+    # An admin of every pinned channel may add from anywhere.
+    channel_admin.response.send_modal.assert_awaited_once()
+
+
+async def test_a_pin_added_after_the_button_refuses_the_submit_and_the_add(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    preview = await _preview(world, agent)
+    await _pin(world, OTHER_CHANNEL_ID)
+
+    submit = _interaction()
+    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submit)
+    assert _followups(submit) == [PIN_WRITE_REFUSAL]
+    submit.edit_original_response.assert_not_awaited()
+
+    add = _interaction()
+    await _button(preview, ADD_LABEL).callback(add)
+    assert _followups(add) == [PIN_WRITE_REFUSAL]
+    assert world.created == [], "nothing was uploaded"
+
+
+async def test_an_agent_shared_after_the_button_refuses_the_submit_and_the_add(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    preview = await _preview(world, agent)
+    await _route(world, TenantScopeRef(tenant_id=world.tenant_id))
+
+    submit = _interaction()
+    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submit)
+    assert "needs someone with Manage Server" in _followups(submit)[0]
+    submit.edit_original_response.assert_not_awaited()
+
+    add = _interaction()
+    await _button(preview, ADD_LABEL).callback(add)
+    assert "needs someone with Manage Server" in _followups(add)[0]
+    assert world.created == [], "nothing was uploaded"
+
+
+async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattached(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The attach re-checks the agent as it is then, not as it was at the click."""
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    preview = await _preview(world, agent)
+    upload = world._skills  # pyright: ignore[reportPrivateUsage]
+
+    def upload_then_pin(request: httpx.Request) -> httpx.Response:
+        response = upload(request)
+        if request.method == "POST":
+            world.state.agents["ag_helper"]["metadata"] = {
+                **world.state.agents["ag_helper"]["metadata"],  # pyright: ignore[reportGeneralTypeIssues]
+                "daimon_managed": "true",
+            }
+        return response
+
+    world._skills = upload_then_pin  # type: ignore[method-assign]  # swap the fake mid-run
+    preview.runtime = world.runtime()
+    interaction = _interaction()
+    await _button(preview, ADD_LABEL).callback(interaction)
+
+    assert len(world.created) == 1, "uploaded before the change"
+    assert world.state.agents["ag_helper"]["skills"] == [], "but never attached"
+    assert _followups(interaction) == [BUILT_IN_MESSAGE]

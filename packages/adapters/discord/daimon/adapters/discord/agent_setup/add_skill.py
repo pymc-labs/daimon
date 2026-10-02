@@ -3,9 +3,12 @@
 The skill becomes the agent's own copy; the shared library and the built-in
 agents are never touched. A server admin may add to any agent they could edit,
 a channel admin to one that answers only in their channels, anyone to one that
-nobody else uses (read as widely as a key change). The button, the submit and
-the Add click each re-check that live; Add re-reads the agent first, so every
-name it carries counts.
+nobody else uses (read as widely as a key change). A pinned agent also takes an
+add only from a panel opened inside its channels, unless the caller is a server
+admin or an admin of every channel it is pinned to (`pin_refusal`, the private
+forms' rule). The button, the submit and the Add click each re-check both live;
+Add re-reads the agent first, so every name it carries counts, and checks the
+fresh agent again right before the upload and the attach.
 """
 
 from __future__ import annotations
@@ -24,8 +27,10 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.authz import Place, Subject
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -72,6 +77,18 @@ def needs_admin_message(agent_name: str) -> str:
     )
 
 
+def _panel_place(interaction: discord.Interaction) -> Place:
+    """Where the panel is open: its thread under the parent channel, a channel, or no channel."""
+    channel = interaction.channel
+    if isinstance(channel, discord.Thread):
+        return Place.from_origin(
+            parent_channel_id=str(channel.parent_id), thread_id=str(channel.id)
+        )
+    if interaction.guild_id is None or interaction.channel_id is None:
+        return Place()
+    return Place.from_origin(parent_channel_id=str(interaction.channel_id), thread_id=None)
+
+
 async def skill_change_refusal(
     interaction: discord.Interaction,
     *,
@@ -83,16 +100,39 @@ async def skill_change_refusal(
     """Why the caller may not change this agent's skills right now, or None.
 
     Pass the re-read `ma_agent` for the final check, so its routing name counts.
+    Without it the agent is read only when the tenant pins anything.
     """
     if agent.is_built_in:
         return BUILT_IN_MESSAGE
     caller = channel_admin_caller(interaction.user)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))
+
+    async def target() -> BetaManagedAgentsAgent:
+        if ma_agent is not None:
+            return ma_agent
+        return await runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)
+
     async with runtime.sessionmaker() as session:
+
+        async def live_subject() -> Subject:
+            return await load_live_subject(
+                session, tenant_id=tenant_id, platform="discord", caller=caller
+            )
+
+        pinned = await pin_refusal(
+            session,
+            tenant_id=tenant_id,
+            load_subject=live_subject,
+            load_agent=target,
+            place=_panel_place(interaction),
+        )
+        if pinned is not None:
+            return pinned
         facts = await load_target_facts(
             session,
             "skill_add",
-            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id)),
+            tenant_id=tenant_id,
             platform="discord",
             agent_names=names,
             ma_agent_id=agent.ma_agent_id,
@@ -105,6 +145,14 @@ async def skill_change_refusal(
     if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
         return None
     return needs_admin_message(agent.name)
+
+
+class _AddRefused(Exception):
+    """A last-moment re-check refused the add; `refusal` is shown as it is."""
+
+    def __init__(self, refusal: str) -> None:
+        super().__init__(refusal)
+        self.refusal = refusal
 
 
 def _bounded(paths: list[str]) -> str:
@@ -188,7 +236,7 @@ class AddSkillModal(discord.ui.Modal):
         except SkillIngestError as exc:
             await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
             return
-        except DaimonError as exc:
+        except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.preview_failed", request_id=request_id)
             await interaction.followup.send(
@@ -267,20 +315,23 @@ class SkillPreviewView(PanelViewBase):
         await interaction.response.defer()
         name, preview = self.agent.name, self.bundle.preview
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
+
+        async def recheck(fresh: BetaManagedAgentsAgent) -> None:
+            refusal = _stamp_refusal(
+                fresh.metadata, tenant_id=str(tenant_id), name=name
+            ) or await skill_change_refusal(
+                interaction,
+                runtime=self.runtime,
+                state=self.state,
+                agent=self.agent,
+                ma_agent=fresh,
+            )
+            if refusal is not None:
+                raise _AddRefused(refusal)
+
         try:
             agent = await self.runtime.anthropic.beta.agents.retrieve(self.agent.ma_agent_id)
-            refusal = _stamp_refusal(agent.metadata, tenant_id=str(tenant_id), name=name)
-            if refusal is None:
-                refusal = await skill_change_refusal(
-                    interaction,
-                    runtime=self.runtime,
-                    state=self.state,
-                    agent=self.agent,
-                    ma_agent=agent,
-                )
-            if refusal is not None:
-                await interaction.followup.send(refusal, ephemeral=True)
-                return
+            await recheck(agent)
             result = await add_agent_skill(
                 self.runtime.anthropic,
                 self.runtime.sessionmaker,
@@ -290,7 +341,11 @@ class SkillPreviewView(PanelViewBase):
                 bundle=self.bundle,
                 origin=self.origin,
                 added_by_account_id=self.state.account_id,
+                recheck=recheck,
             )
+        except _AddRefused as exc:
+            await interaction.followup.send(exc.refusal, ephemeral=True)
+            return
         except SkillIngestError as exc:
             await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
             return
