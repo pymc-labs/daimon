@@ -20,6 +20,7 @@ from daimon.adapters.teams import (
     routines_card,
     setup_card,
     tool_confirmation,
+    wizard,
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
@@ -38,6 +39,7 @@ from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
 from daimon.adapters.teams.thread_reader import ThreadReader
+from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
@@ -298,6 +300,10 @@ def create_teams_http_service(
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
+    wizards = TeamsWizards(
+        runtime, start_turn=turns.start_wizard_turn, draining=lambda: turns.draining
+    )
+    teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)

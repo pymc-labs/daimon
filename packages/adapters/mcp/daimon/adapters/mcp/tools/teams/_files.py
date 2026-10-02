@@ -25,7 +25,8 @@ from daimon.core.teams_sharepoint import SharePoint, file_link
 from fastmcp.exceptions import ToolError
 
 MAX_FILES = 10
-_CHANNEL = re.compile(r"19:[^;]+@thread\.(?:tacv2|skype)")
+# A channel's conversation id; a group chat's ends in `@thread.v2`.
+CHANNEL = re.compile(r"19:[^;]+@thread\.(?:tacv2|skype)")
 _NO_FILES = (
     "daimon cannot save files in that channel: its team's SharePoint site is not granted "
     "to daimon, or it is a private or shared channel. Nothing was posted"
@@ -45,7 +46,7 @@ async def post_files(
     """Post `content` with the files; returns the first activity id."""
     if conversation_id.startswith("a:"):
         return await _offer(auth, client, conversation_id, content, staged)
-    if _CHANNEL.fullmatch(split_thread(conversation_id)[0]):
+    if CHANNEL.fullmatch(split_thread(conversation_id)[0]):
         return await _save_in_channel(runtime, auth, client, conversation_id, content, staged)
     raise ToolError("Teams takes files in a channel or a 1:1 chat with daimon, not a group chat")
 

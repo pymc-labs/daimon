@@ -1,4 +1,4 @@
-"""Executable record of the wizard's deliberate Discord-only scope.
+"""Executable record of the wizard's deliberate Slack exemption.
 
 An absent capability file in this suite is mechanically indistinguishable
 from an oversight: nothing else in the test suite would fail if a Slack
@@ -27,15 +27,19 @@ def test_no_slack_wizard_module_exists() -> None:
     )
 
 
-def test_wizard_core_documents_the_discord_only_scope() -> None:
+def test_teams_wizard_module_exists() -> None:
+    assert importlib.util.find_spec("daimon.adapters.teams.wizard") is not None
+
+
+def test_wizard_core_documents_the_slack_exemption() -> None:
     doc = daimon.core.wizard.__doc__
 
     assert doc is not None, "daimon.core.wizard must carry a package docstring"
-    assert "Discord-only" in doc, (
-        "the package docstring must state the wizard's Discord-only scope in its "
+    assert "Slack is deliberately left out" in doc, (
+        "the package docstring must state the wizard's Slack exemption in its "
         "own terms, not just in a planning document"
     )
-    assert "test_wizard_discord_only" in doc, (
+    assert "test_wizard_slack_exempt" in doc, (
         "the package docstring must name this test file as the executable record "
         "of the exemption, so prose and assertion don't drift apart"
     )

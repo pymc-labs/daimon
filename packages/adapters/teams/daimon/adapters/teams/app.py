@@ -459,6 +459,10 @@ class TeamsApp:
             return
         self.spawn(self._handle(parsed), name="teams.turn")
 
+    def start_wizard_turn(self, inbound: TeamsInbound) -> None:
+        """Run a submitted form's turn on the ordinary path, as a message would."""
+        self.spawn(self._handle(inbound), name="teams.wizard-turn")
+
     def _participation_for(self, inbound: TeamsInbound) -> TeamsParticipation:
         if self._participation is None:
             settings = self.runtime.settings

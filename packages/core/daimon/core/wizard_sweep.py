@@ -1,6 +1,6 @@
 """Expire stale open wizard forms.
 
-An open `wizard_session` row keeps a Discord/Slack message's buttons
+An open `wizard_session` row keeps a Discord or Teams message's buttons
 dispatchable — a tap on it can still write answers or claim a submit. The
 row's `expires_at` is derived at post time from the CDN signature expiry of
 the images the form carries (`daimon.core.wizard.expiry.derive_expires_at`),

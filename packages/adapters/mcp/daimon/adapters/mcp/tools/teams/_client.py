@@ -193,10 +193,21 @@ class TeamsBotClient:
 
     async def create_thread(self, channel_id: str, text: str) -> tuple[str, str]:
         """Start a new post in a channel; returns (thread conversation id, activity id)."""
+        return await self.create_thread_with(channel_id, _message(text))
+
+    async def create_thread_card(
+        self, channel_id: str, card: Mapping[str, object]
+    ) -> tuple[str, str]:
+        """`create_thread` with one Adaptive Card as the post."""
+        return await self.create_thread_with(channel_id, _card_message(card))
+
+    async def create_thread_with(
+        self, channel_id: str, activity: dict[str, object]
+    ) -> tuple[str, str]:
         body: dict[str, object] = {
             "isGroup": True,
             "channelData": {"channel": {"id": channel_id}},
-            "activity": _message(text),
+            "activity": activity,
             "tenantId": self._tenant_id,
         }
         created = _Conversation.model_validate_json((await self._request("POST", "", body)).content)
