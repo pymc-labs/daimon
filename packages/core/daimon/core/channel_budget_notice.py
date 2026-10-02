@@ -3,12 +3,13 @@
 When chat admission refuses a turn for the channel budget, the first refusal
 of each window claims the budget's `exhausted_notice_key` and DMs the
 channel's admins (its grant's users, plus members whose stored roles match a
-granted role), or the server admins when it has none. Setting or raising the
-budget clears the claim, and so does a notice no admin received, so a later
-refusal tries again. Delivery is the adapter's `BudgetNotifier`, held to the
-tenant's DM policy; it runs in the background under a timeout and never
-changes or delays the refusal. A tenant opts out with the `budget_notices`
-setting.
+granted role), or the server admins when it has none. The claim commits
+before recipients are resolved or any DM is sent. Setting or raising the
+budget clears the claim, and so does a notice nobody was sent, so a later
+refusal tries again; one cut short mid-send keeps it. Delivery is the
+adapter's `BudgetNotifier`, held to the tenant's DM policy; it runs in the
+background under one timeout and never changes or delays the refusal. A
+tenant opts out with the `budget_notices` setting.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Final
 
@@ -76,29 +77,6 @@ def notice_key(budget: ChannelBudgetRow, *, now: datetime) -> str:
     return f"{now:%Y-%m}" if budget.window == "monthly" else "window"
 
 
-async def _recipients(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    platform: str,
-    channel_id: str,
-    members: GroupMembers | None,
-) -> list[str]:
-    listed = await channel_admin_user_ids(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        channel_id=channel_id,
-        limit=MAX_RECIPIENTS,
-        members=members,
-    )
-    if listed:
-        return listed
-    return await list_platform_user_ids(
-        session, tenant_id=tenant_id, platform=platform, limit=MAX_RECIPIENTS, admins=True
-    )
-
-
 async def claim_budget_notice(
     session: AsyncSession,
     *,
@@ -106,12 +84,11 @@ async def claim_budget_notice(
     platform: str,
     channel_id: str,
     now: datetime,
-    group_members: GroupMembersFor | None = None,
 ) -> BudgetNotice | None:
-    """The notice to send, or None when the budget is not exhausted or this window's went out.
+    """Claim this window's notice; None when the budget is not exhausted or it went out.
 
-    `group_members` re-checks a recipient matched by a stored Slack group or
-    Teams team; without it such a match reaches nobody.
+    The notice has no recipients yet: they are resolved after the claim
+    commits (`notice_recipients`), since a live group lookup may be slow.
     """
     status = await get_channel_budget_status(
         session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
@@ -125,24 +102,48 @@ async def claim_budget_notice(
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:
         return None
-    recipients = await _recipients(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        channel_id=channel_id,
-        members=group_members(platform, tenant.external_id) if group_members else None,
-    )
     return BudgetNotice(
         tenant_id=tenant_id,
         workspace_id=tenant.external_id,
         platform=platform,
         channel_id=channel_id,
-        recipient_ids=tuple(recipients),
+        recipient_ids=(),
         budget_line=describe_budget(status),
         monthly=budget.window == "monthly",
         budget_id=budget.id,
         window_key=key,
     )
+
+
+async def notice_recipients(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    notice: BudgetNotice,
+    members: GroupMembers | None,
+) -> tuple[str, ...]:
+    """The channel's admins, else the server admins; at most `MAX_RECIPIENTS`.
+
+    `members` re-checks a recipient matched by a stored Slack group or Teams
+    team, with no DB session open; without it such a match reaches nobody.
+    """
+    listed = await channel_admin_user_ids(
+        sessionmaker,
+        tenant_id=notice.tenant_id,
+        platform=notice.platform,
+        channel_id=notice.channel_id,
+        limit=MAX_RECIPIENTS,
+        members=members,
+    )
+    if listed:
+        return tuple(listed)
+    async with sessionmaker() as session:
+        admins = await list_platform_user_ids(
+            session,
+            tenant_id=notice.tenant_id,
+            platform=notice.platform,
+            limit=MAX_RECIPIENTS,
+            admins=True,
+        )
+    return tuple(admins)
 
 
 async def _claim_and_send(
@@ -155,26 +156,29 @@ async def _claim_and_send(
     now: datetime,
     group_members: GroupMembersFor | None,
 ) -> None:
-    async with sessionmaker() as session, session.begin():
-        notice = await claim_budget_notice(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=channel_id,
-            now=now,
-            group_members=group_members,
-        )
-    if notice is None:
-        return
+    notice: BudgetNotice | None = None
     delivered = 0
     try:
-        if notice.recipient_ids:
-            async with asyncio.timeout(NOTICE_TIMEOUT_S):
+        # One bound for everything: the claim, the live group lookups and the DMs.
+        async with asyncio.timeout(NOTICE_TIMEOUT_S):
+            # Committed before any platform call, so a slow lookup or DM never
+            # holds the budget row's lock or a pooled connection.
+            async with sessionmaker() as session, session.begin():
+                notice = await claim_budget_notice(
+                    session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
+                )
+            if notice is None:
+                return
+            members = group_members(platform, notice.workspace_id) if group_members else None
+            notice = replace(
+                notice, recipient_ids=await notice_recipients(sessionmaker, notice, members)
+            )
+            if notice.recipient_ids:
                 delivered = await notifier(notice)
     finally:
-        if not delivered:
-            # Otherwise the window stays claimed and no admin hears of it until
-            # the budget is raised or reset.
+        # Otherwise the window stays claimed and no admin hears of it until
+        # the budget is raised or reset.
+        if notice is not None and not delivered:
             async with sessionmaker() as session, session.begin():
                 await release_exhausted_notice(
                     session, budget_id=notice.budget_id, key=notice.window_key

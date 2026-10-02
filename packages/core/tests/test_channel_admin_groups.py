@@ -18,7 +18,7 @@ from daimon.core.stores.accounts import set_platform_role_ids
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import TenantRow
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _fetcher(
@@ -183,7 +183,7 @@ async def test_channel_admin_dms_reach_a_stored_slack_group_member_only_while_st
 
     async def recipients(members: Callable[[str], Awaitable[frozenset[str]]] | None) -> list[str]:
         found = await channel_admin_user_ids(
-            db_session,
+            async_sessionmaker(bind=db_session.bind),
             tenant_id=tenant.id,
             platform="slack",
             channel_id="C1",
@@ -212,7 +212,12 @@ async def test_channel_admin_dms_cap_after_dropping_members_who_left_the_group(
     _, live = _fetcher({"S1": frozenset({"U_Z_STAYED"})})
 
     found = await channel_admin_user_ids(
-        db_session, tenant_id=tenant.id, platform="slack", channel_id="C1", limit=2, members=live
+        async_sessionmaker(bind=db_session.bind),
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        limit=2,
+        members=live,
     )
 
     assert found == ["U_Z_STAYED"], "the current member is reached however many have left"

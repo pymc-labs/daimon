@@ -32,7 +32,7 @@ from daimon.core.stores.accounts import get_account, list_platform_user_ids
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CHANNEL_ADMIN_PLATFORMS: Final = ("discord", "slack", "teams")
 """The platforms a channel can have its own admins on."""
@@ -334,7 +334,7 @@ async def live_group_member_ids(
 
 
 async def channel_admin_user_ids(
-    session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -348,21 +348,24 @@ async def channel_admin_user_ids(
     granted one, as of their last chat turn; a Slack group or Teams team match
     must still hold by `members` now. Sorted, at most `limit`, counted after
     that re-check: capped before it, members who left could fill the cap.
+    Reads in a session of its own, closed before the lookup, so a slow
+    platform never holds a pooled connection.
     """
-    grant = await get_channel_admins(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-    )
-    if grant is None or not (grant.user_ids or grant.role_ids):
-        return None
     looked_up = platform in LOOKED_UP_GROUP_PLATFORMS
-    found = await list_platform_user_ids(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        limit=None if looked_up else limit,
-        user_ids=grant.user_ids,
-        role_ids=grant.role_ids,
-    )
+    async with sessionmaker() as session:
+        grant = await get_channel_admins(
+            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        )
+        if grant is None or not (grant.user_ids or grant.role_ids):
+            return None
+        found = await list_platform_user_ids(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            limit=None if looked_up else limit,
+            user_ids=grant.user_ids,
+            role_ids=grant.role_ids,
+        )
     if looked_up:
         live = await live_group_member_ids(grant.role_ids, members)
         fold = str.lower if platform == "teams" else str

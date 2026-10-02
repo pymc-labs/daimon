@@ -560,15 +560,14 @@ async def _dm_channel_admins(
     escalation channel. Each DM is held to the tenant's DM policy.
     """
     s = submission
-    async with runtime.sessionmaker() as session:
-        tiers = await support_recipient_tiers(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            channel_id=s.channel_id,
-            requester_id=s.user_id,
-            members=user_group_members(runtime, client, tenant_id=tenant_id),
-        )
+    tiers = await support_recipient_tiers(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=s.channel_id,
+        requester_id=s.user_id,
+        members=user_group_members(runtime, client, tenant_id=tenant_id),
+    )
     if not tiers:
         return False
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())

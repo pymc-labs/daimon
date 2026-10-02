@@ -225,14 +225,13 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         only to a current human member of the guild.
         """
         bot = cast(DaimonBot, interaction.client)
-        async with self._runtime.sessionmaker() as session:
-            tiers = await support_recipient_tiers(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=await self._origin_channel_id(bot),
-                requester_id=str(interaction.user.id),
-            )
+        tiers = await support_recipient_tiers(
+            self._runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=await self._origin_channel_id(bot),
+            requester_id=str(interaction.user.id),
+        )
         if not tiers:
             return False
         policies = self._runtime.settings.direct_message_policies
