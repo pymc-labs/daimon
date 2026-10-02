@@ -308,12 +308,56 @@ def new_agent_form(
     return AdaptiveCard(body=body, actions=[submit], fallback_text="New agent")
 
 
-def token_card(*, agent_name: str, cli: str, mcp_json: str, jti: str) -> AdaptiveCard:
-    """The minted token, shown once inside a dialog, with a Revoke button."""
-    revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
+UNBOUND = "none"
+"""The channel choice of a token bound to no channel (server admins only)."""
+
+
+def token_channel_form(
+    *, agent_name: str, channel_ids: Sequence[str], allow_unbound: bool
+) -> AdaptiveCard:
+    """Pick the channel a coding-tool token runs in: one the caller administers.
+
+    Panels live in the 1:1 chat, so the channel the token binds to is chosen
+    here rather than read from where the button was pressed.
+    """
+    choices = [Choice(title="Not bound to a channel", value=UNBOUND)] if allow_unbound else []
+    choices += [
+        Choice(title=f"Channel {channel_id}", value=channel_id) for channel_id in channel_ids
+    ]
+    submit = SubmitData(TOKEN_DIALOG, {"agent": agent_name, "op": "mint"})
     return AdaptiveCard(
         body=[
-            _text(f"Use **{agent_name}** from your coding tools. Token shown once, copy it now."),
+            _text(f"Where should **{agent_name}** run from your coding tools?"),
+            ChoiceSetInput(
+                id="channel",
+                label="Channel",
+                is_required=True,
+                value=choices[0].value,
+                choices=choices,
+            ),
+            _text("A bound token runs under that channel's pins, seal and budget.", subtle=True),
+        ],
+        actions=[SubmitAction(title="Mint token", data=submit)],
+        fallback_text=f"Use {agent_name} from your coding tools",
+    )
+
+
+def token_card(
+    *, agent_name: str, cli: str, mcp_json: str, jti: str, channel_id: str | None = None
+) -> AdaptiveCard:
+    """The minted token, shown once inside a dialog, with a Revoke button."""
+    revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
+    bound = (
+        f" It runs in channel `{channel_id}`, under that channel's pins, seal and budget."
+        if channel_id is not None
+        else ""
+    )
+    return AdaptiveCard(
+        body=[
+            _text(
+                f"Use **{agent_name}** from your coding tools. Token shown once, copy it now."
+                + bound
+            ),
             _text("**Run this:**"),
             CodeBlock(code_snippet=cli, language="Bash"),
             _text("**Or paste into `.mcp.json`:**"),

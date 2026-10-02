@@ -24,6 +24,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
@@ -255,3 +256,90 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=uuid.UUID(jti))
     assert row is not None and row.revoked_at is not None
+
+
+PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"
+
+
+async def _grant_and_pin(db_factory: async_sessionmaker[AsyncSession], *, pin: bool) -> None:
+    """The member administers PINNED; `pin` pins analyst there."""
+    async with db_factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=PINNED,
+            role_ids=[],
+            user_ids=[OTHER_AAD_OBJECT_ID],
+            actor_account_id=None,
+        )
+        if pin:
+            await set_access_policy(
+                session,
+                tenant_id=TENANT,
+                policy=TenantAccessPolicy(agent_channel_pins={"analyst": (PINNED,)}),
+            )
+
+
+async def test_a_channel_admin_mints_a_token_bound_to_a_channel_they_pick(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The dialog lists only their channels, with no unbound choice, and binds the token."""
+    await _grant_and_pin(db_session_factory, pin=True)
+    fetch = {"dialog_id": "agent_coding_tools", "agent": "analyst"}
+    mint = {"action": "agent_coding_tools", "op": "mint", "agent": "analyst"}
+    async with _running(db_session_factory, teams_api_fake) as (service, _):
+        form = await post_activity(service, _dialog("fetch", fetch, user=OTHER_AAD_OBJECT_ID))
+        minted = await post_activity(
+            service, _dialog("submit", mint | {"channel": PINNED}, user=OTHER_AAD_OBJECT_ID)
+        )
+        forged = await post_activity(
+            service, _dialog("submit", mint | {"channel": ELSEWHERE}, user=OTHER_AAD_OBJECT_ID)
+        )
+        unbound = await post_activity(
+            service, _dialog("submit", mint | {"channel": "none"}, user=OTHER_AAD_OBJECT_ID)
+        )
+
+    choices = json.dumps(form)
+    assert PINNED in choices and ELSEWHERE not in choices, "only the channels they administer"
+    assert "Not bound to a channel" not in choices, "an unbound token stays with server admins"
+    card = json.dumps(minted)
+    assert "claude mcp add" in card and PINNED in card, "the token says where it runs"
+    jti = card.split('"jti": "')[1].split('"')[0]
+    async with db_session_factory() as session:
+        row = await get_mcp_token(session, jti=uuid.UUID(jti))
+    assert row is not None and (row.platform, row.channel_id) == ("teams", PINNED), (
+        "the token is bound to the picked channel"
+    )
+    refusal = setup_panel.NEEDS_ADMIN.format(name="analyst")
+    assert forged["task"]["value"] == refusal, "a channel they do not administer is refused"
+    assert unbound["task"]["value"] == refusal, "and so is an unbound token"
+
+
+async def test_a_channel_admin_cannot_mint_for_an_agent_pinned_nowhere_of_theirs(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """An unpinned agent's token would be unbound, so it stays with server admins."""
+    await _grant_and_pin(db_session_factory, pin=False)
+    mint = {"action": "agent_coding_tools", "op": "mint", "agent": "analyst", "channel": PINNED}
+    async with _running(db_session_factory, teams_api_fake) as (service, _):
+        refused = await post_activity(service, _dialog("submit", mint, user=OTHER_AAD_OBJECT_ID))
+    assert refused["task"]["value"] == setup_panel.NEEDS_ADMIN.format(name="analyst")
+
+
+async def test_a_server_admin_with_a_channel_grant_keeps_the_unbound_choice(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    await _grant_and_pin(db_session_factory, pin=False)
+    fetch = {"dialog_id": "agent_coding_tools", "agent": "analyst"}
+    mint = {"action": "agent_coding_tools", "op": "mint", "agent": "analyst", "channel": "none"}
+    admins = (OTHER_AAD_OBJECT_ID,)
+    async with _running(db_session_factory, teams_api_fake, admins) as (service, _):
+        form = await post_activity(service, _dialog("fetch", fetch, user=OTHER_AAD_OBJECT_ID))
+        minted = await post_activity(service, _dialog("submit", mint, user=OTHER_AAD_OBJECT_ID))
+    assert "Not bound to a channel" in json.dumps(form), "admins may still mint unbound"
+    card = json.dumps(minted)
+    jti = card.split('"jti": "')[1].split('"')[0]
+    async with db_session_factory() as session:
+        row = await get_mcp_token(session, jti=uuid.UUID(jti))
+    assert row is not None and row.channel_id is None, "the unbound pick mints an unbound token"

@@ -3,8 +3,11 @@
 Mirrors Slack's `/agent-setup` and its rules. The panel is read-only and open to
 every member; changes happen in a setup conversation, where the chat tools own
 authorization. New agent is open to everyone (a fresh agent is unrouted, so it
-puts nothing at risk). Minting a coding-tool token is admin-only and only its
-minter may revoke it; token values are never logged. Every click re-verifies the
+puts nothing at risk). Minting a coding-tool token is `authorize_coding_token`'s
+call, as on Discord and Slack: panels live in the 1:1 chat, so a channel admin
+picks one of their channels in the dialog and the token is bound there (an
+unbound token stays with server admins). Only its minter may revoke it; token
+values are never logged. Every click re-verifies the
 clicker and re-reads state, so a stale card grants nothing.
 """
 
@@ -43,7 +46,12 @@ from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
-from daimon.core.authz import AgentRef, build_subject
+from daimon.core.authz import AgentRef, build_agent_ref
+from daimon.core.channel_admins import (
+    ChannelAdminCaller,
+    load_administered_channel_ids,
+    load_live_subject,
+)
 from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -73,7 +81,10 @@ log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
-NEEDS_ADMIN = "Minting an access token for {name} needs an admin."
+NEEDS_ADMIN = (
+    "Minting an access token for {name} needs an admin, or an admin of every channel "
+    "it is pinned to, binding it to one of them."
+)
 NOT_MINTER = "Only the person who minted this token can revoke it."
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
@@ -130,7 +141,7 @@ class SetupPanel:
     async def on_token_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._revoke(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._token_submit(ctx.activity), dialog_message(FAILED))
 
     async def _roster(self, tenant_id: uuid.UUID, chat: str | None) -> Roster:
         async with self._runtime.sessionmaker() as session:
@@ -298,31 +309,80 @@ class SetupPanel:
         return dialog_message(f"Created {name}. It does not answer anywhere yet.")
 
     async def _mint(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
+        """Mint at once, or first ask a channel admin which of their channels it runs in."""
         actor = await card_actor(self._runtime, activity)
         if actor is None:
             return dialog_message(DENIED)
         name = str(submitted_fields(activity.value.data).get("agent") or "")
+        if self._runtime.settings.mcp.jwt_secret is None or (
+            self._runtime.settings.mcp.public_url is None
+        ):
+            return dialog_message(NOT_CONFIGURED)
+        async with self._runtime.sessionmaker() as session:
+            administered = await load_administered_channel_ids(
+                session,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                caller=ChannelAdminCaller(platform_user_id=actor.user_id),
+            )
+        if not administered:
+            return await self._issue(actor, name, channel_id=None)
+        form = cards.token_channel_form(
+            agent_name=name, channel_ids=sorted(administered), allow_unbound=actor.is_admin
+        )
+        return dialog("Use from your coding tools", form)
+
+    async def _token_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
+        data = submitted_fields(activity.value.data)
+        if data.get("op") != "mint":
+            return await self._revoke(activity)
+        actor = await card_actor(self._runtime, activity)
+        if actor is None:
+            return dialog_message(DENIED)
+        channel = str(data.get("channel") or cards.UNBOUND)
+        return await self._issue(
+            actor,
+            str(data.get("agent") or ""),
+            channel_id=None if channel == cards.UNBOUND else channel,
+        )
+
+    async def _issue(
+        self, actor: Actor, name: str, *, channel_id: str | None
+    ) -> TaskModuleInvokeResponse:
+        """Mint `name`'s token as `authorize_coding_token` decides, as Discord and Slack do.
+
+        `channel_id` is the channel picked in the dialog; the grants and the
+        pin are re-read here, so a stale or forged pick grants nothing.
+        """
         secret = self._runtime.settings.mcp.jwt_secret
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
             return dialog_message(NOT_CONFIGURED)
+        roster = await self._roster(actor.tenant_id, None)
+        target = next((row for row in roster.rows if row.name == name), None)
         try:
             async with self._runtime.sessionmaker() as session:
                 policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+                subject = await load_live_subject(
+                    session,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    caller=ChannelAdminCaller(
+                        platform_user_id=actor.user_id, is_server_admin=actor.is_admin
+                    ),
+                )
         except AccessPolicyUnreadable:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)
-        # The panel lives in the 1:1 chat, so the token is never bound to a channel.
-        decision, _ = authorize_coding_token(
-            policy,
-            subject=build_subject(is_admin=actor.is_admin, platform_user_id=actor.user_id),
-            agent=AgentRef.of(name),
-            channel_id=None,
+        agent = AgentRef.of(name)
+        if target is not None and channel_id is not None and policy.agent_channel_pins:
+            ma_agent = await self._runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
+            agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
+        decision, bound_channel_id = authorize_coding_token(
+            policy, subject=subject, agent=agent, channel_id=channel_id
         )
         if not decision:
             log.info("teams.coding_tools.refused", agent_name=name, reason=decision.reason)
             return dialog_message(NEEDS_ADMIN.format(name=name))
-        roster = await self._roster(actor.tenant_id, None)
-        target = next((row for row in roster.rows if row.name == name), None)
         if target is None:
             return dialog_message(GONE)
         account_id = await get_or_create_account(self._runtime, actor)
@@ -337,11 +397,20 @@ class SetupPanel:
                 label=name,
                 secret=secret.get_secret_value().encode(),
                 now=datetime.now(UTC),
+                platform="teams" if bound_channel_id is not None else None,
+                channel_id=bound_channel_id,
             )
         jti = token_jti(token)
-        log.info("teams.coding_tools.minted", agent_name=name, jti=str(jti))  # never the token
+        log.info(  # never the token
+            "teams.coding_tools.minted",
+            agent_name=name,
+            jti=str(jti),
+            bound_channel_id=bound_channel_id,
+        )
         cli, mcp_json = coding_tool_config(agent_name=name, public_url=str(public_url), jwt=token)
-        card = cards.token_card(agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti))
+        card = cards.token_card(
+            agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti), channel_id=bound_channel_id
+        )
         return dialog("Use from your coding tools", card)
 
     async def _revoke(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:

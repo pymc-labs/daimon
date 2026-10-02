@@ -88,6 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
+  from your coding tools" dialog now asks a channel admin which of their
+  channels the token runs in, and binds it there under the same rule as
+  Discord and Slack: the agent must be pinned to channels they administer,
+  and an unbound token stays with server admins, who keep that choice.
+
 - **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
   skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a
   folder of a public GitHub repo (`--branch`, `--path`). It shows the skill's

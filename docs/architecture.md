@@ -280,7 +280,8 @@ credential outright if they are ever reached with it
 (`_require_outside_chat_turn`), so every session they create comes from a
 headless caller outside every channel. The one exception is an agent key
 minted with "Use from your coding tools" in a sealed channel, or in a channel
-its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
+its agent is pinned to (a thread counts as its parent; Teams panels live in
+the 1:1 chat, so its dialog asks which channel): its `mcp_tokens` row
 records that channel (`coding_token_channel`), and its calls run as a turn
 there -- under the channel's pin, seal, environment and budget, with its
 sessions stamped to the channel (`token_channel_id`). `authorize` sees it as
