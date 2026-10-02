@@ -203,11 +203,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Slack channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
   the workspace's, also under an operator token's `channels:write`); an admin
-  of a channel can pick that channel's. In a sealed channel, an environment
-  with unrestricted networking needs a server admin, and so does clearing a
-  pick when the default it falls back to has one. Who answers where in the
-  setup panel lists each channel's environment and offers a select for it, and
-  `explain_agent_resolution` names the environment and the tier that chose it.
+  of a channel can pick that channel's. In a sealed channel, or one holding a
+  sealed thread, an environment with unrestricted networking (any network
+  beyond package managers and MCP servers, so any allowed host) needs a server
+  admin, and so does clearing a pick when the default it falls back to has
+  one. Sealing or isolating a channel whose own pick has such a network warns
+  that a server admin should confirm or change it. Who answers where in the
+  setup panel lists each channel's environment on the reader's side of an
+  isolation and offers a select for it, and `explain_agent_resolution` names
+  the environment and the tier that chose it.
   A conversation switches from its next message and keeps its files and its
   seal, and a routine runs in its channel's environment. Archiving or deleting
   an environment clears the picks that named it. The missing-environment

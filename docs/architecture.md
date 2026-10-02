@@ -518,13 +518,21 @@ the channel, with `set_channel_environment` and `clear_channel_environment`; a
 channel admin sets the channels they run, and a thread id resolves to its
 parent. Who answers where in both setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
-(`packages/core/daimon/core/channel_environments.py`). The name must match an
-existing environment in the tenant; conversations pick it up from their next
-message, keeping their files and their seal, and `explain_agent_resolution`
-reports each tier's environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides
-every pick: in a sealed channel, an environment with unrestricted networking
-(anything but a cloud environment on limited networking) needs a server admin,
-and so does clearing a pick onto a default that has one. An operator token's
+(`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
+drops the rows across an isolation line, and inside an isolated channel the
+workspace and deployment environments too. The name must match an existing
+environment in the tenant, looked up once so the network rule and the write
+judge the same one; conversations pick it up from their next message, keeping
+their files and their seal, and `explain_agent_resolution` reports each tier's
+environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
+sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
+Discord thread the pick or its turn names), an environment with unrestricted
+networking (any network beyond package managers and MCP servers: anything but
+a cloud environment on limited networking with no allowed hosts) needs a
+server admin, and so does clearing a pick onto a default that has one. A pick
+made before the seal never met that rule, so sealing or isolating a channel
+whose own pick is open warns that a server admin should confirm it; who made
+a pick isn't recorded. An operator token's
 `channels:write` covers a channel's environment, never the tenant default. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
