@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +45,8 @@ def test_setup_generates_valid_secrets_and_schema(
     assert set(payload) == {"completed", "missing", "next_step"}
     assert payload["missing"] == [
         "DAIMON_ANTHROPIC__API_KEY",
-        "DAIMON_DISCORD__BOT_TOKEN",
         "DAIMON_MCP__PUBLIC_URL",
+        "DAIMON_DISCORD__BOT_TOKEN",
     ]
     assert (
         payload["next_step"]
@@ -86,6 +88,89 @@ def test_setup_rejects_symlink(tmp_path: Path) -> None:
     assert rc == 1
     assert actual.read_text() == "POSTGRES_PASSWORD=kept\n"
     assert payload["completed"] == []
+
+
+def test_stdlib_bootstrap_matches_installed_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    script = Path(__file__).resolve().parents[5] / "scripts/setup.py"
+    environment = os.environ.copy()
+    for name in (
+        "DAIMON_ANTHROPIC__API_KEY",
+        "DAIMON_MCP__PUBLIC_URL",
+        "DAIMON_DISCORD__BOT_TOKEN",
+    ):
+        environment.pop(name, None)
+        monkeypatch.delenv(name, raising=False)
+    first = subprocess.run(
+        [sys.executable, "-I", "-S", str(script), "--env-file", str(env_file)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    before = env_file.read_bytes()
+    script_payload = json.loads(first.stdout)
+    rc, cli_payload = _invoke("--env-file", str(env_file))
+    assert rc == 0
+    assert env_file.read_bytes() == before
+    assert set(script_payload) == set(cli_payload) == {"completed", "missing", "next_step"}
+    assert script_payload["missing"] == cli_payload["missing"]
+    assert script_payload["next_step"] == cli_payload["next_step"]
+    assert first.stderr == ""
+    for value in _env_values(before.decode()).values():
+        assert value not in first.stdout
+
+
+def test_ready_step_names_seeded_cli_first_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in (
+        "DAIMON_ANTHROPIC__API_KEY",
+        "DAIMON_MCP__PUBLIC_URL",
+        "DAIMON_DISCORD__BOT_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DAIMON_ANTHROPIC__API_KEY=test-key\n"
+        "DAIMON_MCP__PUBLIC_URL=http://localhost:8765/mcp\n"
+        "DAIMON_DISCORD__BOT_TOKEN=test-token\n"
+    )
+    rc, payload = _invoke("--env-file", str(env_file))
+    assert rc == 0
+    assert payload["missing"] == []
+    assert (
+        "docker compose run --rm --no-deps --entrypoint daimon init sessions create --json"
+        in payload["next_step"]
+    )
+    assert (
+        "docker compose run --rm --no-deps --entrypoint daimon init run --session ID"
+        in payload["next_step"]
+    )
+    assert "test-key" not in json.dumps(payload)
+
+
+def test_cli_first_reply_step_precedes_optional_discord_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in (
+        "DAIMON_ANTHROPIC__API_KEY",
+        "DAIMON_MCP__PUBLIC_URL",
+        "DAIMON_DISCORD__BOT_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DAIMON_ANTHROPIC__API_KEY=test-key\nDAIMON_MCP__PUBLIC_URL=http://localhost:8765/mcp\n"
+    )
+    rc, payload = _invoke("--env-file", str(env_file))
+    assert rc == 0
+    assert payload["missing"] == ["DAIMON_DISCORD__BOT_TOKEN"]
+    assert "docker compose up --build -d postgres init" in payload["next_step"]
+    assert "sessions create --json" in payload["next_step"]
 
 
 def _mock_discord(monkeypatch: pytest.MonkeyPatch, responses: dict[str, tuple[int, Any]]) -> None:

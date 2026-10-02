@@ -4,36 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import secrets
-import stat
 from pathlib import Path
 from typing import Annotated, Any, cast
 
 import httpx
 import typer
-from cryptography.fernet import Fernet
+from daimon.adapters.cli.setup_bootstrap import read_env, run_setup, values_from_env
 
 setup_app = typer.Typer(
     help="Prepare local secrets and verify external setup.", invoke_without_command=True
 )
 
-_GENERATED = (
-    "POSTGRES_PASSWORD",
-    "DAIMON_MCP__JWT_SECRET",
-    "DAIMON_CRYPTO__KEYS",
-)
-_HUMAN_STEPS = (
-    (
-        "DAIMON_ANTHROPIC__API_KEY",
-        "Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace.",
-    ),
-    (
-        "DAIMON_DISCORD__BOT_TOKEN",
-        "Create a Discord application and bot, then set DAIMON_DISCORD__BOT_TOKEN in .env.",
-    ),
-    ("DAIMON_MCP__PUBLIC_URL", "Set DAIMON_MCP__PUBLIC_URL in .env to the reachable MCP endpoint."),
-)
 _DISCORD_API = "https://discord.com/api/v10"
 _MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19)
 _PERMISSIONS = {
@@ -45,60 +26,11 @@ _PERMISSIONS = {
     "send_messages_in_threads": 1 << 38,
 }
 _ADMINISTRATOR = 1 << 3
-_DEFAULT_URL = "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"
 
 
 def _emit(payload: dict[str, Any]) -> None:
     # Only names, instructions and public IDs belong in this object.
     typer.echo(json.dumps(payload, sort_keys=True))
-
-
-def _values(content: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line in content.splitlines():
-        match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.*)$", line)
-        if match:
-            values[match.group(1)] = match.group(2).strip().strip("\"'")
-    return values
-
-
-def _set_value(content: str, name: str, value: str) -> str:
-    lines = content.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        if re.match(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=", line):
-            lines[index] = f"{name}={value}\n"
-            return "".join(lines)
-    if content and not content.endswith("\n"):
-        content += "\n"
-    return content + f"{name}={value}\n"
-
-
-def _read_env(path: Path) -> str:
-    if path.is_symlink():
-        raise ValueError("Environment file is a symlink; choose a regular file with --env-file.")
-    if not path.exists():
-        return ""
-    mode = path.stat().st_mode
-    if not stat.S_ISREG(mode):
-        raise ValueError("Environment path must be a regular file.")
-    return path.read_text()
-
-
-def _write_env(path: Path, content: str) -> None:
-    # Exclusive temp creation and replace avoid partial secret writes. The
-    # destination is checked again immediately before replacement.
-    temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if path.is_symlink() or (path.exists() and not path.is_file()):
-            raise ValueError("Environment path changed to a non-regular file.")
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
 
 
 @setup_app.callback()
@@ -112,42 +44,7 @@ def setup(
     if ctx.invoked_subcommand is not None:
         return
     try:
-        content = _read_env(env_file)
-        values = _values(content)
-        completed: list[str] = []
-        for name in _GENERATED:
-            if values.get(name):
-                completed.append(name)
-                continue
-            value = (
-                Fernet.generate_key().decode()
-                if name == "DAIMON_CRYPTO__KEYS"
-                else secrets.token_urlsafe(48)
-            )
-            content = _set_value(content, name, value)
-            values[name] = value
-            completed.append(name)
-        if (
-            not values.get("DAIMON_DATABASE__URL")
-            or values.get("DAIMON_DATABASE__URL") == _DEFAULT_URL
-        ):
-            content = _set_value(
-                content,
-                "DAIMON_DATABASE__URL",
-                f"postgresql+asyncpg://daimon:{values['POSTGRES_PASSWORD']}@localhost:5432/daimon",
-            )
-            completed.append("DAIMON_DATABASE__URL")
-        if not env_file.exists() or content != _read_env(env_file):
-            _write_env(env_file, content)
-        missing = [
-            name for name, _ in _HUMAN_STEPS if not values.get(name) and not os.environ.get(name)
-        ]
-        next_step = next((step for name, step in _HUMAN_STEPS if name in missing), None)
-        if next_step is None:
-            next_step = (
-                "Run `daimon setup verify discord --guild-id GUILD_ID` for your test server."
-            )
-        _emit({"completed": completed, "missing": missing, "next_step": next_step})
+        _emit(run_setup(env_file))
     except (OSError, UnicodeError, ValueError):
         _emit(
             {
@@ -208,7 +105,7 @@ def verify_discord(
     missing: list[str] = []
     failures: list[str] = []
     try:
-        values = _values(_read_env(env_file))
+        values = values_from_env(read_env(env_file))
     except (OSError, UnicodeError, ValueError):
         values = {}
         failures.append(
