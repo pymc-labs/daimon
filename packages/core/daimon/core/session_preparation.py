@@ -20,9 +20,11 @@ Four results, never an exception for an expected outcome:
   untouched and still live, so nothing the caller saved is lost; the turn is
   simply not run.
 
-The whole body holds a blocking Postgres advisory lock on the caller's
+Changes hold a blocking Postgres advisory lock on the caller's
 (tenant, platform, thread, account) tuple, so two mentions racing the same
-change decide once and create one successor, not two.
+change decide once and create one successor, not two. A compatible reused
+session releases that transaction before vault network I/O and verifies that
+the mapping is still current afterward.
 """
 
 from __future__ import annotations
@@ -677,7 +679,40 @@ async def prepare_session_for_turn(
         if isinstance(decision, ReuseAsIs):
             # Nothing to apply but the vault mirror, whose failures have always
             # propagated to the adapter's error edge rather than deferring.
+            # The mirror can await Anthropic and MCP. The advisory lock has
+            # finished its decision; do not keep a pooled connection checked
+            # out for that network round trip on every compatible turn.
+            await db.commit()
             await run_ops()
+            async with deps.sessionmaker() as check:
+                current_row = await ops.read_live_row(
+                    check,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    account_id=session_account_id,
+                )
+            if (
+                current_row is None
+                or current_row.id != row.id
+                or current_row.identity_fingerprint
+                != (
+                    fingerprint_identity(recorded)
+                    if row.effective_config is None
+                    else row.identity_fingerprint
+                )
+                or current_row.mutable_fingerprint
+                != (
+                    fingerprint_mutable(recorded)
+                    if row.effective_config is None
+                    else row.mutable_fingerprint
+                )
+                or current_row.fresh_start_requested_at != row.fresh_start_requested_at
+            ):
+                raise SessionBusyError(
+                    pending_reasons=("session_changed",),
+                    retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+                )
             return on_current(CONTINUED, recorded.model_id)
 
         try:

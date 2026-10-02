@@ -17,7 +17,14 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
+def build_engine(
+    url: str,
+    *,
+    echo: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    pool_timeout: float = 30.0,
+) -> AsyncEngine:
     """Build an `AsyncEngine` for the given DSN.
 
     The caller owns lifecycle and must `await engine.dispose()` on shutdown.
@@ -36,7 +43,14 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     # hide_parameters keeps bound values (agent keys, tokens) out of the
     # SQL text that database errors carry into logs and error reports.
     return create_async_engine(
-        url, echo=echo, pool_pre_ping=True, pool_recycle=1800, hide_parameters=True
+        url,
+        echo=echo,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        hide_parameters=True,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
     )
 
 

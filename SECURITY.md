@@ -1,8 +1,9 @@
 # Security Policy
 
 daimon deployments hold sensitive operator credentials — an Anthropic API
-key and platform bot tokens (Discord, Slack, etc.) — on behalf of every
-guild/workspace the bot serves. A vulnerability in this project can expose
+key and platform credentials (Discord and Slack bot tokens, the Teams app's
+client secret, etc.) — on behalf of every guild, workspace or organisation
+the bot serves. A vulnerability in this project can expose
 those credentials or let one tenant access another tenant's data, so we take
 reports seriously.
 

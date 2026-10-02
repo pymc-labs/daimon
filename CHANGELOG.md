@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Compatible session preparation releases its Postgres connection during vault I/O, and the detached turn outcome writer allows ten seconds for a busy pool before logging a failed write.
+
 ### Changed
 
 - Discord opening mentions now get a parent-channel notice when thread naming or creation takes more than three seconds. The notice becomes a thread link or retry guidance; `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S=0` posts it immediately. Discord `runtime.health` now counts 429 retries by route and records the longest retry wait in each window.
+- Postgres pool size, overflow and checkout timeout are configurable per process through `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and `DAIMON_DATABASE__POOL_TIMEOUT`.
 
 ### Security
 

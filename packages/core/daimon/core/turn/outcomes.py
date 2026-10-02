@@ -29,7 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 log = structlog.get_logger(__name__)
 _PENDING: set[asyncio.Task[None]] = set()
 _MAX_PENDING = 256
-_WRITE_TIMEOUT_S = 1.0
+# The writer is detached from the turn, so a short checkout burst can be
+# tolerated without delaying the user. Keep a bound for a wedged database.
+_WRITE_TIMEOUT_S = 10.0
 _RELEASE = version("daimon-core")
 current_outcome: ContextVar[TurnObservation | None] = ContextVar("turn_outcome", default=None)
 

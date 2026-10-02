@@ -632,7 +632,12 @@ async def run(
     scheduler_settings = SchedulerSettings()
     _validate_mcp_settings(settings)
 
-    engine = _engine_override or build_engine(str(settings.database.url))
+    engine = _engine_override or build_engine(
+        str(settings.database.url),
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+        pool_timeout=settings.database.pool_timeout,
+    )
     sm = build_session_factory(
         engine,
         crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
