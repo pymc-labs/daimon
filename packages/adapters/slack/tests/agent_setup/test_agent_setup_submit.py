@@ -30,12 +30,15 @@ from daimon.adapters.slack.agent_setup.submit import (
     run_new_agent_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core._models import AgentCreationChannel
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -370,6 +373,48 @@ async def test_run_new_agent_inside_an_isolated_channel_says_why_it_is_not_shown
     form = _views(client_fake, "views.update")[0]
     assert form["view_id"] == _FORM_VIEW_ID
     assert "This channel is isolated" in json.dumps(form["view"]), "not left on the placeholder"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grant", [True, False])
+async def test_run_new_agent_by_a_channel_admin_is_their_channels(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    grant: bool,
+) -> None:
+    """A channel admin's new agent is the channel's to set up; a member's is nobody's."""
+    client_fake: Any = fake_slack_web_client
+    runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
+        if grant:
+            await set_channel_admins(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                channel_id=_CHANNEL_ID,
+                role_ids=[],
+                user_ids=[_USER_ID],
+                actor_account_id=None,
+            )
+
+    await run_new_agent_submission(
+        runtime,
+        client_fake.client,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        view_id=_FORM_VIEW_ID,
+        meta=_panel_meta(),
+        name="room-agent",
+        purpose=None,
+        model="claude-sonnet-4-6",
+    )
+
+    async with db_session_factory() as session:
+        channels = (await session.scalars(select(AgentCreationChannel.channel_id))).all()
+    assert channels == ([_CHANNEL_ID] if grant else [])
 
 
 @pytest.mark.asyncio
