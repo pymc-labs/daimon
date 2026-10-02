@@ -11,13 +11,14 @@ import pytest
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response

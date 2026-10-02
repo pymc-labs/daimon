@@ -22,6 +22,7 @@ AdmissionDenialReason = Literal[
     "invoker_not_allowed",
     "channel_protected",
     "agent_pinned_elsewhere",
+    "channel_isolated",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 
@@ -37,6 +38,14 @@ class AdmissionDenied(DaimonError):
     def __init__(self, *, reason: AdmissionDenialReason) -> None:
         super().__init__(reason)
         self.reason: AdmissionDenialReason = reason
+
+
+class DmSourceSealedError(DaimonError):
+    """Raised by `reauthorize` when a DM's source channel or thread was sealed since admission.
+
+    The DM path catches it and quarantines the conversation (its copied
+    context and sessions), exactly as when the seal is found before admission.
+    """
 
 
 class MissingTurnConfigError(DaimonError):

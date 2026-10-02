@@ -9,12 +9,9 @@ No module-level singletons.
 
 from __future__ import annotations
 
-from typing import Any, cast
-
 from daimon.core._models import GitHubAppInstallation
-from daimon.core.errors import StoreError
 from daimon.core.stores.domain import GitHubAppInstallationRow
-from sqlalchemy import CursorResult, any_, delete, func, select, update
+from sqlalchemy import any_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,101 +45,6 @@ async def upsert(
     orm = result.scalar_one()
     await session.flush()
     return GitHubAppInstallationRow.model_validate(orm)
-
-
-async def add_repos(
-    session: AsyncSession,
-    *,
-    installation_id: int,
-    repos: list[str],
-) -> GitHubAppInstallationRow:
-    """Union-add repos to an existing installation.
-
-    This low-level delta operation is not used by webhook delivery handling;
-    unordered deliveries are reconciled from GitHub's complete set instead.
-    Raises StoreError when no installation row exists (no row to extend).
-    """
-    repo_rows = (
-        func.unnest(GitHubAppInstallation.repo_full_names.op("||")(repos))
-        .table_valued("repo", with_ordinality="ordinal")
-        .render_derived(name="repo_rows")
-    )
-    unique_repos = (
-        select(repo_rows.c.repo, func.min(repo_rows.c.ordinal).label("ordinal"))
-        .group_by(repo_rows.c.repo)
-        .subquery()
-    )
-    ordered_repos = func.array(
-        select(unique_repos.c.repo).order_by(unique_repos.c.ordinal).scalar_subquery()
-    )
-    stmt = (
-        update(GitHubAppInstallation)
-        .where(GitHubAppInstallation.installation_id == installation_id)
-        .values(repo_full_names=ordered_repos, updated_at=func.now())
-        .returning(GitHubAppInstallation)
-    )
-    result = await session.execute(stmt.execution_options(populate_existing=True))
-    orm = result.scalar_one_or_none()
-    if orm is None:
-        raise StoreError(f"no installation for id {installation_id}")
-    await session.flush()
-    return GitHubAppInstallationRow.model_validate(orm)
-
-
-async def remove_repos(
-    session: AsyncSession,
-    *,
-    installation_id: int,
-    repos: list[str],
-) -> GitHubAppInstallationRow:
-    """Drop repos from an existing installation.
-
-    This low-level delta operation is not used by webhook delivery handling;
-    unordered deliveries are reconciled from GitHub's complete set instead.
-    Raises StoreError when no installation row exists.
-    """
-    repo_rows = (
-        func.unnest(GitHubAppInstallation.repo_full_names)
-        .table_valued("repo", with_ordinality="ordinal")
-        .render_derived(name="repo_rows")
-    )
-    remaining_repos = func.array(
-        select(repo_rows.c.repo)
-        .where(repo_rows.c.repo.not_in(repos))
-        .order_by(repo_rows.c.ordinal)
-        .scalar_subquery()
-    )
-    stmt = (
-        update(GitHubAppInstallation)
-        .where(GitHubAppInstallation.installation_id == installation_id)
-        .values(repo_full_names=remaining_repos, updated_at=func.now())
-        .returning(GitHubAppInstallation)
-    )
-    result = await session.execute(stmt.execution_options(populate_existing=True))
-    orm = result.scalar_one_or_none()
-    if orm is None:
-        raise StoreError(f"no installation for id {installation_id}")
-    await session.flush()
-    return GitHubAppInstallationRow.model_validate(orm)
-
-
-async def delete_installation(
-    session: AsyncSession,
-    *,
-    installation_id: int,
-) -> None:
-    """Remove an installation record (installation deleted event).
-
-    Raises StoreError when no row exists (mirrors clear_binding discipline).
-    """
-    result = await session.execute(
-        delete(GitHubAppInstallation).where(
-            GitHubAppInstallation.installation_id == installation_id
-        )
-    )
-    if cast(CursorResult[Any], result).rowcount == 0:
-        raise StoreError(f"no installation for id {installation_id}")
-    await session.flush()
 
 
 async def get(

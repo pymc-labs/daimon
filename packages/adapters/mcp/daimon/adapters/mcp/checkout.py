@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.mcp.auth.verifier import TOKEN_KIND_CLAIM
 from daimon.core.billing import BillingConfig
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.auth import TokenVerifier
@@ -49,6 +50,9 @@ def build_checkout_route(
         access: AccessToken | None = await auth.verify_token(token)
         if access is None:
             return Response(status_code=401)
+        # An operator token reaches only its scopes' tools; buying credit is not one.
+        if access.claims.get(TOKEN_KIND_CLAIM) == "operator":
+            return Response(status_code=403)
 
         # --- parse + validate request body ---
         try:
@@ -98,12 +102,12 @@ def build_checkout_route(
 
 _SUCCESS_HTML = (
     "<html><body><h1>Payment received</h1>"
-    "<p>Your server credit is updated. Return to Discord.</p>"
+    "<p>Your credit is updated. You can return to your chat.</p>"
     "</body></html>"
 )
 _CANCEL_HTML = (
     "<html><body><h1>Checkout cancelled</h1>"
-    "<p>No charge was made. Return to Discord.</p>"
+    "<p>No charge was made. You can return to your chat.</p>"
     "</body></html>"
 )
 

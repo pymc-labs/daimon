@@ -88,6 +88,26 @@ class PurgePreview(BaseModel):
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
+def summary_line(preview: PurgePreview) -> str:
+    """The non-zero held-data categories, comma-joined, for the privacy panels."""
+    categories = (
+        (preview.linked_principals, "linked principal(s)"),
+        (preview.routines, "routine(s)"),
+        (preview.user_configs, "user config row(s)"),
+        (preview.user_skills, "synced skill(s)"),
+        (preview.github_credentials, "GitHub token(s)"),
+        (preview.github_oauth_states, "OAuth handshake record(s)"),
+        (preview.mcp_tokens, "MCP token(s)"),
+        (preview.agent_github_binding, "per-agent GitHub link(s)"),
+        (preview.slack_user_tokens, "Slack user token(s)"),
+        (preview.slack_turn_contexts, "Slack turn context(s)"),
+        (preview.direct_message_conversations, "private conversation(s)"),
+        (preview.channel_admins, "channel admin grant(s)"),
+    )
+    parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
+    return ", ".join(parts) if parts else "nothing visible to you yet"
+
+
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:
     # Capitalize the platform name for display, e.g. "Discord:1234567890".
     return f"{p.platform.capitalize()}:{p.external_id}"

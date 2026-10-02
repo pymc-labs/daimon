@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import importlib.metadata
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -21,7 +24,7 @@ from typing import Literal
 import httpx
 from fastapi import HTTPException, status
 
-from notebook_host.jail import SlugPaths, build_jailed_preexec
+from notebook_host.jail import SlugPaths, build_jailed_preexec, open_log_nofollow, remove_path
 
 _log = logging.getLogger(__name__)
 
@@ -33,6 +36,16 @@ _ATTACHMENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 # them. We match the spec's opening line so our detection agrees with marimo's
 # own parser (https://peps.python.org/pep-0723/).
 _INLINE_SCRIPT_METADATA = re.compile(r"^# /// script$", re.MULTILINE)
+
+
+def _marimo_requirement() -> str:
+    """``marimo==<version>`` for the marimo locked into this host's venv.
+
+    A bare ``uv run --with marimo`` may resolve a newer (or cached older)
+    marimo than the one this host was built and tested against, including
+    its session-auth behaviour.
+    """
+    return f"marimo=={importlib.metadata.version('marimo')}"
 
 
 def has_inline_script_metadata(source: str) -> bool:
@@ -64,16 +77,30 @@ class NotebookProcess:
     public_url_base: str | None = None
     started_at: float = field(default_factory=time.time)
     mode: Literal["edit", "run"] = "edit"
+    # A blog: kept alive forever and respawned from disk. Separate from
+    # ``mode`` because a scratch notebook is read-only (run) by default too.
+    permanent: bool = False
+    # The subprocess's own marimo session token (``new_access_token``). The
+    # port is reachable from every other notebook on the host and the slug is
+    # in ``ps``, so this token is the only thing standing between one
+    # notebook's code and another's kernel. Kept out of ``repr``.
+    access_token: str = field(default="", repr=False)
+
+    @property
+    def origin_label(self) -> str:
+        """This notebook's DNS label in per-notebook-origin mode (``origin_base``)."""
+        return origin_label_for(self.access_token) if self.access_token else ""
 
     @property
     def url(self) -> str:
         if self.public_url_base is not None:
-            return f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
-        return f"http://{self.public_host}:{self.host_port}/n/{self.slug}/"
-
-    @property
-    def internal_url(self) -> str:
-        return f"http://localhost:{self.port}/n/{self.slug}/"
+            base = f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
+        else:
+            base = f"http://{self.public_host}:{self.host_port}/n/{self.slug}/"
+        # marimo validates ``access_token`` on the first request, sets its
+        # session cookie and redirects to the bare path, so the token leaves
+        # the address bar after the first load.
+        return f"{base}?access_token={self.access_token}" if self.access_token else base
 
     @property
     def age_s(self) -> float:
@@ -86,19 +113,36 @@ class NotebookProcess:
 def should_reap(np: NotebookProcess, ttl_seconds: int) -> bool:
     """Whether the sweeper should reclaim this subprocess.
 
-    Run-mode processes are blogs: permanent, never killed-and-deleted by age or
-    death here (their liveness/respawn is the sweep's separate concern). For an
-    edit-mode notebook, a dead subprocess is always reaped; an alive one is
-    reaped only when a *positive* TTL is configured and it has outlived it.
+    Blogs (``permanent``) are never killed-and-deleted by age or death here
+    (their liveness/respawn is the sweep's separate concern). For a scratch
+    notebook, read-only or editor alike, a dead subprocess is always reaped; an
+    alive one is reaped only when a *positive* TTL is configured and it has
+    outlived it.
     ``ttl_seconds <= 0`` disables age-based reaping entirely — the notebook lives
     until its kernel dies or it is explicitly deleted. Shared by the background
     sweep loop and the ``/admin/sweep`` endpoint so the two never diverge.
     """
-    if np.mode == "run":
+    if np.permanent:
         return False
     if not np.is_alive():
         return True
     return ttl_seconds > 0 and np.age_s > ttl_seconds
+
+
+def origin_label_for(access_token: str) -> str:
+    """The notebook's own origin label: ``<label>.<origin_base>``.
+
+    Derived from the token, so it rotates with it and needs no storage, and
+    unguessable without it. 32 lowercase hex characters: a valid DNS label
+    that says nothing about the slug.
+    """
+    digest = hashlib.sha256(b"daimon-notebook-origin\0" + access_token.encode())
+    return digest.hexdigest()[:32]
+
+
+def new_access_token() -> str:
+    """A fresh per-notebook marimo session token (256 bits, URL-safe)."""
+    return secrets.token_urlsafe(32)
 
 
 def allocate_port(processes: dict[str, NotebookProcess], start: int, end: int) -> int:
@@ -170,8 +214,12 @@ def _prepare_workspace(paths: SlugPaths) -> Path:
     Idempotent: stale links/files are replaced so a mid-spawn crash doesn't
     wedge the next attempt.
     """
-    paths.data.mkdir(parents=True, exist_ok=True)
-    paths.workspace.mkdir(parents=True, exist_ok=True)
+    for d in (paths.data, paths.workspace, paths.tmp):
+        # mkdir(exist_ok) is satisfied by a symlink to a directory, and the
+        # links below would then be created wherever it points, as root.
+        if d.is_symlink():
+            raise RuntimeError(f"refusing to use symlinked {d.name} in slug tree {paths.root}")
+        d.mkdir(parents=True, exist_ok=True)
 
     # Relative symlinks so the workspace dir is location-independent.
     data_link = paths.workspace / "data"
@@ -181,8 +229,9 @@ def _prepare_workspace(paths: SlugPaths) -> Path:
         (source_link, Path("..") / paths.notebook.name),
     )
     for link, target in targets:
-        if link.is_symlink() or link.exists():
-            link.unlink()
+        # The workspace belongs to the jail uid: whatever it left at these
+        # names (a file, a directory, a link) is removed without following.
+        remove_path(link)
         link.symlink_to(target)
     return paths.workspace
 
@@ -192,6 +241,7 @@ def spawn_marimo(
     paths: SlugPaths,
     port: int,
     *,
+    access_token: str,
     mode: Literal["edit", "run"] = "edit",
     sandbox: bool = False,
     rlimit_as_bytes: int | None = None,
@@ -199,6 +249,14 @@ def spawn_marimo(
     jail_uid: int | None = None,
 ) -> subprocess.Popen[bytes]:
     """Spawn ``marimo <mode> <basename>`` on ``port`` from a per-slug workspace.
+
+    marimo's session auth is always on, keyed to ``access_token``. Every
+    notebook's port is reachable from every other notebook's code on this
+    host, so without it one shared link would reach every live kernel. The
+    token goes in on stdin (``--token-password-file -``), not argv, because
+    ``/proc/<pid>/cmdline`` is readable by every uid; with ``--sandbox``
+    marimo's re-exec inherits the same stdin, so the token stays off argv
+    there too.
 
     cwd is ``paths.workspace``, so the basename arg resolves through the
     source symlink. ``--base-url /n/<slug>`` keeps the proxy a straight
@@ -225,12 +283,16 @@ def spawn_marimo(
     if uv is None:
         raise RuntimeError("uv not on PATH")
     workspace = _prepare_workspace(paths)
-    cmd = [uv, "run", "--with", "marimo", "marimo", mode]
+    # -q: marimo prints its URL, token included, to stdout, which is the
+    # slug's log file.
+    cmd = [uv, "run", "--with", _marimo_requirement(), "marimo", "-q", mode]
     if sandbox:
         cmd.append("--sandbox")
     cmd += [
         paths.notebook.name,
-        "--no-token",
+        "--token",
+        "--token-password-file",
+        "-",
         "--headless",
         "--host",
         "127.0.0.1",
@@ -241,15 +303,16 @@ def spawn_marimo(
     ]
     log_path = paths.log
     # Opened here, in the host process, before the fork — so the file is
-    # created root-owned even though it lives inside the uid-owned 0700 slug
-    # root. That's correct and needs no chown: the child inherits this
+    # created root-owned (0600) in the host-owned slug root, and never through
+    # a planted symlink (O_NOFOLLOW). That's correct and needs no chown: the child inherits this
     # already-open file descriptor, and POSIX does not re-check permissions on
     # an inherited fd. Do not chown this file, and do not move the open()
     # after the privilege drop — the dropped-uid child would then be opening a
     # path it has no rights to, breaking log writes outright.
-    log_fh = open(log_path, "ab")  # noqa: SIM115 — owned by subprocess
+    log_fh = open_log_nofollow(log_path)
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
+    env["TMPDIR"] = str(paths.tmp)
     if jail_uid is not None:
         preexec = build_jailed_preexec(
             jail_uid, rlimit_as_bytes=rlimit_as_bytes, rlimit_cpu_seconds=rlimit_cpu_seconds
@@ -263,9 +326,10 @@ def spawn_marimo(
                 sys.platform,
             )
     try:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(workspace),
+            stdin=subprocess.PIPE,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -273,16 +337,26 @@ def spawn_marimo(
             preexec_fn=preexec,
         )
     finally:
-        log_fh.close()
+        os.close(log_fh)
+    stdin = proc.stdin
+    if stdin is not None:
+        # A child that died before reading leaves a broken pipe; the ready
+        # wait then times out and the caller reports it.
+        with contextlib.suppress(BrokenPipeError):
+            stdin.write(f"{access_token}\n".encode())
+        with contextlib.suppress(BrokenPipeError):
+            stdin.close()
+    return proc
 
 
-async def wait_for_port(port: int, slug: str, timeout_s: float) -> bool:
+async def wait_for_port(port: int, slug: str, timeout_s: float, *, access_token: str) -> bool:
     deadline = time.monotonic() + timeout_s
     url = f"http://localhost:{port}/n/{slug}/"
+    headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=2.0) as c:
         while time.monotonic() < deadline:
             try:
-                r = await c.get(url)
+                r = await c.get(url, headers=headers)
                 if r.status_code == 200:
                     return True
             except httpx.HTTPError:
@@ -371,6 +445,7 @@ def validate_notebook(
         preexec = _make_preexec(rlimit_as_bytes, rlimit_cpu_seconds)
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
+    env["TMPDIR"] = str(paths.tmp)
     with tempfile.TemporaryDirectory() as tmp:
         if jail_uid is not None:
             # Unlike the log file above, this directory is opened *by the
@@ -379,7 +454,7 @@ def validate_notebook(
             # the export fails for every notebook the moment the jail is on,
             # looking like a marimo export error rather than a permissions bug.
             os.chown(tmp, jail_uid, jail_uid)
-        cmd = [uv, "run", "--with", "marimo", "marimo", "export", "html"]
+        cmd = [uv, "run", "--with", _marimo_requirement(), "marimo", "export", "html"]
         if sandbox:
             cmd.append("--sandbox")
         cmd += [paths.notebook.name, "-o", str(Path(tmp) / "check.html")]

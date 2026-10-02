@@ -117,7 +117,7 @@ _CHECK_FAILED = "Something went wrong checking this request — please try again
 _CALLBACK_FAILED = "Something went wrong opening this form — please try again."
 
 #: Fallbacks for the two display names a row may not carry, matching
-#: `posted_controls.edit`: a row minted before its agent was resolved names no
+#: `card_for_request`: a row minted before its agent was resolved names no
 #: target, and one minted outside a turn names no responder.
 _UNNAMED_AGENT: Final[str] = "the agent"
 _UNNAMED_RESPONDER: Final[str] = "Daimon"
@@ -202,7 +202,7 @@ class CredentialRequestButton(
             async with bot.runtime.sessionmaker() as session:
                 request_row = await peek_credential_request(session, token=token)
         except SQLAlchemyError:
-            _log.exception("credential_button.lookup_failed", token_tail=token[-4:])
+            _log.exception("credential_button.lookup_failed")
             request_row = None
         if request_row is None:
             return cls(token=token, label=_FALLBACK_LABEL, request_row=None)
@@ -300,9 +300,9 @@ class CredentialRequestButton(
                 # MCP modal, so a kind added without a branch here silently
                 # opens the wrong modal rather than failing.
                 #
-                # No admin pre-filter, unlike the repo kind — this writes no
-                # agent_repo_binding, so the "changes what code the agent runs
-                # for every member" reasoning behind that gate does not apply.
+                # No click-time pre-filter, unlike the repo kind: the mint
+                # already refused a member on a shared agent, and the modal's
+                # submit re-checks before anything is spent.
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
                 )
@@ -341,6 +341,7 @@ class CredentialRequestButton(
                     runtime=runtime,
                     tenant_id=row.tenant_id,
                     agent_id=row.agent_id,
+                    caller_account_id=row.account_id,
                 ),
                 timeout=_PRE_FILTER_TIMEOUT_SECONDS,
             )

@@ -35,9 +35,15 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     """Serialize operator policy edits, including when no policy row exists.
 
     Call before loading/merging or clearing, in the same transaction as the write.
+    A private form's consume takes it too, before its pin check. FOR NO KEY
+    UPDATE: holders exclude each other, but rows keyed to the tenant can still
+    be inserted (their foreign-key check only takes KEY SHARE), so a writer
+    holding another lock before such an insert can't deadlock with a holder.
     """
     (
-        await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+        await session.execute(
+            select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(key_share=True)
+        )
     ).scalar_one()
 
 
@@ -62,6 +68,13 @@ async def set_access_policy(
     session: AsyncSession, *, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> None:
     payload = policy.model_dump(mode="json")
+    if not payload.get("agent_channel_pins"):
+        # Leave the key out when nothing is pinned, so a process built before
+        # pins existed still reads the row.
+        payload.pop("agent_channel_pins", None)
+    if not payload.get("isolated_channel_ids"):
+        # Same for isolation, so a rollback to a build without it reads the row.
+        payload.pop("isolated_channel_ids", None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
         .values(tenant_id=tenant_id, policy=payload)

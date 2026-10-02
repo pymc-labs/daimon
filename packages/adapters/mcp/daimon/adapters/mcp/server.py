@@ -11,7 +11,8 @@ any collaborator the caller supplied.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -33,6 +34,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_subject_resolver,
     production_tenant_resolver,
 )
+from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddleware
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -60,11 +62,14 @@ from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
+from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
+from daimon.adapters.mcp.tools.teams._client import build_teams_client
+from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
@@ -79,18 +84,23 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.logging_setup import configure_logging
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.operator_tokens import scope_tag
+from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from google import genai
+from key_value.aio.stores.memory import MemoryStore
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -100,6 +110,8 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _MIN_SECRET_BYTES = 32
+# Far above the requests in flight at once; only its own request reads an entry.
+_MAX_STATE_ENTRIES = 10_000
 
 log = structlog.get_logger()
 
@@ -166,6 +178,10 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
+    # The JSON chain and stdlib redaction before the first log line (uvicorn
+    # has configured its loggers by the time it calls this factory); without
+    # it structlog's dev renderer prints rich tracebacks with frame locals.
+    configure_logging(effective_settings.log.level)
     sentry_dsn = (
         effective_settings.sentry.dsn.get_secret_value() if effective_settings.sentry.dsn else None
     )
@@ -180,10 +196,13 @@ def create_mcp_app(
     _validate_settings(effective_settings, skip_auth=auth is not None)
 
     effective_sessionmaker = sessionmaker
+    engine = None
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
         effective_sessionmaker = build_session_factory(
-            engine, crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys)
+            engine,
+            crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys),
+            allow_plaintext=effective_settings.crypto.allow_plaintext,
         )
 
     effective_auth = auth
@@ -235,16 +254,35 @@ def create_mcp_app(
         is_admin_resolver=effective_is_admin_resolver,
         internal_resolver=effective_internal_resolver,
         sessionmaker=effective_sessionmaker,
+        operator_rate_limiter=RateLimiter(
+            max_requests=effective_settings.mcp.operator_calls_per_minute,
+            window=timedelta(minutes=1),
+        ),
     )
 
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
         try:
-            yield
+            async with (
+                runtime_health(
+                    "mcp",
+                    engine,
+                    effective_settings.observability.health_interval_s,
+                    current_turn_counts,
+                )
+                if engine is not None
+                else nullcontext()
+            ):
+                yield
         finally:
             await identity_middleware.drain_audit()
 
-    mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=audit_lifespan)
+    # Session state is keyed per request (StripSessionIdMiddleware, below) and
+    # kept a day: bound it. Nothing needs it past the request.
+    state = MemoryStore(max_entries_per_collection=_MAX_STATE_ENTRIES)
+    mcp = FastMCP(
+        name="daimon", auth=effective_auth, lifespan=audit_lifespan, session_state_store=state
+    )
     mcp.add_middleware(identity_middleware)
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
     # structured ToolError instead of an opaque internal error (issue #14).
@@ -256,6 +294,10 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
+    mcp.add_transform(Visibility(False, tags={"teams"}))
+    # Deployment-wide promo issuing: only an operator token holding the scope
+    # re-enables these (middleware/mcp_identity.py); admins never see them.
+    mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
@@ -302,6 +344,11 @@ def create_mcp_app(
         bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
+        teams_client=(
+            build_teams_client(effective_settings.teams)
+            if effective_settings.teams is not None
+            else None
+        ),
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -320,10 +367,10 @@ def create_mcp_app(
     routines.register_routines_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
-    if effective_settings.discord is not None or effective_settings.slack is not None:
+    if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
     else:
-        log.info("channel tools disabled", reason="no discord or slack settings")
+        log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
@@ -334,6 +381,8 @@ def create_mcp_app(
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
+    register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
 
     register_upload_tool(mcp, runtime=runtime)
 
@@ -349,7 +398,16 @@ def create_mcp_app(
     else:
         log.info("mcp.generation_tools_skipped", reason="DAIMON_GEMINI__API_KEY not set")
 
-    app = mcp.http_app()
+    # Stateless, like the hub: a session id in one process's memory stranded
+    # clients after a redeploy or on another instance ("session terminated",
+    # 404). Nothing needs one: IdentityMiddleware re-derives identity and tool
+    # visibility on every request, and no tool streams progress, elicits,
+    # samples or subscribes. JSON, as no request streams anything.
+    app = mcp.http_app(
+        stateless_http=True,
+        json_response=True,
+        middleware=[Middleware(StripSessionIdMiddleware)],
+    )
     app.state.mcp = mcp
     app.add_route(
         "/uploads/{token}",

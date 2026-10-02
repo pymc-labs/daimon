@@ -712,7 +712,7 @@ async def test_callback_mcp_oauth_kind_spends_the_request_and_sends_a_private_si
             token=token,
             kind="mcp_oauth",
             tenant_id=tenant.id,
-            agent_id=uuid.uuid4(),
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_test"),
             account_id=uuid.uuid4(),
             target="notion",
             mcp_server_url="https://mcp.notion.com/mcp",
@@ -724,7 +724,9 @@ async def test_callback_mcp_oauth_kind_spends_the_request_and_sends_a_private_si
             target_name="daimon",
             requested_work=None,
         )
+    agents = [ma_agent(id="ag_test", name="daimon", tenant_id=tenant.id).model_dump(mode="json")]
     runtime = SimpleNamespace(
+        anthropic=build_fake_anthropic(lambda _r: list_response(agents)),
         sessionmaker=db_session_factory,
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))

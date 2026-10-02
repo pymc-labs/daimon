@@ -137,7 +137,7 @@ async def run_turn(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
-    channel_id: str | None = None,
+    budget_channel_id: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -163,7 +163,7 @@ async def run_turn(
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
-            channel_id=channel_id,
+            budget_channel_id=budget_channel_id,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -189,7 +189,7 @@ async def run_turn(
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
-                channel_id=channel_id,
+                budget_channel_id=budget_channel_id,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -219,7 +219,7 @@ async def run_turn_impl(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
-    channel_id: str | None = None,
+    budget_channel_id: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
@@ -287,8 +287,8 @@ async def run_turn_impl(
     returns, but adapter callers want to preset their own routine context
     (platform, user, guild) via ``functools.partial`` before fire time.
 
-    ``channel_id`` is stamped on the session as ``daimon_channel`` so the usage
-    sweep attributes any spend it replays to that channel's budget.
+    ``budget_channel_id`` is stamped on the session as ``daimon_budget_channel``
+    so the usage sweep attributes any spend it replays to that channel's budget.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
     # Decided before the session exists so the session carries it: an
@@ -317,7 +317,7 @@ async def run_turn_impl(
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
             tool_safety=tool_safety,
-            channel_id=channel_id,
+            budget_channel_id=budget_channel_id,
         )
 
     try:

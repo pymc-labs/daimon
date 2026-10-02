@@ -1,6 +1,6 @@
 # notebook-host
 
-A standalone FastAPI process that spawns one `marimo edit` subprocess per
+A standalone FastAPI process that spawns one marimo subprocess per
 published notebook and reverse-proxies HTTP + WebSocket traffic for
 `/n/<slug>/*` paths. Designed for self-hosting DS teams reaching Daimon
 through chat adapters (Discord/Slack) from inside a trusted network.
@@ -23,10 +23,10 @@ External (untrusted)
    │
    ├── FastAPI host (:8001)
    │     │  bearer-auth on /admin/*
-   │     │  proxy /n/<slug>/* (no auth) — slug-as-secret
+   │     │  proxy /n/<slug>/* (passthrough; marimo checks the token)
    │     ▼
-   ├── marimo edit (localhost:8100) --no-token --base-url /n/slug1
-   ├── marimo edit (localhost:8101) --no-token --base-url /n/slug2
+   ├── marimo run  (localhost:8100) --token (own token, on stdin) --base-url /n/slug1
+   ├── marimo edit (localhost:8101) --token (own token, on stdin) --base-url /n/slug2
    └── ...
 
 Stripped-env: no Anthropic key, no DB creds, no Discord token on this VM.
@@ -39,22 +39,112 @@ credentials, no Discord token, and no Managed Agents vault material. The only
 secret present at runtime is `DAIMON_NOTEBOOK__ADMIN_SECRET`, which is set via
 `fly secrets set` and never committed to source.
 
-**`--no-token` on marimo subprocesses** removes marimo's built-in session token
-auth. This is acceptable only inside a trusted-network position where the host
-is not directly reachable from the public internet. The network is the outer
-perimeter.
+**Every marimo subprocess has its own access token.** Notebook code runs on
+this host, can connect to every other subprocess's localhost port, and can
+read every slug from `ps` (it is in `--base-url`). So neither the port nor the
+slug is an access boundary. Each subprocess runs with marimo's session auth on
+and its own random 256-bit token. The token reaches marimo on stdin
+(`--token-password-file -`), never argv. The URL the host returns is
+`/n/<slug>/?access_token=<token>`; marimo checks the token, sets a session
+cookie scoped to `/n/<slug>` and redirects to the bare path. A request without
+the token, including one from another notebook's cell, gets marimo's login
+redirect or a 401. The proxy forwards only what the browser sends (and, for
+WebSockets, only its `Cookie` and `Authorization` headers). A slug keeps its
+token across re-publishes in the same mode; switching between read-only and
+editor mints a new one, and the editor is refused (409) on a published blog.
+A blog's token is persisted in `blogs.json` (0600, host-only) so its link
+survives restarts. Deleting or reaping a slug invalidates its link. marimo runs
+with `-q`, so its startup banner (which prints the tokenized URL) never reaches
+the slug's log, and the host's logs redact `access_token=` (plain or
+url-encoded). marimo is pinned exactly in `pyproject.toml`, which the Docker
+image installs from without `uv.lock`. The host refuses to boot if links would
+go out over plain http to anything but localhost: set `public_url_base` to the
+`https://` origin, or `allow_http_links` on a trusted private network.
 
-**Bearer auth on `/admin/*`** is the only HTTP auth boundary enforced by the
-host itself. The `/n/<slug>/*` paths are unauthenticated — slug-as-secret is
-the deliberate per-notebook access boundary. The slug is minted as
-`secrets.token_hex(6)` per publish; collision probability is negligible at
-expected volume.
+**The host never follows a link the jail uid planted.** The slug root is owned
+by the host (0711), so the jail uid can't rename or replace `home`,
+`workspace`, `data`, `tmp`, `notebook.py` or `marimo.log`; only the
+subdirectories are the uid's (0700). The host opens every directory it chowns
+`O_NOFOLLOW | O_DIRECTORY` and changes it through the fd. It writes files
+(`notebook.py`, attachments) `O_CREAT | O_EXCL | O_NOFOLLOW` and renames them
+into place, and opens `marimo.log` `O_NOFOLLOW`. A symlink found where a
+directory or file should be (possible in trees from older releases) is
+unlinked, never followed. `notebook.py`, attachments and the log are 0600.
 
-**Operators MUST NOT expose the notebook host to the public internet without
-an upstream auth layer.** Without one, any user who obtains or guesses a slug
-can access that notebook. The intended deployment topology is: Fly's TLS
-termination as the public edge, with the notebook host only reachable from the
-bot VM or from within a trusted network.
+**Leftover processes and uids.** Before a slug's uid is released, and before a
+slug or a blog is respawned, the host kills every process running as that uid,
+not just marimo's process group: it becomes the uid and calls `kill(-1,
+SIGKILL)`, then rescans `/proc` until none are left. If one survives the
+deadline, the uid is quarantined (never handed out again) rather than
+released. Files the uid owns in `/tmp` and `/dev/shm` are deleted too. Jailed
+processes run with `PR_SET_NO_NEW_PRIVS`, a per-uid process cap
+(`RLIMIT_NPROC`) and a private `TMPDIR` inside the slug's tree. Uids are
+handed out round-robin, so a just-released uid is the last one reused.
+Switching a slug between the editor and the read-only app wipes its `home`
+(including the uv cache), `workspace` and `tmp`, so nothing the editor
+planted runs under the new mode.
+
+**Read-only by default.** A scratch notebook is served as a `marimo run` app
+(code hidden, widgets live) unless its upload token asked for the editor
+(`notebook_edit`, minted only for `create_notebook_upload_url(editable=True)`,
+which the bot refuses unless the operator set `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+on the bot). The host enforces its own `allow_editable` (same variable name,
+off by default) on `notebook_edit` tokens and on `PUT /admin/notebooks/{slug}`
+with `"editable": true`; without it every notebook is read-only.
+An editor link runs arbitrary code as that notebook's jail uid, so treat it
+as a shell on this host. Blogs are always read-only.
+
+**Bearer auth on `/admin/*`** guards the admin API. The admin bearer is
+scrubbed from every subprocess's environment.
+
+**Per-notebook origins (`origin_base`).** A notebook's JavaScript (an
+anywidget runs even in a read-only app) can reach anything on its own origin
+with the viewer's cookies. So on a public host every notebook gets its own
+origin: set `DAIMON_NOTEBOOK__ORIGIN_BASE=nb.example.com`, with wildcard DNS
+and a wildcard TLS certificate for `*.nb.example.com`. Each link is then
+`https://<label>.nb.example.com/n/<slug>/?access_token=…`, where `label` is 32
+hex characters derived from the notebook's token (never the slug), so it
+rotates with the token and can't be guessed. The proxy:
+
+- routes by the exact `Host`: `/n/<slug>/` on the bare host, or on another
+  notebook's origin, is a 404, so path mode is refused;
+- refuses (403) any request the browser marks as coming from another origin
+  (`Origin`, or a `Sec-Fetch-Site` other than `same-origin`/`none`), except a
+  top-level navigation such as opening the link from chat. Page JavaScript
+  can't forge these headers, and a sibling notebook is same-site but
+  cross-origin, so its fetches, form posts and frames are all refused;
+- accepts a WebSocket only when `Origin` is exactly the notebook's own origin;
+- strips any `Domain` from `Set-Cookie`, so every cookie is host-only, and
+  sends `Content-Security-Policy: frame-ancestors 'self'`;
+- over https, renames marimo's cookies to `__Host-` cookies (`Secure`,
+  `Path=/`, no `Domain`), forwards only `__Host-` cookies to marimo (so a
+  cookie tossed from another subdomain is dropped), and sends HSTS.
+
+`ORIGIN_BASE` must be a **dedicated registrable domain** (e.g.
+`daimon-notebooks.example`, not `nb.yourcompany.com`), or be listed on the
+Public Suffix List. Otherwise every other site under the same registrable
+domain is same-site with the notebooks.
+
+A real-browser test (`tests/test_notebook_origin_browser.py`) opens B's link,
+then runs attacker JS on A's page: credentialed fetch, `no-cors` POST and
+WebSocket to B, before and after `history.replaceState` to B's path. None of
+it reaches B's marimo.
+
+**Without `origin_base`, a host serves only the tenants you list.** All
+notebooks then share one origin and there is no browser isolation between
+them. A public host (anything but localhost) therefore admits uploads only
+from the tenants in `DAIMON_NOTEBOOK__TENANTS`, comma-separated tenant UUIDs
+or a JSON array, e.g. `<discord-tenant-uuid>,<slack-tenant-uuid>`. List only tenants
+you control (say your own Discord server, Slack workspace and Teams tenant),
+since they can reach each other's notebooks. Any other tenant, or a token
+naming none, gets a 403 that names the setting and the refused id; with the
+list empty every upload is refused. `daimon tenants list --json` shows each
+tenant's `id`. The host logs a warning at boot. Local dev hosts skip the check.
+
+**Known limits.** There is no per-notebook pid or network namespace:
+subprocesses run as separate uids, but an editor notebook can see other
+notebooks' process list and reach the host's network. On a public host, keep
+editors off (`allow_editable`) unless the host serves one client.
 
 ## Configuration
 
@@ -76,6 +166,11 @@ delimiter.
 | `validation_timeout_seconds` | `DAIMON_NOTEBOOK__VALIDATION_TIMEOUT_SECONDS` | `60` (wall-clock budget for that validation export; a slow-but-valid notebook is published anyway) |
 | `public_host` | `DAIMON_NOTEBOOK__PUBLIC_HOST` | `localhost` |
 | `public_url_base` | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | *(unset — set when behind a TLS terminator that strips the internal port, e.g. Fly's https edge)* |
+| `allow_editable` | `DAIMON_NOTEBOOK__ALLOW_EDITABLE` | `false` *(every notebook read-only)* |
+| `allow_http_links` | `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS` | `false` *(refuse to boot with plain-http links off localhost)* |
+| `origin_base` | `DAIMON_NOTEBOOK__ORIGIN_BASE` | *(unset — one shared origin, only listed `tenants` on a public host; set to e.g. `nb.example.com` with wildcard DNS + TLS)* |
+| `origin_scheme` | `DAIMON_NOTEBOOK__ORIGIN_SCHEME` | `https` |
+| `tenants` | `DAIMON_NOTEBOOK__TENANTS` (comma-separated or JSON array) | *(empty — a public host without `origin_base` refuses every upload; ignored with `origin_base`)* |
 | `max_source_bytes` | `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` | `1048576` (1 MiB) |
 | `max_attachment_bytes_ceiling` | `DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES_CEILING` | `104857600` (100 MiB; host-side hard ceiling, defense-in-depth above the daimon-side cap) |
 | `allowed_origins` | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | *(empty — check disabled)* |

@@ -17,13 +17,14 @@ from daimon.adapters.slack.billing_panel.redeem import (
     redeem_result_text,
     run_redeem_submission,
 )
-from daimon.adapters.slack.billing_panel.state import BillingPanelState
 from daimon.adapters.slack.billing_panel.views import build_billing_container
+from daimon.core.billing_panel import BillingPanelState
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_channel_budget, make_tenant
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
@@ -87,11 +88,15 @@ def _bodies(fake: Any, method: str) -> list[dict[str, Any]]:
     return bodies
 
 
-def test_only_admins_get_the_redeem_button() -> None:
-    """Only the admin panel carries the redeem-code button."""
-    admin = build_billing_container(_state(), now=_NOW, since=_SINCE)
-    member = build_billing_container(_state(is_admin=False), now=_NOW, since=_SINCE)
+def test_only_admins_get_the_redeem_button_while_a_code_is_redeemable() -> None:
+    """Only the admin panel carries the redeem-code button, and only while a code is redeemable."""
+    admin = build_billing_container(_state(has_redeemable_promo_code=True), now=_NOW, since=_SINCE)
+    no_code = build_billing_container(_state(), now=_NOW, since=_SINCE)
+    member = build_billing_container(
+        _state(is_admin=False, has_redeemable_promo_code=True), now=_NOW, since=_SINCE
+    )
     assert "billing_redeem_open" in _action_ids(admin), "admins should get the redeem button"
+    assert _action_ids(no_code) == ["billing_topup"], "no redeemable code should hide the button"
     assert "billing_redeem_open" not in _action_ids(member), "members should not get it"
 
 
@@ -212,6 +217,45 @@ async def test_submission_redeems_and_refreshes_the_panel(
     assert retry["view"]["callback_id"] == "billing_redeem", "a repeat should reopen the form"
     assert "already redeemed" in _texts(retry["view"]["blocks"]), (
         "a repeat should be refused as already redeemed"
+    )
+
+
+async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A failed panel refresh after a redemption does not overwrite the success message."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(
+        db_session, code_hash=hash_promo_code(normalize_promo_code("WELCOME-2026")), terms=terms
+    )
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    failing_refresh = AsyncMock(
+        side_effect=OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+    )
+
+    with (
+        _slack(fake_slack_web_client, admin=True),
+        patch(f"{_MODULE}.load_billing_snapshot", failing_refresh),
+    ):
+        await run_redeem_submission(
+            runtime,
+            fake_slack_web_client.client,
+            team_id=_TEAM,
+            user_id=_USER,
+            decision=evaluate_redeem_submission(_submission("WELCOME-2026")),
+        )
+
+    failing_refresh.assert_awaited_once()
+    [result] = _bodies(fake_slack_web_client, "views.update")
+    assert result["view_id"] == "V_FORM" and "Redeemed *$10.00*" in _texts(
+        result["view"]["blocks"]
+    ), "the form should keep confirming the credit"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
+        "the credit should stay in the workspace ledger"
     )
 
 

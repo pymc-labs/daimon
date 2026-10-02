@@ -5,9 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
+# Stamped on a session opened for a channel turn: the channel it runs in, the
+# thread under it (when there is one), and -- once any of its turns ran sealed --
+# the sealed id that sealed it (the channel, or a thread sealed on its own). The
+# transcript tools judge a session against the current seal policy from the
+# first two, and keep it inside the recorded seal from the third, so unsealing
+# later never opens up a transcript written under the seal.
+MA_METADATA_KEY_CHANNEL = "daimon_channel"
+MA_METADATA_KEY_THREAD = "daimon_thread"
+MA_METADATA_KEY_SEALED = "daimon_sealed"
 
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
@@ -20,14 +30,20 @@ MA_METADATA_KEY_ISOLATED = "daimon_isolated"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# Also stamped on a reader variant: the source agent's names (its config name
+# and its MA name, newline-separated). A reader answers as its source, so a
+# pin on the source holds for the reader too (`daimon.core.agent_pins`).
+MA_METADATA_KEY_READER_SOURCE = "daimon_reader_source"
 # Stamped on an MA session created for a `BillingExempt` caller, with the
 # `ExemptReason` as its value (see `daimon.core.turn.posture`). The usage sweep
 # skips a session carrying it: the operator absorbs that usage, it is never
 # debited to the tenant named by `daimon_tenant`. Absent on a billed session.
 MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
-# The parent channel a session was created for, so the usage sweep can
-# attribute its spend to that channel's budget. Absent on DM and MCP sessions.
-MA_METADATA_KEY_CHANNEL = "daimon_channel"
+# The parent channel whose budget the usage sweep attributes a session's spend
+# to; for a DM, the channel it was moved from. Apart from `daimon_channel`,
+# which drives the seal: a DM is budgeted to a channel it never runs in.
+# Absent on MCP sessions and sessions with no channel.
+MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a
@@ -149,6 +165,37 @@ def tenant_scoped_display_title(
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:4]
     keep = _DISPLAY_TITLE_MAX - len(prefix) - 5  # 5 = "~" + 4 hex chars
     return f"{prefix}{body[:keep]}~{digest}"
+
+
+_TENANT_PREFIX_LEN = 9  # f"{str(tenant_id)[:8]}-"
+_HEX = frozenset("0123456789abcdef")
+
+
+def truncated_body_head(body: str) -> str | None:
+    """The part `tenant_scoped_display_title` kept of a body it shortened, else None."""
+    keep = _DISPLAY_TITLE_MAX - _TENANT_PREFIX_LEN - 5
+    shortened = len(body) == keep + 5 and body[keep] == "~" and set(body[keep + 1 :]) <= _HEX
+    return body[:keep] if shortened else None
+
+
+def skill_owner_candidates(
+    body: str, *, stored_owner: str | None, agent_names: Iterable[str]
+) -> frozenset[str]:
+    """The agents a tenant skill may be scoped to; empty for a library skill.
+
+    `stored_owner` (the agent its upload row names) wins. Otherwise the title
+    is read: a long `agent/name` body is shortened and may have lost its "/",
+    so every known agent whose name the kept part could begin counts too, and a
+    caller hiding skills hides on doubt.
+    """
+    if stored_owner is not None:
+        return frozenset({stored_owner})
+    owner, sep, _ = body.partition("/")
+    owners: set[str] = {owner} if sep else set()
+    head = truncated_body_head(body)
+    if head is not None:
+        owners |= {name for name in agent_names if f"{name}/".startswith(head)}
+    return frozenset(owners)
 
 
 def find_conflicting_skill_body(

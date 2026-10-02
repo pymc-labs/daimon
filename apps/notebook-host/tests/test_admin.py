@@ -51,6 +51,7 @@ def _make_stub_spawner(
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -92,7 +93,7 @@ def _make_test_app(
     stub_spawner, _ = _make_stub_spawner()
 
     # Monkeypatch wait_for_port at the admin module level
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return wait_for_port_returns
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -210,7 +211,7 @@ def test_put_existing_slug_kills_old_and_respawns(
     settings = load_settings(_env_file=None)
     stub_spawner, calls = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -329,7 +330,7 @@ def test_put_notebook_returns_503_when_jail_unavailable_and_no_break_glass(
 
     stub_spawner, _ = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -366,7 +367,7 @@ def test_put_notebook_returns_200_when_break_glass_set(
 
     stub_spawner, _ = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -514,7 +515,7 @@ def test_sweep_reaps_dead_and_ttl_past_entries(
 
     settings = load_settings(_env_file=None)
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -758,7 +759,7 @@ def test_admin_accepts_any_configured_bearer(
     settings = load_settings(_env_file=None)
     stub_spawner, _ = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)
@@ -811,7 +812,7 @@ def test_singular_admin_secret_still_works(tmp_path: Path, monkeypatch: pytest.M
 
     stub_spawner, _ = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)

@@ -20,9 +20,14 @@ import discord
 import pytest
 from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.thread_participation import ThreadParticipant
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import thread_participation as store
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.thread_classifier import ClassifierOutcome, ClassifierUsage
 from daimon.core.thread_participation import (
     ClassifierMessage,
@@ -106,6 +111,7 @@ def _responder(
         bot_display_name="daimon",
         billing_config=None,
         markup=Decimal("1.0"),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
     )
 
 
@@ -377,3 +383,57 @@ async def test_a_channel_over_its_budget_never_pays_for_the_classifier(
         is False
     ), "an exhausted channel budget skips an unprompted turn silently"
     assert classifier.calls == [], "the budget gate must run before the model call"
+
+
+async def test_a_turn_isolation_would_refuse_never_pays_for_the_classifier(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    classifier: _FakeClassifier,
+) -> None:
+    """A thread under an isolated channel handed to an agent that answers elsewhere
+    would be refused at admission, so it is skipped before the model call."""
+    tenant = await _funded_tenant(db_session)
+    for channel, agent in ((str(PARENT_ID), "local"), ("4300", "shared")):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+            tenant_id=tenant.id,
+            agent_name=agent,
+            mode="agent",
+        )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=(str(PARENT_ID),),
+            isolated_channel_ids=(str(PARENT_ID),),
+            agent_channel_pins={"local": (str(PARENT_ID),)},
+        ),
+    )
+    await db_session.commit()
+    candidates = _candidates("anyone?")
+
+    async def responds() -> bool:
+        return await _responder(db_session_factory, mode="on").should_respond(
+            _thread(candidates),
+            candidates,
+            trigger=candidates[-1],
+            tenant_id=tenant.id,
+            resolved=ON_THREAD,
+        )
+
+    assert await responds(), "the channel's own agent still participates"
+    assert len(classifier.calls) == 1
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id=str(PARENT_ID),
+        thread_id=str(THREAD_ID),
+        responder_ma_agent_id="agent_shared",
+        responder_name="shared",
+        kind="handoff",
+    )
+    await db_session.commit()
+    assert await responds() is False, "a thread handed across the line stays silent"
+    assert len(classifier.calls) == 1, "the isolation gate must run before the model call"

@@ -21,6 +21,7 @@ or self-host it from this repo.
 [Documentation site](https://pymc-labs.github.io/daimon/) ·
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
+[Teams personal-chat setup](docs/teams.md) ·
 [Claude Code plugin](plugin/README.md) ·
 [Changelog](CHANGELOG.md)
 
@@ -75,7 +76,8 @@ key in a workspace dedicated to this deployment.
 
    In `.env`, set `DAIMON_ANTHROPIC__API_KEY`, `DAIMON_MCP__JWT_SECRET` (any
    random string), `DAIMON_MCP__PUBLIC_URL` (`http://localhost:8765/mcp` for
-   local use) and `POSTGRES_PASSWORD`.
+   local use), `POSTGRES_PASSWORD` and `DAIMON_CRYPTO__KEYS` (a Fernet key,
+   without which agent keys can't be saved).
 
 2. Create a Discord bot in the
    [Developer Portal](https://discord.com/developers/applications), enable

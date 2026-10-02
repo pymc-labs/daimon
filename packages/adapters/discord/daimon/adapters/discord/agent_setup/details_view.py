@@ -22,7 +22,6 @@ from daimon.adapters.discord.agent_setup.conversations import open_setup_convers
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_detail_lists import (
@@ -51,14 +50,6 @@ _LIST_TEXT_RESERVE = 256
 _PURPOSE_MAX_CHARS = 800
 _ROUTING_MAX_CHARS = 1000
 _DETAIL_LIST_NAMES: tuple[DetailListName, ...] = ("keys", "skills", "connections")
-
-
-def coding_tools_refusal(agent_name: str) -> str:
-    """What a member sees instead of a token, naming the permission and the way round it."""
-    return (
-        f"Minting an access token for {agent_name} needs Manage Server. "
-        f"Ask an admin to open Details and use this button."
-    )
 
 
 def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
@@ -349,18 +340,8 @@ class DetailsView(PanelViewBase):
         )
 
     async def _on_coding_tools(self, interaction: discord.Interaction) -> None:
-        """Mint a coding-tool token, but only for a caller who is an admin right now.
-
-        The live re-check comes before anything else: the view's own
-        ``is_admin`` is a snapshot from panel-open, and a caller demoted since
-        then must reach no token material.
-        """
+        """Mint a coding-tool token; `send_coding_tools_access` decides who may, live."""
         log.info("agent_setup.details.coding_tools.click", agent_name=self.details.name)
-        if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # reads only user and guild
-            await interaction.response.send_message(
-                coding_tools_refusal(self.details.name), ephemeral=True
-            )
-            return
         await send_coding_tools_access(
             interaction,
             runtime=self.runtime,

@@ -49,9 +49,14 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.anthropic_spend import spend_limit_error
-from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
-from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
+from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.continuity.continuation import (
+    ContinuationDecision,
+    check_wake_responder,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.messages import (
+    render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
     render_replacement_summary,
@@ -67,6 +72,7 @@ from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -89,7 +95,7 @@ from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_inte
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
@@ -243,6 +249,11 @@ AGENT_PINNED_ELSEWHERE_NOTICE = (
     "this agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
 
+CHANNEL_ISOLATED_NOTICE = (
+    "this channel is isolated and the agent that would answer isn't one of its own. "
+    "A server admin must set the channel's agent."
+)
+
 
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
@@ -268,29 +279,6 @@ async def _resolve_agent_display_name(
             if name:
                 return str(name)
     return "the previous agent"
-
-
-def _resolve_session_account_id(
-    discord_settings: DiscordSettings,
-    admission: Admission,
-    *,
-    tenant_id: uuid.UUID,
-    thread_id: str,
-) -> uuid.UUID:
-    """Per-caller vs legacy single-session-per-thread account key.
-
-    Shared by the main mention path and continuation dispatch's follow-up
-    turn -- both must derive the SAME key for the same (tenant, thread,
-    caller) so a follow-up turn binds the session the mention path would
-    have bound. See `_orchestrate`'s original inline comment (#162) for the
-    confused-deputy history this closes.
-    """
-    if (
-        discord_settings.per_caller_thread_sessions
-        or admission.config.thread_binding_id is not None
-    ):
-        return admission.account_id
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"legacy-thread-sentinel:{tenant_id}:{thread_id}")
 
 
 def _compose_queued_content(messages: list[discord.Message]) -> str:
@@ -390,12 +378,9 @@ class _ParticipationBatch:
     timer: asyncio.Task[None] | None = None
 
 
-# A batch keeps only this many newest messages (the classifier window is the
-# same size), and stops restarting its timer once it has waited this many quiet
-# periods, so a thread that never goes quiet is still judged on a bounded delay
-# with a bounded prompt.
-_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
-_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+# Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
+_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
+_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 
 
 async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
@@ -752,10 +737,19 @@ class DaimonBot(commands.Bot):
                     clear_reason=True,
                 )
                 if not was_ready:
-                    async with self.runtime.sessionmaker() as session:
-                        promo_codes = await has_redeemable_promo_code(
-                            session, now=datetime.now(UTC)
+                    try:
+                        async with self.runtime.sessionmaker() as session:
+                            promo_codes = await has_redeemable_promo_code(
+                                session, now=datetime.now(UTC)
+                            )
+                    except SQLAlchemyError as exc:
+                        # The guild is ready; a failed lookup only drops the promo line.
+                        log.warning(
+                            "guild_seed_promo_lookup_failed",
+                            tenant_id=str(tenant_id),
+                            error=str(exc),
                         )
+                        promo_codes = False
                     await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
@@ -1198,6 +1192,7 @@ class DaimonBot(commands.Bot):
                 bot_display_name=bot_display_name,
                 billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
+                deployment_default=self.runtime.deployment_default,
             )
         return self._participant
 
@@ -1962,11 +1957,6 @@ class DaimonBot(commands.Bot):
         one to before `bind_session` has even run.
         """
         _ = guild_id  # kept for parity with _handle_mention's error-context signature
-        discord_settings = self.runtime.settings.discord
-        assert discord_settings is not None, (
-            "_run_continuation_turn called without discord settings"
-        )
-
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -1978,7 +1968,10 @@ class DaimonBot(commands.Bot):
                 thread_id=row.thread_id,
                 account_id=row.requester_account_id,
             )
-        from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            from_ma_agent_id = predecessor.ma_agent_id if predecessor is not None else None
+            asking_ma_agent_id = await load_asking_agent_id(
+                session, row, live_ma_agent_id=from_ma_agent_id
+            )
         from_name = (
             predecessor.effective_config.agent_name
             if predecessor is not None and predecessor.effective_config is not None
@@ -2011,7 +2004,7 @@ class DaimonBot(commands.Bot):
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
-        # A timer runs only as the agent it was set with; a thread rerouted in
+        # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
             reason=row.reason,
@@ -2019,6 +2012,7 @@ class DaimonBot(commands.Bot):
             target_name=row.target_name,
             admitted_ma_agent_id=admission.agent.id,
             admitted_name=admission.agent.name,
+            asking_ma_agent_id=asking_ma_agent_id,
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
@@ -2067,9 +2061,7 @@ class DaimonBot(commands.Bot):
             make_lifecycle=_make_lifecycle,
         )
 
-        session_account_id = _resolve_session_account_id(
-            discord_settings, admission, tenant_id=tenant_id, thread_id=row.thread_id
-        )
+        session_account_id = admission.account_id
         prepared = await bind_session(
             self.runtime.turn_deps,
             admission,
@@ -2458,6 +2450,14 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
                 await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
+            elif err.reason == "channel_isolated":
+                log.info(
+                    "turn.skipped.channel_isolated",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + CHANNEL_ISOLATED_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
@@ -2521,7 +2521,7 @@ class DaimonBot(commands.Bot):
                         markup=self.runtime.settings.billing.markup,
                         max_input_chars=naming.max_input_chars,
                         timeout_seconds=naming.timeout_seconds,
-                        channel_id=admission.channel_id,
+                        channel_id=admission.budget_channel_id,
                     )
             thread = await message.create_thread(
                 name=thread_name,
@@ -2584,26 +2584,13 @@ class DaimonBot(commands.Bot):
             make_lifecycle=_make_lifecycle,
         )
 
-        # Compute the account_id used to key thread-session lookup and create.
-        # When per_caller_thread_sessions is ON (default): use the caller's real
-        # account_id so each caller in a thread gets their own durable session
-        # (closing the #162 confused-deputy hole — a low-priv caller never
-        # reuses the starter's session). When OFF (opt-out): use a
-        # deterministic per-(tenant,thread) uuid5 as a sentinel that is
-        # identical for every caller in this thread, preserving the legacy
-        # single-session-per-thread behavior byte-for-byte.
-        #
-        # The sentinel is a uuid5 derived from NAMESPACE_URL — real accounts use
-        # random uuid4, so the sentinel can NEVER collide with any real account row
-        # (W1). The formula is stable across restarts so the OFF path always reuses
-        # one session per thread deterministically.
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
             "_orchestrate called without discord settings — entrypoint must validate at boot"
         )
-        session_account_id = _resolve_session_account_id(
-            discord_settings, admission, tenant_id=tenant_id, thread_id=str(thread.id)
-        )
+        # Each caller in a thread keys their own session on their own account,
+        # so nobody reuses another caller's session identity (#162).
+        session_account_id = admission.account_id
 
         # --- Stage two: bind_session (find-or-create, mapping write,
         # recorder binding) -- D-01 bind_session(). ---
@@ -2666,14 +2653,20 @@ class DaimonBot(commands.Bot):
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
-        except SessionBusyError:
+        except SessionBusyError as busy:
             # Nothing failed and nothing is misconfigured: the previous turn in
             # this thread is still running, and the session it is running in
             # belongs to the OUTGOING responder. Making the change around it
             # would answer as one agent inside another agent's workspace, so no
             # turn runs here -- the person is told the in-flight message
-            # finishes first and the switch applies to their next one.
-            busy_text = render_current_work_must_finish(agent.name, handoff=True)
+            # finishes first and the switch applies to their next one. A seal
+            # that landed while the turn was prepared defers it the same way;
+            # the next message is prepared read-only, so it says to send again.
+            busy_text = (
+                render_access_changed_try_again()
+                if "seal" in busy.pending_reasons
+                else render_current_work_must_finish(agent.name, handoff=True)
+            )
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:

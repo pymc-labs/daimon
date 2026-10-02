@@ -112,3 +112,19 @@ def test_agent_pin_confines_only_the_pinned_agent(
 
 def test_open_policy_pins_no_agent() -> None:
     assert not is_outside_agent_pin(OPEN_ACCESS_POLICY, agent_names=("daimon-rx",), channel_id=None)
+
+
+def test_an_empty_stored_pin_refuses_every_channel() -> None:
+    """A name pinned to no channels runs nowhere but an exempt surface."""
+    policy = TenantAccessPolicy(agent_channel_pins={"acme": ()})
+    for channel in ("C111", None):
+        assert is_outside_agent_pin(policy, agent_names=("acme",), channel_id=channel)
+
+
+def test_every_pinned_name_must_allow_the_channel() -> None:
+    policy = TenantAccessPolicy(
+        agent_channel_pins={"Acme Display": ("C111",), "acme": ("C111", "C999")}
+    )
+    names = ("Acme Display", "acme")
+    assert not is_outside_agent_pin(policy, agent_names=names, channel_id="C111")
+    assert is_outside_agent_pin(policy, agent_names=names, channel_id="C999")

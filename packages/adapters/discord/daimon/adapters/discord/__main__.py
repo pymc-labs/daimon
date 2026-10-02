@@ -6,15 +6,18 @@ import asyncio
 import contextlib
 import signal
 import sys
+from typing import cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
-from daimon.core.logging_setup import configure_log_level
+from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
+from daimon.core.runtime_health import runtime_health
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 import discord
 
@@ -28,7 +31,7 @@ async def main() -> None:
         sys.exit(0)
     # Configure the JSON log chain BEFORE the first log line so it takes effect.
     # This entrypoint owns the call site.
-    configure_log_level(settings.log.level)
+    configure_logging(settings.log.level)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
         environment=settings.sentry.environment,
@@ -51,7 +54,13 @@ async def main() -> None:
         health_server = await start_liveness_responder(settings.discord.health_port)
         log.info("starting_discord_bot")
         try:
-            await bot.start(settings.discord.bot_token.get_secret_value())
+            async with runtime_health(
+                "discord",
+                cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),
+                settings.observability.health_interval_s,
+                lambda: (bot._global_inflight, max(bot._inflight.values(), default=0)),  # pyright: ignore[reportPrivateUsage]
+            ):
+                await bot.start(settings.discord.bot_token.get_secret_value())
         finally:
             health_server.close()
             await health_server.wait_closed()

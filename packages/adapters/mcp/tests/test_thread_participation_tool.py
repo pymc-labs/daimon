@@ -10,11 +10,13 @@ from __future__ import annotations
 import uuid
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import thread_participation as tool_module
+from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.thread_participation import (
     _get_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
     _set_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
@@ -25,6 +27,7 @@ from daimon.core.config import (
     DiscordSettings,
     McpSettings,
     Settings,
+    TeamsSettings,
     ThreadParticipationSettings,
 )
 from daimon.core.scope import DeploymentDefault
@@ -42,6 +45,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _ADMIN_REQUIRED = "requires a workspace or server admin"
 _CHANNEL = "chan-1"
 _THREAD = "thread-1"
+_ENTRA = "99999999-8888-7777-6666-555555555555"
+_CALLER = "11111111-2222-3333-4444-555555555555"
+_TEAMS_CHANNEL = "19:abc@thread.tacv2"
+_TEAMS_THREAD = f"{_TEAMS_CHANNEL};messageid=1700000000000"
 
 
 @pytest.fixture(autouse=True)
@@ -64,13 +71,16 @@ def verified_scopes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Participation
     return calls
 
 
-def _settings(mode: ParticipationMode, *, discord: bool = True) -> Settings:
+def _settings(mode: ParticipationMode, *, discord: bool = True, teams: bool = False) -> Settings:
     """A real Settings so `settings.thread_participation` is the real model."""
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")) if discord else None,
+        teams=TeamsSettings(client_id="app-id", client_secret=SecretStr("s"), tenant_id=_ENTRA)
+        if teams
+        else None,
         thread_participation=ThreadParticipationSettings(mode=mode),
     )
 
@@ -352,7 +362,7 @@ async def test_a_disabled_channel_refuses_turning_a_thread_on(
     assert (await _modes(db_session, tenant_id)).thread is None, "no thread row may be written"
 
 
-async def test_a_non_discord_caller_is_refused(
+async def test_a_slack_caller_is_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
@@ -367,7 +377,7 @@ async def test_a_non_discord_caller_is_refused(
             _CHANNEL,
         )
 
-    assert "Discord" in str(exc_info.value), "the refusal must say the feature is Discord-only"
+    assert "Discord" in str(exc_info.value), "the refusal must name where it works"
     assert (await _modes(db_session, tenant_id)).thread is None, "no row may be written"
 
 
@@ -492,7 +502,7 @@ async def test_empty_ids_are_refused_without_a_write(
     assert (modes.workspace, modes.channel, modes.thread) == (None, None, None)
 
 
-async def test_get_refuses_a_non_discord_caller_too(
+async def test_get_refuses_a_slack_caller_too(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _seed(committing_sessionmaker)
@@ -502,5 +512,145 @@ async def test_get_refuses_a_non_discord_caller_too(
             _runtime(committing_sessionmaker, ParticipationMode.ON),
             _auth(tenant_id=tenant_id, admin=False, platform="slack"),
             None,
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Teams callers: the real roster check over a fake Bot Framework
+# ---------------------------------------------------------------------------
+
+
+def _teams_runtime(
+    sessionmaker: async_sessionmaker[AsyncSession], *, member: bool = True, teams: bool = True
+) -> McpRuntime:
+    def _bot_framework(request: httpx.Request) -> httpx.Response:
+        if "login.microsoftonline.com" in str(request.url):
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        assert "/members/" in str(request.url), "only the roster is read"
+        return httpx.Response(200, json={"aadObjectId": _CALLER}) if member else httpx.Response(404)
+
+    client = TeamsBotClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(_bot_framework)),
+        client_id="app-id",
+        client_secret="secret",
+        tenant_id=_ENTRA,
+    )
+    return McpRuntime(
+        session_factory=sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        settings=_settings(ParticipationMode.OFF, discord=False, teams=teams),
+        deployment_default=DeploymentDefault(),
+        teams_client=client,
+    )
+
+
+def _teams_auth(tenant_id: uuid.UUID, *, admin: bool = False) -> AuthIdentity:
+    return AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN if admin else Role.USER,
+        platform="teams",
+        external_id=_ENTRA,
+        platform_user_id=_CALLER,
+        is_admin=admin,
+    )
+
+
+async def _teams_modes(session: AsyncSession, tenant_id: uuid.UUID) -> ParticipationModes:
+    return await get_participation_modes(
+        session,
+        tenant_id=tenant_id,
+        platform="teams",
+        channel_id=_TEAMS_CHANNEL,
+        thread_id=_TEAMS_THREAD,
+    )
+
+
+async def test_a_teams_member_turns_their_thread_on(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    result = await _set_thread_participation_impl(
+        _teams_runtime(committing_sessionmaker), _teams_auth(tenant_id), "on", _TEAMS_THREAD, None
+    )
+
+    assert result.effective_mode == "on"
+    modes = await _teams_modes(db_session, tenant_id)
+    assert modes.thread is ParticipationMode.ON, "keyed on the Teams thread id, platform teams"
+    assert (await _modes(db_session, tenant_id)).thread is None, "nothing lands under discord"
+
+
+async def test_a_teams_admin_turns_a_channel_on(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+    runtime = _teams_runtime(committing_sessionmaker)
+
+    await _set_thread_participation_impl(
+        runtime, _teams_auth(tenant_id, admin=True), "on", None, _TEAMS_CHANNEL
+    )
+
+    assert (await _teams_modes(db_session, tenant_id)).channel is ParticipationMode.ON
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "channel_id"),
+    [
+        ("19:abc@thread.tacv2", None),  # a channel passed as a thread
+        (f"{_TEAMS_CHANNEL};messageid=abc", None),
+        ("a:personal-chat", None),
+        (None, _TEAMS_THREAD),  # a thread passed as a channel
+    ],
+)
+async def test_a_malformed_teams_id_is_refused_before_any_read(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    thread_id: str | None,
+    channel_id: str | None,
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    with pytest.raises(ToolError):
+        await _set_thread_participation_impl(
+            _teams_runtime(committing_sessionmaker),
+            _teams_auth(tenant_id, admin=True),
+            "on",
+            thread_id,
+            channel_id,
+        )
+
+
+async def test_a_teams_caller_outside_the_channel_writes_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    with pytest.raises(ToolError, match="not a member"):
+        await _set_thread_participation_impl(
+            _teams_runtime(committing_sessionmaker, member=False),
+            _teams_auth(tenant_id),
+            "on",
+            _TEAMS_THREAD,
+            None,
+        )
+
+    assert (await _teams_modes(db_session, tenant_id)).thread is None
+
+
+async def test_a_deployment_without_teams_settings_refuses_a_teams_caller(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    with pytest.raises(ToolError):
+        await _set_thread_participation_impl(
+            _teams_runtime(committing_sessionmaker, teams=False),
+            _teams_auth(tenant_id),
+            "on",
+            _TEAMS_THREAD,
             None,
         )

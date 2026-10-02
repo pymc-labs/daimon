@@ -11,10 +11,13 @@ from daimon.adapters.discord.agent_setup.isolation_view import (
     END_LABEL,
     ISOLATE_COPY_LABEL,
     ISOLATE_LABEL,
+    LIFT_LABEL,
     IsolationView,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_isolation import ChannelIsolationStatus
+from daimon.core.channel_isolation_setup import LIFT_ISOLATION_WARNING
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -47,7 +50,9 @@ def _runtime(sessionmaker: object, state: FakeMAState | None = None) -> DiscordR
     )
 
 
-def _view(runtime: DiscordRuntime, account_id: uuid.UUID, *, isolated: bool) -> IsolationView:
+def _view(
+    runtime: DiscordRuntime, account_id: uuid.UUID, *, isolated: bool, private: bool | None = None
+) -> IsolationView:
     state = PanelState(
         roster=[],
         selected=None,
@@ -57,7 +62,11 @@ def _view(runtime: DiscordRuntime, account_id: uuid.UUID, *, isolated: bool) -> 
         channel_id=CHANNEL_ID,
         channel_name="Team Alpha",
     )
-    return IsolationView(state, runtime=runtime, allowed_user_id=42, isolated=isolated)
+    private = isolated if private is None else private
+    status = ChannelIsolationStatus(
+        is_private=private, dedicated_agent_names=("alpha",) if private else (), is_hidden=isolated
+    )
+    return IsolationView(state, runtime=runtime, allowed_user_id=42, status=status)
 
 
 def _interaction(*, admin: bool = True) -> MagicMock:
@@ -95,7 +104,7 @@ def _text(view: discord.ui.LayoutView) -> str:
     )
 
 
-def test_screen_offers_isolating_or_ending_it(account_id: uuid.UUID) -> None:
+def test_screen_offers_isolating_ending_or_lifting_it(account_id: uuid.UUID) -> None:
     runtime = _runtime(MagicMock())
     assert _labels(_view(runtime, account_id, isolated=False)) == {
         "◀ Back",
@@ -103,7 +112,13 @@ def test_screen_offers_isolating_or_ending_it(account_id: uuid.UUID) -> None:
         ISOLATE_COPY_LABEL,
         "Done",
     }, "an open channel can be isolated, with or without a copy"
-    assert _labels(_view(runtime, account_id, isolated=True)) == {"◀ Back", END_LABEL, "Done"}
+    isolated = _view(runtime, account_id, isolated=True)
+    assert _labels(isolated) == {"◀ Back", END_LABEL, LIFT_LABEL, "Done"}
+    assert "Private: yes · Dedicated agent: **alpha** · Hidden: yes" in _text(isolated), (
+        "the screen shows each of isolation's controls"
+    )
+    ended = _view(runtime, account_id, isolated=False, private=True)
+    assert LIFT_LABEL in _labels(ended), "after ending, the seal and pin can still be lifted"
 
 
 async def test_a_member_who_lost_manage_server_changes_nothing(account_id: uuid.UUID) -> None:
@@ -157,3 +172,14 @@ async def test_isolate_refuses_a_shared_agent_then_copies_it_and_ends(
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == (), "ending isolation clears the channel"
+    assert policy.sealed_channel_ids == (str(CHANNEL_ID),), "and keeps it private"
+
+    screen = ended.response.edit_message.call_args.kwargs["view"]
+    lifted = _interaction()
+    await _button(screen, LIFT_LABEL).callback(lifted)
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert (policy.sealed_channel_ids, policy.agent_channel_pins) == ((), {}), (
+        "lifting drops the seal and the copy's pin"
+    )
+    assert LIFT_ISOLATION_WARNING in _text(lifted.response.edit_message.call_args.kwargs["view"])

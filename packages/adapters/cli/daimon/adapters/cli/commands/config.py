@@ -10,11 +10,11 @@ from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
-from daimon.core.channel_isolation import load_channel_isolation
+from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_isolation import binding_refusal, clear_refusal
 from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import (
     ChannelScopeRef,
@@ -25,6 +25,7 @@ from daimon.core.scope import (
     TenantScopeRef,
     UserScopeRef,
 )
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope, resolve
@@ -36,8 +37,6 @@ from daimon.core.stores.scoped_config_write import (
 from pydantic import BaseModel
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
-
-_NO_DEFAULT = DeploymentDefault()
 
 config_app = typer.Typer(
     help="Config: get/set/unset/propagate across scopes.",
@@ -74,12 +73,13 @@ def _validate_key(key: str) -> ConfigField:
 # Chat platforms addressable in a scope string. "cli" is deliberately absent:
 # the local CLI tenant is what the bare `tenant` / `channel:<id>` forms already
 # target, so a `tenant:cli/local` spelling would be a second name for it.
-_SCOPE_PLATFORMS: dict[str, Platform] = {"discord": "discord", "slack": "slack"}
+_SCOPE_PLATFORMS: dict[str, Platform] = {"discord": "discord", "slack": "slack", "teams": "teams"}
 
 _SCOPE_HELP = (
     "user, tenant, tenant:<platform>/<workspace_id>, channel:<channel_id>, "
-    "channel:<platform>/<workspace_id>/<channel_id> (platform: discord|slack; "
-    "a Discord workspace id is the guild id, a Slack one the team id), "
+    "channel:<platform>/<workspace_id>/<channel_id> (platform: discord|slack|teams; "
+    "a Discord workspace id is the guild id, a Slack one the team id, a Teams one "
+    "the Entra tenant id), "
     "deployment (read-only)"
 )
 
@@ -285,30 +285,28 @@ async def _refuse_breaking_isolation(
     scope: ScopeRef,
     agent_name: str | None,
     anthropic: AsyncAnthropic | None,
-    default: DeploymentDefault,
 ) -> None:
-    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks channel isolation.
+    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks a pin or isolation.
 
-    `anthropic` looks up whether the agent is built in; without it the agent counts as not.
+    A pinned agent routed outside its pin would refuse every turn there.
+    `anthropic` looks up the agent's other names; without it only `agent_name` counts.
     """
     if isinstance(scope, UserScopeRef):
         return  # the user tier never picks the agent
-    isolation = await load_channel_isolation(session, tenant_id=scope.tenant_id, default=default)
-    if not isolation.is_active:
+    policy = await load_access_policy(session, tenant_id=scope.tenant_id)
+    if not (policy.isolated_channel_ids or policy.agent_channel_pins):
         return
     channel_id = scope.channel_id if isinstance(scope, ChannelScopeRef) else None
     if agent_name is None:
-        refusal = isolation.clear_refusal(channel_id=channel_id) if channel_id else None
+        refusal = clear_refusal(policy, channel_id=channel_id) if channel_id else None
     else:
         agent = (
             await find_agent_by_daimon_tag(anthropic, tenant_id=scope.tenant_id, name=agent_name)
             if anthropic is not None
             else None
         )
-        managed = agent is not None and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        refusal = isolation.binding_refusal(
-            agent_name, channel_id=channel_id, is_daimon_managed=managed
-        )
+        names = (agent_name, *(agent_pin_names(agent.name, agent.metadata) if agent else ()))
+        refusal = binding_refusal(policy, agent_names=names, channel_id=channel_id)
     if refusal is not None:
         message = render_isolation_refusal(refusal, agent_name=agent_name)
         console.print(f"[red]{message} Nothing was changed.[/red]")
@@ -361,7 +359,6 @@ async def _config_set_command_entry(
             value=value,
             scope_str=scope_str,
             anthropic=rt.anthropic,
-            default=rt.deployment_default,
         )
 
 
@@ -375,7 +372,6 @@ async def _config_set_entry(
     value: str,
     scope_str: str,
     anthropic: AsyncAnthropic | None = None,
-    default: DeploymentDefault = _NO_DEFAULT,
 ) -> None:
     # deployment is read-only; handled before _parse_scope
     if scope_str == "deployment":
@@ -392,7 +388,6 @@ async def _config_set_entry(
             scope=scope,
             agent_name=value,
             anthropic=anthropic,
-            default=default,
         )
         await set_fields(
             session,
@@ -452,7 +447,6 @@ async def _config_unset_command_entry(
             console=console,
             key=key,
             scope_str=scope_str,
-            default=rt.deployment_default,
         )
 
 
@@ -464,12 +458,11 @@ async def _config_unset_entry(
     console: Console,
     key: ConfigField,
     scope_str: str,
-    default: DeploymentDefault = _NO_DEFAULT,
 ) -> None:
     scope = _parse_scope(scope_str, tenant_id=tenant_id, account_id=account_id)
     if key == "agent_name":
         await _refuse_breaking_isolation(
-            session, console=console, scope=scope, agent_name=None, anthropic=None, default=default
+            session, console=console, scope=scope, agent_name=None, anthropic=None
         )
     await unset_fields(session, scope=scope, fields=[key], actor_account_id=account_id)
     console.print(f"[green]✓ unset {key} at {scope_str}[/green]")
@@ -533,7 +526,6 @@ async def _config_propagate_command_entry(
             fields_str=fields_str,
             reset=reset,
             anthropic=rt.anthropic,
-            default=rt.deployment_default,
         )
 
 
@@ -548,7 +540,6 @@ async def _config_propagate_entry(
     fields_str: str | None,
     reset: bool,
     anthropic: AsyncAnthropic | None = None,
-    default: DeploymentDefault = _NO_DEFAULT,
 ) -> None:
     source = _parse_scope(from_str, tenant_id=tenant_id, account_id=account_id)
     targets = [_parse_scope(t, tenant_id=tenant_id, account_id=account_id) for t in to_strs]
@@ -568,7 +559,6 @@ async def _config_propagate_entry(
                     scope=target,
                     agent_name=agent_name,
                     anthropic=anthropic,
-                    default=default,
                 )
 
     result = await propagate(

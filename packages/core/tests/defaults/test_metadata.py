@@ -11,6 +11,7 @@ from daimon.core.defaults.metadata import (
     build_metadata,
     find_conflicting_skill_body,
     find_mount_collision,
+    skill_owner_candidates,
     strip_tenant_prefix,
     tenant_scoped_display_title,
 )
@@ -180,6 +181,45 @@ def test_strip_tenant_prefix_mangle_stability() -> None:
     assert re_prefixed == title, (
         "re-prefixing a stripped mangled title must reproduce the same 64-char string — no re-mangle"
     )
+
+
+def _scoped_body(agent_name: str, name: str = "notes") -> str:
+    title = tenant_scoped_display_title(tenant_id=_TENANT_ID, name=name, agent_name=agent_name)
+    body = strip_tenant_prefix(tenant_id=_TENANT_ID, display_title=title)
+    assert body is not None
+    return body
+
+
+def test_skill_owner_candidates_prefers_the_stored_owner() -> None:
+    owners = skill_owner_candidates(
+        "shared/notes", stored_owner="own", agent_names={"shared", "own"}
+    )
+    assert owners == {"own"}, "a stored owner wins over the title"
+
+
+def test_skill_owner_candidates_reads_an_unshortened_title() -> None:
+    assert skill_owner_candidates(_scoped_body("own"), stored_owner=None, agent_names=set()) == {
+        "own"
+    }
+    assert skill_owner_candidates("notes", stored_owner=None, agent_names={"own"}) == set(), (
+        "a tenant skill has no owning agent"
+    )
+
+
+def test_skill_owner_candidates_matches_a_maximum_length_agent_name() -> None:
+    long_name = "a" * 64
+    body = _scoped_body(long_name)
+    assert "/" not in body, "a 64-char agent name pushes the '/' past the kept title"
+    owners = skill_owner_candidates(body, stored_owner=None, agent_names={long_name, "other"})
+    assert owners == {long_name}, "the shortened title still names its agent"
+    rivals = {long_name, "a" * 63}
+    assert skill_owner_candidates(body, stored_owner=None, agent_names=rivals) == rivals, (
+        "every agent the shortened title could belong to counts as an owner"
+    )
+    unknown = skill_owner_candidates(
+        _scoped_body("b" * 64), stored_owner=None, agent_names={"other"}
+    )
+    assert unknown == set(), "no known agent fits"
 
 
 def test_find_conflicting_skill_body_registry_create_hits_agent_scoped_same_name() -> None:

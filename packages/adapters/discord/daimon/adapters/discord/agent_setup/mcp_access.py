@@ -33,18 +33,32 @@ from daimon.adapters.discord.agent_setup.expiry import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
+from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.authz import build_agent_ref
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.mcp_auth import authorize_coding_token, mint_agent_mcp_token
 from daimon.core.roster import RosterAgent
 from daimon.core.setup_conversations import get_setup_agent
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 
 import discord
 
 log = structlog.get_logger()
+
+
+def coding_tools_refusal(agent_name: str) -> str:
+    """What a member sees instead of a token, naming the permission and the way round it."""
+    return (
+        f"Minting an access token for {agent_name} needs Manage Server, or channel admin "
+        "of every channel it is pinned to, pressed inside one of them. "
+        "Ask an admin to open Details and use this button."
+    )
 
 
 async def send_coding_tools_access(
@@ -66,6 +80,16 @@ async def send_coding_tools_access(
     ``selected_agent`` is what the Details screen sets; ``selected`` is the
     legacy panel's field, read as a fallback so both entry points keep working
     while they coexist.
+
+    Pressed in a sealed channel, or in a channel the agent is pinned to (a
+    thread counts as its parent), the token is bound to that channel
+    (`coding_token_channel`) and its calls run there.
+
+    Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, on the caller's
+    live permissions and roles read at click time (the panel's ``is_admin`` is
+    a snapshot from panel-open): a server admin, or a channel admin of every
+    channel the agent is pinned to, whose token is always bound to one of
+    them. Anyone else is refused before any token material exists.
     """
     card_agent = agent or state.selected_agent
     selected = card_agent or state.selected
@@ -113,6 +137,32 @@ async def send_coding_tools_access(
         )
         return
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
+    caller = channel_admin_caller(interaction.user).model_copy(
+        update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # reads only user and guild
+    )
+    try:
+        async with runtime.sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+            subject = await load_live_subject(
+                session, tenant_id=tenant_id, platform="discord", caller=caller
+            )
+    except AccessPolicyUnreadable:
+        await interaction.response.send_message(POLICY_UNREADABLE_REFUSAL, ephemeral=True)
+        return
+    channel = interaction.channel
+    parent_id = channel.parent_id if isinstance(channel, discord.Thread) else interaction.channel_id
+    decision, bound_channel_id = authorize_coding_token(
+        policy,
+        subject=subject,
+        agent=build_agent_ref(ma_agent.name, ma_agent.metadata, selected.name),
+        channel_id=str(parent_id) if parent_id is not None else None,
+    )
+    if not decision:
+        log.info(
+            "agent_setup.coding_tools.refused", agent_name=selected.name, reason=decision.reason
+        )
+        await interaction.response.send_message(coding_tools_refusal(selected.name), ephemeral=True)
+        return
 
     async with runtime.sessionmaker.begin() as session:
         token = await mint_agent_mcp_token(
@@ -123,6 +173,8 @@ async def send_coding_tools_access(
             label=selected.name,
             secret=jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
+            platform="discord" if bound_channel_id is not None else None,
+            channel_id=bound_channel_id,
         )
 
     # Decode jti from the token without verifying signature (we just minted it).
@@ -138,12 +190,15 @@ async def send_coding_tools_access(
         agent_name=selected.name,
         public_url=public_url,
         jwt=token,
+        channel_id=bound_channel_id,
     )
 
     log.info(
         "agent_setup.coding_tools.minted",
         agent_name=selected.name,
         jti=str(jti),
+        bound_channel_id=bound_channel_id,
+        is_server_admin=subject.is_admin,
         # Never log the token itself.
     )
 
@@ -164,7 +219,9 @@ async def send_coding_tools_access(
     )
 
 
-def render_mcp_config(*, agent_name: str, public_url: str, jwt: str) -> str:
+def render_mcp_config(
+    *, agent_name: str, public_url: str, jwt: str, channel_id: str | None = None
+) -> str:
     """Build the copyable MCP config message for a per-agent MCP token.
 
     Returned as plain message ``content`` (NOT a Components V2 TextDisplay) so
@@ -174,7 +231,8 @@ def render_mcp_config(*, agent_name: str, public_url: str, jwt: str) -> str:
     it), then the ``.mcp.json`` snippet.
 
     The key name is ``daimon-<agent-name>`` so multiple agents are namespaced in
-    the same config file without collision.
+    the same config file without collision. ``channel_id`` names the channel a
+    bound token runs in.
     """
     key_name = f"daimon-{agent_name}"
     config = {
@@ -189,8 +247,14 @@ def render_mcp_config(*, agent_name: str, public_url: str, jwt: str) -> str:
         f'"{public_url}" '
         f'--header "Authorization: Bearer {jwt}"'
     )
+    bound = (
+        f"It runs in <#{channel_id}>, under that channel's pins, seal and budget.\n"
+        if channel_id is not None
+        else ""
+    )
     return (
         f"**Use `{agent_name}` from your coding tools** — token shown once, copy it now.\n"
+        f"{bound}"
         "**Run this:**\n"
         f"```\n{cli_oneliner}\n```\n"
         "**Or paste into `.mcp.json`:**\n"

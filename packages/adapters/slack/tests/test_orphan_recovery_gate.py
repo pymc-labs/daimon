@@ -61,6 +61,7 @@ async def test_transient_orphan_recovery_failure_retries_before_admission(
     runtime = MagicMock()
     runtime.sessionmaker = MagicMock(side_effect=_Session)
     app = SlackApp(runtime=runtime)
+    app._bot_user_ids["T_TEST"] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
     entered = asyncio.Event()
 
     async def _recover(*_args: object, **_kwargs: object) -> None:
@@ -96,7 +97,8 @@ async def test_transient_orphan_recovery_failure_retries_before_admission(
         recovery = app.start_orphan_recovery()
         await asyncio.wait_for(entered.wait(), timeout=1.0)
         await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
-            {"channel": "C_TEST", "event_ts": "1000000001.000001"}, team_id="T_TEST"
+            {"channel": "C_TEST", "event_ts": "1000000001.000001", "text": "<@U_BOT> hi"},
+            team_id="T_TEST",
         )
 
     assert recovery.done() and recovery.exception() is None

@@ -2,7 +2,8 @@
 
 Posts the configured App install URL through the caller's platform. No request
 state, token or expiry is created. Discord opens the link directly; Slack
-acknowledges its click payload without treating it as installation proof.
+acknowledges its click payload without treating it as installation proof;
+Teams posts it as a markdown link.
 
 Ungated deliberately: posting a link has no blast radius inside daimon, and
 GitHub itself enforces who may install an App on a given account or
@@ -19,6 +20,9 @@ from daimon.adapters.mcp.tools.discord import (
 )
 from daimon.adapters.mcp.tools.slack._app_install_button import (
     _post_slack_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.teams._send import (
+    _post_teams_app_install_link_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.github_app_auth import build_app_install_url
 from fastmcp import Context, FastMCP
@@ -58,11 +62,10 @@ async def _post_app_install_link_impl(
             "tell the user an operator must configure it; a working GitHub token "
             "can still be supplied privately through request_repo_binding"
         )
-    post_button = (
-        _post_slack_app_install_button_impl
-        if auth.platform == "slack"
-        else _post_app_install_button_impl
-    )
+    post_button = {
+        "slack": _post_slack_app_install_button_impl,
+        "teams": _post_teams_app_install_link_impl,
+    }.get(auth.platform or "", _post_app_install_button_impl)
     message_id = await post_button(
         runtime,
         auth,
@@ -78,7 +81,7 @@ async def _post_app_install_link_impl(
 
 
 def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def post_github_app_install_link(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,

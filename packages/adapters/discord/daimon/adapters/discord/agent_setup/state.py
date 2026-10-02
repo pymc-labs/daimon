@@ -12,16 +12,14 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.roster import Page, RosterAgent, paginate
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import (
     ChannelConfigRow,
     DeploymentDefault,
     TenantConfigRow,
-    is_agent_reachable,
     pick_agent,
 )
 from daimon.core.specs import AgentSpec
-from daimon.core.stores.domain import AgentRepoBindingRow
 
 
 @dataclasses.dataclass
@@ -35,6 +33,9 @@ class RosterEntry:
     # before reconcile); used to derive the per-agent uuid for credential reads.
     ma_agent_id: str = ""
     is_system: bool = False
+    # The `daimon_name` routing name channel and personal defaults are stored
+    # under; it can differ from the MA display name after a rename.
+    routing_name: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,17 +67,14 @@ class PanelState:
     # derive_guild_account_uuid(tenant_id) — ownership STAMP for create/fork/edit
     guild_account_id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
     platform_principal_id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
-    pat_last4: str | None = None
     # Persisted GitHub linkage for the selected agent, hydrated from the DB at
     # panel-open and on agent-switch (per-agent overlay scope). Display
     # only — never the token. "(inline-pat)" for token-pasted creds.
     github_login: str | None = None
-    mcp_token_last4: str | None = None
     # Number of secrets (agent_files) pinned to the selected agent. Loaded by the
     # shell at panel-open and refreshed whenever the selection changes (picker /
     # delete); rendering-only — never participates in reconcile.
     secret_count: int = 0
-    pending_skill_repo_urls: list[str] = dataclasses.field(default_factory=list[str])
     bound_repo_url: str | None = None
     bound_branch: str = "main"
     # ma_secret_ref of the selected agent's repo binding ("anon:" / "inline-pat:…"),
@@ -131,52 +129,12 @@ class PanelState:
     # answers for the caller exactly as a mention would.
     thread_id: str | None = None
 
-    def add_skill_repo_pending(self, url: str) -> None:
-        """Mark a skill repo as in-flight; idempotent."""
-        if url not in self.pending_skill_repo_urls:
-            self.pending_skill_repo_urls.append(url)
-
-    def apply_repo_modal(self, *, url: str, branch: str, pat_last4: str | None) -> None:
-        """Mutate rendering-only fields. Per LD-04-01, repo binding lives in the
-        agent_repo_binding store; AgentSpec carries no repo_url field."""
-        self.bound_repo_url = url
-        self.bound_branch = branch
-        if pat_last4 is not None:
-            self.pat_last4 = pat_last4
-
-    def hydrate_repo_binding(self, row: AgentRepoBindingRow | None) -> None:
-        """Set the display-only repo fields from a persisted binding (or clear
-        them when the selected agent is unbound). Called at panel-open and on
-        agent-switch so the Repo field reflects the DB, not just in-View edits.
-
-        The store persists the normalized ``owner/repo`` form; rebuild the full
-        ``https://github.com/owner/repo`` URL so the embed's markdown link works
-        and matches what ``apply_repo_modal`` shows on a fresh add."""
-        self.bound_repo_url = f"https://github.com/{row.repo_url}" if row is not None else None
-        self.bound_branch = row.default_branch if row is not None else "main"
-        self.bound_secret_ref = row.ma_secret_ref if row is not None else None
-
-    def apply_agent_modal(self, *, system: str | None, model: str) -> None:
-        """Apply Agent-modal edits — name is intentionally not accepted
-        (Pitfall 4: rename forbidden; use Fork+Delete)."""
-        if self.selected is None:
-            return
-        current = self.selected.spec
-        updated = current.model_copy(update={"system": system, "model": model})
-        self.selected = dataclasses.replace(self.selected, model=model, spec=updated)
-        # Keep the roster list pointing at the new entry too.
-        for idx, entry in enumerate(self.roster):
-            if entry.name == self.selected.name:
-                self.roster[idx] = self.selected
-                break
-
     def apply_mcp_modal(
         self,
         *,
         server_entry: BetaManagedAgentsURLMCPServerParams,
-        token_last4: str,
     ) -> None:
-        """Append an MCP server to the selected agent's spec; record token last-4.
+        """Append an MCP server to the selected agent's spec.
 
         MA rejects an agent whose ``mcp_servers`` names are not each referenced
         by a matching ``{type: mcp_toolset, mcp_server_name: <name>, ...}`` entry
@@ -209,7 +167,6 @@ class PanelState:
             if entry.name == self.selected.name:
                 self.roster[idx] = self.selected
                 break
-        self.mcp_token_last4 = token_last4
 
     def remove_skill_at(self, index: int) -> None:
         """Remove the skill at `index` from the selected agent's spec."""
@@ -257,15 +214,6 @@ class PanelState:
                 break
         return removed_name
 
-    def roster_page_of(self, page_size: int) -> Page[RosterAgent]:
-        """The current window onto `roster_agents`, clamped into range.
-
-        `roster_page` can outlive the rows it indexed — an agent archived in
-        chat between two clicks shortens the roster — so the page number is
-        clamped rather than trusted.
-        """
-        return paginate(self.roster_agents, page=self.roster_page, page_size=page_size)
-
     def select_agent(self, agent: RosterAgent) -> None:
         """Point Details and setup at `agent`, keeping the legacy selection in step.
 
@@ -285,46 +233,6 @@ class PanelState:
             if entry.name == name:
                 self.selected = entry
                 return
-
-    def drop_selected(self) -> RosterEntry | None:
-        """Remove the currently-selected entry; pick a neighbor if any remain.
-
-        Returns the new selection (a neighbor, or ``None`` if the roster is now
-        empty) so callers can act on the post-drop selection without re-reading
-        the attribute (whose narrowing they can't see through this call)."""
-        if self.selected is None:
-            return None
-        try:
-            idx = self.roster.index(self.selected)
-        except ValueError:
-            self.selected = None
-            return None
-        self.roster.pop(idx)
-        if not self.roster:
-            self.selected = None
-        else:
-            self.selected = self.roster[min(idx, len(self.roster) - 1)]
-        return self.selected
-
-    def is_selected_reachable(self) -> bool:
-        """Whether some channel or the workspace currently resolves to the
-        selected agent, including through the deployment default fall-through.
-
-        This is a distinct question from `RosterEntry.is_system`: reachability
-        is a live cascade property (does anything currently point at this
-        agent), while `is_system` is a provenance marker (was this agent
-        created by the defaults seed). They coincide for the seeded agent on
-        a fresh install, but one never implies the other.
-        """
-        if self.selected is None:
-            return False
-        tenant_row, channel_rows = self.cascade_view
-        return is_agent_reachable(
-            self.selected.name,
-            tenant=tenant_row,
-            channels=channel_rows,
-            default=self.deployment_default,
-        )
 
     @classmethod
     def initial(

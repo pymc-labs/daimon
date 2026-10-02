@@ -10,9 +10,11 @@ import discord
 import pytest
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, record_result
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -390,3 +392,38 @@ async def test_a_private_thread_the_creator_is_in_is_posted_to(
 
     assert outcome.status == "delivered" and outcome.note is None
     thread.send.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "agent", ["daimon", "local"], ids=["outside-agent-posting-in", "own-agent"]
+)
+async def test_an_isolated_channels_routine_never_leaves_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    agent: str,
+) -> None:
+    row = (await _routine(db_session)).model_copy(update={"agent_name": agent})
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=row.tenant_id, channel_id="555"),
+        tenant_id=row.tenant_id,
+        agent_name="local",
+        mode="agent",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("555",),
+            isolated_channel_ids=("555",),
+            agent_channel_pins={"local": ("555",)},
+        ),
+    )
+    await db_session.commit()
+    gone = discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
+    dms = _Dms()
+
+    outcome = await _poster(db_session_factory, gone, dms=dms)(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+    assert dms.sent == [], "the result never goes by DM"

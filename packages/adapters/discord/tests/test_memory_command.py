@@ -155,7 +155,7 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
     await set_access_policy(
         db_session,
         tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID)),
-        policy=TenantAccessPolicy(isolated_channel_ids=("42",)),
+        policy=TenantAccessPolicy(sealed_channel_ids=("42",), isolated_channel_ids=("42",)),
     )
     await db_session.commit()
     cog = MemoryCog(MagicMock())

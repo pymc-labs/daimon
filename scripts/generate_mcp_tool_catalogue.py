@@ -89,7 +89,12 @@ TAG_LABELS: dict[str, str] = {
     "agent-chat": "agent tokens only",
     "channel-admin": "channel admins too",
     "discord": "Discord callers",
+    "scope:channels:write": "operator tokens with channels:write",
+    "scope:promo:create": "operator tokens with promo:create",
+    "scope:promo:redeem": "operator tokens with promo:redeem",
+    "scope:tenant:read": "operator tokens with tenant:read",
     "slack": "Slack callers",
+    "teams": "Teams callers",
 }
 UNTAGGED_LABEL = "all callers"
 
@@ -318,17 +323,19 @@ def _header(total: int, hub_total: int) -> list[str]:
         *tag_lines,
         "",
         *_wrap(
-            "A CLI token matches no platform tag, so it sees neither the Discord nor "
-            "the Slack tools. An agent token is narrowed to the agent-chat tools alone "
-            "— everything else is disabled for it, admin tools included."
+            "A CLI token matches no platform tag, so it sees none of the Discord, "
+            "Slack or Teams tools. An agent token is narrowed to the agent-chat tools alone "
+            "— everything else is disabled for it, admin tools included. An operator "
+            "token is narrowed the same way to the tools tagged with its scopes; the "
+            "`promo:create` tools are hidden from every other caller."
         ),
         "",
         *_wrap(
             "A caller does not necessarily receive this list in one response: the "
             "server applies a BM25 search transform, so an ordinary session discovers "
             "tools by searching the catalogue rather than listing it in full. Sessions "
-            "narrowed to agent-chat tools skip the transform and see their tools "
-            "directly."
+            "narrowed to agent-chat tools or to an operator token's scopes skip the "
+            "transform and see their tools directly."
         ),
         "",
     ]

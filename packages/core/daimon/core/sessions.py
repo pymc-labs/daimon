@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
@@ -37,7 +37,7 @@ from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
-    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -52,6 +52,7 @@ from daimon.core.mcp_vault import (
 )
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
+from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
@@ -78,7 +79,7 @@ def _session_metadata(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     billing_exempt: ExemptReason | None,
-    channel_id: str | None = None,
+    budget_channel_id: str | None = None,
 ) -> dict[str, str]:
     """The metadata stamp every Daimon-created session carries.
 
@@ -86,7 +87,7 @@ def _session_metadata(
     the owning account. `daimon_billing_exempt=<reason>` marks a session
     created for a `BillingExempt` caller, which the sweep skips (the operator
     absorbs its usage). It is decided once, here, from the creator's posture.
-    `daimon_channel` is the parent channel the sweep attributes the spend to.
+    `daimon_budget_channel` is the channel whose budget the sweep charges.
     """
     metadata: dict[str, str] = {}
     if account_id is not None:
@@ -95,8 +96,8 @@ def _session_metadata(
         metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
     if billing_exempt is not None:
         metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
-    if channel_id is not None:
-        metadata[MA_METADATA_KEY_CHANNEL] = channel_id
+    if budget_channel_id is not None:
+        metadata[MA_METADATA_KEY_BUDGET_CHANNEL] = budget_channel_id
     return metadata
 
 
@@ -121,7 +122,11 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
-    channel_id: str | None = None,
+    budget_channel_id: str | None = None,
+    origin_channel_id: str | None = None,
+    origin_thread_id: str | None = None,
+    origin_seal_ids: Collection[str] = (),
+    before_create: Callable[[], Awaitable[None]] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -136,6 +141,14 @@ async def create_session(
 
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
+
+    ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
+    turn a session is opened for; they are stamped on it so the transcript tools
+    can refuse a sealed conversation's transcript outside its channel.
+
+    ``budget_channel_id`` is the channel whose budget the session's spend counts
+    toward (for a DM, the channel it was moved from). It is stamped apart from
+    the origin, so budgeting a DM never puts it under that channel's seal.
 
     When a per-agent GitHub PAT is resolvable and the vault was ensured, a
     GitHub Copilot MCP credential is mirrored into the vault
@@ -449,13 +462,24 @@ async def create_session(
         account_id=account_id,
         tenant_id=tenant_id,
         billing_exempt=billing_exempt,
-        channel_id=channel_id,
+        budget_channel_id=budget_channel_id,
     )
     if slack_turn_context_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
     elif private_dm_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = private_dm_id
+    if origin_channel_id is not None:
+        metadata.update(
+            origin_stamp(
+                channel_id=origin_channel_id,
+                thread_id=origin_thread_id,
+                seal=origin_seal_ids,
+            )
+        )
 
+    if before_create is not None:
+        # The caller's last access decision, after every await above.
+        await before_create()
     return await anthropic.beta.sessions.create(
         agent=agent_argument,
         environment_id=environment.id,
@@ -475,6 +499,9 @@ async def create_isolated_session(
     resources: list[Resource],
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
+    budget_channel_id: str | None = None,
+    origin_channel_id: str | None = None,
+    origin_seal_ids: Collection[str] = (),
 ) -> BetaManagedAgentsSession:
     """Create an MA session for an isolated agent — `create_session` with every
     optional mount removed.
@@ -498,13 +525,21 @@ async def create_isolated_session(
     an isolated session with an empty resource list is a caller bug, not a
     degraded mode.
 
-    `billing_exempt` stamps the session the same way `create_session` does.
+    `billing_exempt`, `budget_channel_id` and the origin stamp the session the
+    same way `create_session` does: metadata only, never a mount.
 
     On MA failure: `anthropic.APIError` propagates uncaught.
     """
     metadata = _session_metadata(
-        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+        account_id=account_id,
+        tenant_id=tenant_id,
+        billing_exempt=billing_exempt,
+        budget_channel_id=budget_channel_id,
     )
+    if origin_channel_id is not None:
+        metadata.update(
+            origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
+        )
 
     return await anthropic.beta.sessions.create(
         agent=agent.id,

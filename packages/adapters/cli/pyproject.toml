@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-daimon = "daimon.adapters.cli.main:app"
+daimon = "daimon.adapters.cli.main:main"
 
 [project.urls]
 Repository = "https://github.com/pymc-labs/daimon"

@@ -11,9 +11,11 @@ from daimon.adapters.slack import routine_delivery as poster_mod
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,7 +61,11 @@ def _poster(
     monkeypatch.setattr(poster_mod, "resolve_web_client", fake_resolve)
     runtime = cast(
         SlackRuntime,
-        SimpleNamespace(sessionmaker=sm, settings=SimpleNamespace(direct_message_policies={})),
+        SimpleNamespace(
+            sessionmaker=sm,
+            settings=SimpleNamespace(direct_message_policies={}),
+            deployment_default=DeploymentDefault(),
+        ),
     )
     return make_slack_routine_poster(runtime), client
 
@@ -144,6 +150,48 @@ async def test_slack_refusing_the_channel_falls_back_to_a_dm(
     assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:destination_unavailable")
 
 
+@pytest.mark.parametrize(
+    "agent", ["daimon", "local"], ids=["outside-agent-posting-in", "own-agent"]
+)
+async def test_an_isolated_channels_routine_never_leaves_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+) -> None:
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    row = row.model_copy(update={"agent_name": agent})
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=row.tenant_id, channel_id="C1"),
+        tenant_id=row.tenant_id,
+        agent_name="local",
+        mode="agent",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C1",),
+            isolated_channel_ids=("C1",),
+            agent_channel_pins={"local": ("C1",)},
+        ),
+    )
+    await db_session.commit()
+    post, client = _poster(db_session_factory, monkeypatch)
+    response = MagicMock(spec=AsyncSlackResponse)
+    response.data = {"ok": False, "error": "not_in_channel"}
+    client.chat_postMessage = AsyncMock(side_effect=SlackApiError("not_in_channel", response))
+
+    outcome = await post(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+    client.conversations_open.assert_not_awaited()
+
+
 async def test_no_dm_for_a_creator_the_dm_policy_excludes(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -160,6 +208,7 @@ async def test_no_dm_for_a_creator_the_dm_policy_excludes(
             settings=SimpleNamespace(
                 direct_message_policies={row.tenant_id: DirectMessagePolicy(mode="disabled")}
             ),
+            deployment_default=DeploymentDefault(),
         ),
     )
 

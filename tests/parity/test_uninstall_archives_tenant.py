@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import cast
 
+import pytest
 from cryptography.fernet import Fernet
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.domain import Platform
@@ -55,6 +56,8 @@ async def _assert_platform_effects(
         await s.commit()
 
 
+# Removing the Teams app archives nothing (test_teams_deliberate_gaps.py).
+@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
 async def test_uninstall_archives_tenant(
     driver: PlatformDriver,
     db_session: AsyncSession,

@@ -9,6 +9,18 @@
 #
 # Naming convention: prefix the environment, don't suffix it
 # (e.g. production-daimon-notebook-host, staging-daimon-notebook-host).
+#
+# PUBLIC EXPOSURE: the [[services]] block below publishes the host, because
+# users open notebook links in a browser. Each notebook is protected by the
+# access token in its link and served from its own origin,
+# https://<label>.<your-notebook-domain>/ (see the README's trust model).
+# That needs, before deploying:
+#   - a wildcard DNS record: *.<your-notebook-domain> CNAME <your-app-name>.fly.dev
+#     (plus <your-notebook-domain> itself for the upload URL, if you like)
+#   - a wildcard certificate:
+#       fly certs add "*.<your-notebook-domain>" --app <your-app-name>
+# Without ORIGIN_BASE all notebooks share one origin with no browser
+# isolation, and the host admits only the tenants in DAIMON_NOTEBOOK__TENANTS.
 
 app = "<your-app-name>"
 primary_region = "ord"
@@ -23,6 +35,12 @@ primary_region = "ord"
   # Leaving the placeholder here will produce broken URLs in chat —
   # substitute before deploying.
   DAIMON_NOTEBOOK__PUBLIC_HOST = "<your-app-name>.fly.dev"
+  # Links carry the notebook's access token, so they must be https: without
+  # this they come out as http://<host>:8001/... in plaintext.
+  DAIMON_NOTEBOOK__PUBLIC_URL_BASE = "https://<your-app-name>.fly.dev"
+  # One origin per notebook: links become https://<label>.<this>/n/<slug>/.
+  # Needs the wildcard DNS record and certificate above.
+  DAIMON_NOTEBOOK__ORIGIN_BASE = "<your-notebook-domain>"
   # DAIMON_NOTEBOOK__ADMIN_SECRET must be set via:
   #   fly secrets set DAIMON_NOTEBOOK__ADMIN_SECRET=<secret> --app <your-app-name>
   # Never commit the secret value here.

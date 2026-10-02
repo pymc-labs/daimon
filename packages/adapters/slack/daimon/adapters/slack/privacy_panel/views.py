@@ -9,7 +9,7 @@ Block Kit limits enforced:
   - private_metadata ≤ 3000 chars  (Pitfall 6)
 
 Discord analogs:
-  privacy_panel/panel.py:17-73 (_POLICY_URL, _summary_line, build_privacy_main_container)
+  privacy_panel/panel.py:17-73 (_POLICY_URL, build_privacy_main_container)
   privacy_panel/cascade.py:18-85 (cascade preview body)
   privacy_panel/embeds.py (build_post_delete_container)
 """
@@ -21,45 +21,12 @@ import uuid
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.privacy import PurgePreview
+from daimon.core.privacy import PurgePreview, summary_line
 from daimon.core.purge import AccountPurgeResult
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def summary_line(preview: PurgePreview) -> str:
-    """Return a comma-joined one-line summary of all non-zero held-data categories.
-
-    Port of privacy_panel/panel.py:20-35 (Discord).
-    """
-    parts: list[str] = []
-    if preview.linked_principals.count > 0:
-        parts.append(f"{preview.linked_principals.count} linked principal(s)")
-    if preview.routines.count > 0:
-        parts.append(f"{preview.routines.count} routine(s)")
-    if preview.user_configs.count > 0:
-        parts.append(f"{preview.user_configs.count} user config row(s)")
-    if preview.user_skills.count > 0:
-        parts.append(f"{preview.user_skills.count} synced skill(s)")
-    if preview.github_credentials.count > 0:
-        parts.append(f"{preview.github_credentials.count} GitHub token(s)")
-    if preview.github_oauth_states.count > 0:
-        parts.append(f"{preview.github_oauth_states.count} OAuth handshake record(s)")
-    if preview.mcp_tokens.count > 0:
-        parts.append(f"{preview.mcp_tokens.count} MCP token(s)")
-    if preview.agent_github_binding.count > 0:
-        parts.append(f"{preview.agent_github_binding.count} per-agent GitHub link(s)")
-    if preview.slack_user_tokens.count > 0:
-        parts.append(f"{preview.slack_user_tokens.count} Slack user token(s)")
-    if preview.slack_turn_contexts.count > 0:
-        parts.append(f"{preview.slack_turn_contexts.count} Slack turn context(s)")
-    if preview.direct_message_conversations.count > 0:
-        parts.append(f"{preview.direct_message_conversations.count} private conversation(s)")
-    if preview.channel_admins.count > 0:
-        parts.append(f"{preview.channel_admins.count} channel admin grant(s)")
-    return ", ".join(parts) if parts else "nothing visible to you yet"
 
 
 def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:

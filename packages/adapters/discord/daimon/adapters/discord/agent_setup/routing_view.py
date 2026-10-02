@@ -38,7 +38,7 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
 from daimon.adapters.discord.agent_setup.isolation_view import (
     ISOLATION_LABEL,
     IsolationView,
-    load_is_isolated,
+    load_isolation_status,
 )
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
@@ -507,14 +507,14 @@ class RoutingView(PanelViewBase):
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
-        isolated = await load_is_isolated(self.runtime, state=self.state)
+        status = await load_isolation_status(self.runtime, state=self.state)
         await self.swap_to(
             interaction,
             IsolationView(
                 self.state,
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
-                isolated=isolated,
+                status=status,
             ),
         )
 

@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from daimon.core._models import Account, Tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import mcp_tokens as store
 from daimon.core.stores.domain import McpTokenRow
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -342,3 +344,78 @@ async def test_list_live_tokens_by_label_returns_empty_list_on_no_match(
     )
 
     assert rows == [], "an unmatched label query must return an empty list, not raise"
+
+
+async def test_list_mcp_tokens_hides_revoked_and_expired_unless_asked(
+    db_session: AsyncSession,
+) -> None:
+    """Operators list live tokens by default; --all shows revoked and expired ones too."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    live, revoked, expired = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for jti, expires_at in ((live, None), (revoked, None), (expired, now)):
+        await store.create_mcp_token_row(
+            db_session,
+            jti=jti,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=None,
+            kind="cli",
+            label=None,
+            created_at=now,
+            expires_at=expires_at,
+        )
+    await store.revoke_mcp_token(db_session, jti=revoked, now=now)
+
+    default = await store.list_mcp_tokens(db_session, now=now, tenant_id=tenant_id)
+    everything = await store.list_mcp_tokens(
+        db_session, now=now, tenant_id=tenant_id, include_inactive=True
+    )
+    assert [row.jti for row in default] == [live], "only the live token is listed by default"
+    assert {row.jti for row in everything} == {live, revoked, expired}, "--all lists all three"
+    assert await store.list_mcp_tokens(db_session, now=now, kind="operator") == [], (
+        "the kind filter excludes other kinds"
+    )
+
+
+async def test_add_issued_usd_accumulates_under_the_row_lock(db_session: AsyncSession) -> None:
+    """The issuing ceiling counts every code an operator token created."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    jti = uuid.uuid4()
+    await store.create_mcp_token_row(
+        db_session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=None,
+        kind="operator",
+        scopes={"promo:create"},
+        label=None,
+        created_at=datetime.now(tz=UTC),
+        max_issued_usd=Decimal("100"),
+    )
+
+    locked = await store.lock_mcp_token(db_session, jti=jti)
+    await store.add_issued_usd(db_session, jti=jti, amount_usd=Decimal("30"))
+    await store.add_issued_usd(db_session, jti=jti, amount_usd=Decimal("12.50"))
+    db_session.expire_all()
+    row = await store.get_mcp_token(db_session, jti=jti)
+
+    assert locked is not None and locked.issued_usd == 0, "the lock returns the current row"
+    assert row is not None and row.issued_usd == Decimal("42.50"), "issued amounts add up"
+
+
+async def test_agent_kind_row_requires_an_agent_id(db_session: AsyncSession) -> None:
+    """Only agent keys name an agent; the schema refuses an agent row without one."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            await store.create_mcp_token_row(
+                db_session,
+                jti=uuid.uuid4(),
+                account_id=account_id,
+                tenant_id=tenant_id,
+                agent_id=None,
+                label=None,
+                created_at=datetime.now(tz=UTC),
+            )

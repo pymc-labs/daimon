@@ -105,7 +105,7 @@ def test_parse_scope_channel_slack() -> None:
 
 def test_parse_scope_unknown_platform_raises() -> None:
     with pytest.raises(typer.BadParameter):
-        _parse_scope("tenant:teams/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
+        _parse_scope("tenant:matrix/123", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
     with pytest.raises(typer.BadParameter):
         # "cli" is deliberately not scope-addressable — bare `tenant` already is the local tenant
         _parse_scope("tenant:cli/local", tenant_id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -440,7 +440,13 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
         db_session, scope=other, tenant_id=tenant.id, agent_name="shared", mode="agent"
     )
     await set_access_policy(
-        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("room",),
+            isolated_channel_ids=("room",),
+            agent_channel_pins={"local": ("room",)},
+        ),
     )
 
     async def run(action: str, scope_str: str, value: str = "") -> str:

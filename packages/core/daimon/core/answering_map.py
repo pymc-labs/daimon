@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
+from daimon.core.channel_isolation import IsolationViewer
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -164,22 +165,65 @@ def build_answering_map(
     )
 
 
+def hide_across_isolation(answering: AnsweringMap, viewer: IsolationViewer) -> AnsweringMap:
+    """Only the routing on the reader's side of every isolated channel's line. Pure."""
+    outside = viewer.inside_channel_id is None
+    tenant_default = answering.tenant_default
+    deployment_default = answering.deployment_default if outside else None
+    return answering.model_copy(
+        update={
+            "channel_overrides": tuple(
+                row
+                for row in answering.channel_overrides
+                if viewer.sees_place(row.channel_id) and viewer.sees(row.agent_name)
+            ),
+            "tenant_default": tenant_default if outside else None,
+            "deployment_default": deployment_default,
+            "setup_threads": tuple(
+                ref
+                for ref in answering.setup_threads
+                if viewer.sees_place(ref.parent_channel_id)
+                and (ref.target_name is None or viewer.sees(ref.target_name))
+            ),
+        }
+    )
+
+
+def routed_agent_names(answering_map: AnsweringMap) -> frozenset[str]:
+    """Every agent some tier routes to, anywhere in the install.
+
+    The deployment default counts only while no workspace default has taken
+    the fall-through away from it.
+    """
+    names = {answer.agent_name for answer in answering_map.channel_overrides}
+    if answering_map.tenant_default is not None:
+        names.add(answering_map.tenant_default.agent_name)
+    if answering_map.deployment_default and not answering_map.tenant_consumes_fallthrough:
+        names.add(answering_map.deployment_default)
+    return frozenset(names)
+
+
 async def load_answering_map(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     default: DeploymentDefault,
+    viewer: IsolationViewer | None = None,
 ) -> AnsweringMap:
-    """Read one install's config rows and live setup conversations, then fold them."""
+    """Read one install's config rows and live setup conversations, then fold them.
+
+    `viewer` hides what an isolated channel keeps from the caller.
+    """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     setup_threads, truncated = await list_active_setup_bindings_for_tenant(
         session, tenant_id=tenant_id, platform=platform
     )
-    return build_answering_map(
+    answering = build_answering_map(
         tenant=tenant_row,
         channels=channel_rows,
         default=default,
         setup_threads=setup_threads,
         setup_threads_truncated=truncated,
     )
+    return answering if viewer is None else hide_across_isolation(answering, viewer)

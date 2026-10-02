@@ -4,13 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from notebook_host.consumed_store import (
-    burn_jti,
-    is_consumed,
-    load_consumed,
-    prune_consumed,
-    save_consumed,
-)
+from notebook_host.consumed_store import burn_jti, load_consumed, prune_consumed, save_consumed
 
 
 def test_load_consumed_returns_empty_when_file_missing(tmp_path: Path) -> None:
@@ -66,10 +60,3 @@ def test_burn_jti_prunes_expired_entries_so_the_file_does_not_grow_without_bound
         "burning a new jti must prune every already-expired entry, not just skip them"
     )
     assert load_consumed(path) == {"fresh": now + 300}
-
-
-def test_is_consumed_reflects_burned_state(tmp_path: Path) -> None:
-    path = tmp_path / "consumed.json"
-    assert is_consumed(path, "j1") is False, "an unburned jti is not consumed"
-    burn_jti(path, "j1", exp=2_000_000_000, now=1_000)
-    assert is_consumed(path, "j1") is True, "a burned jti is consumed"

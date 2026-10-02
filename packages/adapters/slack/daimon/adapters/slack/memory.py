@@ -17,14 +17,13 @@ import anthropic
 import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.channel_isolation import load_channel_isolation
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.scope import ScopeContext
-from daimon.core.stores.agent_memory_stores import get_memory_store_id
-from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.memory_view import (
+    get_channel_memory_store,
+    get_memory_content,
+    list_memory_paths,
+)
 from slack_sdk.errors import SlackApiError
 
 log = structlog.get_logger()
@@ -57,48 +56,6 @@ def _fenced(header: str, content: str, limit: int) -> str:
     return f"{header}\n```\n{content}\n```"
 
 
-async def _resolve_store(
-    runtime: SlackRuntime, *, team_id: str, user_id: str, channel_id: str
-) -> tuple[str, str] | None:
-    """Resolve (agent_name, memory_store_id) for the invoking channel.
-
-    Returns None when the channel has no configured agent, the agent has no
-    memory store yet, or channel isolation hides the agent from this channel.
-    Raises DaimonError when the configured agent doesn't exist on the MA side.
-    Same resolution chain as the Discord /memory command.
-    """
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    async with runtime.sessionmaker() as session:
-        principal = await get_or_create_platform_principal(
-            session, tenant_id=tenant_id, platform="slack", external_id=user_id
-        )
-        scope = ScopeContext(
-            account_id=principal.account_id,
-            tenant_id=tenant_id,
-            channel_id=channel_id,
-        )
-        config = await resolve_config(session, context=scope, default=runtime.deployment_default)
-        isolation = await load_channel_isolation(
-            session, tenant_id=tenant_id, default=runtime.deployment_default
-        )
-    if config.agent_name is None:
-        return None
-    inside = isolation.isolated_channel(channel_id)
-    if not isolation.is_visible(config.agent_name, inside_channel_id=inside):
-        return None
-    agent = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
-    )
-    if agent is None:
-        raise DaimonError(f"Configured agent *{config.agent_name}* not found.")
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
-    async with runtime.sessionmaker() as session:
-        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    if store_id is None:
-        return None
-    return config.agent_name, store_id
-
-
 async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Ephemeral /memory handler.
 
@@ -120,45 +77,35 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         return
 
     try:
-        resolved = await _resolve_store(
-            runtime, team_id=team_id, user_id=user_id, channel_id=channel_id
+        resolved = await get_channel_memory_store(
+            runtime.sessionmaker,
+            runtime.anthropic,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            platform="slack",
+            user_id=user_id,
+            channel_id=channel_id,
+            default=runtime.deployment_default,
         )
         if resolved is None:
             text = _EMPTY
         elif not path_arg:
             agent_name, store_id = resolved
-            paths: list[str] = []
-            page = await runtime.anthropic.beta.memory_stores.memories.list(
-                store_id, path_prefix="/"
-            )
-            async for item in page:
-                if item.type == "memory":
-                    paths.append(item.path)
+            paths = await list_memory_paths(runtime.anthropic, store_id)
             text = (
                 _EMPTY
                 if not paths
                 else _truncate(
                     f"*{agent_name}'s memory* ({len(paths)} files)\n"
-                    + "\n".join(f"• `{p}`" for p in sorted(paths))
+                    + "\n".join(f"• `{p}`" for p in paths)
                 )
             )
         else:
             _agent_name, store_id = resolved
-            mem_id: str | None = None
-            page = await runtime.anthropic.beta.memory_stores.memories.list(
-                store_id, path_prefix="/"
-            )
-            async for item in page:
-                if item.type == "memory" and item.path == path_arg:
-                    mem_id = item.id
-                    break
-            if mem_id is None:
+            content = await get_memory_content(runtime.anthropic, store_id, path_arg)
+            if content is None:
                 text = f"No memory at `{path_arg}`. Run `/memory` to list paths."
             else:
-                mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
-                    mem_id, memory_store_id=store_id, view="full"
-                )
-                text = _fenced(f"*`{path_arg}`*", mem.content or "", _SLACK_LIMIT)
+                text = _fenced(f"*`{path_arg}`*", content, _SLACK_LIMIT)
 
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,

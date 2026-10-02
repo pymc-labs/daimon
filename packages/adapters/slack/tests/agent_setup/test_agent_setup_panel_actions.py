@@ -39,6 +39,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_EXPAND_KEYS,
     ACTION_ISOLATE,
     ACTION_ISOLATE_COPY,
+    ACTION_LIFT_ISOLATION,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
@@ -934,3 +935,18 @@ async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert policy.isolated_channel_ids == (room,)
     assert len(_sent(mock, _VIEWS_UPDATE_KEY)) == 2, "each click refreshes Who answers where"
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(
+            ACTION_LIFT_ISOLATION, meta=_meta(view="routing", channel_id=room), view_id="V_ROUTING"
+        ),
+    )
+    texts = [
+        e["text"] for e in _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    ]
+    assert "no longer private" in texts[2], "lifting says the agent may answer elsewhere"
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert (policy.isolated_channel_ids, policy.sealed_channel_ids) == ((), ()), "all lifted"
+    assert "team-alpha" not in policy.agent_channel_pins, "the copy's pin is lifted"

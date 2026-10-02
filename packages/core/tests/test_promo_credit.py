@@ -16,18 +16,16 @@ from daimon.core.promo_codes import (
     normalize_promo_code,
 )
 from daimon.core.promo_credit import (
-    PROMO_EXPIRY_GRACE,
     REDEEM_FAILURE_LIMIT,
     REDEEM_FAILURE_WINDOW,
     ActiveTimedCredit,
     PromoRedeemed,
     PromoRedeemRefused,
     PromoRedeemResult,
-    PromoSettlement,
     get_active_timed_credit,
     redeem_promo_code,
-    settle_promo_credit,
 )
+from daimon.core.promo_settlement import LATE_SPEND_GRACE, PromoSettlement, settle_promo_credit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import PromoCodeRow, TenantRow
@@ -80,8 +78,10 @@ async def _redeem(
     )
 
 
-def _settled(granted: int, expired: int, usd: str = "0") -> PromoSettlement:
-    return PromoSettlement(granted, expired, Decimal(usd))
+def _settled(
+    granted: int, expired: int, usd: str = "0", restored: int = 0, restored_usd: str = "0"
+) -> PromoSettlement:
+    return PromoSettlement(granted, expired, Decimal(usd), restored, Decimal(restored_usd))
 
 
 async def _ledger(session: AsyncSession, tenant: TenantRow) -> dict[str, Decimal]:
@@ -281,8 +281,8 @@ async def test_overlapping_timed_credit_is_spent_earliest_ending_first(
         "the shorter grant should be spent first"
     )
 
-    after_short = T0 + 6 * H + PROMO_EXPIRY_GRACE
-    after_long = T0 + 10 * H + PROMO_EXPIRY_GRACE
+    after_short = T0 + 6 * H
+    after_long = T0 + 10 * H
     assert await settle_promo_credit(db_session_factory, now=after_short) == _settled(0, 1), (
         "the empty short grant should expire with nothing left"
     )
@@ -369,15 +369,17 @@ async def test_a_row_the_ledger_rejects_does_not_hold_back_settlement(
     )
 
 
-class _FirstSessionFails(async_sessionmaker[AsyncSession]):
-    """Fails the first session it opens, as a dropped connection would."""
+class _SessionFails(async_sessionmaker[AsyncSession]):
+    """Fails the ``fail_on``-th session it opens; the default is a dropped connection."""
 
     opened = 0
+    fail_on = 1
+    error: Exception = OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
 
     def __call__(self, **local_kw: Any) -> AsyncSession:
         self.opened += 1
-        if self.opened == 1:
-            raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+        if self.opened == self.fail_on:
+            raise self.error
         return super().__call__(**local_kw)
 
 
@@ -388,7 +390,7 @@ async def test_expiries_settle_even_when_the_grant_phase_fails(
     tenant = await make_tenant(db_session)
     await _timed(db_session, "EARLYWINDOW", -3, -2)
     await _redeem(db_session_factory, tenant, "EARLYWINDOW", now=T0 - 3 * H)
-    factory = _FirstSessionFails(bind=db_session.bind, expire_on_commit=False)
+    factory = _SessionFails(bind=db_session.bind, expire_on_commit=False)
 
     with pytest.raises(OperationalError):
         await settle_promo_credit(factory, now=T0 + H)
@@ -397,6 +399,30 @@ async def test_expiries_settle_even_when_the_grant_phase_fails(
     assert grant.expired_at is not None, "the closed window should still expire"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
         "the unspent timed credit should be gone"
+    )
+
+
+async def test_reconcile_runs_even_when_the_expiry_phase_fails(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Any error in the expiry phase is raised only after the reconcile has run."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    await settle_promo_credit(db_session_factory, now=T0 + 5 * H)  # expires the $10
+    await _spend(db_session, tenant, "4", at=T0 + 4 * H)
+    await _timed(db_session, "EARLYWINDOW", -3, -2)  # clear of the late spend at 4h
+    await _redeem(db_session_factory, tenant, "EARLYWINDOW", now=T0 - 3 * H)
+    factory = _SessionFails(bind=db_session.bind, expire_on_commit=False)
+    factory.fail_on, factory.error = 2, RuntimeError("expiry phase broke")  # grant, expiry, ...
+
+    with pytest.raises(RuntimeError, match="expiry phase broke"):
+        await settle_promo_credit(factory, now=T0 + 5 * H + LATE_SPEND_GRACE)
+
+    grants = await promo_store.list_timed_grants(db_session, tenant_id=tenant.id)
+    assert sorted(g.expired_at is None for g in grants) == [False, True], (
+        "the early code's expiry should still be due after the failed phase"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
+        "the $4 refund should land while the early code's unexpired $10 stays"
     )
 
 
@@ -416,22 +442,173 @@ async def test_settlement_works_through_every_due_row_in_batches(
     assert settled == _settled(0, 3, "30"), "all three expiries should settle despite limit=2"
 
 
-async def test_expiry_waits_out_the_grace_period_for_late_recorded_spend(
-    db_session: AsyncSession, db_session_factory: Factory
-) -> None:
-    """Spend dated inside the window but written after it closed still draws on the credit."""
+async def _grant_late_spend_code(db_session: AsyncSession, factory: Factory) -> TenantRow:
+    """A tenant holding a granted $10 timed credit for [T0+1h, T0+5h)."""
     tenant = await make_tenant(db_session)
     await _timed(db_session, "LATESPEND", 1, 5)
-    await _redeem(db_session_factory, tenant, "LATESPEND")
-    await settle_promo_credit(db_session_factory, now=T0 + 2 * H)
+    await _redeem(factory, tenant, "LATESPEND")
+    await settle_promo_credit(factory, now=T0 + 2 * H)
+    return tenant
+
+
+async def test_expiry_removes_the_remainder_as_soon_as_the_window_closes(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Post-window spend is paid from ordinary credit only, never from the expired remainder."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10"),
+        reason="manual_credit",
+        idempotency_key="manual:ordinary",
+    )
     closed = T0 + 5 * H
 
-    early = await settle_promo_credit(db_session_factory, now=closed + PROMO_EXPIRY_GRACE / 2)
-    await _spend(db_session, tenant, "4", at=T0 + 4 * H)  # recorded late, dated in the window
-    settled = await settle_promo_credit(db_session_factory, now=closed + PROMO_EXPIRY_GRACE)
+    settled = await settle_promo_credit(db_session_factory, now=closed)
+    balance_after_close = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
+    await _spend(db_session, tenant, "10", at=closed + LATE_SPEND_GRACE / 3)
+    later = await settle_promo_credit(db_session_factory, now=closed + LATE_SPEND_GRACE)
 
-    assert early == _settled(0, 0), "nothing should expire inside the grace period"
-    assert settled == _settled(0, 1, "6"), "only the unspent $6 should expire"
+    assert settled == _settled(0, 1, "10"), "the whole unspent $10 should expire at the close"
+    assert balance_after_close == Decimal("10"), (
+        "right after the close the gates should see only the ordinary $10"
+    )
+    assert later == _settled(0, 0), "spend after the window should not be credited back"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
-        "the late spend should have been paid from the timed credit"
+        "spending the ordinary $10 after the close should leave the tenant at $0, not -$10"
+    )
+
+
+async def test_reconcile_credits_back_late_recorded_spend_inside_the_window(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Spend dated inside the window but recorded after its expiry is paid from the credit."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    code_id = (await promo_store.list_timed_grants(db_session, tenant_id=tenant.id))[
+        0
+    ].promo_code_id
+    closed = T0 + 5 * H
+
+    expired = await settle_promo_credit(db_session_factory, now=closed)
+    await _spend(db_session, tenant, "4", at=T0 + 4 * H)  # recorded late, dated in the window
+    early = await settle_promo_credit(db_session_factory, now=closed + LATE_SPEND_GRACE / 2)
+    reconciled = await settle_promo_credit(db_session_factory, now=closed + LATE_SPEND_GRACE)
+    again = await settle_promo_credit(db_session_factory, now=closed + 2 * LATE_SPEND_GRACE)
+
+    assert expired == _settled(0, 1, "10"), "the $10 should expire when the window closes"
+    assert early == _settled(0, 0), "nothing should be reconciled inside the grace period"
+    assert reconciled == _settled(0, 0, restored=1, restored_usd="4"), (
+        "the $4 of late spend should be credited back"
+    )
+    assert again == _settled(0, 0), "a reconciled grant should not be credited again"
+    assert (await _ledger(db_session, tenant))[f"promo_expiry_refund:{code_id}:{tenant.id}"] == (
+        Decimal("4")
+    ), "the refund entry should carry the $4"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
+        "the late spend should end up paid from the timed credit"
+    )
+
+
+async def test_reconcile_restores_at_most_what_the_expiry_removed(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Late spend beyond the credit stays ordinary spend: the refund is capped at the expiry."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    closed = T0 + 5 * H
+
+    await settle_promo_credit(db_session_factory, now=closed)
+    await _spend(db_session, tenant, "12", at=T0 + 4 * H)
+    reconciled = await settle_promo_credit(db_session_factory, now=closed + LATE_SPEND_GRACE)
+
+    assert reconciled == _settled(0, 0, restored=1, restored_usd="10"), (
+        "only the $10 the expiry removed should come back"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-2"), (
+        "the $2 beyond the credit should stay on the balance"
+    )
+
+
+async def test_spend_recorded_after_the_grace_period_stays_ordinary_spend(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Once a grant is reconciled, even later spend dated inside its window is not refunded."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    closed = T0 + 5 * H
+
+    await settle_promo_credit(db_session_factory, now=closed + LATE_SPEND_GRACE)
+    await _spend(db_session, tenant, "4", at=T0 + 4 * H)
+    later = await settle_promo_credit(db_session_factory, now=closed + 2 * LATE_SPEND_GRACE)
+
+    assert later == _settled(0, 0), "a reconciled grant should not be revisited"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-4"), (
+        "spend recorded after the grace period should count as ordinary spend"
+    )
+
+
+async def test_reconcile_with_overlapping_credit_restores_each_grant_once(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Late spend refunds the earlier-ending grant; spend after its reconcile stays ordinary."""
+    tenant = await make_tenant(db_session)
+    long = await _timed(db_session, "LONGER", 0, 10)
+    short = await _timed(db_session, "SHORT1", 2, 6)
+    await _redeem(db_session_factory, tenant, "LONGER")
+    await _redeem(db_session_factory, tenant, "SHORT1")
+    await settle_promo_credit(db_session_factory, now=T0 + 2 * H)
+    await _spend(db_session, tenant, "3", T0 + 3 * H)
+
+    at_short_close = await settle_promo_credit(db_session_factory, now=T0 + 6 * H)
+    await _spend(db_session, tenant, "5", T0 + 5 * H)  # recorded late, inside both windows
+    reconciled = await settle_promo_credit(db_session_factory, now=T0 + 6 * H + LATE_SPEND_GRACE)
+    await _spend(db_session, tenant, "1", T0 + 5 * H)  # recorded after the short reconcile
+    at_long_close = await settle_promo_credit(db_session_factory, now=T0 + 10 * H)
+
+    assert at_short_close == _settled(0, 1, "7"), "the short grant should expire its $7 left"
+    assert reconciled == _settled(0, 0, restored=1, restored_usd="5"), (
+        "the late $5 should be refunded to the short grant, which ends first"
+    )
+    assert at_long_close == _settled(0, 1, "10"), (
+        "spend after the short reconcile stays on the short grant, so the long one keeps $10"
+    )
+    ledger = await _ledger(db_session, tenant)
+    assert f"promo_expiry_refund:{long.id}:{tenant.id}" not in ledger, (
+        "the long grant should never be refunded"
+    )
+    assert ledger[f"promo_expiry_refund:{short.id}:{tenant.id}"] == Decimal("5"), (
+        "the short grant should be refunded exactly once"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-1"), (
+        "only the $1 recorded after the reconcile should be ordinary spend"
+    )
+
+
+@pytest.mark.fresh_schema  # drops a CHECK to plant a row the ledger rejects
+async def test_a_rejected_row_in_a_full_batch_is_passed_over_by_the_next(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """A full batch of rejected rows is excluded from the next, which reaches the good row."""
+    await db_session.execute(
+        text("ALTER TABLE promo_codes DROP CONSTRAINT ck_promo_codes_amount_range")
+    )
+    huge = await promo_store.insert_promo_code(
+        db_session,
+        code_hash=hash_promo_code(normalize_promo_code("HUGEAMOUNT")),
+        terms=_terms("9999999999", start=-1, end=5),
+    )
+    assert huge is not None, "the unchecked insert should succeed"
+    await _timed(db_session, "GOODGRANT", 0, 5)
+    first, second = await make_tenant(db_session), await make_tenant(db_session)
+    for tenant, code in ((first, "HUGEAMOUNT"), (second, "HUGEAMOUNT"), (first, "GOODGRANT")):
+        result = await _redeem(db_session_factory, tenant, code, now=T0 - 2 * H)
+        assert isinstance(result, PromoRedeemed), f"{code} should redeem"
+
+    settled = await settle_promo_credit(db_session_factory, now=T0 + H, limit=2)
+
+    assert settled == _settled(1, 0), "the batch after the rejected rows should grant the good one"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=first.id) == 10, (
+        "only the good $10 grant should reach the ledger"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=second.id) == 0, (
+        "the rejected grant should credit nothing"
     )

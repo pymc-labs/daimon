@@ -1,51 +1,17 @@
 """RoutinesPanelState — per-modal state for /routines.
 
-Pure logic only: a glyph reducer and two frozen dataclasses.
-No I/O, no clock, no DB, no slack_sdk.
-
-Port of discord/routines_panel/state.py with the theme-color tuple dropped
-(Slack uses emoji + text, not embed accent colors).
+Pure logic only: two frozen dataclasses. The glyph and label rules live in
+``daimon.core.routines``, shared with the other chat panels.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal
 
+from daimon.core.routines import Glyph
 from daimon.core.stores.domain import RoutineRow
 
-__all__ = [
-    "Glyph",
-    "RoutineEntry",
-    "RoutinesPanelState",
-    "derive_glyph",
-    "picker_label",
-]
-
-Glyph = Literal["⏸", "⏳", "❌", "✅"]
-
-
-def derive_glyph(row: RoutineRow) -> Glyph:
-    """Single-glyph precedence: Paused > Never-run > Error > Success.
-
-    ``record_result`` clears ``last_error`` on success, so
-    ``last_error is not None`` always reflects the most recent run.
-    """
-    if not row.enabled:
-        return "⏸"
-    if row.last_fired_at is None:
-        return "⏳"
-    if row.last_error is not None:
-        return "❌"
-    return "✅"
-
-
-def picker_label(row: RoutineRow) -> str:
-    """Picker label: trigger_message[:60] or a hex-id fallback for blank messages."""
-    stripped = row.trigger_message.strip()
-    if not stripped:
-        return f"routine {row.id.hex[:8]}"
-    return stripped[:60]
+__all__ = ["RoutineEntry", "RoutinesPanelState"]
 
 
 @dataclasses.dataclass(frozen=True)

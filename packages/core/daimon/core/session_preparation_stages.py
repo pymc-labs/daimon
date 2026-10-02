@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -90,6 +91,9 @@ class WorkspaceTransfer(Protocol):
     `unsaved_work` is the caller's standing answer about uncommitted changes in
     a mounted repository, read off their mapping row. None means they were
     never asked, which carries the same meaning as `"copy"`: capture the work.
+
+    `before_send` is the caller's last access decision, run right before a
+    checkpoint message is sent into the old session.
     """
 
     async def __call__(
@@ -103,6 +107,7 @@ class WorkspaceTransfer(Protocol):
         destination_agent_name: str,
         requested_work: str | None,
         unsaved_work: UnsavedWorkChoice | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> PreparedReplacement: ...
 
 

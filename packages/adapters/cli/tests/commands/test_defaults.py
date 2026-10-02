@@ -38,6 +38,7 @@ def test_format_report_json_emits_kind_bucket_lists() -> None:
     parsed = json.loads(buf.getvalue())
     assert parsed["agents"][0]["name"] == "coder"
     assert parsed["environments"][0]["action"] == "skipped"
+    assert "refusal" not in parsed["agents"][0], "an unset refusal leaves the JSON unchanged"
 
 
 def test_format_report_table_shows_summary_footer() -> None:

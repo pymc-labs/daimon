@@ -14,13 +14,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import set_turn_cap
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -31,14 +32,12 @@ def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     max_concurrent_turns_per_tenant: int = 3,
-    per_caller_thread_sessions: bool = False,
 ) -> DiscordRuntime:
     settings = MagicMock()
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
-    discord_settings.per_caller_thread_sessions = per_caller_thread_sessions
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
@@ -1291,13 +1290,9 @@ class _AsyncIter:
 
 
 class TestPerCallerSessionKeying:
-    """Per-(thread,account) session keying with flag-gated sentinel.
-
-    Flag ON:  get_live_thread_session + both create_thread_session calls use
-              session_account_id=principal.account_id → distinct callers get
-              distinct sessions.
-    Flag OFF: all callers in one thread share the deterministic legacy sentinel →
-              single session per thread, identical to pre-88-04 behavior.
+    """Per-(thread,account) session keying: get_live_thread_session and both
+    create_thread_session calls use session_account_id=principal.account_id, so
+    distinct callers get distinct sessions.
     """
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -1350,7 +1345,7 @@ class TestPerCallerSessionKeying:
 
         # Admin caller (external_id=111) starts the thread: create_session fires, row inserted.
         mock_create_session.return_value = ma_session(id="sess-admin-starter")
-        runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=True)
+        runtime = _make_runtime(db_session_factory)
         bot = make_bot(runtime)
 
         admin_member = MagicMock(spec=discord.Member)
@@ -1512,7 +1507,7 @@ class TestPerCallerSessionKeying:
             ma_session(id="sess-recreated"),
         ]
 
-        runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=True)
+        runtime = _make_runtime(db_session_factory)
         bot = make_bot(runtime)
 
         caller = MagicMock(spec=discord.Member)
@@ -1558,133 +1553,11 @@ class TestPerCallerSessionKeying:
             "recreated row must reference the new MA session, not the dead one"
         )
 
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_legacy_flag_off_reuses_single_session_per_thread(
-        self,
-        mock_resolve_config: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_context_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Flag OFF: two distinct callers in one thread reuse the SAME session —
-        the deterministic legacy sentinel makes every caller use the same lookup key,
-        preserving pre-88-04 behavior exactly.
-        """
-        from daimon.core.defaults.provisioning import provision_tenant
-
-        guild_id = "802000003"
-        thread_id = 8020003
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
-
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-        mock_build_context_xml.return_value = ("<context></context>", [])
-        mock_create_session.return_value = ma_session(id="sess-legacy-shared")
-
-        # Flag OFF → legacy single-session-per-thread.
-        runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=False)
-        bot = make_bot(runtime)
-
-        # First caller (external_id=444) starts the thread.
-        caller_a = MagicMock(spec=discord.Member)
-        caller_a.bot = False
-        caller_a.id = 444
-        caller_a.guild_permissions = MagicMock()
-        caller_a.guild_permissions.manage_guild = False
-        caller_a.guild_permissions.administrator = False
-
-        message_a = _make_thread_message_for_bot(
-            guild_id=int(guild_id), thread_id=thread_id, author=caller_a
-        )
-        await bot.on_message(message_a)
-
-        # Second DISTINCT caller (external_id=555) mentions in the same thread.
-        caller_b = MagicMock(spec=discord.Member)
-        caller_b.bot = False
-        caller_b.id = 555  # DISTINCT from 444
-        caller_b.guild_permissions = MagicMock()
-        caller_b.guild_permissions.manage_guild = False
-        caller_b.guild_permissions.administrator = False
-
-        message_b = _make_thread_message_for_bot(
-            guild_id=int(guild_id), thread_id=thread_id, author=caller_b
-        )
-        await bot.on_message(message_b)
-
-        # With flag OFF, only one session must have been created (the second turn reuses it).
-        assert mock_create_session.call_count == 1, (
-            "flag OFF: two distinct callers in the same thread must reuse ONE session "
-            "(the legacy (tenant,platform,thread) key is shared via the deterministic sentinel); "
-            f"got {mock_create_session.call_count} create_session calls"
-        )
-
-    async def test_legacy_sentinel_never_matches_a_real_account_id(
-        self,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """The OFF-path legacy sentinel uuid5 is collision-proof: it is never equal
-        to any real account.id row in the DB (accounts use random uuid4 from Account()).
-
-        This guarantees the sentinel cannot accidentally match a real caller's account,
-        which would break the OFF→ON migration invariant (W1).
-        """
-        from daimon.core.stores.accounts import account_exists
-
-        # Compute the sentinel formula for an arbitrary (tenant_id, thread_id).
-        tenant_id = uuid.uuid4()
-        thread_id = 99999
-
-        sentinel = uuid.uuid5(uuid.NAMESPACE_URL, f"legacy-thread-sentinel:{tenant_id}:{thread_id}")
-
-        # Insert a couple of real accounts and confirm the sentinel is not among them.
-        async with db_session_factory() as s:
-            from daimon.testing.factories import make_account, make_tenant
-
-            tenant = await make_tenant(s)
-            acct1 = await make_account(s, tenant=tenant)
-            acct2 = await make_account(s, tenant=tenant)
-            await s.commit()
-
-        real_ids = {acct1.id, acct2.id}
-        assert sentinel not in real_ids, (
-            f"legacy sentinel {sentinel} must never equal any real account uuid4; "
-            f"real ids: {real_ids}"
-        )
-
-        # Also assert via the DB that the sentinel account does not exist.
-        async with db_session_factory() as s:
-            sentinel_exists = await account_exists(s, account_id=sentinel)
-        assert not sentinel_exists, (
-            f"legacy sentinel {sentinel} must not exist as an accounts row — "
-            "it is a uuid5 derived from NAMESPACE_URL, accounts use uuid4 (W1)"
-        )
-
 
 class TestPerTurnRoleUpsert:
     """Per-turn unconditional account.role upsert from Discord admin perms.
 
-    The role write runs BEFORE run_turn and is NOT gated by per_caller_thread_sessions.
+    The role write runs BEFORE run_turn.
     It targets only the platform-principal's account — never CLI/operator accounts (T-88-04-03).
     """
 
@@ -1920,84 +1793,6 @@ class TestPerTurnRoleUpsert:
             "CLI/operator admin account must NOT be downgraded by a non-admin Discord turn "
             "(the role write targets only the platform-principal's account, T-88-04-03); "
             f"got: {cli_account.role!r}"
-        )
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_role_upsert_runs_with_flag_off(
-        self,
-        mock_resolve_config: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """The role upsert is UNCONDITIONAL — it fires even when per_caller_thread_sessions=False
-        (the session-keying flag). The role write and the session-keying flag are decoupled (B4).
-        """
-        from daimon.core.defaults.provisioning import provision_tenant
-        from daimon.core.ma_identity import derive_tenant_uuid
-        from daimon.core.stores.accounts import get_account
-        from daimon.core.stores.domain import Role
-        from daimon.core.stores.identity import get_or_create_platform_principal
-
-        guild_id = "803000004"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
-        mock_create_session.return_value = ma_session(id="sess-role-flag-off")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        # Flag OFF — session keying falls back to legacy, but role write must still fire.
-        runtime = _make_runtime(db_session_factory, per_caller_thread_sessions=False)
-        bot = make_bot(runtime)
-
-        admin_member = MagicMock(spec=discord.Member)
-        admin_member.bot = False
-        admin_member.id = 604
-        admin_member.guild_permissions = MagicMock()
-        admin_member.guild_permissions.manage_guild = True
-        admin_member.guild_permissions.administrator = False
-
-        message = _make_channel_message(
-            guild_id=int(guild_id), channel_id=6040, author=admin_member
-        )
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 60400
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        await bot.on_message(message)
-
-        async with db_session_factory() as s:
-            principal = await get_or_create_platform_principal(
-                s, tenant_id=tenant_id, platform="discord", external_id="604"
-            )
-            await s.commit()
-
-        async with db_session_factory() as s:
-            account = await get_account(s, principal.account_id)
-        assert account is not None, "account must exist after turn"
-        assert account.role == Role.ADMIN, (
-            "role upsert must fire even when per_caller_thread_sessions=False (B4 decoupling); "
-            f"got: {account.role!r}"
         )
 
 

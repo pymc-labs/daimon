@@ -22,7 +22,7 @@ from anthropic.types.beta import FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
-from daimon.core.env_file import serialize_env_file
+from daimon.core.env_file import env_row_skip_reason, serialize_env_file
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
@@ -43,8 +43,27 @@ def assemble_env_bytes(rows: list[AgentFileRow]) -> bytes:
     bytes are hashed into the fingerprint session compatibility diffs, so
     quoting values that never needed it would invalidate every live agent's
     mounted `.env` at once.
+
+    A row whose name is hard-denied — stored before that rule existed, or by an
+    admin who set `DATABASE_URL` and the like — or whose value holds a NUL is
+    left out and logged by name: the file is `source`d in the sandbox, so
+    exporting `LD_PRELOAD`, `BASH_ENV` or `TAR_OPTIONS` set by any member would
+    run their code in every later turn. This is the hard-deny layer only, so an
+    admin-set ordinary name such as `DATABASE_URL` still mounts.
     """
-    return serialize_env_file([(row.key, row.content) for row in rows])
+    kept: list[tuple[str, str]] = []
+    for row in rows:
+        problem = env_row_skip_reason(row.key, row.content)
+        if problem is not None:
+            _log.warning(
+                "credential_env.row_skipped",
+                agent_id=str(row.agent_id),
+                key=row.key,
+                reason=problem,
+            )
+            continue
+        kept.append((row.key, row.content))
+    return serialize_env_file(kept)
 
 
 async def upload_env_file(

@@ -62,7 +62,7 @@ async def resolve_skill_names(
     entries: list[str | BetaManagedAgentsSkillParams],
     *,
     tenant_id: uuid.UUID,
-    is_owner_hidden: Callable[[str], bool] | None = None,
+    is_skill_hidden: Callable[[str, str], bool] | None = None,
 ) -> list[BetaManagedAgentsSkillParams]:
     """Resolve a mixed list of skill names and skill-param dicts.
 
@@ -84,14 +84,14 @@ async def resolve_skill_names(
     cross-tenant title leak). The available list is fetched only when at
     least one name failed to resolve.
 
-    ``is_owner_hidden`` names agents whose own skills (``agent/name``) the
-    caller may not see: those resolve as missing and are left out of the
-    available list, so another channel's skills are never revealed.
+    ``is_skill_hidden(skill_id, title_body)`` names skills the caller may not
+    see: those resolve as missing and are left out of the available list, so
+    another channel's skills are never revealed.
     """
 
-    def hidden(body: str) -> bool:
-        owner, _, rest = body.partition("/")
-        return bool(rest) and is_owner_hidden is not None and is_owner_hidden(owner)
+    def hidden(skill_id: str, display_title: str | None) -> bool:
+        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=display_title or "")
+        return is_skill_hidden is not None and body is not None and is_skill_hidden(skill_id, body)
 
     resolved: list[BetaManagedAgentsSkillParams] = []
     unresolved: list[str] = []
@@ -99,12 +99,9 @@ async def resolve_skill_names(
 
     for entry in entries:
         if isinstance(entry, str):
-            if hidden(entry):
-                unresolved.append(entry)
-                continue
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=entry)
             sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
-            if sk is None:
+            if sk is None or hidden(sk.id, sk.display_title):
                 unresolved.append(entry)
                 continue
             resolved.append({"type": "custom", "skill_id": sk.id})
@@ -130,7 +127,7 @@ async def resolve_skill_names(
         for sk in rows:
             if sk.source == "custom" and sk.display_title is not None:
                 bare = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title)
-                if bare is not None and not hidden(bare):
+                if bare is not None and not hidden(sk.id, sk.display_title):
                     available.append(bare)
             elif sk.source == "anthropic" and sk.display_title is not None:
                 available.append(sk.display_title)

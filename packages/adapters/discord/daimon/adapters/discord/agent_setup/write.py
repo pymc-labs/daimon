@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core import agent_lifecycle
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -24,10 +23,9 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_skills_lenient,
 )
-from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
-    build_metadata,
+    MA_METADATA_KEY_NAME,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
@@ -36,31 +34,23 @@ from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import (
     build_multifernet,
-    get_github_login,
     get_pat,
     upsert_credential_encrypted,
 )
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import SyncReport, sync_agent_skills
 from daimon.core.specs import (
     AgentSpec,
     SkillRepo,
     build_authoring_params,
     dump_agent_spec,
-    merge_default_agent_toolset,
 )
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
 
 from .state import PanelState, RosterEntry
 
 _log = structlog.get_logger()
-
-_FORK_COPY_FIELDS: Final = frozenset(
-    {"name", "model", "description", "system", "tools", "mcp_servers", "skills", "metadata"}
-)
 
 if TYPE_CHECKING:
     from cryptography.fernet import MultiFernet
@@ -76,13 +66,6 @@ def validate_model_id(model: str) -> str | None:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
         return f"Model `{model}` is not allowed. Choose one of: {allowed}"
     return None
-
-
-def mask_tail(secret: str) -> str:
-    """Display-only mask. Never call from a logger that records `secret` plain."""
-    if len(secret) < 4:
-        return "****"
-    return f"****{secret[-4:]}"
 
 
 def _build_roster_entry(
@@ -144,7 +127,13 @@ def _build_roster_entry(
         )
     except ValidationError as err:
         raise DaimonError(f"Cannot rebuild AgentSpec for {agent.name!r}: {err}") from err
-    return RosterEntry(name=agent.name, model=agent.model.id, spec=spec, ma_agent_id=str(agent.id))
+    return RosterEntry(
+        name=agent.name,
+        model=agent.model.id,
+        spec=spec,
+        ma_agent_id=str(agent.id),
+        routing_name=str((agent.metadata or {}).get(MA_METADATA_KEY_NAME) or ""),
+    )
 
 
 async def _build_custom_skill_title_map(
@@ -208,26 +197,6 @@ async def load_tenant_roster(
         is_system = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
         out.append(dataclasses.replace(entry, is_system=is_system))
     return out
-
-
-async def load_selected_github_login(
-    runtime: DiscordRuntime, *, tenant_id: uuid.UUID, entry: RosterEntry | None
-) -> str | None:
-    """Return the GitHub login linked to ``entry``'s agent, or None.
-
-    Reads the per-agent overlay (overlay-only — no principal-default
-    bleed). Display only: the token is never read or decrypted. None when
-    nothing is selected, the agent isn't created yet (New/Fork), or no
-    credential is linked for that agent.
-    """
-    if entry is None or not entry.ma_agent_id:
-        return None
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=entry.ma_agent_id)
-    return await get_github_login(
-        principal_id=agent_uuid,
-        agent_id=agent_uuid,
-        sessionmaker=runtime.sessionmaker,
-    )
 
 
 async def load_agent_inline_pat(runtime: DiscordRuntime, *, agent_id: uuid.UUID) -> str | None:
@@ -398,113 +367,6 @@ async def create_blank_agent(
     )
 
 
-async def fork_agent(
-    runtime: DiscordRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    source_spec: AgentSpec,
-    new_name: str,
-    account_id: uuid.UUID,
-) -> None:
-    """Create a new MA agent seeded from `source_spec`'s MA agent.
-
-    Direct `agents.create` — does NOT route through reconcile. Reconcile's
-    name-as-identity semantics turn a second fork-with-same-name into a SKIPPED
-    no-op (or worse, an UPDATE of the existing copy), which is the opposite of
-    what fork means. Mirrors the CLI's `agents fork` path.
-
-    Rejects if `new_name` exists ANYWHERE in this tenant, regardless of owner —
-    agent names are tenant-wide identity. Reconcile dedup and the resolver key
-    on (tenant, name) only, so a same-name agent from any owner would collide
-    at the identity layer.
-    """
-    collisions = await find_agents_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=new_name
-    )
-    if collisions:
-        raise DaimonError(
-            f"This server already has an agent named **{new_name}**. Pick a different name."
-        )
-
-    source = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=source_spec.name
-    )
-    if source is None:
-        raise DaimonError(f"Source agent {source_spec.name!r} not found on MA.")
-    source_ma = await runtime.anthropic.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params: dict[str, object] = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
-    fork_params["name"] = new_name
-    fork_params["metadata"] = build_metadata(
-        tenant_id=tenant_id, name=new_name, account_id=account_id
-    )
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        public_url,
-    )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    # A fork starts with no credentials (see strip_credentialed_mcp_servers).
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
-        sessionmaker=runtime.sessionmaker,
-        tenant_id=tenant_id,
-        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
-        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
-        tools=fork_params.get("tools"),  # type: ignore[arg-type]
-    )
-    fork_params["mcp_servers"] = servers
-    fork_params["tools"] = tools
-    await runtime.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
-
-
-async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
-    """Archive the MA agent matching `name` under the given tenant.
-
-    Channel and server scope rows naming the agent are cleared as part of the
-    delete, so turn resolution falls through the cascade instead of resolving to
-    a deleted agent.
-    """
-    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
-    if agent is None:
-        raise DaimonError(f"No agent named **{name}** found.")
-    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-        # Server-side refusal. The panel disables Delete for a seeded agent
-        # (is_system on the roster entry), but a stale or re-fired view
-        # interaction reaches this function anyway — and archiving here would
-        # take the deployment's built-in agent and its memory store with it.
-        raise DaimonError(
-            f"**{name}** is a built-in agent and cannot be deleted. "
-            "Fork it first, then delete the fork."
-        )
-    await runtime.anthropic.beta.agents.archive(agent.id)
-    await agent_lifecycle.archive_memory_store_best_effort(
-        anthropic=runtime.anthropic,
-        sessionmaker=runtime.sessionmaker,
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-        log_context={"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id},
-    )
-    # After the MA archive, never before: a failure here leaves an archived
-    # agent with stale scope rows rather than a live agent with cleared ones.
-    # Deliberately unguarded — a failure must reach the callback's error
-    # boundary rather than degrade silently.
-    async with runtime.sessionmaker.begin() as session:
-        await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
-
-
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:
     """Build a MultiFernet from `runtime.settings.crypto.keys`."""
     keys = tuple(secret.get_secret_value() for secret in runtime.settings.crypto.keys)
@@ -540,7 +402,7 @@ async def store_inline_pat(
     )
     async with runtime.sessionmaker.begin() as session:
         await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
-    _log.info("repo_auth.pat_stored", masked=mask_tail(plaintext_pat))
+    _log.info("repo_auth.pat_stored")
     return f"inline-pat:{agent_id}"
 
 

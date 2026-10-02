@@ -20,6 +20,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.core.context_prompt import TurnContext
 from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
@@ -85,9 +86,14 @@ class TurnObservation:
 
     @contextmanager
     def activate(self) -> Iterator[None]:
+        nested = current_outcome.get() is self
         token = current_outcome.set(self)
         try:
-            yield
+            if nested:
+                yield
+            else:
+                with track_turn(self.tenant_id):
+                    yield
         finally:
             current_outcome.reset(token)
 

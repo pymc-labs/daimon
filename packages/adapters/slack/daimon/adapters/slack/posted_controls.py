@@ -17,18 +17,14 @@ one; there is nothing to edit and nothing to report.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
 
 import structlog
 from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_requests import split_skill_repo_target
-from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.posted_controls import (
-    CardKind,
     CardState,
     RefusalReason,
     build_card_blocks,
-    build_posted_card,
+    card_for_request,
     card_notification_text,
 )
 from daimon.core.stores.domain import CredentialRequestRow
@@ -39,20 +35,6 @@ __all__ = ["edit_posted_card"]
 
 log = structlog.get_logger()
 
-_REPO_KINDS: frozenset[str] = frozenset({"repo", "skill_repo"})
-
-
-def _repo_and_branch(row: CredentialRequestRow) -> tuple[str | None, str | None]:
-    """`(owner/repo, branch)` for the two repo kinds, `(None, None)` otherwise.
-
-    The repo kinds pack `repo_url@branch#path` into the row's `target`, which
-    is the only record of the branch the card was posted for.
-    """
-    if row.kind not in _REPO_KINDS:
-        return None, None
-    repo_url, branch, _ = split_skill_repo_target(row.target)
-    return normalize_owner_repo(repo_url), branch
-
 
 async def edit_posted_card(
     client: AsyncWebClient,
@@ -62,6 +44,7 @@ async def edit_posted_card(
     outcome: ConfigurationChange | None = None,
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
+    replaces: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -75,22 +58,13 @@ async def edit_posted_card(
     """
     if row.posted_message_id is None:
         return
-    repo, branch = _repo_and_branch(row)
-    card = build_posted_card(
-        kind=cast("CardKind", row.kind),
+    card = card_for_request(
+        row,
         state=state,
-        agent_name=row.target_name or "the agent",
-        responder_name=row.responder_name or "Daimon",
-        target=row.target,
-        requester_platform_user_id=row.requester_platform_user_id,
-        expires_at=row.expires_at,
-        token=row.token,
-        mcp_server_url=row.mcp_server_url,
-        repo=repo,
-        branch=branch,
         outcome=outcome,
         refusal=refusal,
         refusal_lines=refusal_lines,
+        replaces=replaces,
     )
     try:
         await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
