@@ -17,6 +17,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.termination import TerminationReason, denial_termination_reason
 from fastmcp import Context
@@ -24,6 +25,9 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
+
+# How MCP refusals name the tenant, matching the invoker allowlist refusal below.
+_REFUSAL_NOUNS = RefusalNouns(scope="workspace", admin="a workspace admin", billing="/billing")
 
 
 async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFunction]
@@ -326,10 +330,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             gate="cap",
         )
         refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
-        raise ToolError(
-            "TERMINAL ERROR: Monthly usage cap reached for this guild. "
-            "An admin can adjust the cap with /billing."
-        )
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _REFUSAL_NOUNS)}")
 
     if await is_over_channel_budget(
         sessionmaker=sessionmaker,

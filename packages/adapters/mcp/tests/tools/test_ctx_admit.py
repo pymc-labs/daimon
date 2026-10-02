@@ -336,3 +336,20 @@ async def test_a_refused_turn_records_which_gate_refused_it(
     async with sessionmaker() as session:
         rows = await list_for_tenant(session, auth.tenant_id)
     assert [row.reason for row in rows] == [expected], "the refusal is recorded under its gate"
+
+
+async def test_admit_over_the_cap_says_the_cap_is_the_callers_and_an_operator_raises_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform_user_id="u1"
+    )
+    with (
+        _BALANCE_OK,
+        patch("daimon.adapters.mcp.tools._ctx.is_over_cap", new=AsyncMock(return_value=True)),
+        pytest.raises(ToolError) as refused,
+    ):
+        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+    assert str(refused.value) == (
+        "TERMINAL ERROR: You've reached your monthly usage cap. An operator can raise it."
+    ), "the MCP refusal uses the shared cap wording"
