@@ -963,6 +963,7 @@ class TestSetupHook:
 
         # Stub remaining Cogs via sys.modules to keep the test merge-order-independent.
         mock_help_cog = MagicMock()
+        mock_here_cog = MagicMock()
         mock_agent_setup_cog = MagicMock()
         mock_routines_cog = MagicMock()
         mock_billing_cog = MagicMock()
@@ -971,6 +972,8 @@ class TestSetupHook:
 
         help_mod = types.ModuleType("daimon.adapters.discord.commands.help")
         help_mod.HelpCog = mock_help_cog  # type: ignore[attr-defined]
+        here_mod = types.ModuleType("daimon.adapters.discord.commands.here")
+        here_mod.HereCog = mock_here_cog  # type: ignore[attr-defined]
         agent_setup_mod = types.ModuleType("daimon.adapters.discord.commands.agent_setup")
         agent_setup_mod.AgentSetupCog = mock_agent_setup_cog  # type: ignore[attr-defined]
         routines_mod = types.ModuleType("daimon.adapters.discord.commands.routines")
@@ -1002,6 +1005,7 @@ class TestSetupHook:
             "sys.modules",
             {
                 "daimon.adapters.discord.commands.help": help_mod,
+                "daimon.adapters.discord.commands.here": here_mod,
                 "daimon.adapters.discord.commands.agent_setup": agent_setup_mod,
                 "daimon.adapters.discord.commands.routines": routines_mod,
                 "daimon.adapters.discord.commands.billing": billing_mod,
@@ -1012,9 +1016,10 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
+        assert len(add_cog_calls) == 9, "setup_hook should add exactly 9 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
+        mock_here_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)
         mock_billing_cog.assert_called_once_with(bot)
