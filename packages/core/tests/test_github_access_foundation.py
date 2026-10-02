@@ -62,6 +62,13 @@ def test_group_access_splits_profiles_and_batches() -> None:
     assert groups[0][2][0] == 1 and groups[1][2] == (501,)
 
 
+def test_group_access_uses_write_for_duplicate_repo() -> None:
+    groups = group_repository_access(
+        [(9, 101, "read"), (9, 101, "write"), (9, 101, "read"), (9, 102, "read")]
+    )
+    assert groups == [(9, "write", (101,)), (9, "read", (102,))]
+
+
 @pytest.mark.asyncio
 async def test_mint_rejects_empty_ids_before_http() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -69,7 +76,28 @@ async def test_mint_rejects_empty_ids_before_http() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ValueError):
-            await mint_installation_token(client, jwt="jwt", installation_id=9, repository_ids=[])
+            await mint_installation_token(
+                client, jwt="jwt", installation_id=9, repository_ids=[], profile="read"
+            )
+
+
+@pytest.mark.asyncio
+async def test_id_mint_requires_profile_before_http() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("unprofiled ID mint reached GitHub")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError):
+            await mint_installation_token(client, jwt="jwt", installation_id=9, repository_ids=[10])
+        with pytest.raises(ValueError):
+            await mint_installation_token(
+                client,
+                jwt="jwt",
+                installation_id=9,
+                repository_ids=[10],
+                profile="read",
+                permissions={"contents": "write"},
+            )
 
 
 @pytest.mark.asyncio
@@ -86,12 +114,17 @@ async def test_mint_uses_repository_ids() -> None:
             jwt="jwt",
             installation_id=9,
             repository_ids=[10, 11],
-            permissions={"contents": "read"},
+            profile="read",
         )
     assert token == "issued"
     assert json.loads(requests[0].content) == {
         "repository_ids": [10, 11],
-        "permissions": {"contents": "read"},
+        "permissions": {
+            "metadata": "read",
+            "contents": "read",
+            "issues": "read",
+            "pull_requests": "read",
+        },
     }
 
 
@@ -186,5 +219,39 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
         kind=GITHUB_TOKEN_MINT,
         outcome="allowed",
         reason="issued",
+        token_id=row.token_id,
+        session_id="session",
+        installation_id=909,
+        repo_ids=[101],
+        permissions={"contents": "read"},
+        expires_at=row.expires_at,
     )
     assert event is not None and event.operation == "github_token_mint"
+    assert event.github_token_id == row.token_id
+    assert event.github_session_id == "session"
+    assert event.github_installation_id == 909
+    assert event.github_repo_ids == [101]
+    assert event.github_permissions == {"contents": "read"}
+    assert event.github_expires_at == row.expires_at
+
+    await github_issued_tokens.record_revoke_attempt(db_session, token_id=row.token_id)
+    revoked = await github_issued_tokens.mark_revoked(db_session, token_id=row.token_id)
+    again = await github_issued_tokens.mark_revoked(db_session, token_id=row.token_id)
+    assert revoked.revoked_at == again.revoked_at
+    assert revoked.revoke_attempts == again.revoke_attempts == 1
+
+    pending = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        session_id="pending-session",
+        installation_id=909,
+        repo_ids=[101],
+        permissions={"contents": "read"},
+        grant_versions={"grant:101": 1, "authorization:101": 2},
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    closed = await github_issued_tokens.mark_revoked(db_session, token_id=pending.token_id)
+    closed_again = await github_issued_tokens.mark_revoked(db_session, token_id=pending.token_id)
+    assert closed.status == "revoked" and closed.encrypted_token is None
+    assert closed_again.revoked_at == closed.revoked_at

@@ -42,6 +42,12 @@ class SecurityAuditEntry(BaseModel):
     """Keyed HMAC-SHA256 of the text an edit or delete replaced; never the text."""
     turn_ref: str | None = None
     """The turn a tidy action ran in: ``origin:<id>`` or ``token:<jti>``."""
+    github_token_id: uuid.UUID | None = None
+    github_session_id: str | None = None
+    github_installation_id: int | None = None
+    github_repo_ids: list[int] | None = None
+    github_permissions: dict[str, str] | None = None
+    github_expires_at: datetime | None = None
 
 
 class SecurityAuditRow(SecurityAuditEntry):
@@ -57,8 +63,14 @@ async def append_github_token_event(
     kind: GitHubTokenAuditKind,
     outcome: Literal["allowed", "denied", "error"],
     reason: str,
+    token_id: uuid.UUID,
+    session_id: str,
+    installation_id: int,
+    repo_ids: list[int],
+    permissions: dict[str, str],
+    expires_at: datetime,
 ) -> SecurityAuditRow | None:
-    """Audit a token lifecycle step without recording the token or repo names."""
+    """Audit a token lifecycle step without recording the secret or repo names."""
     return await append_event(
         session,
         tenant_id=tenant_id,
@@ -70,6 +82,12 @@ async def append_github_token_event(
         operation=kind,
         outcome=outcome,
         reason=reason,
+        github_token_id=token_id,
+        github_session_id=session_id,
+        github_installation_id=installation_id,
+        github_repo_ids=repo_ids,
+        github_permissions=permissions,
+        github_expires_at=expires_at,
     )
 
 
@@ -93,9 +111,17 @@ async def append_event(
     target_message_id: str | None = None,
     content_hmac: str | None = None,
     turn_ref: str | None = None,
+    github_token_id: uuid.UUID | None = None,
+    github_session_id: str | None = None,
+    github_installation_id: int | None = None,
+    github_repo_ids: list[int] | None = None,
+    github_permissions: dict[str, str] | None = None,
+    github_expires_at: datetime | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
         raise ValueError("occurred_at must include a timezone")
+    if github_expires_at is not None and github_expires_at.utcoffset() is None:
+        raise ValueError("github_expires_at must include a timezone")
     # Serialize with the sanctioned erasure paths. A queued write arriving after
     # deletion must not recreate tenant rows or the deleted account's identifiers.
     tenant = await session.scalar(
@@ -130,6 +156,12 @@ async def append_event(
         target_message_id=target_message_id,
         content_hmac=content_hmac,
         turn_ref=turn_ref,
+        github_token_id=github_token_id,
+        github_session_id=github_session_id,
+        github_installation_id=github_installation_id,
+        github_repo_ids=github_repo_ids,
+        github_permissions=github_permissions,
+        github_expires_at=github_expires_at,
     )
     session.add(event)
     await session.flush()
