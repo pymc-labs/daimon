@@ -527,7 +527,7 @@ judge the same one; conversations pick it up from their next message, keeping
 their files and their seal, and `explain_agent_resolution` reports each tier's
 environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
 sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
-Discord thread the pick or its turn names), an environment with unrestricted
+Discord thread the pick names), an environment with unrestricted
 networking (any network beyond package managers and MCP servers: anything but
 a cloud environment on limited networking with no allowed hosts) needs a
 server admin, and so does clearing a pick onto a default that has one. A pick

@@ -368,8 +368,13 @@ async def _explain_agent_resolution_impl(
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
         channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
-        tenant_environment=tenant_cfg.environment_name if tenant_cfg is not None else None,
-        deployment_environment=runtime.deployment_default.environment_name,
+        # An isolated channel's insiders see no workspace picks (`hide_across_isolation`).
+        tenant_environment=tenant_cfg.environment_name
+        if tenant_cfg is not None and caller.inside_channel_id is None
+        else None,
+        deployment_environment=runtime.deployment_default.environment_name
+        if caller.inside_channel_id is None
+        else None,
         environment_explanation=build_environment_resolution_note(
             environment_name=resolved.environment_name,
             tier=resolved.environment_name_tier,

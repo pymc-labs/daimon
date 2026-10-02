@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
+import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
 from daimon.core.answering_map import AnsweringMap
@@ -324,6 +325,12 @@ SEALED_OPEN_NETWORK_WARNING: Final = (
 )
 """Sealing a channel whose own pick may predate the seal's network rule."""
 
+SEALED_NETWORK_UNCHECKED_WARNING: Final = (
+    "This channel's environment could not be checked for an open network; a server "
+    "admin should confirm it."
+)
+"""Sealing a channel whose own pick could not be looked up."""
+
 
 async def sealed_network_warning(
     session: AsyncSession,
@@ -345,9 +352,12 @@ async def sealed_network_warning(
     )
     if resolved.environment_name_tier != "channel" or resolved.environment_name is None:
         return None
-    environment = await find_environment_by_daimon_tag(
-        client, tenant_id=tenant_id, name=resolved.environment_name
-    )
+    try:
+        environment = await find_environment_by_daimon_tag(
+            client, tenant_id=tenant_id, name=resolved.environment_name
+        )
+    except anthropic.APIError:  # the seal is saved already; a lookup must not undo its reply
+        return SEALED_NETWORK_UNCHECKED_WARNING
     if environment is None or not has_open_network(environment):
         return None
     return SEALED_OPEN_NETWORK_WARNING
@@ -391,6 +401,7 @@ async def save_scope_environment(
 __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
     "NOT_OFFERED_NOTE",
+    "SEALED_NETWORK_UNCHECKED_WARNING",
     "SEALED_OPEN_NETWORK_WARNING",
     "EnvironmentPick",
     "EnvironmentPicker",

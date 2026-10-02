@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
+    SEALED_NETWORK_UNCHECKED_WARNING,
     SEALED_OPEN_NETWORK_WARNING,
     build_archive_environment_note,
     build_clear_environment_note,
@@ -292,3 +294,30 @@ async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
     assert await warning("c_open") == SEALED_OPEN_NETWORK_WARNING, "its own open pick warns"
     assert await warning("c_closed") is None, "a limited network needs no confirmation"
     assert await warning("c_inherits") is None, "the open default is a server admin's pick"
+
+
+async def test_sealed_network_warning_survives_a_failed_lookup(db_session: AsyncSession) -> None:
+    """The seal is saved before the warning, so a lookup error says so instead of failing."""
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/environments",
+        lambda _r, _m: httpx.Response(400, json={"type": "error", "error": {"type": "x"}}),
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c_open"),
+        tenant_id=tenant.id,
+        environment_name="open",
+    )
+
+    warning = await sealed_network_warning(
+        db_session,
+        build_fake_anthropic(router.dispatch),
+        tenant_id=tenant.id,
+        channel_id="c_open",
+        default=DeploymentDefault(environment_name="open"),
+    )
+
+    assert warning == SEALED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"

@@ -204,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
   the workspace's, also under an operator token's `channels:write`); an admin
   of a channel can pick that channel's. In a sealed channel, or one holding a
-  sealed thread, an environment with unrestricted networking (any network
+  sealed Slack thread or the sealed Discord thread the pick names, an environment with unrestricted networking (any network
   beyond package managers and MCP servers, so any allowed host) needs a server
   admin, and so does clearing a pick when the default it falls back to has
   one. Sealing or isolating a channel whose own pick has such a network warns
