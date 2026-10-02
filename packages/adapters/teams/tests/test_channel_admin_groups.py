@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
 
 import httpx
@@ -86,3 +88,33 @@ async def test_without_graph_or_on_a_failed_read_nobody_holds_a_team(
         )
         held = await owned_team_ids(runtime, tenant_id=tenant_id, user_id=OWNER)  # type: ignore[arg-type]
         assert held == frozenset(), f"fail closed with {lookup!r}"
+
+
+async def test_a_turns_owner_lookup_runs_with_no_session_open(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A slow Graph read on every chat turn must not hold a pooled connection."""
+    tenant_id = await _grant(db_session)
+    open_sessions = [0]
+    seen: list[int] = []
+
+    @asynccontextmanager
+    async def counting() -> AsyncIterator[AsyncSession]:
+        open_sessions[0] += 1
+        try:
+            async with db_session_factory() as session:
+                yield session
+        finally:
+            open_sessions[0] -= 1
+
+    async def owners(group_id: str) -> frozenset[str]:
+        seen.append(open_sessions[0])
+        return frozenset({OWNER})
+
+    runtime = MagicMock(
+        sessionmaker=counting, team_owners=owners, group_members=GroupMembersCache()
+    )
+    held = await owned_team_ids(runtime, tenant_id=tenant_id, user_id=OWNER)  # type: ignore[arg-type]
+
+    assert held == frozenset({TEAM}), "the owner still holds the granted team"
+    assert seen == [0], "the Graph read ran after the grants session closed"

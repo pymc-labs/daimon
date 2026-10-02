@@ -110,12 +110,18 @@ async def test_the_cache_stays_bounded() -> None:
     assert len(cache._entries) <= 2, "full of live entries, it starts again"  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_only_groups_a_grant_names_are_looked_up(db_session: AsyncSession) -> None:
+async def test_only_groups_a_grant_names_are_looked_up(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T0GROUPS")
     asked, fetch = _fetcher({"S1": frozenset({"U1"}), "S9": frozenset({"U1"})})
 
     none = await load_member_group_ids(
-        db_session, tenant_id=tenant.id, platform="slack", platform_user_id="U1", members=fetch
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        platform_user_id="U1",
+        members=fetch,
     )
     assert (none, asked) == (frozenset(), []), "no group grant, no lookup"
 
@@ -129,7 +135,11 @@ async def test_only_groups_a_grant_names_are_looked_up(db_session: AsyncSession)
         actor_account_id=None,
     )
     matched = await load_member_group_ids(
-        db_session, tenant_id=tenant.id, platform="slack", platform_user_id="U1", members=fetch
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        platform_user_id="U1",
+        members=fetch,
     )
     assert (matched, asked) == (frozenset({"S1"}), ["S1"]), "S9 is in no grant, so never asked"
 

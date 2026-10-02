@@ -56,14 +56,13 @@ async def owned_team_ids(
     members = team_owner_lookup(runtime)
     if members is None:
         return frozenset()
-    async with runtime.sessionmaker() as session:
-        return await load_member_group_ids(
-            session,
-            tenant_id=tenant_id,
-            platform="teams",
-            platform_user_id=user_id.lower(),
-            members=members,
-        )
+    return await load_member_group_ids(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="teams",
+        platform_user_id=user_id.lower(),
+        members=members,
+    )
 
 
 async def channel_admin_caller(

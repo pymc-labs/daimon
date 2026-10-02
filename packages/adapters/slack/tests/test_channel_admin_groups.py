@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -125,3 +127,48 @@ async def test_a_failed_lookup_admits_nobody(
     )
 
     assert caller.role_ids == frozenset(), "fail closed"
+
+
+async def test_a_turns_group_lookup_runs_with_no_session_open(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A slow Slack on every chat turn must not hold a pooled connection."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0GROUPS")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        role_ids=["S1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    open_sessions = [0]
+    seen: list[int] = []
+
+    @asynccontextmanager
+    async def counting() -> AsyncIterator[AsyncSession]:
+        open_sessions[0] += 1
+        try:
+            async with db_session_factory() as session:
+                yield session
+        finally:
+            open_sessions[0] -= 1
+
+    class _Counting(_Client):
+        async def usergroups_users_list(self, *, usergroup: str) -> dict[str, Any]:
+            seen.append(open_sessions[0])
+            return await super().usergroups_users_list(usergroup=usergroup)
+
+    runtime = MagicMock(sessionmaker=counting, group_members=GroupMembersCache())
+    caller = await channel_admin_caller(
+        runtime,
+        _as_client(_Counting({"S1": ["U1"]})),
+        tenant_id=tenant.id,
+        user_id="U1",
+        is_admin=False,
+    )
+
+    assert caller.role_ids == frozenset({"S1"}), "the grant-named group is still found"
+    assert seen == [0], "the lookup ran after the grants session closed"

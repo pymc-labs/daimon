@@ -292,7 +292,7 @@ async def confirm_stored_group_ids(
 
 
 async def load_member_group_ids(
-    session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -302,9 +302,12 @@ async def load_member_group_ids(
     """The groups some grant of this tenant names that admit the user: Slack and Teams.
 
     Only grant-named groups are looked up, so a tenant with no group grant
-    makes no lookup at all.
+    makes no lookup at all. The grants are read in a session of their own,
+    closed before the lookup, so a slow platform never holds a pooled connection
+    on a chat turn.
     """
-    grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+    async with sessionmaker() as session:
+        grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
     named = grant_group_ids(grants)
     if not named:
         return frozenset()

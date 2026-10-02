@@ -102,14 +102,13 @@ async def user_group_ids(
     runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, user_id: str
 ) -> frozenset[str]:
     """The user groups named by this workspace's grants that `user_id` is in."""
-    async with runtime.sessionmaker() as session:
-        return await load_member_group_ids(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            platform_user_id=user_id,
-            members=user_group_members(runtime, client, tenant_id=tenant_id),
-        )
+    return await load_member_group_ids(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        members=user_group_members(runtime, client, tenant_id=tenant_id),
+    )
 
 
 async def channel_admin_caller(
