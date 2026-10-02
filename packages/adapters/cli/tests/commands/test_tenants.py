@@ -880,6 +880,31 @@ async def test_access_policy_accepts_platform_ids(
     assert policy.sealed_channel_ids == tuple(channels)
 
 
+async def test_access_policy_refuses_a_teams_isolated_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """Teams can't keep an isolated channel's routine output inside it, so the
+    CLI refuses isolation there, as the MCP tool does."""
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="teams", workspace_id="teams-isolate")
+    channel = "19:abc123@thread.tacv2"
+
+    with pytest.raises(typer.BadParameter, match="only on Discord and Slack"):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="teams",
+            external_id="teams-isolate",
+            sealed_channel=[channel],
+            isolated_channel=[channel],
+        )
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy == OPEN_ACCESS_POLICY, "nothing is written"
+
+
 async def test_access_policy_seals_a_single_slack_thread(
     db_session_factory: async_sessionmaker[AsyncSession],
     stub_anthropic: AsyncAnthropic,

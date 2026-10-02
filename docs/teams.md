@@ -88,6 +88,8 @@ MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
 here) and channel budgets (`set_channel_budget`) work as on Discord and Slack.
+Channel isolation does not exist on Teams yet: `set_channel_isolation` and
+`daimon tenants access-policy set --isolated-channel` refuse a Teams channel.
 
 ### Channel history
 

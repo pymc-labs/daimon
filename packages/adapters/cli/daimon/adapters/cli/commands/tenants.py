@@ -576,7 +576,7 @@ def tenants_access_policy_set_command(
             help=(
                 "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
                 "and its default agent pinned to it alone, answering nowhere else. Ending one "
-                "keeps its seal and pins."
+                "keeps its seal and pins. Discord and Slack only."
             )
         ),
     ] = None,
@@ -816,6 +816,11 @@ async def tenants_access_policy_set(
                 raise typer.BadParameter(f"{field}: pass at least one non-empty id")
             if validated_platform == "teams" and field == "protected_category_ids":
                 raise typer.BadParameter(f"{field}: Teams has no categories, got {ids[0]!r}")
+            # Teams isolation is not supported end to end; the MCP tool refuses it too.
+            if validated_platform == "teams" and field == "isolated_channel_ids":
+                raise typer.BadParameter(
+                    f"{field}: channel isolation exists only on Discord and Slack"
+                )
             for value in ids:
                 cleaned = value.strip()
                 pattern = (
