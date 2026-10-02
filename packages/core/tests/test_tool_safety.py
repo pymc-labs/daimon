@@ -224,12 +224,14 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out is not None
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1] | {
-        "configs": [{"name": "add_skill", "permission_policy": {"type": "always_ask"}}]
+        "configs": [
+            {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+        ]
     }, "daimon's own toolset stays trusted, except the one tool that confirms"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
-    assert out[2]["configs"] == [{"name": "create_issue"}], (
-        "a per-tool always_allow would let that tool skip the pause"
-    )
+    assert out[2]["configs"] == [
+        {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
+    ], "a per-tool always_allow would let that tool skip the pause"
 
 
 def test_session_tools_report_no_change_once_gated() -> None:

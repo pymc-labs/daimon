@@ -475,6 +475,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tool safety keeps asking after a thread's first turn.** On the next turn,
+  a session created with tool safety on was compared with the agent's own
+  `always_allow` tools, so it read as changed and the in-place update wrote
+  `always_allow` back onto it: third-party writes stopped showing a
+  confirmation card after the first turn. The bind and the update now gate the
+  tools the way session create does, so an unchanged session is left alone and
+  a real tools change keeps `always_ask`. A session that already lost its
+  cards gets them back on its next turn.
 - **Teams posts nothing but its answer.** A file it could not read, an oversize output and a declined file offer each sent a status message of its own under the answer. The agent is now told what it could not open and why, and the rest is only logged, as on Slack and Discord. Cards and file offers still post.
 - **Teams channel files without Graph Explorer.** When a channel file is refused, a daimon admin gets an Enable files card: one sign-in by a SharePoint or global admin grants the bot that team's site. It needs `DAIMON_TEAMS__PUBLIC_URL` and a redirect URI on the app (see `docs/teams.md`).
 - **The MCP endpoint is stateless.** It kept MCP sessions in one process's

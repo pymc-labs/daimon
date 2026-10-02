@@ -565,6 +565,8 @@ async def prepare_session_for_turn(
             agent_uuid=agent_uuid,
             account_id=admission.account_id,
             recorded=recorded,
+            tool_safety=deps.tool_safety,
+            public_url=deps.public_url,
             memory_read_only=admission.memory_read_only,
         )
         fresh_start = row.fresh_start_requested_at is not None
@@ -667,6 +669,7 @@ async def prepare_session_for_turn(
                 agent_uuid=agent_uuid,
                 account_id=admission.account_id,
                 mcp=deps.mcp,
+                tool_safety=deps.tool_safety,
                 fernet=deps.fernet,
                 github_fallback_pat=deps.github_fallback_pat,
                 github_app_id=deps.github_app_id,

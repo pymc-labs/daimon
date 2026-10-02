@@ -54,6 +54,7 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_agent_repo_binding, make_tenant
 from daimon.testing.ma import (
     FakeMAState,
@@ -153,6 +154,7 @@ async def _apply(
         agent_uuid=agent_uuid,
         account_id=account_id if account_id is not None else uuid.uuid4(),
         mcp=McpSettings(),
+        tool_safety=OPEN_TOOL_SAFETY,
         fernet=None,
         github_fallback_pat="ghp_fallback",
         github_app_id=None,

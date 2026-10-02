@@ -464,10 +464,12 @@ def session_tools_for_policy(
 
     `None` means nothing needs to change: enforcement is off, or every toolset
     already carries the policy this deployment wants. Otherwise each gated
-    toolset gets `always_ask` as its default, and any per-tool
-    `permission_policy` under it is dropped, since a per-tool `always_allow`
-    would let that one tool skip the pause. Daimon's own trusted toolset
-    stays `always_allow` except for its `CONFIRMED_DAIMON_TOOLS`, which ask.
+    toolset gets `always_ask` as its default and on every per-tool config
+    under it, since a per-tool `always_allow` would let that one tool skip
+    the pause. Daimon's own trusted toolset stays `always_allow` except for
+    its `CONFIRMED_DAIMON_TOOLS`, which ask. Every config written here is
+    complete (`enabled` and `permission_policy`), so the session reports back
+    exactly what was sent and its tools hash the same on the next bind.
 
     The session carries this, not the agent: `create_session` sends it as an
     `agent_with_overrides`, so however the agent was written (panel, chat
@@ -494,12 +496,13 @@ def session_tools_for_policy(
             if wanted["type"] == "always_ask" and entry.get("configs"):
                 configs: list[dict[str, Any]] = []
                 for config in entry["configs"]:
-                    trimmed = {k: v for k, v in dict(config).items() if k != "permission_policy"}
-                    changed = changed or len(trimmed) != len(config)
-                    configs.append(trimmed)
+                    changed = changed or config.get("permission_policy") != wanted
+                    configs.append({**config, "permission_policy": wanted})
                 entry["configs"] = configs
             elif server_name == DAIMON_SERVER_NAME and server_name in trusted_servers:
-                configs, asked = _ask_for_confirmed_tools(entry.get("configs") or [])
+                configs, asked = _ask_for_confirmed_tools(
+                    entry.get("configs") or [], enabled=default_config.get("enabled", True)
+                )
                 changed = changed or asked
                 entry["configs"] = configs
         out.append(entry)
@@ -507,16 +510,19 @@ def session_tools_for_policy(
 
 
 def _ask_for_confirmed_tools(
-    configs: Sequence[Mapping[str, Any]],
+    configs: Sequence[Mapping[str, Any]], *, enabled: bool
 ) -> tuple[list[dict[str, Any]], bool]:
-    """The trusted toolset's per-tool configs with each `CONFIRMED_DAIMON_TOOLS` on `always_ask`."""
+    """The trusted toolset's per-tool configs with each `CONFIRMED_DAIMON_TOOLS` on `always_ask`.
+
+    A config added here takes the toolset's own `enabled`, as an omitted one would.
+    """
     ask: dict[str, PermissionPolicyType] = {"type": "always_ask"}
     out = [dict(config) for config in configs]
     changed = False
     for name in CONFIRMED_DAIMON_TOOLS:
         config = next((c for c in out if c.get("name") == name), None)
         if config is None:
-            out.append({"name": name, "permission_policy": ask})
+            out.append({"name": name, "enabled": enabled, "permission_policy": ask})
             changed = True
         elif config.get("permission_policy") != ask:
             config["permission_policy"] = ask
