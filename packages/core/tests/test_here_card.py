@@ -60,11 +60,13 @@ def test_winning_tier_and_attribution(tier: str, expected_setter: uuid.UUID | No
             agent_name_set_at=NOW,
         ),
         configuration_target_name="target" if tier == "thread" else None,
+        set_by_label="Alex",
         policy=TenantAccessPolicy(),
         details=None,
     )
     assert card.tier == tier
-    assert card.set_by_account_id == expected_setter
+    assert ("Set by: Alex" in card.text) == (expected_setter is not None)
+    assert "set_by_account_id" not in card.model_dump()
     assert ("Configuration target: target." in card.text) == (tier == "thread")
 
 
@@ -119,13 +121,14 @@ def test_thread_setter_and_visible_workspace_defaults() -> None:
         configuration_target_name="configured-agent",
         thread_set_by_account_id=SETTER,
         thread_set_at=NOW,
+        set_by_label="Alex",
         policy=TenantAccessPolicy(),
         details=details,
         channels=(ChannelConfigRow(tenant_id=TENANT, channel_id="override", agent_name="other"),),
         deployment_default=DeploymentDefault(agent_name="other"),
         visible_channel_ids={"one", "two", "override"},
     )
-    assert card.set_by_account_id == SETTER
+    assert "Set by: Alex" in card.text
     assert card.default_channels == ("two",)
     assert card.configuration_target_name == "configured-agent"
 
@@ -266,6 +269,7 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_isolated_channel
     monkeypatch.setattr(
         here_card_module, "get_discord_principal_for_account", AsyncMock(return_value="123")
     )
+    resolve_display = AsyncMock(return_value="Alex @team <@123>")
     card = await load_here_card(
         MagicMock(),
         MagicMock(),
@@ -278,15 +282,34 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_isolated_channel
         public_mcp_url=None,
         is_admin=False,
         caller_account_id=uuid.uuid4(),
+        resolve_setter_display=resolve_display,
         visible_channel_ids={"private", "outside"},
         category_channels_bot_can_view=(("private", "#private: yes"), ("outside", "#outside: yes")),
     )
     assert card.agent_name == "daimon"
     assert card.configuration_target_name == "target"
-    assert card.set_by_account_id == SETTER
-    assert "Set by: <@123>" in card.text
+    assert "Set by: Alex ＠team ‹＠123›" in card.text
+    assert "set_by_account_id" not in card.model_dump()
+    resolve_display.assert_awaited_once_with("123")
     assert "outside" not in card.text
     assert not any(item.kind == "personal OAuth" for item in card.credentials)
     assert card.routines == ()
     routines_load.assert_not_awaited()
     assert isolation_load.await_args.kwargs["is_admin"] is False
+    resolve_display.return_value = None
+    unknown = await load_here_card(
+        MagicMock(),
+        MagicMock(),
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="private",
+        thread_id="thread",
+        default=DeploymentDefault(agent_name="other"),
+        github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
+        public_mcp_url=None,
+        is_admin=False,
+        caller_account_id=uuid.uuid4(),
+        resolve_setter_display=resolve_display,
+    )
+    assert "Set by: unknown" in unknown.text
+    assert "<@123>" not in unknown.text

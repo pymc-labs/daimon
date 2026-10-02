@@ -9,17 +9,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.discord._models import ChannelRow
-from daimon.adapters.mcp.tools.here import _where_am_i_impl  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.here import (  # pyright: ignore[reportPrivateUsage]
+    _setter_display_name,
+    _where_am_i_impl,
+)
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 
 
-def _auth() -> AuthIdentity:
+def _auth(*, platform: str = "discord") -> AuthIdentity:
     return AuthIdentity(
         account_id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         role=Role.ADMIN,
-        platform="discord",
+        platform=platform,
+        external_id="123456",
         platform_user_id="123",
         is_admin=True,
     )
@@ -57,6 +61,34 @@ async def test_admin_channel_turn_gets_member_card_and_unknown_bot_visibility() 
     assert load.await_args.kwargs["is_admin"] is False
     assert load.await_args.kwargs["bot_can_view"] is None
     assert "category_channels_bot_can_view" not in load.await_args.kwargs
+    assert callable(load.await_args.kwargs["resolve_setter_display"])
+
+
+async def test_slack_setter_uses_plain_display_name() -> None:
+    client = MagicMock()
+    client.users_info = AsyncMock(
+        return_value={"user": {"profile": {"display_name": "Alex"}, "name": "fallback"}}
+    )
+    with patch(
+        "daimon.adapters.mcp.tools.here.slack_web_client", new=AsyncMock(return_value=client)
+    ):
+        assert await _setter_display_name(_runtime(), _auth(platform="slack"), "U123") == "Alex"
+
+
+async def test_discord_setter_uses_plain_member_name() -> None:
+    member = SimpleNamespace(display_name="Alex")
+    guild = MagicMock()
+    guild.fetch_member = AsyncMock(return_value=member)
+    client = MagicMock()
+    client.fetch_guild = AsyncMock(return_value=guild)
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    with (
+        patch("daimon.adapters.mcp.tools.here._require_bot_token", return_value="token"),
+        patch("daimon.adapters.mcp.tools.here.rest_client", return_value=context),
+    ):
+        assert await _setter_display_name(_runtime(), _auth(), "789") == "Alex"
 
 
 @pytest.mark.parametrize(
