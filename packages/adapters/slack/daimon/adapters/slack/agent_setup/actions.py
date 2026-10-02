@@ -62,6 +62,7 @@ from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
     load_environment_picker,
+    load_picker_subject,
     may_pick_environment,
     save_environment_choice,
 )
@@ -723,12 +724,11 @@ async def _dispatch_panel_action(
         value = str(selected.get("value") or "")
         if not value or not meta.channel_id:
             return
+        subject = await load_picker_subject(
+            runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+        )
         if not await may_pick_environment(
-            runtime,
-            tenant_id=tenant_id,
-            channel_id=meta.channel_id,
-            user_id=user_id,
-            is_admin=is_admin,
+            runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
         ):
             await post_ephemeral(
                 client,
@@ -738,7 +738,12 @@ async def _dispatch_panel_action(
             )
             return
         note = await save_environment_choice(
-            runtime, tenant_id=tenant_id, channel_id=meta.channel_id, user_id=user_id, value=value
+            runtime,
+            tenant_id=tenant_id,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+            subject=subject,
+            value=value,
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,

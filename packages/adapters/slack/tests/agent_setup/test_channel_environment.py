@@ -21,6 +21,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     build_routing_view,
 )
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE, PanelMetadata
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -29,6 +30,7 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.roster import paginate
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import ma_environment
@@ -284,3 +286,33 @@ async def test_a_refused_or_stale_pick_writes_nothing(
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
         is None
     ), "nothing is written"
+
+
+async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a sealed channel unrestricted networking stays a workspace admin's pick."""
+    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=False))
+    tenant_id = await _seed(db_session_factory, grant=True)
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(
+            session, tenant_id=tenant_id, policy=TenantAccessPolicy(sealed_channel_ids=(CHANNEL,))
+        )
+    client = _client()
+
+    await _pick(
+        _runtime(db_session_factory, tenant_id, []),
+        client,
+        tenant_id,
+        environment_option_value("science"),
+    )
+
+    assert "sealed" in client.chat_postEphemeral.call_args.kwargs["text"], (
+        "the refusal names the seal"
+    )
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "the refused pick writes nothing"
