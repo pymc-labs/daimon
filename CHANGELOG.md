@@ -88,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
+  skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a
+  folder of a public GitHub repo (`--branch`, `--path`). It shows the skill's
+  files and runnable files, asks before uploading unless `--yes`, and follows
+  the same rules as the chat tool and the setup panels: a built-in agent is
+  refused, and a skill another agent also has is never given a new version.
+
 - **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to the Discord/Teams one; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it

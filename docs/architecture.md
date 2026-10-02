@@ -552,7 +552,11 @@ environments also check the caller can see the channel.
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
-or a GitHub folder read through the skill-repo fetch. Archives refuse links,
+or a GitHub folder read through the skill-repo fetch. `daimon skills add --agent
+NAME PATH|URL` adds a local folder, SKILL.md or `.zip`, or a public GitHub folder,
+from the CLI: it previews, asks unless `--yes`, and decides as a server admin
+(never a built-in agent, the pin rule asked again just before the upload and the
+attach). Archives refuse links,
 absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
 uploaded under the agent-scoped title, never the shared library. A name a
