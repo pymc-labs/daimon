@@ -29,6 +29,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_policy import require_agent_creatable
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -437,6 +438,7 @@ async def _create_agent_impl(
             "repo via skill_repos or use sync_skills after the agent "
             "is created."
         )
+    await require_agent_creatable(runtime, auth)
     await _reject_guild_name_collision(runtime, auth, spec.name)
     public_url = (
         str(runtime.settings.mcp.public_url)

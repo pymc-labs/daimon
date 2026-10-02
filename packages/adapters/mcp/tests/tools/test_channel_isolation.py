@@ -22,6 +22,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable, turn_origin_place
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
+    _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
@@ -48,6 +49,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.specs import AgentSpec
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import Role
@@ -613,6 +615,20 @@ async def test_an_own_agent_writes_into_no_other_agent(
     assert [a.name for a in listed] == ["shared"], "outside, its edited spec never shows"
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, world.auth(), "local")
+
+
+async def test_an_own_agent_creates_no_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A new agent answers outside C, so a prompt C's agent wrote into it would carry
+    C's content out: refused for every caller it runs for, before anything is made."""
+    world, runtime = await _world(committing_sessionmaker)
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="the client's plans")
+    for auth in _own_agent_callers(world).values():
+        with pytest.raises(ToolError, match="creates no agents"):
+            await _create_agent_impl(runtime, auth, spec)
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert names == {"local", "shared"}, "no agent was created"
 
 
 async def test_an_own_agent_schedules_nothing_outside(
