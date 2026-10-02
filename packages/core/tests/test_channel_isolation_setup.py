@@ -280,6 +280,42 @@ async def test_a_copy_refused_after_the_fork_is_archived(
     assert policy.isolated_channel_ids == ()
 
 
+async def test_a_copy_whose_isolation_write_fails_is_archived(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any failure after the fork, not only a refusal, archives the copy and re-raises."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+
+    async def broken_write(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(channel_isolation_setup, "set_fields", broken_write)
+    with pytest.raises(RuntimeError, match="write failed"):
+        await _isolate(client, db_session_factory, tenant.id, "c1", fork=True)
+
+    assert len(archived) == 1 and archived[0] != shared.id, "the orphan copy is archived"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.isolated_channel_ids == (), "nothing was isolated"
+
+
 async def test_fork_agent_copies_the_source_under_a_new_name(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

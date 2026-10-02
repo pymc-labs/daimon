@@ -336,8 +336,8 @@ async def set_channel_isolation(
 
     A copy is made only when `fork` is set and the channel has no agent that may
     be its own, so repeating a request never copies twice; `subject` is who
-    asks for it (`authorize(FORK)`). A copy the locked re-check refuses is
-    archived.
+    asks for it (`authorize(FORK)`). A copy the locked re-check refuses, or
+    one whose write fails, is archived.
     """
     if not isolated:
         async with sessionmaker.begin() as session:
@@ -414,7 +414,8 @@ async def set_channel_isolation(
             )
             if found.refusal is not None:
                 raise ChannelIsolationRefused(found.refusal, agent_name=new_name)
-    except ChannelIsolationRefused:
+    except Exception:
+        # Re-raised: a copy no channel got, refused or not, must not linger.
         await anthropic.beta.agents.archive(copy.agent.id)
         raise
     return IsolationChange(
