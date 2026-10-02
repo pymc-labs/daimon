@@ -329,6 +329,7 @@ STILL_ADMIN_TOOL_NAMES = (
     "set_channel_environment",
     "clear_channel_environment",
     "set_channel_protection",
+    "archive_isolation_copy",
 )
 """Tools a plain member never sees.
 

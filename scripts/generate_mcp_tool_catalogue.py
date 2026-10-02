@@ -89,6 +89,7 @@ TAG_LABELS: dict[str, str] = {
     "agent-chat": "agent tokens only",
     "channel-admin": "channel admins too",
     "discord": "Discord callers",
+    "scope:agents:archive": "operator tokens with agents:archive",
     "scope:channels:write": "operator tokens with channels:write",
     "scope:promo:create": "operator tokens with promo:create",
     "scope:promo:redeem": "operator tokens with promo:redeem",

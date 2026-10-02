@@ -31,7 +31,11 @@ from daimon.core.authz import Subject
 from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ISOLATION_COPY,
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
@@ -474,6 +478,7 @@ async def set_channel_isolation(
         new_name=new_name,
         public_url=public_url,
         subject=subject,
+        extra_metadata={MA_METADATA_KEY_ISOLATION_COPY: channel_id},
     )
     try:
         async with sessionmaker.begin() as session:

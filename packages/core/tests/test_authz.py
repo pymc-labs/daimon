@@ -30,6 +30,7 @@ DISPLAY_PINNED = TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME
 SEALED = TenantAccessPolicy(sealed_channel_ids=("C_SEAL",))
 PROTECTED = TenantAccessPolicy(protected_channel_ids=("C_PROT",))
 INVOKERS = TenantAccessPolicy(invoker_user_ids=("U_OK",))
+OPEN = TenantAccessPolicy()
 
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
@@ -1371,6 +1372,24 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "action": Action.SET_CHANNEL_PROTECTION,
             "place": Place(channel_id="C_ACME"),
         },
+        _deny("admin_required"),
+    ),
+    (
+        "server admin archives an isolation copy",
+        OPEN,
+        {"subject": ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        ALLOW,
+    ),
+    (
+        "a channel admin archives no isolation copy",
+        OPEN,
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        _deny("admin_required"),
+    ),
+    (
+        "an admin's agent key archives no isolation copy",
+        OPEN,
+        {"subject": AGENT_KEY_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
         _deny("admin_required"),
     ),
     (

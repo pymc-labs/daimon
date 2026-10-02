@@ -70,6 +70,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   sealed channel, or one holding a sealed thread (`sealed`).
 - **Channel protection and seals**: a server admin's call, never a channel
   admin's, even on a channel they administer.
+- **Archiving an isolation copy**: a server admin's call; which copies may go
+  is `daimon.core.isolation_copies`'s.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -97,7 +99,7 @@ callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
 fork, channel default binds, channel environment picks, channel protection and
-seal toggles, coding-tool token
+seal toggles, isolation copy archives, coding-tool token
 mints, the protection of a turn's own notices and of a routine's destination
 (`POST` with no agent), a routine's creator at fire and delivery
 (`ACT_FOR_CREATOR`), and the shared-agent table (`CHANGE_SHARED_AGENT`, asked by
@@ -173,6 +175,8 @@ class Action(StrEnum):
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
     # Protect or seal one channel (`Place.channel_id`), or lift either.
     SET_CHANNEL_PROTECTION = "set_channel_protection"
+    # Archive the copy an isolated channel was given, as that channel closes.
+    ARCHIVE_ISOLATION_COPY = "archive_isolation_copy"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -681,6 +685,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if req.open_network and _holds_seal(policy, channel, place, req.origin):
             return _deny("sealed")
         return ALLOW
+
+    if req.action is Action.ARCHIVE_ISOLATION_COPY:
+        if subject.is_admin and not subject.via_agent_key:
+            return ALLOW
+        return _deny("admin_required")
 
     if req.action is Action.SET_CHANNEL_PROTECTION:
         # Protection and seals guard what a server admin owns, so a channel

@@ -95,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Operator tokens from the setup panels.** Server admins on Discord, Slack
   and Teams mint, list and revoke operator tokens from Who answers where:
-  `tenant:read`, `channels:write` and `promo:redeem` only (`promo:create`
+  `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only (`promo:create`
   stays with `daimon mcp mint-operator-token`), for 30 days, shown once. The
   listing never shows a token, and every mint and revoke is audited.
 - **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
@@ -279,6 +279,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel, or lift either, without restating the policy's lists. Only server
   admins and operator tokens may, never a channel admin; an isolated channel
   stays sealed until its isolation ends.
+- **Archiving an isolation copy.** `archive_isolation_copy` (also under a new
+  operator scope, `agents:archive`) archives the agent `set_channel_isolation`
+  copied for a channel once that channel closes, with its pin and default
+  there. Only server admins and operator tokens may; it never archives
+  another agent, a default, or a copy still pinned or a default elsewhere.
 - **Channel environments.** Admins can pick the environment a Discord,
   Slack or Teams channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not

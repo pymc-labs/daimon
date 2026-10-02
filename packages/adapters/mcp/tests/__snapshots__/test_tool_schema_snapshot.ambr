@@ -380,6 +380,54 @@
         'type': 'object',
       }),
     }),
+    'archive_isolation_copy': dict({
+      'description': '''
+        Archive the agent copied for an isolated channel, when that channel closes.
+        For example, retire #client-acme's agent once the engagement ends. Requires a
+        server or workspace admin.
+        
+        Only an agent ``set_channel_isolation`` copied for a channel can be archived
+        here, never a built-in agent or a default. Pass ``channel_id``, the channel it
+        was made for, to drop its pin and default there with it; while it is pinned
+        or a default anywhere else, the call is refused. The channel stays sealed and
+        isolated, so nothing answers there afterwards. ``expected_ma_agent_id`` guards
+        against a namesake made since the agent was listed.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'archive_my_session': dict({
       'description': '''
         Archive a session when its conversation is finished.

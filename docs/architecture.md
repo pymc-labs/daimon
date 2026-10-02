@@ -527,6 +527,13 @@ own until it is pinned there; `/dm` from C is refused; a call is held to C
 only where its tool takes a verified origin (not the send, DM, self-edit or
 routine edit tools), and a call that names none is judged from outside.
 
+When C closes, `archive_isolation_copy` (server admins, or the
+`agents:archive` operator scope; `core/isolation_copies.py`) archives the copy
+`set_channel_isolation` made for it, stamped `daimon_isolation_copy`, with its
+pin and default in C. It archives no other agent and no default, and refuses
+a copy pinned or a default anywhere but the channel named as closing. C stays
+sealed and isolated, so nothing answers there after.
+
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
 `packages/core/daimon/core/scope.py`), so a channel can keep its agent and run
@@ -1334,6 +1341,7 @@ registered and expire too, while older jti-less ones keep working.
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_environments` |
 | `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_protection`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `agents:archive` | `archive_isolation_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
