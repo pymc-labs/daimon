@@ -295,7 +295,7 @@ async def run_turn_impl(
     ``budget_channel_id`` is stamped on the session as ``daimon_budget_channel``
     so the usage sweep attributes any spend it replays to that channel's budget.
     ``origin_place`` stamps where the routine fires (`routine_origin`), so its
-    transcript reads only where a turn there would.
+    transcript reads only where a turn there would, and only by its owner.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
     # Decided before the session exists so the session carries it: an
@@ -328,6 +328,7 @@ async def run_turn_impl(
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,
             origin_thread_id=origin_place.thread_id if origin_place is not None else None,
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
+            private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
         )
 
     try:

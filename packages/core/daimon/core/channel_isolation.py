@@ -33,6 +33,7 @@ from daimon.core.access_policy import (
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -137,11 +138,13 @@ def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Pla
 
 @dataclass(frozen=True)
 class RoutineOrigin:
-    """Where a routine's session runs, stamped on it like a turn there."""
+    """Where a routine's session runs, stamped on it like a turn there, and
+    the private stamp that keeps its transcript its owner's alone."""
 
     channel_id: str
     thread_id: str | None
     seal_ids: frozenset[str]
+    private_dm_id: str
 
 
 def routine_origin(
@@ -149,10 +152,13 @@ def routine_origin(
 ) -> RoutineOrigin | None:
     """The channel and thread a routine fires into, with the seal over them now.
 
-    Stamped on the routine's session so its transcript reads only where a
-    turn's would: an isolated or sealed channel's routine stays inside it. A
-    routine without a destination runs where it was made; one with neither
-    is headless (None).
+    Stamped on the routine's session so an isolated or sealed channel's
+    routine transcript stays inside it. A routine without a destination is
+    placed by its saved channel (for one made in a DM, the channel the DM
+    came from); one with neither is headless (None). Every stamp is private
+    too (`private_routine_stamp`): the routine runs on its owner's
+    credentials, so no admin or channel admin reads it from the hub, as
+    before it carried a channel.
     """
     channel_id = routine_destination_channel(row) or row.channel_id
     if channel_id is None:
@@ -172,6 +178,7 @@ def routine_origin(
         channel_id=channel_id,
         thread_id=thread_id,
         seal_ids=source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id),
+        private_dm_id=private_routine_stamp(row.id),
     )
 
 

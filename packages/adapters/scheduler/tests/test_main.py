@@ -528,9 +528,9 @@ async def test_fire_gates_on_and_attributes_to_the_routine_channel(
         return
     assert fetched.last_error is None
     assert calls[0]["budget_channel_id"] == "chan-9"
-    assert calls[0]["origin_place"] == RoutineOrigin("chan-9", None, frozenset()), (
-        "the routine session is stamped with the channel it runs in"
-    )
+    assert calls[0]["origin_place"] == RoutineOrigin(
+        "chan-9", None, frozenset(), f"routine:{row.id}"
+    ), "the routine session is stamped with the channel it runs in"
     factory = calls[0]["usage_record_factory"]
     assert callable(factory)
     partial = factory("sess_abc", "claude-opus-4-7")
@@ -597,9 +597,9 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
     await fake_client.close()
 
     assert len(calls) == 1, "the routine runs"
-    assert calls[0]["origin_place"] == RoutineOrigin("room", "555000555", frozenset({"room"})), (
-        "the session carries the destination and the seal over it"
-    )
+    assert calls[0]["origin_place"] == RoutineOrigin(
+        "room", "555000555", frozenset({"room"}), f"routine:{row.id}"
+    ), "the session carries the destination and the seal over it"
 
 
 async def test_fire_checks_the_agent_pin_before_the_channel_budget(

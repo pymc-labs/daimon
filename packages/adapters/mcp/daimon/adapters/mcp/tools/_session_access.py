@@ -21,6 +21,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_THREAD,
+    is_private_routine_stamp,
 )
 from daimon.core.session_seal import seal_ids
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
@@ -210,13 +211,17 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
     `authorize` read admits another account's channel conversation too.
     Discord private scopes carry
     no execution credential, so all MCP session introspection is denied there.
+    A routine's private stamp is its owner's own: no grant is needed, and no
+    one else's hub read opens it.
     """
     metadata = session.metadata or {}
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
         # Another account's session: only `authorize`'s admin or channel admin
         # hub read opens it (never a private DM, never to continue).
         return _admin_may_read_other(metadata)
-    if MA_METADATA_KEY_PRIVATE_DM not in metadata:
+    private = metadata.get(MA_METADATA_KEY_PRIVATE_DM)
+    if private is None or is_private_routine_stamp(private):
+        # A routine's owner reads its transcript like any of theirs; the seal still applies.
         return True
     return (
         auth.slack_turn_context_id is not None

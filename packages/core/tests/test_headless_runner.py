@@ -897,7 +897,9 @@ async def test_run_turn_stamps_a_routine_session_with_where_it_fires() -> None:
         environment_id="env_x",
         trigger_message="hi",
         tenant_id=uuid.uuid4(),
-        origin_place=RoutineOrigin(channel_id="c1", thread_id="t1", seal_ids=frozenset({"c1"})),
+        origin_place=RoutineOrigin(
+            channel_id="c1", thread_id="t1", seal_ids=frozenset({"c1"}), private_dm_id="routine:r1"
+        ),
     )
 
     metadata = session_create_capture[0]["metadata"]
@@ -905,6 +907,7 @@ async def test_run_turn_stamps_a_routine_session_with_where_it_fires() -> None:
         f"the routine session must be stamped with its destination; got {metadata!r}"
     )
     assert metadata.get("daimon_sealed") == "c1", "and with the seal over it"
+    assert metadata.get("daimon_private_dm") == "routine:r1", "and kept private to its owner"
 
 
 # --- .env resource mount threading ---

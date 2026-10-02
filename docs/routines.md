@@ -393,9 +393,15 @@ tenant's chat or DM policy. They can use saved memory but cannot change it.
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the seal over
 them at fire time (`channel_isolation.routine_origin`). A routine with no
-destination is stamped with the channel it was made in. So a sealed or
+destination is stamped with its saved channel: the channel it was made in,
+or for one made in a DM, the channel that DM came from. So a sealed or
 isolated channel's routine transcript is read only from inside that channel,
-as its conversations are.
+as its conversations are, by its owner too. A routine with neither is not
+stamped. Every stamped routine session also carries the private-DM stamp
+(`daimon_private_dm=routine:<id>`): a routine runs on its owner's
+credentials, so its transcript stays its owner's alone. No server admin or
+channel admin reads it from the hub, as before routine sessions carried a
+channel.
 
 
 ### Durable fire diagnostics

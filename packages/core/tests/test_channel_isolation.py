@@ -200,26 +200,28 @@ def test_a_teams_routine_saved_without_its_channel_is_placed_by_its_id(
 
 def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None:
     """Channel, thread and seal follow the destination; Slack names a thread by its
-    ts, Discord by its id; a routine with no channel at all is headless."""
+    ts, Discord by its id; every stamp is private to the routine's owner; a routine
+    with no channel at all is headless."""
     channel = _routine("local", "c1")
+    private = f"routine:{channel.id}"
     assert routine_origin(POLICY, channel, platform="discord") == RoutineOrigin(
-        "c1", None, frozenset({"c1"})
+        "c1", None, frozenset({"c1"}), private
     )
     discord = channel.model_copy(update={"destination_kind": "thread", "destination_id": "t9"})
     assert routine_origin(POLICY, discord, platform="discord") == RoutineOrigin(
-        "c1", "t9", frozenset({"c1"})
+        "c1", "t9", frozenset({"c1"}), private
     ), "a Discord thread sits under its saved parent"
     slack = channel.model_copy(update={"destination_kind": "thread", "destination_id": "c1:1.2"})
     assert routine_origin(POLICY, slack, platform="slack") == RoutineOrigin(
-        "c1", "1.2", frozenset({"c1"})
+        "c1", "1.2", frozenset({"c1"}), private
     )
     open_channel = _routine("shared", "c2")
     assert routine_origin(POLICY, open_channel, platform="discord") == RoutineOrigin(
-        "c2", None, frozenset()
+        "c2", None, frozenset(), f"routine:{open_channel.id}"
     ), "an unsealed destination carries no seal"
     no_destination = _routine("shared", None).model_copy(update={"channel_id": "c1"})
     assert routine_origin(POLICY, no_destination, platform="discord") == RoutineOrigin(
-        "c1", None, frozenset({"c1"})
+        "c1", None, frozenset({"c1"}), f"routine:{no_destination.id}"
     ), "without a destination it runs where it was made"
     assert routine_origin(POLICY, _routine("shared", None), platform="discord") is None
 
