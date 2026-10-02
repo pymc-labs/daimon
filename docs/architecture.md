@@ -401,8 +401,8 @@ and set the rest again. `set` refuses to overwrite an unreadable row, so
 that channel on top of the server admins (`channel_admins`,
 `packages/core/daimon/core/channel_admins.py`). `admit()` stores the member's
 live role ids on the account (`accounts.platform_role_ids`) beside the role, so
-MCP tools test a grant without asking the platform; Slack has no roles, so a
-Slack grant is by user id. A channel admin may do what a server admin may for
+MCP tools test a grant without asking the platform; Slack and Teams have no
+roles, so their grants are by user id (on Teams the Entra object id). A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
@@ -544,7 +544,9 @@ a pick isn't recorded. An operator token's
 `channels:write` covers a channel's environment, never the tenant default. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
-default.
+default. The channel tools read a Slack or Teams thread id as its channel and
+a Discord thread through a lookup (`tools/_channel_target.py`); budgets and
+environments also check the caller can see the channel.
 
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
