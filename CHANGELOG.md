@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A private form's pinned-agent check now runs in the same transaction that spends the form, on Discord, Slack and Teams, so a pin committed after the earlier check still refuses it and the form stays unspent. That transaction holds the tenant's policy lock from the check until the form is spent, so a pin edit made meanwhile waits and applies to the next form. The routine fire and delivery checks (protected destination, the creator still on the invoker allowlist), the protection of a turn's own notices, and the shared-agent replace/remove table now all go through the one access decision. They decide exactly as before.
+- The action-time access checks now run at the last moment before each effect: right before a session is created (after the predecessor lookup and environment, vault and memory setup), after a dead-session recovery waits for the preparation lock (a seal added meanwhile defers adoption so the session is rebuilt read-only), after an agent chat resolves the agent's names, and inside the MCP OAuth vault write and server attach. A refused sign-in's saved grant is removed, retried once, and logged by id if it can't be. A DM whose source was sealed during a session replacement or recovery is closed instead of reporting a failed preparation. Session preparation decides again once it holds its lock, so a pin or seal that lands while it waits stops a checkpoint from running on the old writable session. A recovery adopts another turn's replacement only when that session is already read-only and carries the current seal, and it decides again right before the recovered message is sent. An agent-chat `start_turn` decides again right before its session is created. Every turn's first message, and a workspace checkpoint's message into the old session, is decided again right before it is sent, after the stream opens: a pin added meanwhile refuses it, and a seal makes the turn wait so the next one is prepared read-only (Discord says to send the message again).
 - Access is decided again at the moment of action, not only when a turn is admitted. Before a session is found, reused, replaced or recreated after a crash, the turn's pin, protection and invoker checks are re-run on the current access policy, so a pin or protection added in between refuses it, and a seal added in between is stamped on the session and makes memory read-only. The check runs again right before a replacement session is created after a workspace transfer, and agent-chat and hub turns re-check right before they create a session or send a message, resumed sessions included. A DM is closed if its source channel was sealed since the turn started. The MCP OAuth callback checks the pinned-agent rule after the code exchange, again before the grant is saved and again before the server is attached, so a pin that lands mid sign-in stores no grant and attaches nothing. An admin reading their own DM sessions from the hub reads them as before. `daimon agents rekey-guild-ownership` keeps a report reader's link to its source agent. A published report's reader variant now counts as its source agent for pins, and publishing a pinned agent's reader needs an admin or a request from inside its channels (`publish_report(origin_context_id=…)`). An agent-scoped key is never exempt as an admin, whoever minted it.
 - **Seeded defaults are protected from chat edits.** Skill-repo imports now
   gate like other attachment writes: a member needs an admin on an agent
@@ -29,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everyone else. Each caller now always gets their own session, as the
   default already did. Unknown keys are ignored, so a deployment still
   setting it boots normally.
-- Each marimo notebook now requires its own access token. The link the host returns carries it, and a notebook's code can no longer open another notebook by curling its localhost port or reusing a slug it read from `ps`. Scratch notebooks are read-only apps; the editor needs `create_notebook_upload_url(editable=True)` on a deployment that sets `DAIMON_NOTEBOOK__ALLOW_EDITABLE`, and switching a slug between read-only and editor issues a new link. The host also needs its own `DAIMON_NOTEBOOK__ALLOW_EDITABLE` to serve an editor, and `PUT /admin/notebooks/{slug}` is read-only unless it asks for `editable`. The host kills every process of a notebook's uid before reusing or respawning it, quarantines a uid it can't clear, and deletes the uid's files in `/tmp` and `/dev/shm`. Jailed notebooks run with no-new-privileges, a process cap and a private `TMPDIR`, and switching a slug between editor and read-only wipes its home and workspace. Tokens are kept out of marimo's log and redacted from the host's logs, marimo is pinned exactly, and the host refuses to boot with plain-http links off localhost. With `DAIMON_NOTEBOOK__ORIGIN_BASE` (wildcard DNS and TLS), each notebook gets its own origin, `https://<label>.<origin_base>/`, and the host routes by Host, refuses cross-origin requests and WebSockets, and keeps cookies host-only. Without it, notebooks share one origin, so a public host admits a single tenant, named in the bot's upload token. Over https, notebook cookies are `__Host-` prefixed and `Secure`, and HSTS is sent. The slug root is owned by the host and the host never follows a symlink the notebook planted when it chowns, writes or logs. httpx request logs are silenced and every log line is redacted after formatting. The Fly example sets up per-notebook origins.
+- Each marimo notebook now requires its own access token. The link the host returns carries it, and a notebook's code can no longer open another notebook by curling its localhost port or reusing a slug it read from `ps`. Scratch notebooks are read-only apps; the editor needs `create_notebook_upload_url(editable=True)` on a deployment that sets `DAIMON_NOTEBOOK__ALLOW_EDITABLE`, and switching a slug between read-only and editor issues a new link. The host also needs its own `DAIMON_NOTEBOOK__ALLOW_EDITABLE` to serve an editor, and `PUT /admin/notebooks/{slug}` is read-only unless it asks for `editable`. The host kills every process of a notebook's uid before reusing or respawning it, quarantines a uid it can't clear, and deletes the uid's files in `/tmp` and `/dev/shm`. Jailed notebooks run with no-new-privileges, a process cap and a private `TMPDIR`, and switching a slug between editor and read-only wipes its home and workspace. Tokens are kept out of marimo's log and redacted from the host's logs, marimo is pinned exactly, and the host refuses to boot with plain-http links off localhost. With `DAIMON_NOTEBOOK__ORIGIN_BASE` (wildcard DNS and TLS), each notebook gets its own origin, `https://<label>.<origin_base>/`, and the host routes by Host, refuses cross-origin requests and WebSockets, and keeps cookies host-only. Without it, notebooks share one origin, so a public host admits only the tenants its operator lists in `DAIMON_NOTEBOOK__TENANTS`, for one operator's own Discord server, Slack workspace and Teams tenant; any other tenant gets a 403 naming its id. Over https, notebook cookies are `__Host-` prefixed and `Secure`, and HSTS is sent. The slug root is owned by the host and the host never follows a symlink the notebook planted when it chowns, writes or logs. httpx request logs are silenced and every log line is redacted after formatting. The Fly example sets up per-notebook origins.
 - `/dm` now refuses in a sealed channel or a Discord thread under one, before reading any history. It used to copy the last 12 messages into a DM that sits outside the seal. On Slack, a thread sealed on its own is dropped from the copied history instead. An existing DM whose source channel, thread or (on Slack) any copied thread is sealed later ends on its next message: the conversation and its copied context are deleted and its sessions retired. DMs started before this release end as soon as the workspace seals anything. Run migration `0032_dm_source_ids` before deploying.
 - The Slack `/routines` panel lists only your own routines unless you are an admin. `daimon agents fork` refuses a pinned source and leaves token-backed MCP servers off the copy, like the chat tool. The unused panel fork helpers and credential-copy stores are removed, and member-facing copy no longer points members at `fork_agent`, which is admin-only.
 - Cross-agent protection is complete only for pinned agents: pin every client project agent. `decide_handoff` now requires the caller's admin status and the channel's agent explicitly.
@@ -53,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - Deployments that set `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS=false`: each caller in an existing thread starts a fresh session of their own at their next message; the shared session is not carried over.
-- Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` accepts uploads from the first tenant only and refuses tokens that name no tenant, so upgrade the bot with it; set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve several tenants.
+- Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` refuses every upload until `DAIMON_NOTEBOOK__TENANTS` lists the tenant UUIDs it may serve (comma-separated or a JSON array; `daimon tenants list --json` shows them, and each refusal names the id), and refuses tokens that name no tenant, so upgrade the bot with it. Set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve any tenant in isolation. A `tenant.json` left in the data directory by a pre-release build is ignored and can be deleted.
 - Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). `DAIMON_CRYPTO__KEYS` now also accepts the raw `Fernet.generate_key()` output or a comma-separated list; before this, only a JSON list parsed and a bare key stopped every service at boot. After setting keys and restarting **every** process with them, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - Agents whose keys hold shell metacharacters get a re-quoted `.env` once, so those sessions pick up a fresh mount on their next turn. Keys already stored under a hard-denied or non-identifier name stop being exported (an admin-set `DATABASE_URL` still mounts — only tool-control names are dropped); each skipped name is logged as `credential_env.row_skipped` and still shows in `list_agent_keys` so it can be removed or re-added under another name. If you suspect a name like `TAR_OPTIONS` or `LD_PRELOAD` was set on a shared agent before this release, refresh that agent's sessions and rotate any credential the agent could have reached.
 - Audit what members set up before the cross-agent fixes: `list_routines` as an admin for routines whose agent is not the one their destination channel answers with, and thread handoff bindings to agents from other projects. These keep working until removed.
@@ -74,6 +76,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_tenant_summary` (with each channel's admins) and, for `promo:create`,
   `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`
   tokens now expire and can be revoked. Run migration `0036_operator_tokens`.
+- **Teams takes every private form Discord and Slack do.** A key value can
+  span lines, `request_agent_key` without a key posts a `.env` form on Teams
+  (the file is pasted, since a dialog has no file input), and repo and
+  skill-repo cards open a GitHub token form that binds the working repo or
+  imports and attaches the skills, with Slack's admin gate and whole-file
+  rules. A token that cannot read the repo is refused in the dialog before
+  the request is spent.
+- **Teams channel turns replay their thread, as on Discord and Slack.** The
+  first turn in a thread reads the root post and its newest replies through
+  Microsoft Graph, a later turn only what came after the last message it read,
+  and a mention that starts a thread the channel's recent posts, all marked
+  untrusted. A bare @mention asks about the thread. Images pasted into a
+  channel message now reach the agent; files shared in a channel are named and
+  the person is told they can't be opened, as is anything Graph can't read.
+  This needs the resource-specific consent `ChannelMessage.Read.Group`, which
+  a team owner grants at install: upload the updated app package again. A
+  refused or slow read never fails a turn, which then runs without history.
+
+- **Teams channels can take files, once an admin grants the team's site.**
+  With the Graph application permission `Sites.Selected` and a write grant on
+  a team's SharePoint site, files shared in its channels reach the agent as
+  download links, and files the agent writes are uploaded to the channel's
+  Files tab and linked below its answer, or in one message; one that fails to
+  upload is named there. The turn tells the agent whether this works in that
+  channel. Without a grant, in private and shared channels, or when Graph
+  refuses, channels behave as before. The manifest is unchanged; `docs/teams.md` has
+  the grant steps.
+
+- **Teams threads can be followed, as on Discord.** Ask the agent to follow a
+  thread (`set_thread_participation`; a channel or the whole organisation
+  needs a listed admin) and it reads replies nobody addressed to it, then
+  joins in when the same classifier, quiet timer and hourly cap Discord uses
+  say it can help. The turn passes the usual admission and billing gates,
+  runs as the newest author, and posts only its answer: no status card,
+  notice or error. Root posts, bots and protected channels are never judged,
+  and without Graph history a followed thread stays mention-only. Quoting one
+  of the bot's messages in a channel now counts as mentioning it, and the
+  quoted text reaches the agent in place.
+
 - `scripts/hackathon_rehearsal_readout.py` prints stage readouts from staging logs, Monitoring metrics and content-free turn outcomes.
 - Long-running adapters emit `runtime.health` logs every 30 seconds with Anthropic response attempts, database pool use, event loop lag and turns in flight; `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0` disables them.
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
@@ -300,6 +341,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls are ticked, failed ones marked, and older calls fold into "+N earlier".
   The list now includes MCP and custom tool calls and still never shows tool
   arguments. The finished-turn summary and the error card are unchanged.
+- **Teams shows the same status card, and answers without a usage line.** The
+  running card on Teams now matches Discord and Slack: a bold Thinking or
+  Working headline with the elapsed time, up to six recent tool calls with
+  readable names and done or failed marks (MCP and custom tools included),
+  and the latest draft underneath, with Cancel kept. Answers, the close of a
+  turn that only ran tools ("✅ Done.") and failure notices no longer end with
+  the agent, time, token, cost and balance line. The feedback buttons stay on
+  the last part of the answer.
+- **Teams agents know how file delivery works there.** The guidance block
+  every agent gets now has a Teams paragraph: in a 1:1 chat, saving a file
+  under `/mnt/session/outputs` is the delivery path, with Slack's write rules,
+  and the person accepts it from a download card; in a channel no file can be
+  attached, so the agent says so once in its reply, pastes short text inline
+  or points to a 1:1 chat. Channel threads no longer get a separate note per
+  file. `send_message`'s refusal of files on Teams now says where files go
+  instead of "not available yet". Agents pick it up at their next reconcile
+  or edit.
 
 - A handoff or private-input continuation whose process dies mid-dispatch is
   no longer stuck in `claimed`: it is retried if its turn had not started, and
@@ -341,6 +399,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Teams posts nothing but its answer.** A file it could not read, an oversize output and a declined file offer each sent a status message of its own under the answer. The agent is now told what it could not open and why, and the rest is only logged, as on Slack and Discord. Cards and file offers still post.
+- **Teams channel files without Graph Explorer.** When a channel file is refused, a daimon admin gets an Enable files card: one sign-in by a SharePoint or global admin grants the bot that team's site. It needs `DAIMON_TEAMS__PUBLIC_URL` and a redirect URI on the app (see `docs/teams.md`).
+- **The MCP endpoint is stateless.** It kept MCP sessions in one process's
+  memory, so after a redeploy, or on a deployment running the MCP server on
+  more than one instance, a client's tool calls failed with "server terminated
+  the MCP session" (HTTP 400) or "Session not found" (HTTP 404) for the rest of
+  its session. Every request now stands alone, needs no `initialize` first and
+  answers with JSON, as the hub endpoints already did; an unknown session id
+  is ignored. Identity and tool visibility were already worked out per request
+  from the token, so no tool changes.
+- A Teams channel message the bot ignores because it was not mentioned is now
+  logged as `teams.message.ignored`, and a refusal reply that fails to send as
+  `teams.refusal.send_failed`, each with the conversation type and reason and
+  never the message text. Both cases used to leave no trace.
 - The Slack bot no longer answers thread replies that don't mention it. Slack
   can deliver an `app_mention` event for a reply in a thread the bot is in even
   when the reply never mentions it, and each one ran a billed turn. A turn now

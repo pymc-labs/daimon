@@ -377,8 +377,8 @@ Read from `daimon.core.config.ThreadParticipationSettings`. Prefix
 
 Organic thread participation: replying in a thread unprompted.
 
-Platform-agnostic settings (the store and tool are keyed by platform); only the Discord
-adapter reads them today. `mode` is the deployment tier of a cascade (deployment,
+Platform-agnostic settings (the store and tool are keyed by platform); the Discord and
+Teams adapters read them. `mode` is the deployment tier of a cascade (deployment,
 workspace, channel, thread) that the agent's `set_thread_participation` tool writes the
 other tiers of. `off` (the default) changes nothing for anyone: no classifier runs and
 every server behaves as today until someone asks the agent to follow a thread, or an
@@ -542,6 +542,15 @@ listener.
 
 When False, /api/messages answers 503 while the health endpoints stay live — the process
 keeps running so ingress can be re-enabled without a redeploy.
+
+### `DAIMON_TEAMS__PUBLIC_URL`
+
+`HttpUrl | None` · optional · default unset
+
+Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
+without /api/messages). Enables the admin sign-in that grants daimon a team's SharePoint
+site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
+redirect URI on the app registration.
 
 ### `DAIMON_TEAMS__ADMIN_USER_IDS`
 
@@ -1042,10 +1051,6 @@ Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
 once for the daimon side that calls it. They are read by different processes; a single
 shared env file would set both.
 
-No field in this model carries a `Field(description=...)`, so this section lists types
-and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
-inline comments.
-
 ### `DAIMON_NOTEBOOK__DATA_DIR`
 
 `Path` · optional · default `/data/notebooks`
@@ -1141,6 +1146,17 @@ inline comments.
 ### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
 
 `'https' | 'http'` · optional · default `https`
+
+### `DAIMON_NOTEBOOK__TENANTS`
+
+`tuple[UUID, ...]` · optional · default unset
+
+Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads from,
+comma-separated or as a JSON array of strings. Their notebooks share one browser origin
+and can reach each other, so list only tenants one operator controls. Empty refuses
+every upload. Ignored with ORIGIN_BASE (every notebook gets its own origin) and on
+localhost. An unlisted tenant's 403 names its id; `daimon tenants list --json` shows
+every tenant's id.
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 

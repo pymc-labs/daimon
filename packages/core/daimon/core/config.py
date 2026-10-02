@@ -283,7 +283,7 @@ class ThreadParticipationSettings(BaseModel):
     """Organic thread participation: replying in a thread unprompted.
 
     Platform-agnostic settings (the store and tool are keyed by platform);
-    only the Discord adapter reads them today. `mode` is the deployment tier
+    the Discord and Teams adapters read them. `mode` is the deployment tier
     of a cascade (deployment, workspace, channel, thread) that the agent's
     `set_thread_participation` tool writes the other tiers of. `off` (the
     default) changes nothing for anyone: no classifier runs and every server
@@ -509,6 +509,16 @@ class TeamsSettings(BaseModel):
             "When False, /api/messages answers 503 while the health endpoints "
             "stay live — the process keeps running so ingress can be "
             "re-enabled without a redeploy."
+        ),
+    )
+    public_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "Externally reachable base URL of the Teams service (the Bot "
+            "Framework messaging endpoint without /api/messages). Enables the "
+            "admin sign-in that grants daimon a team's SharePoint site; its "
+            "callback is <public_url>/oauth/teams/files/callback, which must be "
+            "a Web redirect URI on the app registration."
         ),
     )
     admin_user_ids: tuple[str, ...] = Field(

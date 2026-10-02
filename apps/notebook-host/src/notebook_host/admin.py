@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
@@ -162,56 +162,35 @@ def _require_editor_allowed(settings: Settings) -> None:
         )
 
 
-_TENANT_FILE = "tenant.json"
-
-
 def _admit_tenant(settings: Settings, tenant: str | None) -> None:
-    """On a shared-origin public host, accept uploads from one tenant only.
+    """On a shared-origin public host, accept uploads from listed tenants only.
 
     Without per-notebook origins (``origin_base``) every notebook shares one
     browser origin, so one tenant's notebook JavaScript could reach another's.
-    The first tenant to upload claims the host (``tenant.json``, 0600); any
-    other tenant, or a token that names none, is refused. Local dev hosts and
+    The operator lists the tenants that may share it (``tenants``); any other
+    tenant, or a token that names none, is refused. Local dev hosts and
     per-origin hosts skip this.
     """
     if settings.origin_base is not None or settings.is_local_dev:
         return
     if tenant is None:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "upload token names no tenant; this host serves one"
+            status.HTTP_403_FORBIDDEN,
+            "upload token names no tenant, so DAIMON_NOTEBOOK__TENANTS can't admit it; "
+            "upgrade the bot, or set DAIMON_NOTEBOOK__ORIGIN_BASE for per-notebook origins",
         )
-    path = settings.data_dir / _TENANT_FILE
     try:
-        raw = path.read_text()
-    except FileNotFoundError:
-        owner = None
-    except OSError as err:
-        raise _tenant_claim_unusable() from err
-    else:
-        # A claim that exists but can't be read must never be re-claimed by
-        # whoever uploads next: refuse until an operator repairs it.
-        try:
-            owner = json.loads(raw)["tenant"]
-        except (ValueError, KeyError, TypeError) as err:
-            raise _tenant_claim_unusable() from err
-        if not isinstance(owner, str):
-            raise _tenant_claim_unusable()
-    if owner is None:
-        write_file_nofollow(path, json.dumps({"tenant": tenant}).encode(), owner_uid=None)
-        return
-    if not hmac.compare_digest(str(owner), tenant):
+        listed = UUID(tenant) in settings.tenants
+    except ValueError:
+        listed = False
+    if not listed:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "this notebook host serves another tenant; notebooks share one browser origin "
-            "here (set DAIMON_NOTEBOOK__ORIGIN_BASE for per-notebook origins)",
+            f"tenant {tenant} is not in DAIMON_NOTEBOOK__TENANTS; notebooks on this host "
+            "share one browser origin, so it serves only the tenants listed there. Add the "
+            "id to share the origin with them, or set DAIMON_NOTEBOOK__ORIGIN_BASE for "
+            "per-notebook origins",
         )
-
-
-def _tenant_claim_unusable() -> HTTPException:
-    return HTTPException(
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        f"{_TENANT_FILE} is unreadable; refusing uploads until an operator repairs it",
-    )
 
 
 def _kill_uid_or_503(uid: int) -> None:

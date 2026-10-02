@@ -5,14 +5,17 @@ organisation or conversation, wrong requester, expired, already used. The
 submit re-runs them all, and the atomic consume precedes every write, so one
 request yields one write however often its dialog is submitted. The secret
 lives only in the submit payload: never logged, echoed, prefilled or put on a
-card. Env keys and MCP tokens take a password field; MCP OAuth hands out a
-private sign-in link.
+card. Env values and `.env` contents take a multi-line field (a dialog has no
+file input, so the file is pasted), MCP and GitHub tokens a password field;
+MCP OAuth hands out a private sign-in link. A GitHub token is checked against
+its repo before the consume: no private reply can reach the requester once
+the dialog has closed.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -28,24 +31,41 @@ from daimon.adapters.teams.card_actions import (
     error_text,
     submitted_fields,
 )
+from daimon.adapters.teams.credential_repos import attach_imported_skills, store_agent_pat
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    agent_pin_names,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
+from daimon.core.agent_reach import load_target_facts
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
-from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_requests import availability_for_request
+from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
+from daimon.core.credential_requests import availability_for_request, split_skill_repo_target
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.report import Action
 from daimon.core.env_file import (
+    MAX_ENV_FILE_BYTES,
     MEMBER_SECRET_SUFFIX_HINT,
+    EnvEntry,
+    EnvFileRejected,
+    decode_env_bytes,
     env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
     env_name_problem,
     env_related_held,
+    parse_env_file,
 )
+from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.mcp_attach import (
     McpConnectDecision,
     McpServerReplaceRefusedError,
@@ -59,7 +79,12 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import (
+    OperationKind,
+    TargetFacts,
+    decide_operation,
+    needs_reachability_read,
+)
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
     NO_LONGER_VALID_MESSAGE,
@@ -72,16 +97,23 @@ from daimon.core.posted_controls.teams_card import (
     ADAPTIVE_CARD_TYPE,
     build_adaptive_card,
     card_for_request,
+    teams_wording,
 )
+from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests as store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     agent_env_writes_allowed,
+    list_agent_files,
     lock_agent_keys,
     put_agent_file_if_unchanged,
 )
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
+from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.teams_threads import conversation_of
 from daimon.core.turn_keys import list_turn_key_names
 from microsoft_teams.api import (
@@ -111,7 +143,20 @@ SUBMIT = "credential_submit"
 Dispatch = Callable[[uuid.UUID, str, str | None], Awaitable[None]]
 Refusal = Literal["invalid", "wrong_org", "wrong_requester", "expired", "used"]
 
-_FORM_KINDS = ("env", "mcp")
+_FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo")
+_REPO_KINDS = ("repo", "skill_repo")
+#: Slack's caps: a GitHub token is short; whole-file errors name at most three keys.
+_MAX_GITHUB_TOKEN_CHARS = 255
+_COLLISION_LINES_SHOWN = 3
+_SHARED_AGENT = (
+    "This agent answers for other people here, so changing its repo or its keys needs an "
+    "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
+    "of your own."
+)
+_SHARED_AGENT_SKILLS = (
+    "This agent answers for other people here, so adding skills to it needs an admin. Ask "
+    "me and I'll write the request for them, or ask me to fork it and add them to the fork."
+)
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."
 _UNCONFIGURED = (
@@ -166,25 +211,75 @@ def env_name_refusal(name: str, problem: str) -> str:
     )
 
 
-def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
-    """The password form for an env key or MCP token. Never prefilled."""
-    env = row.kind == "env"
-    body: list[CardElement] = [error_text(error)] if error else []
-    body.append(
-        TextInput(
+def _secret_input(kind: str) -> TextInput:
+    """The one input a kind collects, sized as on Slack."""
+    if kind == "env":
+        return TextInput(
             id="secret",
-            label="Value" if env else "Token",
-            style="Password",
+            label="Value",
+            placeholder="paste the value",
+            is_multiline=True,
             is_required=True,
             max_length=MAX_SECRET_VALUE_BYTES,
         )
+    if kind == "env_file":
+        return TextInput(
+            id="secret",
+            label=".env file contents",
+            placeholder="KEY=VALUE",
+            is_multiline=True,
+            is_required=True,
+            max_length=MAX_ENV_FILE_BYTES,
+        )
+    github = kind in _REPO_KINDS
+    return TextInput(
+        id="secret",
+        label="Token",
+        placeholder="github_pat_…" if github else None,
+        style="Password",
+        is_required=True,
+        max_length=_MAX_GITHUB_TOKEN_CHARS if github else MAX_SECRET_VALUE_BYTES,
     )
-    facts = card_for_request(row, state="requested").facts
+
+
+def _title(row: CredentialRequestRow) -> str:
+    if row.kind == "env":
+        return f"{row.target} for {row.target_name or 'the agent'}"
+    if row.kind == "mcp":
+        return f"{row.target} token"
+    return "Keys from a file" if row.kind == "env_file" else "Your GitHub token"
+
+
+def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
+    """The private form for one request: the card's facts and one input. Never prefilled."""
+    # One block per line: a TextBlock does not reliably break on a single newline.
+    body: list[CardElement] = [error_text(line) for line in (error or "").splitlines()]
+    body.append(_secret_input(row.kind))
+    facts = teams_wording(card_for_request(row, state="requested")).facts
+    if row.kind == "skill_repo":
+        facts = ("Skill repo only — the working repo does not change.", *facts)
+    if row.kind in _REPO_KINDS:
+        facts = (*facts, "A fine-grained token with read access to the repo.")
     body += [TextBlock(text=fact, is_subtle=True, size="Small", wrap=True) for fact in facts]
     save = SubmitAction(title="Save", data=SubmitData(SUBMIT, {"token": row.token}))
-    agent = row.target_name or "the agent"
-    title = f"{row.target} for {agent}" if env else f"{row.target} token"
+    title = _title(row)
     return dialog(title, AdaptiveCard(body=body, actions=[save], fallback_text=title))
+
+
+def _collision_lines(collisions: Sequence[EnvEntry], held: frozenset[str]) -> tuple[str, ...]:
+    """The keys a whole-file import would replace: names and line numbers, no values."""
+    lines = [env_collision_line(entry, held) for entry in collisions[:_COLLISION_LINES_SHOWN]]
+    if len(collisions) > _COLLISION_LINES_SHOWN:
+        lines.append(f"…and {len(collisions) - _COLLISION_LINES_SHOWN} more.")
+    return tuple(lines)
+
+
+class _KeyAppearedMidWrite(Exception):
+    """A key read as absent existed by its write; raised only to roll the import back."""
+
+    def __init__(self, entry: EnvEntry) -> None:
+        super().__init__(entry.name)
+        self.entry = entry
 
 
 def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
@@ -260,6 +355,16 @@ class TeamsCredentialRequests:
             return dialog_message(_MESSAGES[reason or "invalid"])
         if row.kind == "mcp_oauth":
             return await self._start_oauth(row, activity.service_url)
+        if row.kind == "repo":
+            # Gated at the click too, as on Slack: a member is not asked for a
+            # token a shared agent would refuse.
+            agent = await find_agent_by_derived_uuid(
+                self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            )
+            if agent is None:
+                return dialog_message(_AGENT_GONE)
+            if await self._attachment_refused(row, agent, "repo_bind", is_admin=actor.is_admin):
+                return dialog_message(_SHARED_AGENT)
         return credential_form(row)
 
     async def _start_oauth(
@@ -277,13 +382,18 @@ class TeamsCredentialRequests:
         if pin_refusal is not None:
             return dialog_message(pin_refusal)
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(session, token=row.token, now=now)
-            flow = (
-                await begin_mcp_oauth_flow(session, request=consumed, app_root_url=root, now=now)
-                if consumed is not None
-                else None
-            )
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                flow = (
+                    await begin_mcp_oauth_flow(
+                        session, request=consumed, app_root_url=root, now=now
+                    )
+                    if consumed is not None
+                    else None
+                )
+        except FormPinRefused as refused:
+            return dialog_message(refused.refusal)
         if consumed is None or flow is None:
             return dialog_message(NO_LONGER_VALID_MESSAGE)
         # The mcp process edits the card again once sign-in completes.
@@ -300,20 +410,43 @@ class TeamsCredentialRequests:
         secret = str(fields.get("secret") or "")
         if not secret.strip():
             return credential_form(row, "Value cannot be empty — try again.")
-        if len(secret.encode()) > MAX_SECRET_VALUE_BYTES:
+        if row.kind == "env_file" and len(secret.encode()) > MAX_ENV_FILE_BYTES:
+            return credential_form(row, f"That is too big. Max {MAX_ENV_FILE_BYTES // 1024} KB.")
+        if row.kind != "env_file" and len(secret.encode()) > MAX_SECRET_VALUE_BYTES:
             return credential_form(row, f"Value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.")
         mcp = self._runtime.settings.mcp
         if row.kind == "mcp" and (mcp.public_url is None or mcp.jwt_secret is None):
+            return dialog_message(_UNCONFIGURED)
+        if row.kind in _REPO_KINDS and self._runtime.turn_deps.fernet is None:
             return dialog_message(_UNCONFIGURED)
         if row.kind == "env":
             # The name is re-checked against the submitter's live role.
             problem = env_name_problem(row.target, is_admin=actor.is_admin)
             if problem is not None:
                 return dialog_message(env_name_refusal(row.target, problem))
+        entries: tuple[EnvEntry, ...] = ()
+        if row.kind in ("env", "env_file"):
             async with self._runtime.sessionmaker() as session:
                 if not agent_env_writes_allowed(session):
                     log.error("teams.credential.env_refused_no_crypto_keys")
                     return dialog_message(str(AgentEnvEncryptionRequiredError()))
+        if row.kind == "env_file":
+            # Parsed before the consume, as Slack parses the upload: a file that
+            # cannot be read costs nothing, and the form stays open to fix it.
+            try:
+                text = decode_env_bytes(secret.encode())
+                entries = parse_env_file(text, member_writable_only=not actor.is_admin)
+            except EnvFileRejected as err:
+                log.info(
+                    "teams.credential.env_file_rejected",
+                    rejection=err.rejection,
+                    lines=[problem.line for problem in err.problems],
+                )
+                agent_name = row.target_name or "the agent"
+                rejected = render_env_import_rejected(
+                    err.rejection, err.problems, target_name=agent_name, pasted=True
+                )
+                return credential_form(row, rejected)
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )
@@ -324,13 +457,90 @@ class TeamsCredentialRequests:
         if pin_refusal is not None:
             return dialog_message(pin_refusal)
         url = activity.service_url
-        work = (
-            self._save_env(row, agent, secret, is_admin=actor.is_admin, service_url=url)
-            if row.kind == "env"
-            else self._save_mcp(row, agent, secret, is_admin=actor.is_admin, service_url=url)
-        )
+        if row.kind in _REPO_KINDS:
+            refused = await self._repo_refusal(row, agent, secret.strip(), actor, url)
+            if refused is not None:
+                return refused
+        is_admin = actor.is_admin
+        work: Awaitable[None]
+        if row.kind == "env":
+            work = self._save_env(row, agent, secret, is_admin=is_admin, service_url=url)
+        elif row.kind == "env_file":
+            work = self._save_env_file(row, agent, entries, service_url=url)
+        elif row.kind == "mcp":
+            work = self._save_mcp(row, agent, secret, is_admin=is_admin, service_url=url)
+        elif row.kind == "repo":
+            work = self._save_repo(row, agent, secret.strip(), service_url=url)
+        else:
+            work = self._save_skill_repo(
+                row, agent, secret.strip(), is_admin=is_admin, service_url=url
+            )
         self._spawn(self._background(work, kind=row.kind), name="teams.cred.save")
         return TaskModuleResponse()
+
+    async def _repo_refusal(
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        pat: str,
+        actor: Actor,
+        service_url: str | None,
+    ) -> TaskModuleResponse | None:
+        """The admin gate, then the token's access to the repo; None when both pass.
+
+        The gate is decided again here against the live submitter, before the
+        consume, as on Slack. A refused card stops offering the form.
+        """
+        skills = row.kind == "skill_repo"
+        operation: OperationKind = "skill_repo_connect" if skills else "repo_bind"
+        if await self._attachment_refused(row, agent, operation, is_admin=actor.is_admin):
+            async with self._runtime.sessionmaker.begin() as session:
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="write_failed"
+                )
+            edit = self._edit(row, "refused", service_url, reason="admin_required")
+            self._spawn(edit, name="teams.cred.edit")
+            return dialog_message(_SHARED_AGENT_SKILLS if skills else _SHARED_AGENT)
+        # Verified before it is stored: a token that cannot read the repo is not
+        # a credential for it, and a stored one would shadow a working token.
+        owner_repo = normalize_owner_repo(split_skill_repo_target(row.target)[0])
+        http = self._runtime.http_client
+        if not await pat_can_access_repo(http, owner_repo=owner_repo, pat=pat):
+            return credential_form(
+                row,
+                f"That token cannot read {owner_repo} (or the repo does not exist). "
+                "Paste one that can. Nothing was saved.",
+            )
+        return None
+
+    async def _attachment_refused(
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        operation: OperationKind,
+        *,
+        is_admin: bool,
+    ) -> bool:
+        """Decide a repo bind or skill import for whoever submitted (Slack's rule)."""
+        managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        async with self._runtime.sessionmaker() as session:
+            facts = await load_target_facts(
+                session,
+                operation,
+                tenant_id=row.tenant_id,
+                platform="teams",
+                agent_names=agent_pin_names(agent.name, agent.metadata),
+                ma_agent_id=str(agent.id),
+                default=self._runtime.deployment_default,
+                # Teams has no channel admins (see `CHANNEL_ADMIN_PLATFORMS`).
+                caller=ChannelAdminCaller(platform_user_id=None, is_server_admin=is_admin),
+                is_daimon_managed=managed,
+                # Slack leaves the caller's own sessions out of a skill import's
+                # sharing read, not a repo bind's.
+                caller_account_id=row.account_id if operation == "skill_repo_connect" else None,
+                caller_platform_user_id=row.requester_platform_user_id,
+            )
+        return decide_operation(operation, is_admin=is_admin, target=facts) != "allow"
 
     async def _background(self, work: Awaitable[None], *, kind: str) -> None:
         """Runner boundary. A failed write can carry the value in its SQL
@@ -349,12 +559,18 @@ class TeamsCredentialRequests:
         outcome: ConfigurationChange | None = None,
         reason: RefusalReason | None = None,
         replaces: str | None = None,
+        refusal_lines: Sequence[str] = (),
     ) -> None:
         """Edit the posted card. Best effort: the outcome is already recorded."""
         if row.posted_message_id is None:
             return
         card = card_for_request(
-            row, state=state, outcome=outcome, refusal=reason, replaces=replaces
+            row,
+            state=state,
+            outcome=outcome,
+            refusal=reason,
+            replaces=replaces,
+            refusal_lines=refusal_lines,
         )
         attachment = Attachment(content_type=ADAPTIVE_CARD_TYPE, content=build_adaptive_card(card))
         edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
@@ -422,55 +638,63 @@ class TeamsCredentialRequests:
         )
         state: CardState = "applied"
         queued = False
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(
-                session, token=row.token, now=datetime.now(UTC)
-            )
-            # Re-read under the write, holding the agent's key-set lock: an
-            # alias that appeared after the gate above was decided was never
-            # put to it, and one a concurrent writer is adding waits.
-            appeared = False
-            if consumed is not None:
-                await lock_agent_keys(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(
+                    session, row=row, agent=agent, now=datetime.now(UTC)
                 )
-                appeared = (
-                    env_related_held(
-                        consumed.target,
-                        await list_turn_key_names(
-                            session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                        ),
+                # Re-read under the write, holding the agent's key-set lock: an
+                # alias that appeared after the gate above was decided was never
+                # put to it, and one a concurrent writer is adding waits.
+                appeared = False
+                if consumed is not None:
+                    await lock_agent_keys(
+                        session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
                     )
-                    != related_before
-                )
-            if consumed is not None and refuse:
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome="write_failed"
-                )
-                state = "refused"
-            elif consumed is not None and appeared:
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome="stale_replacement"
-                )
-                state = "superseded"
-            elif consumed is not None:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=consumed.target,
-                    content=secret,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=consumed.replaces_updated_at,
-                )
-                outcome = "applied" if written is not None else "stale_replacement"
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome=outcome
-                )
-                if written is None:
+                    appeared = (
+                        env_related_held(
+                            consumed.target,
+                            await list_turn_key_names(
+                                session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                            ),
+                        )
+                        != related_before
+                    )
+                if consumed is not None and refuse:
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="write_failed"
+                    )
+                    state = "refused"
+                elif consumed is not None and appeared:
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="stale_replacement"
+                    )
                     state = "superseded"
-                else:
-                    queued = await record_input_continuation(session, consumed, platform="teams")
+                elif consumed is not None:
+                    written = await put_agent_file_if_unchanged(
+                        session,
+                        tenant_id=consumed.tenant_id,
+                        agent_id=consumed.agent_id,
+                        key=consumed.target,
+                        content=secret,
+                        set_by_account_id=consumed.account_id,
+                        expected_updated_at=consumed.replaces_updated_at,
+                    )
+                    outcome = "applied" if written is not None else "stale_replacement"
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome=outcome
+                    )
+                    if written is None:
+                        state = "superseded"
+                    else:
+                        queued = await record_input_continuation(
+                            session, consumed, platform="teams"
+                        )
+        except FormPinRefused:
+            # Decided with the consume: rolled back, the form stays live. The
+            # dialog showed the earlier refusal for a pin already set.
+            log.info("teams.credential.pin_refused", kind="env")
+            return
         if consumed is None:
             log.info("teams.credential.already_used", kind="env")
             return
@@ -494,6 +718,295 @@ class TeamsCredentialRequests:
         )
         if queued:
             await self._resume(consumed, service_url)
+
+    async def _apply_env_file(
+        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, entries: Sequence[EnvEntry]
+    ) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
+        """Consume and write every entry in one transaction, as Slack does.
+
+        Returns the consumed row (None when already spent), the entries that
+        would replace a held key (then nothing is written and the request is
+        `stale_replacement`), whether the continuation was queued, and the held
+        names the refusal lines need.
+        """
+        now = datetime.now(UTC)
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                if consumed is None:
+                    return None, (), False, frozenset()
+                # Held across the read and the writes, so a concurrent writer of
+                # another alias name cannot interleave.
+                await lock_agent_keys(
+                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                )
+                files = await list_agent_files(
+                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                )
+                held = frozenset(file.key for file in files)
+                collisions = env_import_collisions(entries, held)
+                if collisions:
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="stale_replacement"
+                    )
+                    return consumed, collisions, False, held
+                for entry in entries:
+                    written = await put_agent_file_if_unchanged(
+                        session,
+                        tenant_id=consumed.tenant_id,
+                        agent_id=consumed.agent_id,
+                        key=entry.name,
+                        content=entry.value,
+                        set_by_account_id=consumed.account_id,
+                        expected_updated_at=None,
+                    )
+                    if written is None:
+                        raise _KeyAppearedMidWrite(entry)
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="applied"
+                )
+                queued = await record_input_continuation(session, consumed, platform="teams")
+                return consumed, (), queued, frozenset()
+        except _KeyAppearedMidWrite as err:
+            # The rollback took the consume with it: spend it now, as a collision.
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                if consumed is None:
+                    return None, (), False, frozenset()
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="stale_replacement"
+                )
+                return consumed, (err.entry,), False, frozenset({err.entry.name})
+
+    async def _save_env_file(
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        entries: Sequence[EnvEntry],
+        *,
+        service_url: str | None,
+    ) -> None:
+        """Whole-file, as on Slack: a key already held, by name or alias, writes nothing."""
+        try:
+            consumed, collisions, queued, held = await self._apply_env_file(row, agent, entries)
+        except FormPinRefused:
+            log.info("teams.credential.pin_refused", kind="env_file")
+            return
+        if consumed is None:
+            log.info("teams.credential.already_used", kind="env_file")
+            return
+        await self._edit(consumed, "received", service_url)
+        if collisions:
+            responder = consumed.responder_name or "Daimon"
+            lines = (
+                *_collision_lines(collisions, held),
+                f"Nothing was changed. Ask {responder} to replace a key you already have.",
+            )
+            log.info(
+                "teams.credential.env_file_refused",
+                key_count=len(entries),
+                collision_count=len(collisions),
+            )
+            await self._edit(
+                consumed, "refused", service_url, reason="env_file_invalid", refusal_lines=lines
+            )
+            return
+        # Key names only, never a value.
+        log.info("teams.credential.env_file_saved", keys=[entry.name for entry in entries])
+        change = ConfigurationChange(
+            target_name=consumed.target_name or "this agent",
+            kind="keys_bulk",
+            availability=availability_for_request(consumed),
+            count=len(entries),
+        )
+        await self._edit(consumed, "applied", service_url, outcome=change)
+        if queued:
+            await self._resume(consumed, service_url)
+
+    async def _consume(
+        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent
+    ) -> CredentialRequestRow | None:
+        """Spend the form, the pin decided in the same transaction. None when it is not spent."""
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(
+                    session, row=row, agent=agent, now=datetime.now(UTC)
+                )
+        except FormPinRefused:
+            log.info("teams.credential.pin_refused", kind=row.kind)
+            return None
+        if consumed is None:
+            log.info("teams.credential.already_used", kind=row.kind)
+        return consumed
+
+    async def _save_repo(
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        pat: str,
+        *,
+        service_url: str | None,
+    ) -> None:
+        """Consume, store the token as the agent's own, bind the working repo.
+
+        The branch comes from the request, not the form.
+        """
+        consumed = await self._consume(row, agent)
+        if consumed is None:
+            return
+        await self._edit(consumed, "received", service_url)
+        repo_url, branch, _path = split_skill_repo_target(consumed.target)
+        try:
+            ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
+            proof = RepoAccessProof(
+                kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
+            )
+            async with self._runtime.sessionmaker.begin() as session:
+                await set_binding(
+                    session,
+                    tenant_id=consumed.tenant_id,
+                    agent_id=consumed.agent_id,
+                    repo_url=repo_url,
+                    default_branch=branch,
+                    ma_secret_ref=ref,
+                    proof=proof,
+                )
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="applied"
+                )
+                queued = await record_input_continuation(session, consumed, platform="teams")
+        except Exception as err:
+            # Type only: a failed write can quote the token; the card says it did not land.
+            log.warning("teams.credential.repo_write_failed", err_type=type(err).__name__)
+            return await self._refuse(consumed, "target_unavailable", service_url)
+        log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
+        change = ConfigurationChange(
+            target_name=consumed.target_name or "this agent",
+            kind="repo",
+            repo=normalize_owner_repo(repo_url),
+            branch=branch,
+            availability="next_message",
+        )
+        await self._edit(consumed, "applied", service_url, outcome=change)
+        if queued:
+            await self._resume(consumed, service_url)
+
+    async def _save_skill_repo(
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        pat: str,
+        *,
+        is_admin: bool,
+        service_url: str | None,
+    ) -> None:
+        """Consume, store the token for the skill repo, import, attach (Slack's runner).
+
+        The working repo binding is never touched.
+        """
+        consumed = await self._consume(row, agent)
+        if consumed is None:
+            return
+        await self._edit(consumed, "received", service_url)
+        url, branch, path = split_skill_repo_target(consumed.target)
+        owner_repo = normalize_owner_repo(url)
+        log.info("teams.credential.skill_repo_saved", repo_url=url, branch=branch, path=path)
+        stored = False
+        try:
+            ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
+            stored = True
+            proof = RepoAccessProof(
+                kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
+            )
+            async with self._runtime.sessionmaker.begin() as session:
+                await set_skill_repo_credential(
+                    session,
+                    tenant_id=consumed.tenant_id,
+                    agent_id=consumed.agent_id,
+                    repo_url=url,
+                    default_branch=branch,
+                    path=path,
+                    ma_secret_ref=ref,
+                    proof=proof,
+                )
+                seeded = await list_seeded_skill_names(session, tenant_id=consumed.tenant_id)
+            outcomes = await run_skill_sync(
+                self._runtime.anthropic,
+                self._runtime.http_client,
+                url=url,
+                branch=branch,
+                path=path,
+                tenant_id=consumed.tenant_id,
+                seeded_skill_names=seeded,
+                is_admin=is_admin,
+                token=pat,
+            )
+        except Exception as err:
+            # Upstream details stay in operator logs, never on the card.
+            log.warning("teams.credential.skill_repo_sync_failed", err_type=type(err).__name__)
+            if not stored:
+                return await self._refuse(consumed, "target_unavailable", service_url)
+            return await self._skills_partial(consumed, owner_repo, None, service_url)
+        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        failure_detail = summarize_failed_imports(outcomes)
+        if not imported:
+            # Nothing reached the library, which an applied card must not claim.
+            return await self._skills_partial(consumed, owner_repo, failure_detail, service_url)
+        attach = await attach_imported_skills(
+            self._runtime,
+            tenant_id=consumed.tenant_id,
+            agent_id=consumed.agent_id,
+            outcomes=imported,
+        )
+        log.info(
+            "teams.credential.skill_repo_imported",
+            imported=len(imported),
+            attached=attach.attached,
+            note=attach.note,
+        )
+        async with self._runtime.sessionmaker.begin() as session:
+            outcome = "applied" if attach.attached else "write_failed"
+            await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
+            queued = await record_input_continuation(
+                session, consumed, platform="teams", carries_work=attach.attached
+            )
+        detail = [failure_detail] if attach.attached else [attach.note, failure_detail]
+        change = ConfigurationChange(
+            target_name=consumed.target_name or attach.agent_name or "the agent",
+            kind="skills_bulk",
+            availability="next_message" if attach.attached else "saved",
+            repo=owner_repo,
+            count=len(imported),
+            detail="\n".join(line for line in detail if line) or None,
+        )
+        state: CardState = "applied" if attach.attached else "partial"
+        await self._edit(consumed, state, service_url, outcome=change)
+        if attach.attached and queued:
+            await self._resume(consumed, service_url)
+
+    async def _skills_partial(
+        self,
+        row: CredentialRequestRow,
+        repo: str,
+        detail: str | None,
+        service_url: str | None,
+    ) -> None:
+        """The token is stored but no skill reached the agent: audited, no turn promised."""
+        async with self._runtime.sessionmaker.begin() as session:
+            await store.set_credential_request_outcome(
+                session, token=row.token, outcome="write_failed"
+            )
+            await record_input_continuation(session, row, platform="teams", carries_work=False)
+        # `preparation_failed` names no count, but the change model requires one.
+        change = ConfigurationChange(
+            target_name=row.target_name or "the agent",
+            kind="skills_bulk",
+            availability="preparation_failed",
+            repo=repo,
+            count=1,
+            detail=detail,
+        )
+        await self._edit(row, "partial", service_url, outcome=change)
 
     async def _refuse(
         self,
@@ -541,8 +1054,12 @@ class TeamsCredentialRequests:
             else McpConnectDecision(replaces=False, replace_allowed=False)
         )
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(session, token=row.token, now=now)
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        except FormPinRefused:
+            log.info("teams.credential.pin_refused", kind="mcp")
+            return
         if consumed is None:
             log.info("teams.credential.already_used", kind="mcp")
             return

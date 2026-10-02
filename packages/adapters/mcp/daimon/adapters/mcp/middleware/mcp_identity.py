@@ -354,6 +354,8 @@ class IdentityMiddleware(Middleware):
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
+        # Each enable appends a rule to session state, which must be this
+        # request's alone: StripSessionIdMiddleware (server.py) sees to it.
         if identity.is_operator:
             return await self._resolve_operator(context, call_next, identity)
         if is_admin:

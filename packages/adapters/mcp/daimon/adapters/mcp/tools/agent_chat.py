@@ -473,6 +473,9 @@ async def _start_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
+            # Vault, repo-token and env work run first: decide again right
+            # before the session exists, so a pin landing meanwhile leaves none.
+            before_create=recheck,
         )
 
     if (observation := current_outcome.get()) is not None:

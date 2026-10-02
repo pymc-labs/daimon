@@ -17,6 +17,7 @@ __all__ = [
     "CREDENTIAL_DIALOG",
     "build_adaptive_card",
     "card_for_request",
+    "teams_wording",
 ]
 
 ADAPTIVE_CARD_TYPE: Final[str] = "application/vnd.microsoft.card.adaptive"
@@ -25,6 +26,26 @@ CREDENTIAL_DIALOG: Final[str] = "credential_request"
 # The poster knows the requester's Entra id, not their name, so the footer
 # names the role; only the requester can open the form either way.
 _REQUESTER: Final[str] = "the person who asked"
+
+
+# A dialog has no file input, so on Teams a `.env` file is pasted, not uploaded.
+_PASTED: Final[dict[str, str]] = {
+    "🔐 Upload it privately": "🔐 Paste it privately",
+    "Daimon stores the keys, not a retained copy of your uploaded file.": (
+        "Daimon stores the keys, not a copy of what you pasted."
+    ),
+}
+
+
+def teams_wording(card: PostedCard) -> PostedCard:
+    """The card as Teams words it: an `env_file` request takes a paste."""
+    if card.kind != "env_file":
+        return card
+    buttons = tuple(
+        b.model_copy(update={"label": _PASTED.get(b.label, b.label)}) for b in card.buttons
+    )
+    facts = tuple(_PASTED.get(fact, fact) for fact in card.facts)
+    return card.model_copy(update={"buttons": buttons, "facts": facts})
 
 
 def _text(text: str, **style: object) -> dict[str, object]:
@@ -49,6 +70,7 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
     The token is the opaque request handle, never a secret value, and is
     required whenever the card has a form button (only the `requested` state).
     """
+    card = teams_wording(card)
     body: list[dict[str, object]] = [_text(card.headline, weight="Bolder")]
     body += [_text(fact, isSubtle=True, spacing="None") for fact in card.facts]
     actions: list[dict[str, object]] = []

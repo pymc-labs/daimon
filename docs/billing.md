@@ -153,7 +153,7 @@ channel, found from its `origin_context_id`. Each scheduled
 routine fire runs all three, the budget last against the routine's channel
 (after the agent pin check), and records the reason as that run's error
 instead of raising. Wakes pass through
-chat admission, so all three apply. Discord's unprompted thread participation
+chat admission, so all three apply. Unprompted thread participation (Discord and Teams)
 checks all three too, and skips silently, on the grounds that a billing
 notice is owed to someone who actually asked.
 
@@ -471,9 +471,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord, Slack and Teams terminal reply footers show the remaining ledger balance
+The Discord and Slack terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
-without a tenant omit it.
+without a tenant omit it. Teams answers carry no usage footer.
 
 ## What you can see
 

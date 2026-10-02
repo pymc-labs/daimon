@@ -575,11 +575,6 @@ async def _request_agent_key_impl(
             raise ToolError(
                 f"You named one key ({named}); pass it as `key` instead of requesting a file."
             )
-        if auth.platform == "teams":
-            # A Teams dialog has no file input, so the upload form cannot exist here.
-            raise ToolError(
-                "Teams cannot take a .env file upload. Request each key by name with `key`."
-            )
     async with runtime.session_factory() as session:
         writable = agent_env_writes_allowed(session)
     if not writable:
@@ -1028,7 +1023,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_skill_repo_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -1074,7 +1069,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_repo_binding(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

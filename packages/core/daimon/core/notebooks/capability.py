@@ -52,8 +52,8 @@ def mint_token(
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
         "jti": jti,
     }
-    # The notebook host serves one tenant unless it has per-notebook origins,
-    # so it needs to know whose upload this is. Omitted when unknown, so the
+    # Without per-notebook origins the notebook host serves only the tenants
+    # its operator lists, so it needs to know whose upload this is. Omitted when unknown, so the
     # report host's claims (which have no tenant) are unchanged.
     if tenant is not None:
         payload["tenant"] = tenant

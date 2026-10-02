@@ -45,7 +45,12 @@ from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import agent_pin_names, request_pin_refusal
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    agent_pin_names,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
@@ -198,12 +203,15 @@ async def _mark_button_consumed(client: AsyncWebClient, *, row: CredentialReques
 
 
 async def _consume(
-    runtime: SlackRuntime, *, token: str, now: datetime
+    runtime: SlackRuntime,
+    *,
+    request: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent,
+    now: datetime,
 ) -> CredentialRequestRow | None:
+    """Spend the form, deciding the pin rule in the same transaction (`FormPinRefused`)."""
     async with runtime.sessionmaker() as session, session.begin():
-        return await credential_requests_store.consume_credential_request(
-            session, token=token, now=now
-        )
+        return await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
 
 
 async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
@@ -308,7 +316,12 @@ async def _validate_submission(
     user_id: str,
     channel_id: str,
     kind: CredentialRequestKind,
-) -> CredentialRequestRow | None:
+) -> tuple[CredentialRequestRow, BetaManagedAgentsAgent] | None:
+    """The live request and its target agent, or None once the submitter is told why not.
+
+    The pin rule is decided here, before any confirmation, and again inside
+    the consume transaction (`consume_form_unless_pinned`).
+    """
     async with runtime.sessionmaker() as session:
         row = await credential_requests_store.peek_credential_request(session, token=token)
     if (
@@ -356,7 +369,7 @@ async def _validate_submission(
             text=pin_refusal,
         )
         return None
-    return row
+    return row, agent
 
 
 def _env_name_refusal(name: str, problem: str) -> str:
@@ -399,7 +412,7 @@ async def run_env_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -408,8 +421,9 @@ async def run_env_credential_submission(
         channel_id=channel_id,
         kind="env",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -459,9 +473,7 @@ async def run_env_credential_submission(
     queued = False
     try:
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             # Re-read under the write, holding the agent's key-set lock: an
             # alias that appeared after the gate above was decided was never
             # put to it, and one a concurrent writer is adding waits.
@@ -508,6 +520,16 @@ async def run_env_credential_submission(
                     state = "superseded"
                 else:
                     queued = await record_input_continuation(session, consumed, platform="slack")
+    except FormPinRefused as refused:
+        # Decided with the consume: rolled back, nothing stored.
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_write_refused_no_crypto_keys")
@@ -628,7 +650,12 @@ def _collision_lines(collisions: tuple[EnvEntry, ...], held: frozenset[str]) -> 
 
 
 async def _apply_env_file_entries(
-    runtime: SlackRuntime, *, token: str, entries: tuple[EnvEntry, ...], now: datetime
+    runtime: SlackRuntime,
+    *,
+    request: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent,
+    entries: tuple[EnvEntry, ...],
+    now: datetime,
 ) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
     """Consume the request and write every entry, in one transaction.
 
@@ -644,9 +671,7 @@ async def _apply_env_file_entries(
     """
     try:
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             if consumed is None:
                 return None, (), False, frozenset()
             # Held across the read below and the writes after it, so a
@@ -661,7 +686,7 @@ async def _apply_env_file_entries(
             collisions = env_import_collisions(entries, existing)
             if collisions:
                 await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="stale_replacement"
+                    session, token=request.token, outcome="stale_replacement"
                 )
                 return consumed, collisions, False, frozenset(existing)
             for entry in entries:
@@ -677,7 +702,7 @@ async def _apply_env_file_entries(
                 if written is None:
                     raise _KeyAppearedMidWrite(entry)
             await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="applied"
+                session, token=request.token, outcome="applied"
             )
             queued = await record_input_continuation(session, consumed, platform="slack")
             return consumed, (), queued, frozenset()
@@ -685,13 +710,11 @@ async def _apply_env_file_entries(
         # The rollback took the consume with it, so the request is live again:
         # spend it here and answer exactly as a read-time collision answers.
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             if consumed is None:
                 return None, (), False, frozenset()
             await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="stale_replacement"
+                session, token=request.token, outcome="stale_replacement"
             )
             return consumed, (err.entry,), False, frozenset({err.entry.name})
 
@@ -727,7 +750,7 @@ async def run_env_file_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -736,8 +759,9 @@ async def run_env_file_credential_submission(
         channel_id=channel_id,
         kind="env_file",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -787,8 +811,18 @@ async def run_env_file_credential_submission(
 
     try:
         consumed, collisions, queued, held = await _apply_env_file_entries(
-            runtime, token=token, entries=entries, now=datetime.now(UTC)
+            runtime, request=request, agent=agent, entries=entries, now=datetime.now(UTC)
         )
+    except FormPinRefused as refused:
+        # Decided with the consume: rolled back, nothing stored.
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_file_refused_no_crypto_keys")
@@ -956,7 +990,7 @@ async def run_mcp_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -965,8 +999,9 @@ async def run_mcp_credential_submission(
         channel_id=channel_id,
         kind="mcp",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -987,7 +1022,17 @@ async def run_mcp_credential_submission(
 
     connect = await _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id)
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -1389,7 +1434,7 @@ async def run_skill_repo_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -1398,8 +1443,9 @@ async def run_skill_repo_credential_submission(
         channel_id=channel_id,
         kind="skill_repo",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -1425,7 +1471,17 @@ async def run_skill_repo_credential_submission(
         return
 
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -1621,7 +1677,7 @@ async def run_repo_bind_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -1630,8 +1686,9 @@ async def run_repo_bind_credential_submission(
         channel_id=channel_id,
         kind="repo",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -1656,7 +1713,17 @@ async def run_repo_bind_credential_submission(
         return
 
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,

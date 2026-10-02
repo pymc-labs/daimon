@@ -21,9 +21,9 @@ their pre-turn gate.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
@@ -54,7 +54,12 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, MissingTurnConfigError
+from daimon.core.turn.errors import (
+    AdmissionDenied,
+    DmSourceSealedError,
+    MissingTurnConfigError,
+    SessionBusyError,
+)
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 
 __all__ = [
@@ -493,11 +498,40 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     seal_ids = admission.origin_seal_ids | _seal_ids(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
-    if seal_ids == admission.origin_seal_ids:
+    # Memory posture is decided from the policy as it is now, not only from
+    # new seals: a DM turn picks up `dm_memory_read_only` switched on since
+    # admission. Read-only never relaxes back to writable here.
+    memory_read_only = (
+        admission.memory_read_only or bool(seal_ids) or (grant.is_dm and policy.dm_memory_read_only)
+    )
+    if seal_ids == admission.origin_seal_ids and memory_read_only == admission.memory_read_only:
         return admission
     return replace(
         admission,
         origin_seal_ids=seal_ids,
-        source_sealed=True,
-        memory_read_only=True,
+        source_sealed=admission.source_sealed or bool(seal_ids),
+        memory_read_only=memory_read_only,
     )
+
+
+def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awaitable[None]]:
+    """A last decision to run right before a message is sent into a session.
+
+    Opening the stream and building the message await network calls after the
+    session's last decision. A pin or protection added since refuses the send
+    (`AdmissionDenied`); a seal or read-only change the session wasn't built
+    with makes the turn wait (`SessionBusyError`) so the next one is prepared
+    with it, rather than writing into a session mounted for the old decision.
+    """
+
+    async def decide() -> None:
+        current = await reauthorize(deps, admission)
+        if (
+            current.origin_seal_ids != admission.origin_seal_ids
+            or current.memory_read_only != admission.memory_read_only
+        ):
+            raise SessionBusyError(
+                pending_reasons=("seal",), retry_after=datetime.now(UTC) + timedelta(seconds=1)
+            )
+
+    return decide

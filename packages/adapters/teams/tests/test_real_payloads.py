@@ -78,6 +78,26 @@ SOURCES: dict[str, tuple[str, ...]] = {
         f"{_LEARN}/bots/how-to/conversations/channel-and-group-conversations",
     ),
     "channel_thread_reply": (_CAPTURE,),
+    # The captured reply with files uploaded to it: the activity carries only the text, and
+    # the files are `reference` attachments on Graph's copy of the message.
+    "channel_attachments_reply": (
+        _CAPTURE,
+        "https://learn.microsoft.com/en-us/graph/api/resources/chatmessageattachment",
+    ),
+    # The captured reply with a pasted image and a file marked in its HTML.
+    "channel_media_reply": (
+        _CAPTURE,
+        "https://learn.microsoft.com/en-us/graph/api/resources/chatmessageattachment",
+        "https://learn.microsoft.com/en-us/graph/api/chatmessagehostedcontent-get",
+    ),
+    # The captured reply quoting the bot instead of mentioning it: the SDK's quotedReply
+    # entity (senderId the quoted author's Bot Framework id) and its text placeholder.
+    "channel_quote_reply": (
+        _CAPTURE,
+        "https://github.com/microsoft/teams.py/blob/main/packages/api/src/microsoft_teams/api/"
+        "models/entity/quoted_reply_entity.py",
+        "https://microsoft.github.io/teams-sdk/blog/quoted-and-threaded-replies/",
+    ),
     # The captured message with the documented group chat conversation.
     "group_chat_message": (
         _CAPTURE,
@@ -135,6 +155,19 @@ MESSAGES: dict[str, tuple[str, str, str, tuple[InboundFile, ...]]] = {
     ),
     "channel_mention": ("channel", THREAD_ID, "summarise this week's releases", ()),
     "channel_thread_reply": ("channel", THREAD_ID, "reply to thread", ()),
+    "channel_attachments_reply": ("channel", THREAD_ID, "describe these attachments", ()),
+    "channel_media_reply": (
+        "channel",
+        THREAD_ID,
+        "describe these attachments",
+        (InboundFile("embedded_image", "image"), InboundFile("embedded_file", "file")),
+    ),
+    "channel_quote_reply": (
+        "channel",
+        THREAD_ID,
+        '[quoting daimon: "Releases ship on Thursdays."]\ndoes this still hold?',
+        (),
+    ),
     "personal_file": (
         "dm",
         CONVERSATION_ID,
@@ -207,7 +240,9 @@ def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-@pytest.mark.parametrize("case", ["personal_message", "channel_mention", "channel_thread_reply"])
+@pytest.mark.parametrize(
+    "case", ["personal_message", "channel_mention", "channel_thread_reply", "channel_quote_reply"]
+)
 async def test_real_message_runs_a_turn_answered_in_its_conversation(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
 ) -> None:
@@ -385,7 +420,9 @@ async def test_file_consent_decline_deletes_without_uploading(
 
     assert response is None
     assert uploads == [] and deletes == ["file_1"]
-    assert _posts(teams_api_fake)[-1]["text"] == "Okay, I won't send `file_example.txt`."
+    assert not any("file_example.txt" in str(p.get("text")) for p in _posts(teams_api_fake)), (
+        "a decline posts nothing"
+    )
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
