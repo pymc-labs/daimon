@@ -300,7 +300,9 @@ class ChannelAdmin(Base):
             ondelete="SET NULL",
             name="fk_channel_admins_updated_by_account_id",
         ),
-        CheckConstraint("platform IN ('discord', 'slack')", name="ck_channel_admins_platform"),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_channel_admins_platform"
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -1470,6 +1472,35 @@ class SlackBotToken(Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
+
+class TeamsInstallation(Base):
+    """A team daimon's bot is installed in, and the Entra group Graph names it by.
+
+    Recorded from the team's activities and install events; deleted when the
+    bot is removed from the team. The MCP server lists and resolves channels
+    through it, since nothing app-only lists the teams an app is in.
+    """
+
+    __tablename__ = "teams_installations"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "team_id", name="pk_teams_installations"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_teams_installations_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    #: The Bot Framework team id, which is also the General channel's id.
+    team_id: Mapped[str] = mapped_column(Text)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    installed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class SlackUserToken(Base):
