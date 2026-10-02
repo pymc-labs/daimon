@@ -534,3 +534,130 @@ async def test_the_setup_thread_is_held_to_its_channel(
         origin_context_id=origin_id,
     )
     assert routine.agent_name == "local", "C's agent is scheduled into C from its setup thread"
+
+
+def _key(world: _World, *, bound: str | None) -> AuthIdentity:
+    """An agent key of C's own agent, minted in C (``bound``) or anywhere else."""
+    return AuthIdentity(
+        account_id=world.account_id,
+        tenant_id=world.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="444444444444444444",
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
+        bound_channel_id=bound,
+    )
+
+
+def _own_agent_callers(world: _World) -> dict[str, AuthIdentity]:
+    """Everyone C's own agent may run for: in C, in an admin's or C's channel admin's
+    DM (the credential is the same wherever the turn runs), and its agent keys."""
+    channel_admin = replace(
+        world.auth(admin=False, executing="agent_local"), administered_channel_ids=frozenset({ROOM})
+    )
+    return {
+        "member": world.auth(admin=False, executing="agent_local"),
+        "admin": world.auth(admin=True, executing="agent_local"),
+        "channel admin": channel_admin,
+        "bound key": _key(world, bound=ROOM),
+        "unbound key": _key(world, bound=None),
+    }
+
+
+async def test_an_own_agent_posts_and_messages_nowhere_outside_wherever_it_runs(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Send and DM paths: C's agent posts into C only, never another channel, a thread
+    elsewhere or the requester's own DM, and sends no direct messages, for every caller."""
+    world, runtime = await _world(committing_sessionmaker)
+    for who, auth in _own_agent_callers(world).items():
+        for channel, parent in ((OTHER, None), ("t9", OTHER), ("D123", None)):
+            with pytest.raises(ToolError, match="pinned to its own channels"):
+                await require_channel_writable(
+                    runtime, auth, channel_id=channel, parent_channel_id=parent
+                )
+        await require_channel_writable(runtime, auth, channel_id="t1", parent_channel_id=ROOM)
+        with pytest.raises(ToolError, match="sends no direct messages"):
+            await send_direct_message_impl(runtime, auth, recipient_id="123", content="hi")
+        assert who, "every caller is held"
+
+
+async def test_an_own_agent_writes_into_no_other_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Self-edit paths: from C the agent can't name another agent to edit, and what it
+    writes into its own spec stays hidden outside C."""
+    world, runtime = await _world(committing_sessionmaker)
+    world.state.agents["agent_local"]["metadata"]["daimon_account"] = str(world.account_id)
+    admin_inside = world.auth(admin=True, executing="agent_local")
+
+    async def update(auth: AuthIdentity, name: str, agent_id: str) -> AgentInfo:
+        return await _update_agent_impl(
+            runtime,
+            auth,
+            name,
+            model=None,
+            description="the client's plans",
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id=agent_id,
+        )
+
+    with pytest.raises(ToolError, match="missing or changed"):
+        await update(admin_inside, "shared", "agent_shared")
+    own = await update(admin_inside, "local", "agent_local")
+    assert own.description == "the client's plans", "C's agent edits itself"
+    listed = await _list_agents_impl(runtime, world.auth(), None)
+    assert [a.name for a in listed] == ["shared"], "outside, its edited spec never shows"
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, world.auth(), "local")
+
+
+async def test_an_own_agent_schedules_nothing_outside(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routine paths: from C the agent can neither schedule another agent nor edit a
+    routine running elsewhere, so no trigger carries C's content out."""
+    world, runtime = await _world(committing_sessionmaker)
+
+    async def destination(
+        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+    ) -> str | None:
+        return kwargs["destination_id"]
+
+    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    async with committing_sessionmaker.begin() as session:
+        elsewhere = await routines_store.create_routine(
+            session,
+            tenant_id=world.tenant_id,
+            created_by_user_id="444444444444444444",
+            agent_id="agent_shared",
+            agent_name="shared",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="hi",
+            enabled=True,
+            next_fire_at=None,
+            destination_kind="channel",
+            destination_id=OTHER,
+            channel_id=OTHER,
+        )
+    for who in ("member", "admin", "channel admin"):
+        auth = _own_agent_callers(world)[who]
+        with pytest.raises(ToolError, match="no agent named"):
+            await _create_routine_impl(
+                runtime,
+                auth,
+                agent_name="shared",
+                cron_expr="0 * * * *",
+                timezone="UTC",
+                trigger_message="the client's plans",
+                destination_kind="channel",
+                destination_id=OTHER,
+            )
+        with pytest.raises(ToolError, match="routine not found"):
+            await _update_routine_impl(
+                runtime, auth, routine_id=elsewhere.id, trigger_message="the client's plans"
+            )
