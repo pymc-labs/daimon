@@ -35,6 +35,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
+    lock_policy_writes_exclusive,
     set_access_policy,
 )
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -281,6 +282,7 @@ async def _write_isolation(
     default: DeploymentDefault,
 ) -> tuple[_ChannelAgent, bool]:
     """Under the policy lock: isolate with the channel's default agent if it may be its own."""
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
     found = await _channel_agent(
@@ -341,6 +343,7 @@ async def set_channel_isolation(
     """
     if not isolated:
         async with sessionmaker.begin() as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             policy = await load_access_policy(session, tenant_id=tenant_id)
             updated = end_isolation(
@@ -395,6 +398,7 @@ async def set_channel_isolation(
     )
     try:
         async with sessionmaker.begin() as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             await set_fields(
                 session,

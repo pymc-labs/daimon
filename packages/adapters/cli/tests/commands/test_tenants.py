@@ -777,7 +777,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
     release = asyncio.Event()
     second_lock_started = asyncio.Event()
     original_load = tenants_mod.load_access_policy
-    original_lock = tenants_mod.lock_access_policy
+    original_lock = tenants_mod.lock_policy_writes_exclusive
     calls = 0
 
     async def held_load(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
@@ -795,7 +795,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
         await original_lock(session, tenant_id=tenant_id)
 
     monkeypatch.setattr(tenants_mod, "load_access_policy", held_load)
-    monkeypatch.setattr(tenants_mod, "lock_access_policy", observed_lock)
+    monkeypatch.setattr(tenants_mod, "lock_policy_writes_exclusive", observed_lock)
     first = asyncio.create_task(
         tenants_access_policy_set(
             rt=rt,

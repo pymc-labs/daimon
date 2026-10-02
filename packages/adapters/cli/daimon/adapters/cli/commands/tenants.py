@@ -34,6 +34,7 @@ from daimon.core.stores.access_policy import (
     clear_access_policy,
     load_access_policy,
     lock_access_policy,
+    lock_policy_writes_exclusive,
     set_access_policy,
 )
 from daimon.core.stores.domain import Platform
@@ -884,6 +885,7 @@ async def tenants_access_policy_set(
     before: dict[str, tuple[str, ...]] = {}
     previous: TenantAccessPolicy | None = None
     async with rt.sessionmaker() as session, session.begin():
+        await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
             try:

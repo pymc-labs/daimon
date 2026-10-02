@@ -7,6 +7,7 @@ A missing row is the open default. A row that no longer validates raises
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Any, cast
 
@@ -31,12 +32,40 @@ class AccessPolicyUnreadable(DaimonError):
         self.tenant_id = tenant_id
 
 
+def _policy_write_key(tenant_id: uuid.UUID) -> int:
+    # Separate namespace from preparation, mutation, support and tidy fences.
+    return int.from_bytes(
+        hashlib.blake2b(f"policy_writes:{tenant_id}".encode(), digest_size=8).digest(),
+        "big",
+        signed=True,
+    )
+
+
+async def lock_policy_writes_shared(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Fence policy changes through a bounded platform effect without locking Tenant."""
+    await session.execute(select(func.pg_advisory_xact_lock_shared(_policy_write_key(tenant_id))))
+
+
+async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Take BEFORE tenant/other rows, including before a policy read/merge.
+
+    Only policy writers use this fence. Preparation/mutation, support's per-user
+    fence, form consume and handoff never acquire it. Tidy takes its agent fence,
+    then the shared fence, then its post row; it never locks Tenant or acquires
+    the other fences. Writers never acquire tidy/post fences, so there is no
+    reverse edge closing a lock cycle.
+    """
+    await session.execute(select(func.pg_advisory_xact_lock(_policy_write_key(tenant_id))))
+
+
 async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
     """Serialize operator policy edits, including when no policy row exists.
 
-    Call before loading/merging or clearing, in the same transaction as the write.
-    A private form's consume takes it too, before its pin check. FOR NO KEY
-    UPDATE: holders exclude each other, but rows keyed to the tenant can still
+    Policy writers take lock_policy_writes_exclusive BEFORE this lock and
+    before loading/merging or clearing, in the same transaction as the write.
+    Non-policy mutations retain this row lock alone. A private form's consume
+    takes it too, before its pin check. FOR NO KEY UPDATE: holders exclude
+    each other, but rows keyed to the tenant can still
     be inserted (their foreign-key check only takes KEY SHARE), so a writer
     holding another lock before such an insert can't deadlock with a holder.
     """
@@ -67,6 +96,8 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
 async def set_access_policy(
     session: AsyncSession, *, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> None:
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
     if not payload.get("agent_channel_pins"):
         # Leave the key out when nothing is pinned, so a process built before
@@ -88,6 +119,8 @@ async def set_access_policy(
 
 async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     """Delete the tenant's row, putting it back on the open default. True if one existed."""
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await lock_access_policy(session, tenant_id=tenant_id)
     result = await session.execute(
         delete(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
     )

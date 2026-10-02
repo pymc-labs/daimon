@@ -56,11 +56,11 @@ from daimon.core.channel_tidy import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.security_audit import record_denial
-from daimon.core.session_preparation_gate import pool_headroom
+from daimon.core.session_preparation_gate import tidy_pool_headroom
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
-    lock_access_policy,
+    lock_policy_writes_shared,
 )
 from daimon.core.stores.agent_posts import (
     AgentPostRow,
@@ -370,19 +370,20 @@ async def run_action(
     post: AgentPostRow | None = None,
     content: str | None = None,
 ) -> None:
-    """Lock order: tidy agent advisory -> tenant policy -> target row.
+    """Lock order: tidy agent advisory -> shared policy-write advisory -> target row.
 
     No tenant-lock holder acquires the tidy advisory lock. The audit writer
     uses a separate transaction without reacquiring it; the owning transaction
     keeps all locks through the bounded platform call and ledger completion.
-    MA/origin I/O precedes the tenant lock. An uncertain write clears the hash
-    and retires the target, refusing retries rather than claiming known content.
+    MA/origin I/O precedes the shared policy-write lock. An uncertain write
+    clears the hash and retires the target, refusing retries rather than
+    claiming known content.
     """
     reason = "preparation_error"
     outcome: Literal["denied", "error"] = "error"
     try:
         async with (
-            pool_headroom(runtime.session_factory),
+            tidy_pool_headroom(runtime.session_factory),
             runtime.session_factory.begin() as session,
         ):
             await lock_tidy_agent(session, ctx.actor)
@@ -402,7 +403,7 @@ async def run_action(
             )
             outcome = "denied"
             reason = "policy_changed"
-            await lock_access_policy(session, tenant_id=ctx.actor.tenant_id)
+            await lock_policy_writes_shared(session, tenant_id=ctx.actor.tenant_id)
             if post is not None:
                 current = await get_post(
                     session,

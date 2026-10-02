@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import io
 
 import pytest
 from aioresponses import CallbackResult, aioresponses
@@ -12,7 +13,6 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_tidy import content_hash
 from daimon.core.stores.access_policy import (
     load_access_policy,
-    lock_access_policy,
     set_access_policy,
 )
 from daimon.core.stores.agent_posts import get_post
@@ -36,7 +36,6 @@ def fake(monkeypatch):
 async def write_policy(world, policy):
     # Use the real policy writer's lock on a separate pooled connection.
     async with world.sessionmaker.begin() as session:
-        await lock_access_policy(session, tenant_id=world.tenant_id)
         await set_access_policy(session, tenant_id=world.tenant_id, policy=policy)
 
 
@@ -366,9 +365,15 @@ async def test_concurrent_discord_edits_keep_correct_replaced_hash(
 async def test_policy_writer_waits_for_platform_effect(
     committing_sessionmaker, fake, monkeypatch, existing_policy
 ):
+    from types import SimpleNamespace
+
+    from daimon.adapters.cli.commands.tenants import tenants_access_policy_set
+    from rich.console import Console
+
+    channel = "222222222222222222"
     world = await d._world(committing_sessionmaker)
     auth, origin = await world.turn()
-    mid = await d._post(world, auth)
+    mid = await d._post(world, auth, channel_id=channel)
     if existing_policy:
         await write_policy(world, TenantAccessPolicy())
     entered, release = asyncio.Event(), asyncio.Event()
@@ -385,7 +390,7 @@ async def test_policy_writer_waits_for_platform_effect(
         d._edit_message_impl(
             world.runtime,
             auth,
-            channel_id=d._CHANNEL,
+            channel_id=channel,
             message_id=mid,
             content="updated",
             origin_context_id=origin,
@@ -393,7 +398,13 @@ async def test_policy_writer_waits_for_platform_effect(
     )
     await asyncio.wait_for(entered.wait(), 5)
     writer = asyncio.create_task(
-        write_policy(world, TenantAccessPolicy(protected_channel_ids=(d._CHANNEL,)))
+        tenants_access_policy_set(
+            rt=SimpleNamespace(sessionmaker=world.sessionmaker),
+            console=Console(file=io.StringIO()),
+            platform="discord",
+            external_id=d._GUILD,
+            protected_channel=[channel],
+        )
     )
     try:
         await asyncio.sleep(0.1)
@@ -405,7 +416,7 @@ async def test_policy_writer_waits_for_platform_effect(
         await d._delete_message_impl(
             world.runtime,
             auth,
-            channel_id=d._CHANNEL,
+            channel_id=channel,
             message_id=mid,
             origin_context_id=origin,
         )
@@ -454,3 +465,92 @@ async def test_platform_timeout_releases_policy_lock_and_refuses_uncertain_retry
             origin_context_id=origin,
         )
     assert [r.outcome for r in await world.audit()] == ["allowed", "error", "denied"]
+
+
+async def test_new_session_completes_during_tidy_platform_call(
+    committing_sessionmaker, fake, monkeypatch
+):
+    from daimon.core.stores.thread_sessions import create_thread_session
+
+    world = await d._world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    mid = await d._post(world, auth)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = fake.handle
+
+    async def handle(route, kwargs):
+        if route.method == "PATCH" and route.path.endswith("/{message_id}"):
+            entered.set()
+            await release.wait()
+        return await original(route, kwargs)
+
+    d.patch_discord_http(monkeypatch, handle)
+    edit = asyncio.create_task(
+        d._edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=d._CHANNEL,
+            message_id=mid,
+            content="updated",
+            origin_context_id=origin,
+        )
+    )
+
+    async def insert():
+        async with world.sessionmaker.begin() as session:
+            return await create_thread_session(
+                session,
+                tenant_id=world.tenant_id,
+                platform="discord",
+                thread_id="new-conversation",
+                account_id=world.account_id,
+                ma_session_id="new-session",
+                ma_agent_id=d._AGENT,
+            )
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        created = await asyncio.wait_for(insert(), 1)
+        assert created.ma_session_id == "new-session"
+        assert not edit.done()
+    finally:
+        release.set()
+        await edit
+
+
+@pytest.mark.parametrize("size,overflow", [(4, 0), (6, 0), (5, 10)])
+async def test_tidy_leaves_turn_send_capacity(db_engine, db_schema, size, overflow):
+    from daimon.core.session_preparation_gate import pool_headroom, tidy_pool_headroom
+
+    engine = build_test_engine(db_engine.url, db_schema, pool_size=size, max_overflow=overflow)
+    factory = async_sessionmaker(engine)
+    release, entered = asyncio.Event(), asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def tidy():
+        nonlocal active, peak
+        async with tidy_pool_headroom(factory):
+            active += 1
+            peak = max(peak, active)
+            entered.set()
+            await release.wait()
+            active -= 1
+
+    calls = [asyncio.create_task(tidy()) for _ in range(5)]
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.sleep(0.05)
+        # Fill every remaining mutation slot while tidy is blocked.
+        holders = (size + overflow) // 2
+        preparations = min(max(1, size // 2), holders - 1)
+        mutations = holders - preparations
+        async with contextlib.AsyncExitStack() as stack:
+            for _ in range(max(1, mutations - 1)):
+                await asyncio.wait_for(stack.enter_async_context(pool_headroom(factory)), 1)
+        assert peak == 1
+        assert sum(call.done() for call in calls) == 0
+    finally:
+        release.set()
+        await asyncio.gather(*calls)
+        await engine.dispose()

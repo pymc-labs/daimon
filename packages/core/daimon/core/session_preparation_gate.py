@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import Pool, QueuePool
 
+_tidy_gate = asyncio.Semaphore(1)
+
 _waiting = 0
 _active = 0
 _pool_gates: weakref.WeakKeyDictionary[Pool, asyncio.Semaphore] = weakref.WeakKeyDictionary()
@@ -20,7 +22,7 @@ _preparation_pool_gates: weakref.WeakKeyDictionary[Pool, asyncio.Semaphore] = (
 
 @asynccontextmanager
 async def pool_headroom(
-    factory: async_sessionmaker[AsyncSession], *, preparation: bool = False
+    factory: async_sessionmaker[AsyncSession], *, preparation: bool = False, tidy: bool = False
 ) -> AsyncIterator[None]:
     """Reserve separate pre-checkout capacity for preparation and mutation.
 
@@ -63,6 +65,13 @@ async def pool_headroom(
             gate = asyncio.Semaphore(holders - preparations)
         _pool_gates[pool] = gate
         _preparation_pool_gates[pool] = preparation_gate
+    if tidy:
+        overflow = pool._max_overflow  # pyright: ignore[reportPrivateUsage]
+        holders = (pool.size() + max(0, overflow)) // 2
+        preparations = min(max(1, pool.size() // 2), holders - 1)
+        # If only one mutation slot exists, borrow preparation capacity.
+        # Tiny external test pools retain the single-holder fallback.
+        preparation = holders > 1 and holders - preparations == 1
     if preparation:
         gate = _preparation_pool_gates[pool]
     await gate.acquire()
@@ -95,3 +104,15 @@ class PreparationGate:
         finally:
             _active -= 1
             self._semaphore.release()
+
+
+@asynccontextmanager
+async def tidy_pool_headroom(factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
+    """One tidy holder per process, gated before pooled connection checkout.
+
+    Share the existing two-connections-per-holder budget. Leave a mutation
+    slot for sends; minimum production pools lend preparation capacity.
+    Waiting tidy calls consume no connections.
+    """
+    async with _tidy_gate, pool_headroom(factory, tidy=True):
+        yield
