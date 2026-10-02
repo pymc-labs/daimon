@@ -859,26 +859,46 @@ Human-support escalation: where requests land, and how many each user gets.
 request eat the tenant's ability to run turns, and would give a paid-up tenant unlimited
 support. Different unit, different table.
 
-An unset `escalation_channel_id` disables the escalate affordance entirely rather than
-recording requests nobody will ever see. Failing closed is the honest behaviour: an
-escalate button that reaches no one is worse than no button, because the person believes
-they have asked for help.
+Discord and Teams requests go to `escalation_channel_id` (a Teams `19:…` channel is
+posted by the Teams bot, any other id is a Discord channel); Slack requests go only to
+`slack_escalation_channel_id`, never to that channel. An unset channel disables the
+affordance it serves entirely rather than recording requests nobody will ever see.
+Failing closed is the honest behaviour: an escalate button that reaches no one is worse
+than no button, because the person believes they have asked for help. Every platform
+spends the same per-user, per-tenant allowance from one ledger.
 
 ### `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Channel id where human-support requests are posted: a Discord channel id, or a Teams
-channel id (`19:…`) that the Teams bot posts in. Teams requests reach a Discord channel
-only when the Discord bot token is also set. Unset (the default) disables the escalate
-affordance entirely — a request that reaches nobody is worse than no button at all. A
-channel rather than operator DMs: it survives one person's DMs being closed, and it
-leaves a shared record anyone on the rota can pick up. The bot must be able to post
-there.
+Channel id where human-support requests from Discord and Teams are posted: a Discord
+channel id, or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests
+reach a Discord channel only when the Discord bot token is also set. Unset (the default)
+disables the escalate affordance on Discord and Teams — a request that reaches nobody is
+worse than no button at all. A channel rather than operator DMs: it survives one
+person's DMs being closed, and it leaves a shared record anyone on the rota can pick up.
+The bot must be able to post there.
+
+### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
+
+`str | None` · optional · default unset
+
+Slack channel id where human-support requests from Slack are posted. Unset (the default)
+disables the Ask a human button on Slack. Slack requests never go to the Discord
+channel, nor Discord requests here. The bot must be a member of the channel.
+
+### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
+
+`str | None` · optional · default unset
+
+Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID, for a
+deployment installed in several workspaces: every workspace's requests are posted with
+that workspace's bot token. Unset posts with the requesting workspace's own token, which
+suits a single-workspace install. daimon must be installed in the named workspace.
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
-`int` · optional · default `3`
+`int` · optional · default `20`
 
 How many human-support requests each user gets within a tenant. A COUNT of interactions,
 NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — the two are deliberately separate

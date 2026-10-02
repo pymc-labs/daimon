@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to the Discord/Teams one; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it
   names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide
@@ -418,6 +419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `DAIMON_SUPPORT__CREDITS_PER_USER` now defaults to 20 human-support requests per person (was 3); 0 still turns escalation off. This applies to Discord, Teams and Slack. Two requests from one person can no longer both spend the last credit on any of them: the count and the write now run under a per-person lock. Teams' support replies now use the same wording as Discord and Slack.
 - **A tidier status card while a turn runs.** Discord shows one embed instead
   of two and Slack one matching card: a bold Thinking or Working headline with
   the elapsed time, up to six recent tool calls in a code block, and the latest

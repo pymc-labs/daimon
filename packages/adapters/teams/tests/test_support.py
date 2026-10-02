@@ -44,12 +44,14 @@ def _running(
     fake: TeamsApiFake,
     *,
     channel: str = OPS,
-    credits: int = 3,
+    credits: int | None = 3,
     http: httpx.AsyncClient | None = None,
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     runtime = build_teams_runtime(db_factory, http_client=http)
-    runtime.settings.support = SupportSettings(
-        escalation_channel_id=channel, credits_per_user=credits
+    runtime.settings.support = (
+        SupportSettings(escalation_channel_id=channel)
+        if credits is None
+        else SupportSettings(escalation_channel_id=channel, credits_per_user=credits)
     )
     cast(Any, runtime.settings).discord = SimpleNamespace(bot_token=SecretStr("discord-token"))
     return running_service(runtime, fake)
@@ -89,6 +91,17 @@ def _posts_to(fake: TeamsApiFake, conversation: str) -> list[str]:
         for r in fake.activity_requests
         if f"/conversations/{conversation}/" in r.url
     ]
+
+
+async def test_the_default_allowance_is_twenty_requests(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake, credits=None) as service:
+        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+        reply = await _send(service, _token(card), "help")
+
+    assert "You have 20 requests left" in card
+    assert support.RECEIVED.format(remaining=19) in reply
 
 
 async def test_a_request_asked_in_a_channel_links_back_to_it(

@@ -65,6 +65,7 @@ from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
+from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.observability import capture_exception_with_scope
@@ -170,8 +171,12 @@ class SlackTurnLifecycle:
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
         alert_webhook_url: SecretStr | None = None,
+        ask_human: bool = False,
     ) -> None:
         self._trigger_ts = trigger_ts
+        # Whether the final answer offers Ask a human beside the vote buttons
+        # (`support_escalation.slack_support_enabled`).
+        self._ask_human = ask_human
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
         self._render_tables = render_tables
@@ -551,7 +556,10 @@ class SlackTurnLifecycle:
                         notification_chunk = f"{mention}\n{chunk}"
                     blocks.extend(to_blocks(self._state, now=self._clock()))
                 if index == len(deliveries) - 1:
-                    blocks.append(build_feedback_actions_block())
+                    feedback_block = build_feedback_actions_block()
+                    if self._ask_human:
+                        feedback_block["elements"].append(build_ask_human_button())
+                    blocks.append(feedback_block)
                 try:
                     if index == 0 and not self._notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))

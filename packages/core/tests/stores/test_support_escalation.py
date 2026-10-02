@@ -256,3 +256,89 @@ async def test_account_scoped_delete_reaches_rows_written_before_the_account_exi
         "lies about what erasure removes"
     )
     assert await _rows(db_session) == 0
+
+
+# ---------------------------------------------------------------------------
+# record_escalation_once: one request per person per message, atomically
+# ---------------------------------------------------------------------------
+
+
+async def _once(session: AsyncSession, tenant_id: object, **overrides: object) -> object:
+    kwargs: dict[str, object] = {
+        "tenant_id": tenant_id,
+        "account_id": None,
+        "platform": "slack",
+        "platform_user_id": "U1",
+        "channel_id": "C1",
+        "message_id": "1700000000.000100",
+        "ma_session_id": None,
+        "note": "please help",
+        "allowance": 3,
+    }
+    kwargs.update(overrides)
+    return await store.record_escalation_once(session, **kwargs)  # type: ignore[arg-type]
+
+
+async def test_a_second_request_on_the_same_message_spends_nothing(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ONCE")
+
+    first = await _once(db_session, tenant.id)
+    second = await _once(db_session, tenant.id, note="again")
+
+    assert isinstance(first, store.EscalationOutcome)
+    assert isinstance(second, store.EscalationOutcome)
+    assert first.status == "recorded" and first.remaining == 2
+    assert second.status == "duplicate" and second.row is None
+    assert second.remaining == 2, "a duplicate must not consume a credit"
+    assert await _rows(db_session) == 1
+
+
+async def test_another_message_or_person_is_not_a_duplicate(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ONCE")
+
+    await _once(db_session, tenant.id)
+    other_message = await _once(db_session, tenant.id, message_id="1700000000.000200")
+    other_person = await _once(db_session, tenant.id, platform_user_id="U2")
+
+    assert isinstance(other_message, store.EscalationOutcome)
+    assert isinstance(other_person, store.EscalationOutcome)
+    assert other_message.status == "recorded"
+    assert other_person.status == "recorded" and other_person.remaining == 2
+    assert await _rows(db_session) == 3
+
+
+async def test_once_refuses_when_credits_are_spent(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ONCE")
+
+    await _once(db_session, tenant.id, allowance=1)
+    refused = await _once(db_session, tenant.id, allowance=1, message_id="1700000000.000300")
+
+    assert isinstance(refused, store.EscalationOutcome)
+    assert refused.status == "out_of_credits" and refused.row is None
+    assert refused.remaining == 0
+    assert await _rows(db_session) == 1
+
+
+async def test_credits_are_shared_across_platforms_in_one_tenant(
+    db_session: AsyncSession,
+) -> None:
+    """One ledger: a person's allowance is per (tenant, user), whatever surface spends it."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ONCE")
+    await store.record_escalation(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=None,
+        platform="discord",
+        platform_user_id="U1",
+        channel_id="c",
+        message_id="m",
+        ma_session_id=None,
+        note="n",
+        allowance=2,
+    )
+    outcome = await _once(db_session, tenant.id, allowance=2)
+
+    assert isinstance(outcome, store.EscalationOutcome)
+    assert outcome.status == "recorded" and outcome.remaining == 0

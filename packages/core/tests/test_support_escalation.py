@@ -94,7 +94,35 @@ def test_escalation_is_disabled_when_no_channel_is_configured() -> None:
         "escalation must be OFF by default -- a deployment that never "
         "configures a channel must not offer the affordance"
     )
-    assert SupportSettings().credits_per_user == 3
+    assert SupportSettings().slack_escalation_channel_id is None, (
+        "Slack escalation must be OFF by default too -- each platform needs its own channel"
+    )
+
+
+def test_default_allowance_is_twenty_and_zero_still_disables() -> None:
+    from daimon.core.config import SupportSettings
+    from daimon.core.support_escalation import is_enabled
+
+    assert SupportSettings().credits_per_user == 20
+    assert SupportSettings(credits_per_user=0).credits_per_user == 0
+    assert not is_enabled(channel_id="C1", allowance=0), "0 credits must disable escalation"
+    assert is_enabled(channel_id="C1", allowance=20)
+
+
+def test_an_unset_or_empty_channel_disables_the_platform() -> None:
+    from daimon.core.support_escalation import is_enabled
+
+    assert not is_enabled(channel_id=None, allowance=20)
+    assert not is_enabled(channel_id="", allowance=20)
+
+
+def test_shared_copy_names_the_remaining_count() -> None:
+    """Discord and Slack render the same words from core."""
+    from daimon.core.support_escalation import OUT_OF_CREDITS, offer_text, received_text
+
+    assert "You have 7 support request(s) left" in offer_text(remaining=7)
+    assert "You have 3 left." in received_text(remaining=3)
+    assert "used all your human-support requests" in OUT_OF_CREDITS
 
 
 def test_support_credits_are_not_the_billing_ledger() -> None:
