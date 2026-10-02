@@ -421,14 +421,20 @@ Slack and Teams look up only the groups some grant names
 grants nothing. `admit()` stores the member's matched group ids on the account
 (`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
 without asking the platform. A channel admin may do what a server admin may for
-an agent local to their channels -- not the tenant default or anyone's
+an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
 and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent (never a budget or the tenant balance, which stay
-with server admins: `SET_CHANNEL_BUDGET`). A `/dm` conversation counts as the channel it was
+with server admins: `SET_CHANNEL_BUDGET`). An agent is theirs when a channel
+admin made it from one of their channels (`agent_creation_channels`, written by
+`create_agent` from a verified turn origin and by each setup panel's New agent
+form), when a server admin pinned it inside their channels only, or when a
+server admin set it as one of their channels' default
+(`channel_config.agent_name_set_by_admin`); any other agent needs a server
+admin on every surface (`channel_admin_holds`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
@@ -440,8 +446,9 @@ is `Subject.administered_channel_ids`, filled from the stored grants and never
 administer every channel of every pin on it (a pin to no channel stays with
 server admins), and so is minting it a coding-tools token bound to one of
 those channels (never an unbound one). A channel admin binds only a shared agent
-(managed or tenant-wide), one answering nowhere yet, or one already local
-to them, never another channel's own agent. No chat tool, panel or CLI
+(managed or tenant-wide), or one a channel admin made from one of their
+channels or a server admin pinned inside them; a server admin's default does
+not make an agent theirs to move, and another channel's own agent never is. No chat tool, panel or CLI
 write (`daimon config set`, `daimon config propagate`) binds a pinned agent
 as the default of a channel outside its pin, for server admins too
 (`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
@@ -637,7 +644,7 @@ the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
 (`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
-admins on any other, channel admins on agents local to their channels, anyone
+admins on any other, channel admins on agents of theirs local to their channels, anyone
 on agents nobody else uses. Sharing is read as widely as a key change
 (`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
 default, or another member's routine or live session. Prompt and setup edits

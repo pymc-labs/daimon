@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Channel admins change only their channels' own agents.** A channel admin
+  could configure, rebind and edit any agent answering in their channels,
+  including one a member bound there. They now may only when the agent is
+  theirs: made by a channel admin from one of their channels (`create_agent`
+  with the turn's `origin_context_id`, or a setup panel's New agent form),
+  pinned by a server admin inside their channels, or set as one of their
+  channels' default by a server admin; the last does not let them bind it
+  elsewhere. Existing agents have no recorded creation channel, and defaults
+  a server admin set before this are recognised by the setter's stored role,
+  so a server admin re-sets any other default a channel admin should manage.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a
   Teams team's Entra group id (whose owners it admits), from
