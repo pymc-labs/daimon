@@ -187,6 +187,7 @@ source_modules = [
     "daimon.core.scope",
     "daimon.core.session_compat",
     "daimon.core.session_preparation",
+    "daimon.core.session_preparation_gate",
     "daimon.core.session_preparation_stages",
     "daimon.core.session_seal",
     "daimon.core.session_snapshot",

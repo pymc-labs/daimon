@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -61,6 +62,15 @@ def _reveal(secret: SecretStr | None) -> str | None:
     return secret.get_secret_value() if secret is not None else None
 
 
+def _preparation_limit(settings: Settings) -> int:
+    """Use the configured bound; tolerate incomplete settings mocks in adapter tests."""
+    configured: object = settings.database.preparation_concurrency
+    if isinstance(configured, int) and configured > 0:
+        return configured
+    pool_size = cast(object, settings.database.pool_size)
+    return max(1, pool_size // 2) if isinstance(pool_size, int) else 1
+
+
 def build_turn_deps(
     settings: Settings,
     anthropic: AsyncAnthropic,
@@ -88,7 +98,5 @@ def build_turn_deps(
         github_app_private_key=_reveal(github.app_private_key),
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,
-        preparation_gate=PreparationGate(
-            settings.database.preparation_concurrency or max(1, settings.database.pool_size // 2)
-        ),
+        preparation_gate=PreparationGate(_preparation_limit(settings)),
     )
