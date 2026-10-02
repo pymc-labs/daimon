@@ -192,7 +192,12 @@ async def _teams_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         )
     except GraphUnavailable as err:
         raise _graph_refused(err) from err
-    posts = [p for m in page.value if (p := _post(m, channel_id=ref.channel_id)) is not None]
+    posts = [
+        p
+        for m in page.value
+        if (p := _post(m, channel_id=ref.channel_id)) is not None
+        and read_policy.allows(p.thread_id, ref.channel_id)
+    ]
     posts.reverse()
     next_cursor = skiptoken_of(page.next_link)
     return TeamsChannelResult(
@@ -259,6 +264,9 @@ async def _teams_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     read_policy: ChannelReadPolicy,
 ) -> TeamsReadMessage:
     ref, root = await _located(runtime, auth, channel_id, read_policy)
+    if root is None:
+        # A post is its own thread's root, so a sealed thread's root stays sealed.
+        read_policy.require(thread_id(ref.channel_id, message_id), ref.channel_id)
     client, _ = require_client(runtime, auth)
     try:
         message = await graph_for(client).get_message(
@@ -298,7 +306,7 @@ async def _teams_list_threads_impl(  # pyright: ignore[reportUnusedFunction]  # 
     rows: list[TeamsThreadRow] = []
     for message in page.value:
         post = _post(message, channel_id=ref.channel_id)
-        if post is None:
+        if post is None or not read_policy.allows(post.thread_id, ref.channel_id):
             continue
         rows.append(
             TeamsThreadRow(
@@ -356,6 +364,8 @@ async def _searchable(
 ) -> list[TeamsChannelRef]:
     client, caller = require_client(runtime, auth)
     if channel_ids:
+        if len(channel_ids) > _SEARCH_CHANNELS:
+            raise ToolError(f"search at most {_SEARCH_CHANNELS} channels at once")
         refs: list[TeamsChannelRef] = []
         for channel_id in channel_ids:
             ref, root = await _located(runtime, auth, channel_id, read_policy)

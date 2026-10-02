@@ -60,11 +60,14 @@ class _Fake:
         self.members = members
         self.requests: list[httpx.Request] = []
         self.graph_status = 200
+        self.graph_token_status = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         url = request.url
         if url.host == "login.microsoftonline.com":
+            if b"graph.microsoft.com" in request.content and self.graph_token_status != 200:
+                return httpx.Response(self.graph_token_status)
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         path = url.path
         if path.endswith(f"/v3/teams/{_TEAM}/conversations"):
@@ -258,6 +261,24 @@ async def test_a_sealed_channel_is_refused_from_outside(
         )
 
 
+async def test_a_sealed_thread_stays_out_of_its_channel_reads(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _setup(db_session)
+    runtime = _runtime(_Fake(), sessionmaker)
+    sealed = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=frozenset({_THREAD})))
+    read = await _teams_read_channel_impl(
+        runtime, auth, channel_id=_CHANNEL, limit=5, cursor=None, read_policy=sealed
+    )
+    assert [p.text for p in read.posts] == ["newer post about budgets"]
+    threads = await _teams_list_threads_impl(runtime, auth, channel_id=_CHANNEL, read_policy=sealed)
+    assert [t.thread_id for t in threads] == [f"{_CHANNEL};messageid=1700000000100"]
+    with pytest.raises(ToolError):
+        await _teams_get_message_impl(
+            runtime, auth, channel_id=_CHANNEL, message_id=_ROOT, read_policy=sealed
+        )
+
+
 async def test_list_channels_hides_private_channels_from_non_members(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -314,6 +335,22 @@ async def test_graph_refusal_explains_the_missing_consent(
     auth, fake = await _setup(db_session), _Fake()
     fake.graph_status = 403
     with pytest.raises(ToolError, match="team owner"):
+        await _teams_read_channel_impl(
+            _runtime(fake, sessionmaker),
+            auth,
+            channel_id=_CHANNEL,
+            limit=5,
+            cursor=None,
+            read_policy=OPEN_READ_POLICY,
+        )
+
+
+async def test_a_refused_graph_token_is_a_tool_error(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    auth, fake = await _setup(db_session), _Fake()
+    fake.graph_token_status = 401
+    with pytest.raises(ToolError, match="Graph"):
         await _teams_read_channel_impl(
             _runtime(fake, sessionmaker),
             auth,

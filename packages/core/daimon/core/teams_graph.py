@@ -228,7 +228,7 @@ class GraphClient:
             raise GraphUnavailable("not a Graph URL")
         try:
             token = await self.token()
-        except (ValueError, OSError) as err:  # MSAL's error, or its transport's
+        except (ValueError, OSError, httpx.HTTPError) as err:  # MSAL's, or a raw token call's
             raise GraphUnavailable(f"token: {type(err).__name__}") from err
         if not token:
             raise GraphUnavailable("no token")
