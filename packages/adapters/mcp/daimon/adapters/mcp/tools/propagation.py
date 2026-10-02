@@ -28,6 +28,7 @@ from daimon.adapters.mcp.tools._isolation import (
     refuse,
     require_bindable,
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.reachability import (
     require_bindable_as_channel_default,
     require_channel_admin,
@@ -89,8 +90,12 @@ class ClearDefaultResult:
 async def _require_scope_admin(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
 ) -> None:
-    """The workspace default needs a server admin; a channel's also admits its channel admins."""
+    """The workspace default needs a server admin; a channel's also admits its channel admins.
+
+    Operator tokens change only channel defaults, never the workspace one."""
     if channel_id is None:
+        if auth.is_operator:
+            raise ToolError("An operator token changes only a channel's default; pass channel_id.")
         _require_admin(auth)
     else:
         await require_channel_admin(runtime, auth, channel_id=channel_id)
@@ -103,6 +108,7 @@ async def _set_agent_default_impl(
     channel_id: str | None,
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
+    require_scope(auth, "channels:write")
     await _require_scope_admin(runtime, auth, channel_id)
     agent = None
     if expected_ma_agent_id is not None or auth.platform in CHAT_PLATFORMS:
@@ -119,13 +125,15 @@ async def _set_agent_default_impl(
             is_daimon_managed=agent is not None
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
-    policy = await load_isolation(runtime, auth.tenant_id)
-    if policy.isolated_channel_ids:
-        if agent is None:
-            agent = await find_agent_by_daimon_tag(
-                runtime.client, tenant_id=auth.tenant_id, name=agent_name
-            )
-        require_bindable(policy, agent_name, agent=agent, channel_id=channel_id)
+    else:
+        # The workspace default answers everywhere, so no pinned agent can be it.
+        policy = await load_isolation(runtime, auth.tenant_id)
+        if policy.agent_channel_pins:
+            if agent is None:
+                agent = await find_agent_by_daimon_tag(
+                    runtime.client, tenant_id=auth.tenant_id, name=agent_name
+                )
+            require_bindable(policy, agent_name, agent=agent, channel_id=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -162,6 +170,7 @@ async def _clear_agent_default_impl(
     auth: AuthIdentity,
     channel_id: str | None,
 ) -> ClearDefaultResult:
+    require_scope(auth, "channels:write")
     await _require_scope_admin(runtime, auth, channel_id)
     if channel_id is not None:
         policy = await load_isolation(runtime, auth.tenant_id)
@@ -367,7 +376,7 @@ async def _explain_agent_resolution_impl(
 
 
 def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def set_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -402,7 +411,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
         )
 
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def clear_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,

@@ -1298,6 +1298,42 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
     assert unknown.channel_id is None, "without a live origin the routine is unbudgeted"
 
 
+async def test_create_routine_by_a_channel_bound_key_records_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A key minted in a channel spends there, so its routine with no destination does too."""
+    tenant = await make_tenant(db_session, platform="discord")
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=_ma_client_with_agents(
+            [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+        ),
+    )
+    key = dataclasses.replace(
+        _auth_identity(tenant_id=tenant.id, talking_to=None),
+        account_id=account.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_resolved"),
+    )
+
+    async def create(auth: AuthIdentity) -> RoutineRow:
+        return await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="weekly summary",
+        )
+
+    bound = await create(dataclasses.replace(key, bound_channel_id="555"))
+    assert bound.channel_id == "555", "a bound key's routine is budgeted against its channel"
+    unbound = await create(key)
+    assert unbound.channel_id is None, "an unbound key's routine stays unbudgeted"
+
+
 async def test_create_routine_refuses_a_pinned_agent_without_a_pinned_destination(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -1565,3 +1601,47 @@ async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name
             routine_id=created.id,
             trigger_message="report, but more",
         )
+
+
+def _empty_display_agent(tenant_id: uuid.UUID) -> dict[str, object]:
+    return ma_agent(
+        id="ag_resolved",
+        name="",
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
+    ).model_dump(mode="json")
+
+
+async def test_an_empty_name_pin_does_not_pin_a_routine_on_create_or_update(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A pin keyed by the empty name never makes a routine pinned (save-time rule).
+
+    An agent whose display name is empty and whose config name is not pinned
+    saves a routine with no destination, on create and on update.
+    """
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"": (_PINNED_CHANNEL,)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, client=_ma_client_with_agents([_empty_display_agent(tenant.id)])
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+
+    created = await _create_routine_impl(
+        runtime,
+        auth,
+        agent_name="acme-config",
+        cron_expr="0 9 * * *",
+        timezone="UTC",
+        trigger_message="report",
+    )
+    updated = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, trigger_message="report, but more"
+    )
+    assert updated.trigger_message == "report, but more"

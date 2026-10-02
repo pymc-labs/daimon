@@ -25,6 +25,7 @@ from daimon.adapters.slack.agent_policy import (
     MANAGED_AGENT_MESSAGE,
     NEEDS_ADMIN_SPEC_MESSAGE,
     SHARED_AGENT_MESSAGE,
+    SHARED_AGENT_SKILLS_MESSAGE,
     refusal_message,
     refuse_unless_allowed,
     refuse_unless_allowed_for_agent_name,
@@ -387,6 +388,9 @@ def test_refusal_copy_differs_by_operation_family() -> None:
     )
     assert refusal_message("key_remove", "needs_admin") == SHARED_AGENT_MESSAGE, (
         "attachment writes carry one string for both refused outcomes"
+    )
+    assert refusal_message("skill_repo_connect", "needs_admin") == SHARED_AGENT_SKILLS_MESSAGE, (
+        "a skill import names what the member was trying to add"
     )
 
 

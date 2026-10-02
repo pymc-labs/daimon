@@ -51,12 +51,15 @@ def is_credential_interaction_valid(
     return str(interaction.message.id) == row.posted_message_id
 
 
-async def refuse_if_credential_target_unavailable(
+async def resolve_credential_target(
     interaction: discord.Interaction, *, runtime: DiscordRuntime, row: CredentialRequestRow
-) -> bool:
-    """Verify the exact agent before consuming a private form or saving its value.
+) -> BetaManagedAgentsAgent | None:
+    """The exact agent a private form targets, or None once the submitter is told why not.
 
-    Also applies the pinned-agent write rule to the agent as it is now.
+    Also applies the pinned-agent write rule to the agent as it is now. The
+    rule is decided again inside the consume transaction
+    (`daimon.core.agent_pins.consume_form_unless_pinned`); this earlier check
+    refuses before any confirmation is shown.
     """
     try:
         agent = await find_agent_by_derived_uuid(
@@ -70,15 +73,17 @@ async def refuse_if_credential_target_unavailable(
             "I couldn't verify this agent. Nothing was saved; please try submitting again.",
             ephemeral=True,
         )
-        return True
+        return None
     if agent is None:
         await interaction.followup.send(
             "This request's agent no longer exists. Nothing was saved. "
             "Ask Daimon for a new request for the intended agent.",
             ephemeral=True,
         )
-        return True
-    return await refuse_if_pinned_elsewhere(interaction, runtime=runtime, row=row, agent=agent)
+        return None
+    if await refuse_if_pinned_elsewhere(interaction, runtime=runtime, row=row, agent=agent):
+        return None
+    return agent
 
 
 async def refuse_if_pinned_elsewhere(

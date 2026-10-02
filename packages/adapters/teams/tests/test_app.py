@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+import structlog
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
+from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -26,17 +30,23 @@ from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from microsoft_teams.api import MessageActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
+    SERVICE_URL,
+    THREAD_ID,
     FakeSender,
     bot_token,
     build_teams_runtime,
+    make_channel_activity,
     make_inbound,
+    make_message_activity,
     patched_admission,
     patched_turns,
 )
@@ -56,12 +66,6 @@ def _app(
     )
 
 
-async def _holding_a_slot(teams: TeamsApp) -> None:
-    async with asyncio.timeout(5):
-        while not teams._inflight.get(TENANT):
-            await asyncio.sleep(0.01)
-
-
 async def test_messages_during_a_turn_queue_and_run_once_per_author(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -78,8 +82,9 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
         await started.wait()
-        await teams._orchestrate(make_inbound("two"), TENANT)
-        await teams._orchestrate(make_inbound("three"), TENANT)
+        two, three = make_inbound("two"), make_inbound("three")
+        await teams._orchestrate(two, TENANT)
+        await teams._orchestrate(three, TENANT)
         await teams._orchestrate(make_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
         assert len(ran) == 1, "queued messages wait for the running turn"
         release.set()
@@ -90,6 +95,33 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
         (AAD_OBJECT_ID, "two\n\nthree"),
         (OTHER_AAD_OBJECT_ID, "other"),
     ]
+    assert ran[1].message_ids == (two.activity_id, three.activity_id), (
+        "the composed turn knows every message it answers, for media and history"
+    )
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A refused mention (here a command in a channel) must not drop another person's batch."""
+    teams = _app(db_session_factory, FakeSender())
+    mention = dataclasses.replace(
+        make_inbound("is it shipped?", conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+    )
+    command = dataclasses.replace(mention, text="new")
+    participation = teams._participation_for(mention)
+
+    with (
+        patch.object(participation, "cancel", wraps=participation.cancel) as cancel,
+        patch.object(TeamsApp, "_run_turns", AsyncMock()),
+    ):
+        await teams._handle(command)
+        assert cancel.call_count == 0, "the pointer reply runs no turn, so the batch stays"
+        await teams._handle(mention)
+
+    cancel.assert_called_once_with(THREAD_ID)
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -150,14 +182,16 @@ async def test_the_tenant_cap_sheds_a_new_thread(
 ) -> None:
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=1)
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        started.set()
         await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
-        await _holding_a_slot(teams)
+        async with asyncio.timeout(5):
+            await started.wait()
         await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first
@@ -178,14 +212,16 @@ async def test_a_tenant_turn_cap_override_beats_the_deployment_cap(
         await set_turn_cap(session, tenant_id=TENANT, cap=1)
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=3)
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        started.set()
         await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
-        await _holding_a_slot(teams)
+        async with asyncio.timeout(5):
+            await started.wait()
         await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first
@@ -217,6 +253,48 @@ def _click(key: str, clicker: str) -> Any:
         value=SimpleNamespace(action=action), from_=SimpleNamespace(aad_object_id=clicker)
     )
     return SimpleNamespace(activity=activity)
+
+
+def _message(payload: dict[str, object], reply: AsyncMock) -> Any:
+    activity = MessageActivity.model_validate(payload)
+    return SimpleNamespace(
+        activity=activity, conversation_ref=SimpleNamespace(service_url=SERVICE_URL), reply=reply
+    )
+
+
+async def test_a_root_post_without_a_mention_is_dropped_with_a_log(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Organic participation screens thread replies only: a new post stays mention-only."""
+    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    root = make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID)
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(_message(root, reply))
+    reply.assert_not_awaited()
+    assert {
+        "event": "teams.message.ignored",
+        "log_level": "debug",
+        "conversation_type": "channel",
+        "reason": "not_mentioned",
+    } in logs, "a silent drop leaves the conversation type and why, never the text"
+
+
+async def test_a_refusal_that_cannot_be_sent_is_logged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+    reply = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(
+            _message(make_message_activity(conversation_type="groupChat"), reply)
+        )
+    reply.assert_awaited_once()
+    assert {
+        "event": "teams.refusal.send_failed",
+        "log_level": "warning",
+        "conversation_type": "groupChat",
+        "reason": "ConnectError",
+    } in logs, "a refusal nobody saw is still on record"
 
 
 async def test_only_the_author_can_cancel(
@@ -311,3 +389,43 @@ async def test_a_denied_turn_says_why_without_a_card(
         await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+def _unprompted_reply() -> TeamsInbound:
+    inbound = make_inbound("is the release on?", conversation=THREAD_ID, kind="channel")
+    return dataclasses.replace(inbound, channel_id=CHANNEL_ID, unprompted=True)
+
+
+_THREAD = HistoryBlock(tag="thread", lines=('<message author="Grace">ship Thursday?</message>',))
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_unprompted_turn_posts_only_its_answer(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+
+    with (
+        patch.object(TeamsApp, "_history", AsyncMock(return_value=_THREAD)),
+        patched_turns("Thursday, per the release notes.") as turns,
+    ):
+        await teams._participate(_unprompted_reply(), TENANT)
+
+    assert [a.text for a in sender.activities] == ["Thursday, per the release notes."]
+    assert 'unprompted="true"' in turns[0]["user_message"], "the agent knows nobody asked"
+    assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_unprompted_turn_stays_silent_when_refused_or_without_its_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
+    with patch.object(app_module, "admit", denied):
+        await teams._participate(_unprompted_reply(), TENANT)
+    with patch.object(TeamsApp, "_history", AsyncMock(return_value=None)), patched_turns() as turns:
+        await teams._participate(_unprompted_reply(), TENANT)
+    assert sender.activities == [] and turns == []

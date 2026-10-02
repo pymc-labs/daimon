@@ -12,12 +12,16 @@ the browser sees.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import anthropic as anthropic_pkg
 import httpx
+import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -28,9 +32,15 @@ from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.accounts import get_account
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
+
+
+class McpOAuthWriteRefusedError(DaimonError):
+    """The access decision refused the sign-in after the code exchange; nothing is left."""
 
 
 class McpOAuthIncompleteFlowError(DaimonError):
@@ -77,14 +87,26 @@ async def complete_mcp_oauth_flow(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     default: DeploymentDefault,
+    may_write: Callable[[], Awaitable[bool]] | None = None,
 ) -> McpOAuthCompletion:
     """Exchange, store in the requester's vault, attach the server to the agent.
 
+    ``may_write`` is the caller's access decision. It is asked before the
+    first vault call (after the code exchange), again inside the vault lock
+    immediately before the grant is written, and again inside the agent's MCP
+    lock immediately before the attach: each step before it awaits the
+    network or a lock, and a pin landing in any of those waits must stop the
+    grant and the attach. A refusal raises `McpOAuthWriteRefusedError`; no
+    grant is written and nothing is attached (at most the person's own empty
+    vault exists, as it would after a declined sign-in).
+
     The grant is personal, but the attach is not: repointing a server name the
     agent already declares at another URL redirects every caller. That is
-    re-decided here as `mcp_replace` against the requester's recorded role
-    (the browser callback carries no live platform identity), and a refused
-    replacement raises `McpServerReplaceRefusedError` with the agent unchanged.
+    re-decided here as `mcp_replace` against the requester as stored (the
+    browser callback carries no live platform identity): role, platform id and
+    role ids, so a channel admin passes or fails here as at the request. A
+    refused replacement raises `McpServerReplaceRefusedError` with the agent
+    unchanged.
     """
     client = registered_client(flow, fernet=fernet)
     assert flow.token_endpoint is not None  # narrowed by registered_client
@@ -97,6 +119,12 @@ async def complete_mcp_oauth_flow(
         redirect_uri=flow.redirect_uri,
         resource=flow.resource,
     )
+
+    async def still_allowed() -> None:
+        if may_write is not None and not await may_write():
+            raise McpOAuthWriteRefusedError
+
+    await still_allowed()
     vault_id = await ensure_agent_mcp_vault(
         anthropic,
         account_id=flow.account_id,
@@ -113,6 +141,7 @@ async def complete_mcp_oauth_flow(
     async with hold_agent_vault_lock(
         session_factory, account_id=flow.account_id, agent_id=flow.agent_id
     ):
+        await still_allowed()
         credential_id = await put_mcp_oauth_credential(
             anthropic,
             vault_id=vault_id,
@@ -122,6 +151,7 @@ async def complete_mcp_oauth_flow(
             token_endpoint=flow.token_endpoint,
             resource=flow.resource,
             now=now,
+            before_write=still_allowed,
         )
     # The grant is in this person's vault now, which is what makes them
     # connected: their sessions mount the server, nobody else's do. Stamped
@@ -134,12 +164,24 @@ async def complete_mcp_oauth_flow(
     if agent is None:
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
-        account = await get_account(session, flow.account_id)
+        requester = await get_account_with_tenant(session, account_id=flow.account_id)
+    caller = (
+        ChannelAdminCaller(platform_user_id=None)
+        if requester is None
+        else ChannelAdminCaller(
+            platform_user_id=requester.platform_user_id,
+            role_ids=frozenset(requester.platform_role_ids),
+            is_server_admin=requester.role is Role.ADMIN,
+        )
+    )
     # Decide and attach under the per-agent MCP lock, serialized with the
     # token forms' attach-then-publish and the direct tools.
     async with agent_mcp_write_lock(
         session_factory, tenant_id=flow.tenant_id, agent_id=flow.agent_id
     ):
+        if may_write is not None and not await may_write():
+            await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
+            raise McpOAuthWriteRefusedError
         decision = await decide_mcp_connect(
             session_factory,
             tenant_id=flow.tenant_id,
@@ -147,25 +189,55 @@ async def complete_mcp_oauth_flow(
             agent_id=flow.agent_id,
             server_name=flow.server_name,
             url=flow.mcp_server_url,
-            is_admin=account is not None and account.role is Role.ADMIN,
+            platform=requester.platform if requester is not None else "",
+            caller=caller,
             default=default,
             shares_token=False,
         )
-        attached = await attach_mcp_server_to_agent(
-            anthropic,
-            agent.id,
-            server_name=flow.server_name,
-            url=flow.mcp_server_url,
-            replace_allowed=decision.replace_allowed,
-        )
+        try:
+            attached = await attach_mcp_server_to_agent(
+                anthropic,
+                agent.id,
+                server_name=flow.server_name,
+                url=flow.mcp_server_url,
+                replace_allowed=decision.replace_allowed,
+                before_update=still_allowed,
+            )
+        except McpOAuthWriteRefusedError:
+            await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
+            raise
     return McpOAuthCompletion(
         vault_id=vault_id, credential_id=credential_id, ma_agent_id=attached.id
     )
 
 
+async def _withdraw_grant(anthropic: AsyncAnthropic, *, credential_id: str, vault_id: str) -> None:
+    """Remove a grant written before the sign-in was refused; retry once, log a failure.
+
+    A pin landed after the grant was written, so a refused sign-in must leave
+    no grant behind as well as no attach. A failed delete is logged by id
+    (never the credential) so an operator can remove it.
+    """
+    for attempt in (1, 2):
+        try:
+            await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            return
+        except anthropic_pkg.NotFoundError:
+            return
+        except anthropic_pkg.APIError as exc:
+            if attempt == 2:
+                _log.error(
+                    "mcp_oauth.refused_grant_withdraw_failed",
+                    credential_id=credential_id,
+                    vault_id=vault_id,
+                    error_type=type(exc).__name__,
+                )
+
+
 __all__ = [
     "McpOAuthCompletion",
     "McpOAuthIncompleteFlowError",
+    "McpOAuthWriteRefusedError",
     "complete_mcp_oauth_flow",
     "registered_client",
 ]

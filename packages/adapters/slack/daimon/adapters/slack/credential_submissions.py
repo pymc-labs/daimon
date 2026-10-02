@@ -45,7 +45,12 @@ from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import agent_pin_names, request_pin_refusal
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    agent_pin_names,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
@@ -87,12 +92,14 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
@@ -104,6 +111,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -195,12 +203,15 @@ async def _mark_button_consumed(client: AsyncWebClient, *, row: CredentialReques
 
 
 async def _consume(
-    runtime: SlackRuntime, *, token: str, now: datetime
+    runtime: SlackRuntime,
+    *,
+    request: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent,
+    now: datetime,
 ) -> CredentialRequestRow | None:
+    """Spend the form, deciding the pin rule in the same transaction (`FormPinRefused`)."""
     async with runtime.sessionmaker() as session, session.begin():
-        return await credential_requests_store.consume_credential_request(
-            session, token=token, now=now
-        )
+        return await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
 
 
 async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
@@ -286,7 +297,11 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=await resolve_is_admin(client, user_id=user_id),
+        platform="slack",
+        caller=ChannelAdminCaller(
+            platform_user_id=user_id,
+            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -301,7 +316,12 @@ async def _validate_submission(
     user_id: str,
     channel_id: str,
     kind: CredentialRequestKind,
-) -> CredentialRequestRow | None:
+) -> tuple[CredentialRequestRow, BetaManagedAgentsAgent] | None:
+    """The live request and its target agent, or None once the submitter is told why not.
+
+    The pin rule is decided here, before any confirmation, and again inside
+    the consume transaction (`consume_form_unless_pinned`).
+    """
     async with runtime.sessionmaker() as session:
         row = await credential_requests_store.peek_credential_request(session, token=token)
     if (
@@ -349,7 +369,7 @@ async def _validate_submission(
             text=pin_refusal,
         )
         return None
-    return row
+    return row, agent
 
 
 def _env_name_refusal(name: str, problem: str) -> str:
@@ -392,7 +412,7 @@ async def run_env_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -401,8 +421,9 @@ async def run_env_credential_submission(
         channel_id=channel_id,
         kind="env",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -452,9 +473,7 @@ async def run_env_credential_submission(
     queued = False
     try:
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             # Re-read under the write, holding the agent's key-set lock: an
             # alias that appeared after the gate above was decided was never
             # put to it, and one a concurrent writer is adding waits.
@@ -501,6 +520,16 @@ async def run_env_credential_submission(
                     state = "superseded"
                 else:
                     queued = await record_input_continuation(session, consumed, platform="slack")
+    except FormPinRefused as refused:
+        # Decided with the consume: rolled back, nothing stored.
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_write_refused_no_crypto_keys")
@@ -508,8 +537,12 @@ async def run_env_credential_submission(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
         )
         return
-    except Exception:
-        log.exception("credential_request.env_write_failed", key_present=True)
+    except Exception as exc:
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_write_failed", key_present=True, error_type=type(exc).__name__
+        )
+        capture_exception_with_scope(exc)
         await post_ephemeral(
             client,
             thread_ts=thread_ts,
@@ -617,7 +650,12 @@ def _collision_lines(collisions: tuple[EnvEntry, ...], held: frozenset[str]) -> 
 
 
 async def _apply_env_file_entries(
-    runtime: SlackRuntime, *, token: str, entries: tuple[EnvEntry, ...], now: datetime
+    runtime: SlackRuntime,
+    *,
+    request: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent,
+    entries: tuple[EnvEntry, ...],
+    now: datetime,
 ) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
     """Consume the request and write every entry, in one transaction.
 
@@ -633,9 +671,7 @@ async def _apply_env_file_entries(
     """
     try:
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             if consumed is None:
                 return None, (), False, frozenset()
             # Held across the read below and the writes after it, so a
@@ -650,7 +686,7 @@ async def _apply_env_file_entries(
             collisions = env_import_collisions(entries, existing)
             if collisions:
                 await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="stale_replacement"
+                    session, token=request.token, outcome="stale_replacement"
                 )
                 return consumed, collisions, False, frozenset(existing)
             for entry in entries:
@@ -666,7 +702,7 @@ async def _apply_env_file_entries(
                 if written is None:
                     raise _KeyAppearedMidWrite(entry)
             await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="applied"
+                session, token=request.token, outcome="applied"
             )
             queued = await record_input_continuation(session, consumed, platform="slack")
             return consumed, (), queued, frozenset()
@@ -674,13 +710,11 @@ async def _apply_env_file_entries(
         # The rollback took the consume with it, so the request is live again:
         # spend it here and answer exactly as a read-time collision answers.
         async with runtime.sessionmaker() as session, session.begin():
-            consumed = await credential_requests_store.consume_credential_request(
-                session, token=token, now=now
-            )
+            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
             if consumed is None:
                 return None, (), False, frozenset()
             await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="stale_replacement"
+                session, token=request.token, outcome="stale_replacement"
             )
             return consumed, (err.entry,), False, frozenset({err.entry.name})
 
@@ -716,7 +750,7 @@ async def run_env_file_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -725,8 +759,9 @@ async def run_env_file_credential_submission(
         channel_id=channel_id,
         kind="env_file",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -776,13 +811,42 @@ async def run_env_file_credential_submission(
 
     try:
         consumed, collisions, queued, held = await _apply_env_file_entries(
-            runtime, token=token, entries=entries, now=datetime.now(UTC)
+            runtime, request=request, agent=agent, entries=entries, now=datetime.now(UTC)
         )
+    except FormPinRefused as refused:
+        # Decided with the consume: rolled back, nothing stored.
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_file_refused_no_crypto_keys")
         await post_ephemeral(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
+    except Exception as exc:
+        # Handled here, not in the spawned task, so the person gets a reply.
+        # Rolled back with the consume, so the request stays live. The Sentry
+        # capture carries id tags only; frame locals are never sent.
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_file_write_failed",
+            key_count=len(entries),
+            error_type=type(exc).__name__,
+        )
+        capture_exception_with_scope(exc)
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="Something went wrong — please try again.",
         )
         return
     if consumed is None:
@@ -926,7 +990,7 @@ async def run_mcp_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -935,8 +999,9 @@ async def run_mcp_credential_submission(
         channel_id=channel_id,
         kind="mcp",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -957,7 +1022,17 @@ async def run_mcp_credential_submission(
 
     connect = await _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id)
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -1183,8 +1258,8 @@ class SkillAttachOutcome:
 
     `attached` is the one bit `run_skill_repo_credential_submission` needs to
     pick the confirmation copy's availability: `next_message` when the attach
-    actually landed, `preparation_failed` when the import succeeded but the
-    attach did not (or found nothing new to attach).
+    actually landed, `saved` when the skills reached the library but not the
+    agent. `note` then closes the card with the reason.
     """
 
     note: str
@@ -1225,9 +1300,18 @@ async def _attach_skills_to_requested_agent(
     )
     if agent is None:
         return SkillAttachOutcome(
-            note="Could not attach: that agent no longer exists. The skills are in the library.",
+            note="That agent no longer exists.",
             attached=False,
             agent_name=None,
+            skill_count=len(skill_ids),
+        )
+    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        # Admins included: an attach never stamps the reconciler's spec hash,
+        # so the seeded agent would drift for good.
+        return SkillAttachOutcome(
+            note=f"`{agent.name}` is a built-in agent. Fork it and add them to the fork.",
+            attached=False,
+            agent_name=agent.name,
             skill_count=len(skill_ids),
         )
     new_skills: list[BetaManagedAgentsSkillParams] = [
@@ -1254,10 +1338,7 @@ async def _attach_skills_to_requested_agent(
             err_type=type(err).__name__,
         )
         return SkillAttachOutcome(
-            note=(
-                f"Imported, but attaching to `{agent.name}` failed. "
-                "Ask again to retry attaching it."
-            ),
+            note="Attaching them did not finish. Ask again to retry.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),
@@ -1346,13 +1427,14 @@ async def run_skill_repo_credential_submission(
     The credential lands in the skill-repo store, NOT in the agent's working
     repo binding: somebody who offers a token so an agent can read skills out
     of a repo has not asked for that repo to become the agent's checkout, and
-    the card they clicked said as much. No admin gate, matching the env/mcp
-    kinds — `sync_skills` itself gates imports at request time.
+    the card they clicked said as much. The import attaches skills to the
+    agent, so `skill_repo_connect` is decided again before the consume, as the
+    repo bind does, and the attach never lands on a defaults-managed agent.
     """
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -1361,14 +1443,45 @@ async def run_skill_repo_credential_submission(
         channel_id=channel_id,
         kind="skill_repo",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
 
+    if await refuse_unless_allowed(
+        runtime,
+        client,
+        operation="skill_repo_connect",
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        thread_ts=thread_ts,
+        caller_account_id=request.account_id,
+    ):
+        # Same shape as the repo bind: nothing is spent, and the card stops
+        # offering a form this submitter could never finish.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+        await edit_posted_card(client, row=request, state="refused", refusal="admin_required")
+        return
+
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -1429,6 +1542,9 @@ async def run_skill_repo_credential_submission(
                 ma_secret_ref=ma_secret_ref,
                 proof=proof,
             )
+            seeded_skill_names = await list_seeded_skill_names(
+                session, tenant_id=consumed.tenant_id
+            )
         outcomes = await run_skill_sync(
             runtime.anthropic,
             runtime.http_client,
@@ -1436,6 +1552,8 @@ async def run_skill_repo_credential_submission(
             branch=branch,
             path=path,
             tenant_id=consumed.tenant_id,
+            seeded_skill_names=seeded_skill_names,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
             token=value,
         )
     except DaimonError as err:
@@ -1470,12 +1588,38 @@ async def run_skill_repo_credential_submission(
         )
         return
 
+    imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+    failure_detail = summarize_failed_imports(outcomes)
+    if not imported:
+        # Nothing reached the library (an empty repo, or every skill refused
+        # or failed), which an applied card must not claim.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await edit_posted_card(
+            client,
+            row=consumed,
+            state="partial",
+            outcome=ConfigurationChange(
+                target_name=consumed.target_name or "the agent",
+                kind="skills_bulk",
+                availability="preparation_failed",
+                repo=owner_repo,
+                # `preparation_failed` names no count but the model requires one.
+                count=1,
+                detail=failure_detail,
+            ),
+        )
+        return
+
     attach = await _attach_skills_to_requested_agent(
-        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=outcomes
+        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=imported
     )
     log.info(
         "credential_request.skill_repo.attach",
-        imported=len(outcomes),
+        imported=len(imported),
         attached=attach.attached,
         note=attach.note,
     )
@@ -1488,6 +1632,7 @@ async def run_skill_repo_credential_submission(
         )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
+    detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
     await edit_posted_card(
         client,
         row=consumed,
@@ -1495,11 +1640,10 @@ async def run_skill_repo_credential_submission(
         outcome=ConfigurationChange(
             target_name=consumed.target_name or attach.agent_name or "the agent",
             kind="skills_bulk",
-            availability="next_message" if attach.attached else "preparation_failed",
+            availability="next_message" if attach.attached else "saved",
             repo=owner_repo,
-            # `preparation_failed` names no count but the model requires one;
-            # see `_report_skill_repo_failure`.
-            count=max(attach.skill_count, 1),
+            count=len(imported),
+            detail="\n".join(line for line in detail_lines if line) or None,
         ),
     )
     if attach.attached and queued:
@@ -1533,7 +1677,7 @@ async def run_repo_bind_credential_submission(
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    request = await _validate_submission(
+    validated = await _validate_submission(
         runtime,
         client,
         token=token,
@@ -1542,8 +1686,9 @@ async def run_repo_bind_credential_submission(
         channel_id=channel_id,
         kind="repo",
     )
-    if request is None:
+    if validated is None:
         return
+    request, agent = validated
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
@@ -1568,7 +1713,17 @@ async def run_repo_bind_credential_submission(
         return
 
     now = datetime.now(UTC)
-    consumed = await _consume(runtime, token=token, now=now)
+    try:
+        consumed = await _consume(runtime, request=request, agent=agent, now=now)
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,

@@ -139,21 +139,23 @@ per-session cap and no window other than the calendar month.
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
 its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
-channel it came from. A turn with no channel (an older DM, an MCP turn) and a
-channel with no budget are never gated.
+channel it came from. A turn with no channel (an older DM, an MCP turn from
+a key not minted in a channel) and a channel with no budget are never gated.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
 belongs to each adapter. The turn aborts — it never silently degrades to a
 cheaper model. The balance and cap checks are re-run, with the same order, by
 the MCP tools that start a turn (`_admit` in
-`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`); the billed media
+`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`), followed by the
+budget of the channel an agent key was minted in; the billed media
 tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
-channel, found from its `origin_context_id`. Each scheduled
+channel, found from its `origin_context_id` (or the key's own channel). A
+routine such a key saves without a destination records that channel. Each scheduled
 routine fire runs all three, the budget last against the routine's channel
 (after the agent pin check), and records the reason as that run's error
 instead of raising. Wakes pass through
-chat admission, so all three apply. Discord's unprompted thread participation
+chat admission, so all three apply. Unprompted thread participation (Discord and Teams)
 checks all three too, and skips silently, on the grounds that a billing
 notice is owed to someone who actually asked.
 
@@ -241,9 +243,14 @@ What a budget does not cover:
   that channel's budget is used up, and the DM's turns and media calls
   count toward it and are gated by it. `get_channel_budget` in such a DM
   reads that channel's budget.
-- **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
-  like) record no channel and do not check budgets yet. A media tool call
-  without a live `origin_context_id` is not attributed either.
+- **MCP turns from an unbound key.** An agent key minted with "Use from your
+  coding tools" in a sealed channel, or in one its agent is pinned to, records
+  that channel (`mcp_tokens.channel_id`): its `start_turn`, `ask` and
+  `continue_turn` are gated by that channel's budget, and the sessions it
+  opens carry `daimon_budget_channel`, so their spend is attributed there.
+  Every other key, the hub and bearer tokens record no channel and are not
+  gated. A media tool call without a live `origin_context_id` is not
+  attributed either.
 - **Routines with no channel**: made without a destination outside a
   channel (no `origin_context_id`, or from a DM), and Discord thread
   destinations saved before this release (see
@@ -377,6 +384,15 @@ tenant's attempts, which are serialized per tenant so parallel guesses
 cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
+An integration can issue codes over MCP with an operator token holding
+`promo:create` (see [architecture](architecture.md#operator-tokens)):
+`create_promo_code`, `list_promo_codes` and `revoke_promo_code` take the same
+terms as `daimon promo`, and no server admin sees them. A token minted with
+`--max-issued-usd` (whole cents) may issue at most that much credit in total,
+counted as `amount_usd × max_redemptions` per code (so `max_redemptions` is
+required); `mcp_tokens.issued_usd` tracks the total, and revoking a code gives
+none back. No operator token can open a top-up: `/billing/checkout` answers 403.
+
 ## The tables
 
 | Table | Holds |
@@ -462,9 +478,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord, Slack and Teams terminal reply footers show the remaining ledger balance
+The Discord and Slack terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
-without a tenant omit it.
+without a tenant omit it. Teams answers carry no usage footer.
 
 ## What you can see
 

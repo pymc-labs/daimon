@@ -20,6 +20,7 @@ typo is silent — check the spelling here.
 - [Anthropic](#anthropic)
 - [CLI](#cli)
 - [Logging](#logging)
+- [Observability](#observability)
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
@@ -167,6 +168,17 @@ Read from `daimon.core.config.LogSettings`. Prefix `DAIMON_LOG__`.
 
 Minimum log level emitted by the structured logger.
 
+## Observability
+
+Read from `daimon.core.config.ObservabilitySettings`. Prefix `DAIMON_OBSERVABILITY__`.
+
+### `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`
+
+`float` · optional · default `30`
+
+Seconds between runtime.health structured log lines from each long-running process.
+Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable.
+
 ## Ops
 
 Read from `daimon.core.config.OpsSettings`. Prefix `DAIMON_OPS__`.
@@ -233,6 +245,13 @@ recommended in production).
 How long an uploaded bundle object is retained on the Files API before deletion.
 Deletion is performed by the scheduler's pending-file sweeper, not by this process
 directly — a deployment running no scheduler will never reclaim these objects.
+
+### `DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`
+
+`int` · optional · default `60`
+
+Per-token cap on tool calls an operator token (minted with `daimon mcp mint-operator-
+token`) may make per rolling minute, counted in each MCP process. Set to 0 to disable.
 
 ## Hub
 
@@ -330,18 +349,6 @@ notice; continuation wakes keep their existing admission path.
 Port for the Discord process's liveness endpoint. Must not collide with the mcp process
 (8080) or the scheduler process (8082) — all process groups share one host.
 
-### `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS`
-
-`bool` · optional · default `True`
-
-When True (default), each Discord thread keeps a separate agent session per calling
-user, so no user inherits another user's session identity or permissions in a shared
-thread. When False, a single session is shared by every caller in the thread — a legacy
-fallback, not recommended for production. Setting this False also exposes credentials:
-the shared session's token is minted for the thread starter's account, so any
-participant can prompt the agent into calling get_cli_token and receive the starter's
-bound PAT as plaintext.
-
 ### `DAIMON_DISCORD__QA_BOT_USER_IDS`
 
 `tuple[str, ...]` · optional · default unset
@@ -370,8 +377,8 @@ Read from `daimon.core.config.ThreadParticipationSettings`. Prefix
 
 Organic thread participation: replying in a thread unprompted.
 
-Platform-agnostic settings (the store and tool are keyed by platform); only the Discord
-adapter reads them today. `mode` is the deployment tier of a cascade (deployment,
+Platform-agnostic settings (the store and tool are keyed by platform); the Discord and
+Teams adapters read them. `mode` is the deployment tier of a cascade (deployment,
 workspace, channel, thread) that the agent's `set_thread_participation` tool writes the
 other tiers of. `off` (the default) changes nothing for anyone: no classifier runs and
 every server behaves as today until someone asks the agent to follow a thread, or an
@@ -536,6 +543,15 @@ listener.
 When False, /api/messages answers 503 while the health endpoints stay live — the process
 keeps running so ingress can be re-enabled without a redeploy.
 
+### `DAIMON_TEAMS__PUBLIC_URL`
+
+`HttpUrl | None` · optional · default unset
+
+Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
+without /api/messages). Enables the admin sign-in that grants daimon a team's SharePoint
+site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
+redirect URI on the app registration.
+
 ### `DAIMON_TEAMS__ADMIN_USER_IDS`
 
 `tuple[str, ...]` · optional · default unset
@@ -631,11 +647,11 @@ storage for local development.
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
-save agent keys: without keys, saving an agent environment value is refused unless
-`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
-decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
-plaintext rows remain.
+Ordered Fernet keys used to encrypt/decrypt stored credentials: a single key, a comma-
+separated list, or a JSON list. Required to save agent keys: without keys, saving an
+agent environment value is refused unless `allow_plaintext` is set. The first key
+encrypts new values; older keys remain valid for decrypting existing ciphertext during
+rotation. Run `daimon crypto verify` to confirm no plaintext rows remain.
 
 ### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
 
@@ -1035,10 +1051,6 @@ Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
 once for the daimon side that calls it. They are read by different processes; a single
 shared env file would set both.
 
-No field in this model carries a `Field(description=...)`, so this section lists types
-and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
-inline comments.
-
 ### `DAIMON_NOTEBOOK__DATA_DIR`
 
 `Path` · optional · default `/data/notebooks`
@@ -1134,6 +1146,17 @@ inline comments.
 ### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
 
 `'https' | 'http'` · optional · default `https`
+
+### `DAIMON_NOTEBOOK__TENANTS`
+
+`tuple[UUID, ...]` · optional · default unset
+
+Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads from,
+comma-separated or as a JSON array of strings. Their notebooks share one browser origin
+and can reach each other, so list only tenants one operator controls. Empty refuses
+every upload. Ignored with ORIGIN_BASE (every notebook gets its own origin) and on
+localhost. An unlisted tenant's 403 names its id; `daimon tenants list --json` shows
+every tenant's id.
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 

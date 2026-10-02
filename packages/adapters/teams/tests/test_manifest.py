@@ -45,3 +45,13 @@ def test_manifest_offers_what_the_adapter_answers() -> None:
     assert bot["supportsFiles"] is True
     [commands] = bot["commandLists"]
     assert {c["title"] for c in commands["commands"]} == set(COMMAND_HELP)
+
+
+def test_manifest_requests_channel_message_consent_for_the_bot_app() -> None:
+    """Thread replay reads Graph under the team owner's RSC consent, given at install."""
+    manifest = _manifest()
+    assert manifest["webApplicationInfo"]["id"] == manifest["id"], "RSC is granted to the bot app"
+    assert manifest["webApplicationInfo"]["resource"], "Teams rejects RSC without a resource"
+    assert manifest["authorization"]["permissions"]["resourceSpecific"] == [
+        {"name": "ChannelMessage.Read.Group", "type": "Application"}
+    ], "only channel messages; files need tenant-wide consent, which daimon does not ask"

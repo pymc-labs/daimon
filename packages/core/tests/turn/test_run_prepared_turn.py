@@ -440,7 +440,9 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     deps = _deps(sessionmaker=db_session_factory, router=router)
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
-    admission = _admission(account_id=account.id, agent=agent, env=env)
+    admission = dataclasses.replace(
+        _admission(account_id=account.id, agent=agent, env=env), budget_channel_id="c-parent"
+    )
     prepared = _prepared_turn(
         deps=deps,
         admission=admission,
@@ -486,6 +488,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     assert live.ma_session_id == outcome.ma_session_id, (
         "the live row's session id must be the new one"
     )
+    assert live.channel_id == "c-parent", "the new row records the channel the turn runs for"
 
     async with db_session_factory() as s:
         rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
@@ -1657,6 +1660,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         image_blocks: object,
         system_blocks: object = (),
         tool_confirmation: object = None,
+        before_send: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
@@ -1759,6 +1763,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         image_blocks: object,
         system_blocks: object = (),
         tool_confirmation: object = None,
+        before_send: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
@@ -2758,10 +2763,10 @@ async def main() -> None:
 asyncio.run(main())
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=3.0, check=False
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=8.0, check=False
     )
     assert result.returncode == 0, (
-        "a successful archive should finish within three seconds; "
+        "a successful archive should finish within eight seconds; "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
 

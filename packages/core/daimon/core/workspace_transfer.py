@@ -374,6 +374,7 @@ async def transfer_workspace(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = _utc_now,
     channel_id: str | None = None,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -459,6 +460,8 @@ async def transfer_workspace(
         # would simply hang until the deadline.
         tool_confirmation=AutoApprove(),
         deadline=checkpoint_deadline,
+        # The checkpoint executes the old session: decided again right before.
+        before_send=before_send,
     )
     failure = _checkpoint_gap_reason(state)
     if failure is not None:
@@ -664,6 +667,7 @@ class WorkspaceTransferRunner:
         destination_agent_name: str,
         requested_work: str | None,
         unsaved_work: UnsavedWorkChoice | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> PreparedReplacement:
         from_agent_name = self.from_agent_name or old_snapshot.agent_name
         outcome = await transfer_workspace(
@@ -685,6 +689,7 @@ class WorkspaceTransferRunner:
             ),
             unsaved_work=unsaved_work,
             channel_id=self.channel_id,
+            before_send=before_send,
         )
         return as_prepared_replacement(
             outcome,

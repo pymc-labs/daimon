@@ -550,13 +550,7 @@ async def run_wizard_submit_turn_observed(
 
         agent = admission.agent
 
-        if discord_settings.per_caller_thread_sessions:
-            session_account_id = admission.account_id
-        else:
-            session_account_id = uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"legacy-thread-sentinel:{row.tenant_id}:{channel.id}",
-            )
+        session_account_id = admission.account_id
 
         # --- Stage two: bind_session -- D-01 bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation

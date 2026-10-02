@@ -83,6 +83,33 @@ def check_link_security(settings: Settings) -> None:
     )
 
 
+def warn_shared_origin(settings: Settings) -> None:
+    """Say at boot which tenants a shared-origin public host will serve."""
+    if settings.is_local_dev:
+        return
+    if settings.origin_base is not None:
+        if settings.tenants:
+            _log.warning(
+                "DAIMON_NOTEBOOK__TENANTS has no effect with DAIMON_NOTEBOOK__ORIGIN_BASE: "
+                "every tenant gets per-notebook origins."
+            )
+        return
+    if not settings.tenants:
+        _log.warning(
+            "notebooks share one browser origin on this host and DAIMON_NOTEBOOK__TENANTS "
+            "is empty, so every upload is refused. List the tenant ids allowed to share the "
+            "origin there (a JSON array of UUIDs), or set DAIMON_NOTEBOOK__ORIGIN_BASE "
+            "(wildcard DNS + TLS) for per-notebook origins."
+        )
+        return
+    _log.warning(
+        "notebooks share one browser origin on this host: the %d tenant(s) in "
+        "DAIMON_NOTEBOOK__TENANTS can reach each other's notebooks. Set "
+        "DAIMON_NOTEBOOK__ORIGIN_BASE (wildcard DNS + TLS) for per-notebook origins.",
+        len(settings.tenants),
+    )
+
+
 def create_app(settings: Settings) -> FastAPI:
     processes: dict[str, NotebookProcess] = {}
 
@@ -132,12 +159,7 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
         check_link_security(settings)
-        if settings.origin_base is None and not settings.is_local_dev:
-            _log.warning(
-                "notebooks share one browser origin on this host, so it serves ONE tenant: "
-                "the first tenant to upload claims it. Set DAIMON_NOTEBOOK__ORIGIN_BASE "
-                "(wildcard DNS + TLS) for per-notebook origins."
-            )
+        warn_shared_origin(settings)
         # Fail-closed boot gate (D-05): a host that cannot apply the jail must
         # not come up at all. Refusing per-request instead would leave an
         # apparently healthy host answering nothing but 503s — a configuration

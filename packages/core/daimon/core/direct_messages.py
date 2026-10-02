@@ -10,7 +10,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
-from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_sealed_source
+from daimon.core.access_policy import (
+    DM_SCOPE_PREFIX,
+    TenantAccessPolicy,
+    is_dm_source_sealed,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.scope import ChannelScopeRef
@@ -31,9 +35,10 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.turn.admission import Admission, admit
+from daimon.core.turn.admission import Admission, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.errors import DmSourceSealedError
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -87,23 +92,23 @@ def is_sealed_slack_message(
 
 
 def _source_is_sealed(policy: TenantAccessPolicy, conversation: DirectMessageRow) -> bool:
-    """Whether any recorded source of this conversation is sealed now.
+    """Whether any recorded source of this conversation is sealed now (fails closed)."""
+    return is_dm_source_sealed(
+        policy,
+        source_channel_id=conversation.source_channel_id,
+        source_thread_id=conversation.source_thread_id,
+        source_thread_keys=tuple(conversation.source_thread_keys or ()),
+    )
 
-    Fails closed: a row without recorded provenance (written before it was
-    stored) cannot prove its source unsealed, so any seal in the tenant
-    counts. For a Discord thread the parent can't be recovered from the old
-    source URL.
-    """
-    if not policy.sealed_channel_ids:
-        return False
-    if conversation.source_channel_id is None:
-        return True
-    if is_sealed_source(
-        policy, channel_id=conversation.source_channel_id, thread_id=conversation.source_thread_id
-    ):
-        return True
-    sealed = set(policy.sealed_channel_ids)
-    return any(key in sealed for key in conversation.source_thread_keys or ())
+
+async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
+    """Delete the conversation and retire its sessions, then refuse with the sealed copy."""
+    async with deps.sessionmaker.begin() as session:
+        retired = await quarantine_conversation(session, conversation=conversation)
+    for session_id in retired:
+        with suppress(anthropic.APIError):
+            await deps.anthropic.beta.sessions.archive(session_id)
+    raise DaimonError(SEALED_SINCE_MESSAGE)
 
 
 async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMessageRow) -> None:
@@ -111,18 +116,14 @@ async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMes
 
     The row (copied context and private history) is deleted and the scope's
     provider sessions retired, so nothing supplied earlier survives into a
-    later turn; a fresh /dm is required.
+    later turn; a fresh /dm is required. `reauthorize` asks the same question
+    again right before the DM's session is built (`DmSourceSealedError`).
     """
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
     if not _source_is_sealed(policy, conversation):
         return
-    async with deps.sessionmaker.begin() as session:
-        retired = await quarantine_conversation(session, conversation=conversation)
-    for session_id in retired:
-        with suppress(anthropic.APIError):
-            await deps.anthropic.beta.sessions.archive(session_id)
-    raise DaimonError(SEALED_SINCE_MESSAGE)
+    await _quarantine(deps, conversation)
 
 
 def require_unsealed_source(admission: Admission) -> None:
@@ -311,20 +312,36 @@ async def reply_to_dm(
             memory_read_only=admission.memory_read_only or conversation.memory_read_only,
             slack_turn_context_id=execution_id,
             private_dm_id=str(execution_id) if execution_id else conversation.scope_id,
+            # Re-asked by `reauthorize` right before the DM's session is built.
+            grant=replace(
+                admission.grant,
+                dm_source=DmSource(
+                    channel_id=conversation.source_channel_id,
+                    thread_id=conversation.source_thread_id,
+                    thread_keys=tuple(conversation.source_thread_keys or ()),
+                ),
+            )
+            if admission.grant is not None
+            else None,
         )
         deadline = turn_deadline(now=now)
-        prepared = await bind_session(
-            deps,
-            admission,
-            tenant_id=conversation.tenant_id,
-            platform=platform,
-            external_user_id=external_user_id,
-            thread_id=conversation.scope_id,
-            session_account_id=admission.account_id,
-            # Never attach a later Slack turn to a prior turn's bearer credential.
-            reuse_existing=platform != "slack",
-            deadline=deadline,
-        )
+        try:
+            prepared = await bind_session(
+                deps,
+                admission,
+                tenant_id=conversation.tenant_id,
+                platform=platform,
+                external_user_id=external_user_id,
+                thread_id=conversation.scope_id,
+                session_account_id=admission.account_id,
+                # Never attach a later Slack turn to a prior turn's bearer credential.
+                reuse_existing=platform != "slack",
+                deadline=deadline,
+            )
+        except DmSourceSealedError:
+            # The source was sealed after admission: same quarantine as above.
+            await _quarantine(deps, conversation)
+            raise
         previous = [
             TranscriptTurn(role="user" if item["role"] == "user" else "agent", text=item["text"])
             for item in conversation.history
@@ -355,20 +372,27 @@ async def reply_to_dm(
             async def reseed() -> str:
                 return user_message
 
-            outcome = await run_prepared_turn(
-                deps,
-                prepared,
-                tenant_id=conversation.tenant_id,
-                platform=platform,
-                thread_id=conversation.scope_id,
-                external_user_id=external_user_id,
-                user_message=user_message,
-                lifecycle=_CollectReply(),
-                cancel=asyncio.Event(),
-                reseed_user_message=reseed,
-                recovery_lifecycle=lambda _: _CollectReply(),
-                deadline=deadline,
-            )
+            try:
+                outcome = await run_prepared_turn(
+                    deps,
+                    prepared,
+                    tenant_id=conversation.tenant_id,
+                    platform=platform,
+                    thread_id=conversation.scope_id,
+                    external_user_id=external_user_id,
+                    user_message=user_message,
+                    lifecycle=_CollectReply(),
+                    cancel=asyncio.Event(),
+                    reseed_user_message=reseed,
+                    recovery_lifecycle=lambda _: _CollectReply(),
+                    deadline=deadline,
+                )
+            except DmSourceSealedError:
+                # Decided again during a dead-session recovery: same quarantine.
+                await _quarantine(deps, conversation)
+                raise
+        if isinstance(outcome.state.error, DmSourceSealedError):
+            await _quarantine(deps, conversation)
         if outcome.state.error is not None:
             raise outcome.state.error
         answer = (

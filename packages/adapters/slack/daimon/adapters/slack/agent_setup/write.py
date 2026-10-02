@@ -17,25 +17,19 @@ import dataclasses
 import uuid
 from typing import TYPE_CHECKING
 
-import httpx
 import structlog
-from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core import agent_lifecycle
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.defaults.reconcile_agents import reconcile_agent
-from daimon.core.defaults.report import Action, ResourceOutcome
-from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import (
     build_multifernet,
     get_pat,
     upsert_credential_encrypted,
 )
-from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -43,12 +37,6 @@ from daimon.core.scope import (
     ScopeRef,
     TenantConfigRow,
     TenantScopeRef,
-)
-from daimon.core.skill_sync import SyncReport, sync_agent_skills
-from daimon.core.specs import (
-    AgentSpec,
-    SkillRepo,
-    dump_agent_spec,
 )
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.scoped_config_read import get_scope
@@ -195,72 +183,6 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
 
 
-async def replace_agent_resources_for_panel(
-    runtime: SlackRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    spec: AgentSpec,
-) -> ResourceOutcome:
-    """Authoritatively replace the selected agent's mcp_servers/skills/tools.
-
-    For REMOVALS only. Routes around reconcile because reconcile's merge
-    semantics would re-add the removed entry.
-    """
-    ma_agent = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=spec.name
-    )
-    if ma_agent is None:
-        raise DaimonError(f"Agent {spec.name!r} not found on MA; cannot update.")
-    resolved_skills = await resolve_refs(
-        runtime.anthropic, refs=list(spec.skills), tenant_id=tenant_id
-    )
-    payload = dump_agent_spec(spec)
-    payload["mcp_servers"] = payload.get("mcp_servers") or []
-    payload["tools"] = payload.get("tools") or []
-
-    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        return await runtime.anthropic.beta.agents.update(
-            fresh.id,
-            version=fresh.version,
-            **payload,
-            skills=resolved_skills,
-            metadata=fresh.metadata,  # type: ignore[arg-type]
-        )
-
-    updated = await update_agent_with_version_retry(runtime.anthropic, ma_agent.id, _apply)
-    return ResourceOutcome(
-        kind="agent", name=spec.name, action=Action.UPDATED, anthropic_id=updated.id
-    )
-
-
-async def call_reconcile_for_panel(
-    runtime: SlackRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    spec: AgentSpec,
-    guild_account_id: uuid.UUID,
-) -> ResourceOutcome:
-    """Reconcile the currently-selected agent.
-
-    Propagates ``account_id`` (per-user metadata stamp) and ``public_url``
-    (default-MCP merge).
-    """
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    return await reconcile_agent(
-        runtime.anthropic,
-        spec,
-        tenant_id=tenant_id,
-        dry_run=False,
-        account_id=guild_account_id,
-        public_url=public_url,
-        managed=False,
-    )
-
-
 async def load_agent_inline_pat(runtime: SlackRuntime, *, agent_id: uuid.UUID) -> str | None:
     """Return the inline PAT ``core/sessions.py`` would resolve for ``agent_id``, or None.
 
@@ -322,31 +244,3 @@ async def store_inline_pat(
         await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
     _log.info("repo_auth.pat_stored")
     return f"inline-pat:{agent_id}"
-
-
-async def kick_off_skill_sync(
-    runtime: SlackRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    agent_name: str,
-    repo_url: str,
-) -> SyncReport:
-    """Invoke ``sync_agent_skills`` for one repo + the selected agent.
-
-    The caller wraps in ``asyncio.create_task`` to fire-and-forget. Builds a
-    fresh ``httpx.AsyncClient`` (closed when the task completes).
-    """
-    fernet = _build_runtime_fernet(runtime)
-    repos = [SkillRepo(url=repo_url, branch="main", path="", split=True)]
-    async with httpx.AsyncClient() as http_client:
-        return await sync_agent_skills(
-            principal_id=account_id,
-            tenant_id=tenant_id,
-            agent_name=agent_name,
-            repos=repos,
-            sessionmaker=runtime.sessionmaker,
-            fernet=fernet,
-            http_client=http_client,
-            anthropic_client=runtime.anthropic,
-        )

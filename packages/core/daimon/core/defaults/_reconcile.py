@@ -35,6 +35,7 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -260,4 +261,8 @@ async def _reconcile_core(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
             {"key": lock_key},
         )
-        return await _run_passes(skill_session=lock_session)
+        report = await _run_passes(skill_session=lock_session)
+        await prune_seeded_skills(
+            lock_session, tenant_id=tenant_id, present_names=skill_names_present
+        )
+        return report

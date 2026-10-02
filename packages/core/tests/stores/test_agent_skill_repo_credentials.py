@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 import pytest
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.agent_skill_repo_credentials import (
-    delete_skill_repo_credential,
     get_skill_repo_credential,
     get_tenant_skill_repo_proof_kind,
     list_skill_repo_credentials_for_repo,
@@ -268,49 +267,3 @@ async def test_set_skill_repo_credential_does_not_touch_agent_repo_binding(
     )
     assert binding.default_branch == "main", "the working repo's branch must be untouched"
     assert binding.ma_secret_ref == "working-secret", "the working repo's token must be untouched"
-
-
-async def test_delete_skill_repo_credential_removes_only_that_repo(
-    db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session)
-    agent_id = uuid.uuid4()
-    for repo in ("acme/skills-a", "acme/skills-b"):
-        await set_skill_repo_credential(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            repo_url=repo,
-            default_branch="main",
-            path="",
-            ma_secret_ref="secret",
-            proof=None,
-        )
-
-    await delete_skill_repo_credential(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        repo_url="https://github.com/acme/skills-a",
-    )
-
-    assert (
-        await get_skill_repo_credential(
-            db_session, tenant_id=tenant.id, agent_id=agent_id, repo_url="acme/skills-a"
-        )
-        is None
-    ), "the named enrollment must be gone (and the lookup key must normalize)"
-    assert (
-        await get_skill_repo_credential(
-            db_session, tenant_id=tenant.id, agent_id=agent_id, repo_url="acme/skills-b"
-        )
-        is not None
-    ), "the other enrollment must survive"
-
-
-async def test_delete_skill_repo_credential_is_idempotent(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-
-    await delete_skill_repo_credential(
-        db_session, tenant_id=tenant.id, agent_id=uuid.uuid4(), repo_url="acme/never-enrolled"
-    )

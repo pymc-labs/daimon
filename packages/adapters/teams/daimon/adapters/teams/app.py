@@ -4,7 +4,8 @@ Mirrors `SlackApp`. One turn per conversation thread at a time; messages that
 arrive meanwhile queue silently (Teams bots cannot react) and run after it as
 one turn per author. A per-tenant cap sheds load, and no turn starts until the
 boot sweep has retired the previous process's turns. A wake poller opens chats
-with due handoffs and timers.
+with due handoffs and timers. Unmentioned thread replies go to organic thread
+participation (`participation.py`), whose turns run here, silently on failure.
 """
 
 from __future__ import annotations
@@ -13,24 +14,27 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
-from xml.sax.saxutils import escape, quoteattr
 
 import anthropic
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.card import enable_files_card
 from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
     CHANNEL_POINTER,
     CommandContext,
     CommandHandler,
     parse_command,
 )
+from daimon.adapters.teams.context import HistoryBlock, newest_message_id, render_user_message
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -48,11 +52,19 @@ from daimon.adapters.teams.lifecycle import (
     TimedSender,
 )
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
+from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.adapters.teams.site_grant import (
+    STATE_TTL_S,
+    authorize_url,
+    redirect_uri,
+    sign_state,
+)
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
-from daimon.core.continuity.continuation import check_wake_responder
+from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -66,6 +78,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -80,6 +93,7 @@ from daimon.core.stores.turn_card_intents import (
     retire_turn_card_intent,
 )
 from daimon.core.teams_threads import conversation_of
+from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
@@ -151,31 +165,21 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "channel_protected": ("turn.skipped.channel_protected", None),
 }
 
+_NO_CONTEXT = (
+    "I couldn't read this thread, so there's nothing for me to go on. "
+    "Write your question after the mention. If this keeps happening, ask a team owner "
+    "to check the app's permission to read channel messages."
+)
+
+
+def _bare_mention(inbound: TeamsInbound) -> bool:
+    """A channel mention with no words or files: it asks about the thread."""
+    return inbound.kind == "channel" and not inbound.text.strip() and not inbound.files
+
+
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 # Builds a continuation turn's handoff notice from what the bind carried across.
 HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
-
-
-def _user_message(
-    controls: str, inbound: TeamsInbound, *, is_admin: bool, keys: str, prefix: str
-) -> str:
-    """Host facts, then the person's escaped words, shaped like Slack's context XML."""
-    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>'
-    query = (
-        f"<user_query author_id={quoteattr(inbound.user_id)} "
-        f'is_admin="{str(is_admin).lower()}">{escape(inbound.text)}</user_query>'
-    )
-    return "\n".join(
-        [
-            controls,
-            "<context>",
-            context,
-            *([keys] if keys else []),
-            "</context>",
-            "",
-            prefix + query,
-        ]
-    )
 
 
 def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
@@ -188,6 +192,7 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
             items[-1],
             text="\n\n".join(item.text for item in items),
             files=tuple(file for item in items for file in item.files),
+            composed_ids=tuple(item.activity_id for item in items[:-1]),
         )
         for items in by_author.values()
     ]
@@ -218,6 +223,8 @@ class TeamsApp:
         sender: TeamsSender,
         commands: Mapping[str, CommandHandler],
         bot_token: BotToken,
+        reader: ThreadReader | None = None,
+        channel_files: ChannelFiles | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -229,7 +236,13 @@ class TeamsApp:
         self._sender = TimedSender(sender)
         self._commands = commands
         self._bot_token = bot_token
-        self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self.spawn)
+        # Channel history and media through Graph; None replays nothing.
+        self._reader = reader
+        # Channel files through SharePoint; None leaves channels without files.
+        self._channel_files = channel_files
+        self.outputs = TeamsOutputDelivery(
+            runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
+        )
         self.credentials = TeamsCredentialRequests(
             runtime=runtime,
             sender=self._sender,
@@ -247,6 +260,8 @@ class TeamsApp:
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # Group id -> when its enable-files sign-in was offered (monotonic).
+        self._files_offered: dict[str, float] = {}
         self._recovery: asyncio.Task[None] | None = None
         self._wake_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
@@ -255,6 +270,8 @@ class TeamsApp:
         # Dispatches that found their chat busy, by thread key: the service URL to
         # use and whether the cap holds them back (only wakes; a saved input wins).
         self._deferred_dispatch: dict[str, tuple[uuid.UUID, str | None, bool]] = {}
+        # Built on first use: the classifier names the bot as the activity's recipient does.
+        self._participation: TeamsParticipation | None = None
         self.draining = False
 
     @property
@@ -342,6 +359,8 @@ class TeamsApp:
         sweep edits its card to interrupted.
         """
         self.draining = True
+        if self._participation is not None:
+            self._participation.cancel_all()
         if self._wake_poller is not None:
             # Dispatches it spawned drain with the turns; due rows wait for the next boot.
             self._wake_poller.cancel()
@@ -380,16 +399,106 @@ class TeamsApp:
             service_url=ctx.conversation_ref.service_url,
         )
         if isinstance(parsed, Refusal):
+            # Type and reason only, never the text: these drops are otherwise invisible.
+            conversation_type = activity.conversation.conversation_type
+            if parsed.text is None:
+                # Debug: with channel-message consent Teams delivers every channel post.
+                log.debug(
+                    "teams.message.ignored",
+                    conversation_type=conversation_type,
+                    reason="not_mentioned",
+                )
+                return
             conversation_id = activity.conversation.id
-            if parsed.text is not None and await self._may_post(
-                conversation_id.split(";", 1)[0], conversation_id
-            ):
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+            if await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
+                try:
                     await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
+                except TEAMS_SEND_ERRORS as exc:
+                    log.warning(
+                        "teams.refusal.send_failed",
+                        conversation_type=conversation_type,
+                        reason=type(exc).__name__,
+                    )
+            return
+        if parsed.unprompted:
+            if self.runtime.settings.thread_participation.mode is ParticipationMode.DISABLED:
+                log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
+                return
+            self.spawn(self._observe(parsed), name="teams.participation")
             return
         self.spawn(self._handle(parsed), name="teams.turn")
 
+    def _participation_for(self, inbound: TeamsInbound) -> TeamsParticipation:
+        if self._participation is None:
+            settings = self.runtime.settings
+            gates = ParticipationGates(
+                platform="teams",
+                settings=settings.thread_participation,
+                sessionmaker=self.runtime.sessionmaker,
+                anthropic=self.runtime.anthropic,
+                bot_display_name=inbound.bot_name or "daimon",
+                billing_config=self.runtime.billing_config,
+                markup=settings.billing.markup,
+            )
+            self._participation = TeamsParticipation(
+                gates=gates,
+                settings=settings.thread_participation,
+                reader=self._reader,
+                spawn=self.spawn,
+                fire=self._participate,
+                is_busy=lambda key: self.draining or key in self._processing,
+            )
+        return self._participation
+
+    async def _observe(self, inbound: TeamsInbound) -> None:
+        """An unmentioned thread reply: one cascade read, then maybe a batch."""
+
+        async def may_follow() -> bool:
+            # Only a followed thread pays these reads; a protected one is never judged.
+            if not await self._may_post(inbound.channel_id, inbound.thread_id):
+                return False
+            live = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
+            return live is not None
+
+        await self._participation_for(inbound).observe(inbound, self._tenant_id, is_live=may_follow)
+
+    async def _participate(self, trigger: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """The classifier said reply: run one turn as the burst's author, silently shed.
+
+        Admission, billing and the turn itself are a mention's; only every
+        notice is withheld (`_say`, the unprompted lifecycle).
+        """
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)
+        key = trigger.conversation_id
+        cap = await self._turn_cap(tenant_id)
+        if self.draining or key in self._processing:
+            return  # a mention landed while the classifier was deciding
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=trigger.channel_id,
+                thread_id=trigger.thread_id,
+            )
+            log.info(
+                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+            )
+            return
+        self._last_message_at[key] = datetime.now(UTC)
+        async with self._holding(key, tenant_id):
+            # Written on admission, not on answer: a turn that ends silent still spent.
+            if self._participation is not None:
+                await self._participation.record(trigger, tenant_id)
+            await self._run_turns(key, tenant_id, [trigger])
+
     async def _say(self, inbound: TeamsInbound, text: str) -> None:
+        if inbound.unprompted:
+            # Nobody asked: a refusal or notice per quiet burst would spam the thread.
+            log.info("teams.notice.withheld", reason="unprompted")
+            return
         await self._sender.send(
             inbound.conversation_id,
             MessageActivityInput(text=text),
@@ -468,6 +577,7 @@ class TeamsApp:
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._pending.setdefault(key, []).append(inbound)
+            self._supersede_batch(inbound)
             return
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
@@ -484,8 +594,17 @@ class TeamsApp:
             await self._say(inbound, _SHED)
             return
         self._last_message_at[key] = datetime.now(UTC)
+        self._supersede_batch(inbound)
         async with self._holding(key, tenant_id):
             await self._run_turns(key, tenant_id, [inbound])
+
+    def _supersede_batch(self, inbound: TeamsInbound) -> None:
+        """A mention's turn owns the thread now: drop its waiting batch, whose replies it replays.
+
+        Not on arrival: a mention refused before here (protected, command, shed) drops nothing.
+        """
+        if inbound.kind == "channel" and self._participation is not None:
+            self._participation.cancel(inbound.conversation_id)
 
     @contextlib.asynccontextmanager
     async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:
@@ -590,18 +709,21 @@ class TeamsApp:
                 asking_ma_agent_id=await self._asking_agent_id(continuation, tenant_id),
             )
 
-        agent = admission.agent
-        # Committed before the post so a lost response still leaves a record.
-        async with self.runtime.sessionmaker.begin() as session:
-            intent = await create_turn_card_intent(
-                session,
-                tenant_id=tenant_id,
-                platform="teams",
-                thread_id=inbound.conversation_id,
-                turn_token=uuid.uuid4(),
-                channel_id=inbound.conversation_id,
-            )
-        cancel_key = intent.id.hex
+        # Committed before the post so a lost response still leaves a record. An
+        # unprompted turn posts no card up front, so there is none to sweep.
+        intent_id: uuid.UUID | None = None
+        if not inbound.unprompted:
+            async with self.runtime.sessionmaker.begin() as session:
+                intent = await create_turn_card_intent(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    thread_id=inbound.conversation_id,
+                    turn_token=uuid.uuid4(),
+                    channel_id=inbound.conversation_id,
+                )
+            intent_id = intent.id
+        cancel_key = (intent_id or uuid.uuid4()).hex
         # Every attempt's lifecycle; dead-session recovery adds one, the last is current.
         holder: list[TeamsTurnLifecycle] = []
 
@@ -612,12 +734,10 @@ class TeamsApp:
                 conversation_id=inbound.conversation_id,
                 service_url=inbound.service_url,
                 cancel_key=cancel_key,
-                agent_name=agent.name,
-                model_id=agent.model.id,
                 adopt_message_id=adopt,
-                sessionmaker=self.runtime.sessionmaker,
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                unprompted=inbound.unprompted,
             )
             holder.append(attempt)
             return attempt
@@ -630,12 +750,13 @@ class TeamsApp:
             await lifecycle.post_initial()
             try:
                 # A gate: no untracked turn runs behind a visible card.
-                async with self.runtime.sessionmaker.begin() as session:
-                    recorded = await record_turn_card_message(
-                        session, id=intent.id, message_id=lifecycle.message_id or ""
-                    )
-                if not recorded:
-                    raise DaimonError("Teams card intent could not record its message id")
+                if intent_id is not None:
+                    async with self.runtime.sessionmaker.begin() as session:
+                        recorded = await record_turn_card_message(
+                            session, id=intent_id, message_id=lifecycle.message_id or ""
+                        )
+                    if not recorded:
+                        raise DaimonError("Teams card intent could not record its message id")
                 await self._bind_and_run(
                     inbound,
                     tenant_id,
@@ -666,7 +787,7 @@ class TeamsApp:
             task = asyncio.current_task()
             # A closed card shows its outcome; the sweep must never overwrite it.
             if closed or task is None or task.cancelling() == 0:
-                await asyncio.shield(self._settle(intent.id, lifecycle.message_id, closed, markers))
+                await asyncio.shield(self._settle(intent_id, lifecycle.message_id, closed, markers))
 
     async def _refusal(
         self, error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch, name: str
@@ -697,6 +818,10 @@ class TeamsApp:
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
+        bare = _bare_mention(inbound)
+        if bare and self._reader is None:
+            await lifecycle.close_with_notice(_NO_CONTEXT)
+            return
         deadline = turn_deadline(now=datetime.now(UTC))
         try:
             prepared = await bind_session(
@@ -714,6 +839,16 @@ class TeamsApp:
             await lifecycle.close_with_notice(await self._refusal(error, admission.agent.name))
             if reraise:
                 raise
+            return
+
+        # The messages this turn answers and its status card are not history.
+        skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
+        watermark = prepared.watermark if prepared.reused else None
+        history = await self._history(inbound, watermark=watermark, skip_ids=skip)
+        read = [history]
+        # An unprompted turn without its thread has nothing to answer: it stays silent.
+        if (bare or inbound.unprompted) and history is None:
+            await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
         summary: str | None = None
@@ -737,14 +872,18 @@ class TeamsApp:
             adopted.answer_prefix = lifecycle.answer_prefix
             return adopted
 
+        reader = self._reader
+        # A channel activity carries only the text: its media are on Graph's copy.
+        media = await reader.read_media(inbound) if reader else None
         attachments = await prepare_attachments(
             self.runtime.http_client,
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
+            channel=inbound.kind == "channel",
+            channel_media=media,
+            graph_token=reader.token if reader else None,
         )
-        if attachments.notice is not None:
-            await self._say(inbound, attachments.notice)
         config = admission.config
         async with turn_origin(
             self.runtime.sessionmaker,
@@ -768,16 +907,21 @@ class TeamsApp:
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
             )
-            message = _user_message(
+            render = functools.partial(
+                render_user_message,
                 controls,
                 inbound,
                 is_admin=self._role(inbound) is Role.ADMIN,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
+                channel_files=await self._files_reachable(inbound),
             )
+            message = render(history=history)
 
             async def reseed() -> str:
-                return message
+                # A recreated session has seen nothing: replay the whole thread.
+                read.append(await self._history(inbound, watermark=None, skip_ids=skip))
+                return render(history=read[-1])
 
             outcome = await run_prepared_turn(
                 deps,
@@ -801,27 +945,77 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            sweep = self.outputs.sweep(inbound, outcome.ma_session_id)
+            append = holder[-1].append_to_answer
+            sweep = self.outputs.sweep(inbound, outcome.ma_session_id, append=append)
             self.spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
             )
-            loss = render_unexpected_loss(kind)
-            if not await final.prepend_revealed_answer(loss):
-                await self._say(inbound, loss)
+            # Above the answer or not at all: a message of its own lands below it.
+            if not await final.prepend_revealed_answer(render_unexpected_loss(kind)):
+                log.info("teams.turn.loss_notice_dropped")
         if summary is not None and not final.answer_prefix_applied:
-            await self._say(inbound, summary)
+            log.info("teams.turn.summary_dropped")
         if outcome.mapping_id is not None and final.final_message_id is not None:
+            mark = final.final_message_id
+            if inbound.kind == "channel":
+                # The newest message read, not the answer: replies posted while the
+                # turn ran are older than the answer, and the next delta needs them.
+                newest = (h.newest_id for h in read if h is not None)
+                mark = newest_message_id([*inbound.message_ids, *newest]) or mark
             async with self.runtime.sessionmaker.begin() as session:
-                await update_watermark(
-                    session, id=outcome.mapping_id, watermark_message_id=final.final_message_id
-                )
+                await update_watermark(session, id=outcome.mapping_id, watermark_message_id=mark)
         if prepared.continuity.pending:
-            await self._say(
-                inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
+            # The change was saved where it was made; the next turn applies it.
+            log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
+        if media is not None and any(f.refused for f in media.files):
+            await self._offer_enable_files(inbound, media.group_id)
+
+    async def _offer_enable_files(self, inbound: TeamsInbound, group_id: str | None) -> None:
+        """An admin whose channel files were refused gets the sign-in that grants them.
+
+        A card, not a status line: never unprompted, and again only once the last
+        offer's sign-in has expired.
+        """
+        teams = self._teams
+        now = time.monotonic()
+        if (
+            group_id is None
+            or teams.public_url is None
+            or inbound.unprompted
+            or self._role(inbound) is not Role.ADMIN
+            or now - self._files_offered.get(group_id, -STATE_TTL_S) < STATE_TTL_S
+        ):
+            return
+        self._files_offered[group_id] = now
+        state = sign_state(group_id, secret=teams.client_secret.get_secret_value(), now=time.time())
+        url = authorize_url(
+            tenant_id=teams.tenant_id,
+            client_id=teams.client_id,
+            redirect_uri=redirect_uri(teams.public_url),
+            state=state,
+        )
+        try:
+            await self._sender.send(
+                inbound.conversation_id, enable_files_card(url), service_url=inbound.service_url
             )
+        except TEAMS_SEND_ERRORS:
+            self._files_offered.pop(group_id, None)
+            log.warning("teams.enable_files.send_failed", exc_info=True)
+
+    async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
+        if inbound.kind != "channel":
+            return None
+        return self._channel_files is not None and await self._channel_files.is_available(inbound)
+
+    async def _history(
+        self, inbound: TeamsInbound, *, watermark: str | None, skip_ids: frozenset[str]
+    ) -> HistoryBlock | None:
+        if self._reader is None:
+            return None
+        return await self._reader.read(inbound, watermark=watermark, skip_ids=skip_ids)
 
     async def _key_names(
         self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission
@@ -928,7 +1122,8 @@ class TeamsApp:
             log.error("teams.continuation.dispatch_failed", conversation_id=key, exc_info=exc)
 
     async def _asking_agent_id(self, row: TaskContinuationRow, tenant_id: uuid.UUID) -> str | None:
-        """The agent of the requester's live session here, which a private input resumes."""
+        """The agent that asked for a private input, while the requester's live session is
+        still with it (`load_asking_agent_id`)."""
         if row.reason != "private_input_applied":
             return None
         async with self.runtime.sessionmaker() as session:
@@ -939,7 +1134,9 @@ class TeamsApp:
                 thread_id=row.thread_id,
                 account_id=row.requester_account_id,
             )
-        return live.ma_agent_id if live is not None else None
+            return await load_asking_agent_id(
+                session, row, live_ma_agent_id=live.ma_agent_id if live is not None else None
+            )
 
     async def _run_continuation(
         self,
@@ -987,7 +1184,7 @@ class TeamsApp:
 
     async def _settle(
         self,
-        intent_id: uuid.UUID,
+        intent_id: uuid.UUID | None,
         message_id: str | None,
         closed: bool,
         markers: set[uuid.UUID],
@@ -1000,7 +1197,7 @@ class TeamsApp:
         """
         try:
             async with self.runtime.sessionmaker.begin() as session:
-                if closed:
+                if closed and intent_id is not None:
                     await retire_turn_card_intent(
                         session, id=intent_id, expected_message_id=message_id
                     )

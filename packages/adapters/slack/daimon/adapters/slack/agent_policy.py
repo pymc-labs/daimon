@@ -55,6 +55,7 @@ __all__ = [
     "MANAGED_AGENT_MESSAGE",
     "NEEDS_ADMIN_SPEC_MESSAGE",
     "SHARED_AGENT_MESSAGE",
+    "SHARED_AGENT_SKILLS_MESSAGE",
     "gather_target_facts",
     "refusal_message",
     "refuse_unless_allowed",
@@ -85,6 +86,13 @@ SHARED_AGENT_MESSAGE: Final[str] = (
     "This agent answers for other people here, so changing its repo or its keys "
     f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
     "to make you a new agent of your own."
+)
+
+#: A skill-repo import by a member onto a shared agent: the imported skills
+#: would reach everyone it answers.
+SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
+    f"This agent answers for other people here, so adding skills to it needs {ADMIN_NOUN}. "
+    "Ask me and I'll write the request for them, or ask me to fork it and add them to the fork."
 )
 
 AGENT_GONE_MESSAGE: Final[str] = (
@@ -140,11 +148,13 @@ async def refuse_unless_allowed(
     channel_id: str,
     user_id: str,
     thread_ts: str | None = None,
+    caller_account_id: uuid.UUID | None = None,
 ) -> bool:
     """Decide `operation` against the agent daimon knows as `agent_id`.
 
     Returns True when the caller must stop (the refusal has been posted as an
-    ephemeral), False to proceed.
+    ephemeral), False to proceed. `caller_account_id` leaves the caller's own
+    live sessions out of the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
@@ -177,6 +187,7 @@ async def refuse_unless_allowed(
         ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller_account_id=caller_account_id,
     )
     return await _render_outcome(
         client,
@@ -265,6 +276,8 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     """
     if operation == "agent_spec_edit":
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SPEC_MESSAGE
+    if operation == "skill_repo_connect":
+        return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE
 
 

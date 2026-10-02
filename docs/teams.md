@@ -10,7 +10,9 @@ Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
 before daimon code runs; tokens from any other issuer (such as Entra ID) are
-refused with 401 first. The same listener serves `/healthz` and `/readyz`.
+refused with 401 first. The same listener serves `/healthz` and `/readyz`,
+and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
+(below); a reverse proxy in front must pass that path too.
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
 64 KiB are refused before parsing. The `teams` compose service (opt-in `teams`
 profile) publishes the port; the messaging endpoint must reach it.
@@ -29,8 +31,12 @@ is supported; government and China clouds use other Bot Framework hosts.
 
 - **1:1 chat.** Every message is a turn, in the organisation's tenant. It
   counts as a DM for the access policy, so `dm_memory_read_only` applies.
-- **Channels.** Only messages that @mention the bot. Each root post is its own
-  thread and session; replies that @mention it continue that thread.
+- **Channels.** Messages that @mention the bot or quote one of its messages
+  (Reply on a bot message); the quote reaches the agent in place. Each root
+  post is its own thread and session; replies that address it continue that
+  thread. A bare @mention asks about the thread; if the thread cannot be
+  read, the bot says so instead of starting a turn. A followed thread also
+  gets unprompted replies (below).
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
@@ -76,30 +82,129 @@ MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
 There are no channel admins: only the listed admins administer a channel.
 
+### Channel history
+
+Like Discord and Slack, a channel turn replays the conversation it sits in,
+read through Microsoft Graph and marked untrusted for the agent. The first
+turn in a thread gets the root post and its newest 50 replies, a later turn
+only the replies newer than the last message it read, and a mention that starts a
+thread the channel's 25 most recently active posts. One page is read per turn,
+marked `truncated` when there is more. System events, deleted posts and the
+bot's own cards are left out; mentions read as `@name`, files as names.
+
+Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
+the manifest. A team owner grants it when adding the app to a team, for that
+team only; no tenant-wide permission or admin consent is needed. It also makes
+Teams deliver every channel post to the bot, which ignores those without a
+mention unless their thread is followed. An existing install needs the updated app package uploaded again
+(bump `version`), then accepting the permission when the team updates the
+app. Tenant admins can turn this consent off
+(`Set-MgBetaTeamRscConfiguration -State DisabledForAllApps`); the bot then
+answers without history. A refused, throttled or slow read (10 seconds) never
+fails a turn: it runs without history and the adapter logs one warning with
+the HTTP status and no content.
+
+### Following threads
+
+As on Discord, a thread can be followed: the bot reads replies nobody
+addressed to it and joins in when a small classifier says it can help. Ask
+the agent ("follow this thread", "stop following"); it calls
+`set_thread_participation`, and `get_thread_participation` says what applies.
+Anyone in a channel can follow its threads; a whole channel or the
+organisation needs a listed admin. The deployment default is
+`DAIMON_THREAD_PARTICIPATION__MODE`; `disabled` turns it off for Teams and
+Discord alike.
+
+A burst of replies is judged once, after the thread has been quiet for
+`QUIET_SECONDS`, over the thread read through Graph, and capped per thread
+per hour. The turn runs as the burst's newest author and passes the same
+admission and billing gates as a mention, but posts only its answer: no
+status card or Cancel button, and every refusal, notice and error is only
+logged. No turn posts a status message of its own under its answer, as on
+Slack and Discord: what the person must hear rides on the answer, and only
+cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
+are ignored, and protected channels are skipped. Without Graph history (the
+consent above) a followed thread stays mention-only.
+
 ### Files
 
 - **In.** Images pasted into a message are fetched with the bot token and
   passed to the agent. Files shared in a 1:1 chat reach the agent as short-lived
   download links. The manifest must set `supportsFiles: true`.
 - **Out.** Files the agent writes to its outputs are offered in the 1:1 chat
-  with Teams' file consent card; accepting uploads the file to the user's
+  with Teams' file consent card (the agent guidance describes this path); accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
-- **Channels.** Reading a file shared in a channel, or posting one, needs
-  Microsoft Graph. The bot names a file it made there in a note and discards
-  it.
+- **Channels.** Teams sends the bot only a channel message's text, so the bot
+  reads each message it answers from Graph and passes its images to the agent. Files live in the team's SharePoint site, which no
+  team-scoped permission reaches: they work only in teams whose site an admin
+  granted (below). There, a shared file from that site (never another one)
+  reaches the agent as a short-lived download link, and each file the agent
+  writes is uploaded to the channel's Files tab (never overwriting) and linked
+  below its answer, or in one message when the answer has no room (never
+  after an unprompted answer); a failed upload is only logged.
+  Elsewhere, or when Graph refuses, the agent is told the shared file's name
+  and why it could not be opened, for its answer to explain, and an output is logged
+  (`teams.channel_output.skipped` or `.upload_failed`, no name or content) and
+  dropped from the delivery listing; the agent's own copy stays in its
+  workspace. The turn context tells the agent which case applies
+  (`files="available"` or `"unavailable"`), learned per channel from the last
+  folder lookup or upload and rechecked every 10 minutes while unavailable.
 
-The bot token is only sent to Bot Framework hosts, downloads and uploads only
-go to SharePoint hosts, and every redirect hop is re-checked.
+The bot token is only sent to Bot Framework hosts, the Graph token only to
+`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
+every redirect hop is re-checked (Graph reads follow none).
+
+### Channel files (optional)
+
+Grant the app `Sites.Selected`, which reaches only the sites granted to it,
+then grant each team's site. The manifest does not change and no restart is
+needed.
+
+1. Entra portal → App registrations → the bot's app → API permissions → Add
+   a permission → Microsoft Graph → Application permissions →
+   `Sites.Selected` → Grant admin consent.
+2. Set `DAIMON_TEAMS__PUBLIC_URL` to the Teams service's public base URL
+   (the messaging endpoint without `/api/messages`). Same app →
+   Authentication → Add a platform → Web → redirect URI
+   `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
+3. When a daimon admin shares a file in a team whose site is not granted,
+   the bot posts an **Enable files** card (at most every 15 minutes per team).
+   A SharePoint or global admin clicks it and signs in once (the first in the
+   organisation must be a global admin, who consents for everyone); the Teams service
+   then grants the app write on that team's site, and its next message sees
+   the files.
+
+Or grant a site by hand as a SharePoint or global admin holding
+`Sites.FullControl.All`:
+
+```http
+GET https://graph.microsoft.com/v1.0/groups/{group-id}/sites/root
+POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
+
+{"roles": ["write"],
+ "grantedToIdentities": [{"application": {"id": "<DAIMON_TEAMS__CLIENT_ID>", "displayName": "daimon"}}]}
+```
+
+The group id is in the team's link (team → ⋯ → Get link to team → `groupId=`).
+
+Standard channels only: private and shared channels keep files in a site of
+their own, where outputs are not uploaded. Removing the site permission
+(`DELETE /sites/{site-id}/permissions/{id}`) returns the team to names only.
 
 ### Keys and sign-ins
 
-When an agent asks for an API key or an MCP token (`request_agent_key`,
-`request_mcp_token`), it posts a card in the conversation. Only the person who
-asked can open it; the secret goes into a password field in a Teams dialog and
-never through the chat. `request_mcp_oauth` opens a private sign-in link the
-same way. Once the value is saved, the card shows the outcome and the waiting
-work resumes. Key names and replacing an existing key follow Slack's rules.
+When an agent asks for an API key, a `.env` file, an MCP token or GitHub
+access (`request_agent_key`, `request_mcp_token`, `request_repo_binding`,
+`request_skill_repo_token`), it posts a card in the conversation. Only the
+person who asked can open it; the secret goes into a Teams dialog and never
+through the chat. Key values and `.env` contents take a multi-line field (paste
+the file: a dialog has no file input), tokens a password field.
+`request_mcp_oauth` opens a private sign-in link the same way. Once the value
+is saved, the card shows the outcome and the waiting work resumes. Key names,
+replacing a key, whole-file imports, and binding a repo or importing skills
+onto a shared agent follow Slack's rules. A GitHub token that cannot read the
+repo is refused in the dialog, and the form stays open.
 
 ### Agent tools
 
@@ -138,11 +243,11 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported yet
 
-Reactions, reading channel history (`read_channel`, `read_thread`,
-`search_messages`, `get_message`, `list_channels` and `parse_link` are hidden
-from Teams turns), files in channels (both need Microsoft Graph), file posting
-through `send_message`, and private inputs a password field cannot take: `.env`
-uploads, multi-line secrets, and repository or skill-repository tokens.
+Reactions, the agent's own channel-reading tools (`read_channel`,
+`read_thread`, `search_messages`, `get_message`, `list_channels` and
+`parse_link` are hidden from Teams turns), files in channels whose site is
+not granted and in private or shared channels, and file posting
+through `send_message`.
 Also Discord and Slack only: `send_direct_message`, `/dm` conversations,
 routine destinations (refused on save), table rendering
 (`DAIMON_TABLE_RENDERING`) and completion pings (`DAIMON_COMPLETION_PINGS`).

@@ -435,6 +435,10 @@ class ThreadSession(Base):
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The channel the session runs for, recorded at creation: a thread's parent,
+    # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
+    # when unknown; agent reach then counts the session as possibly anywhere.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:
@@ -1378,19 +1382,35 @@ class GitHubPushDelivery(Base):
 
 
 class McpToken(Base):
-    """JTI registry for per-agent MCP JWTs.
+    """JTI registry for MCP JWTs that can be revoked: agent keys, operator and CLI tokens.
 
     Each minted token has one row. `revoked_at` is NULL while the token is
     live; `revoke_mcp_token` sets it atomically via UPDATE…RETURNING.
 
     `agent_id` is Text, not UUID — it stores the stringified derived UUID (A2)
     so the column matches the JWT claim shape exactly and stays decoupled from
-    the UUID type constraint.
+    the UUID type constraint. Only `kind = 'agent'` rows carry one.
 
     Private to `daimon.core.stores.**` per the import-linter contract.
     """
 
     __tablename__ = "mcp_tokens"
+    __table_args__ = (
+        CheckConstraint("kind IN ('agent', 'operator', 'cli')", name="ck_mcp_tokens_kind"),
+        CheckConstraint("(kind = 'agent') = (agent_id IS NOT NULL)", name="ck_mcp_tokens_agent_id"),
+        CheckConstraint(
+            "kind = 'operator' OR (scopes = '{}' AND max_issued_usd IS NULL)",
+            name="ck_mcp_tokens_operator_fields",
+        ),
+        CheckConstraint(
+            "issued_usd >= 0 AND (max_issued_usd IS NULL OR max_issued_usd > 0)",
+            name="ck_mcp_tokens_issued",
+        ),
+        CheckConstraint(
+            "(platform IS NULL) = (channel_id IS NULL) AND (channel_id IS NULL OR kind = 'agent')",
+            name="ck_mcp_tokens_channel",
+        ),
+    )
 
     jti: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -1406,12 +1426,25 @@ class McpToken(Base):
         ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
     )
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
+    scopes: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
     label: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_issued_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    issued_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, server_default=text("0")
+    )
+    # The channel the token was minted in, whose calls then run inside it; both
+    # NULL for a token bound to no channel.
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):
@@ -2260,6 +2293,9 @@ class SecurityAuditEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
+    token_kind: Mapped[str | None] = mapped_column(Text)
+    token_jti: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scope: Mapped[str | None] = mapped_column(Text)
 
 
 class DirectMessagePolicy(Base):

@@ -177,8 +177,10 @@ def _render_skill_removed(target_name: str, skill: str | None) -> str:
 
 
 def _render_skills_bulk_added(change: ConfigurationChange) -> str:
-    if change.detail is not None:
-        raise ValueError("kind='skills_bulk' does not use detail; it names no single skill")
+    """`detail` is an optional closing line: why skills did not import or attach.
+
+    `saved` means the skills reached the library but not the target agent.
+    """
     if change.count is None:
         raise ValueError("kind='skills_bulk' requires count")
     if change.count < 1:
@@ -191,17 +193,23 @@ def _render_skills_bulk_added(change: ConfigurationChange) -> str:
             [
                 f"Your GitHub token is saved for {target_name}.",
                 "The skills did not import.",
-                f"Ask me to add skills from {change.repo} again to retry.",
+                change.detail or f"Ask me to add skills from {change.repo} again to retry.",
             ]
         )
     noun = "skill" if change.count == 1 else "skills"
     pronoun = "it" if change.count == 1 else "them"
-    return "\n".join(
-        [
+    if change.availability == "saved":
+        lines = [
+            f"{change.count} {noun} imported from {change.repo}, but not added to {target_name}."
+        ]
+    else:
+        lines = [
             f"{change.count} {noun} added to {target_name} from {change.repo}.",
             f"It can use {pronoun} from your next message here.",
         ]
-    )
+    if change.detail is not None:
+        lines.append(change.detail)
+    return "\n".join(lines)
 
 
 def _render_mcp_connected(
@@ -384,7 +392,11 @@ _ENV_NAMES_SHOWN: Final[int] = 8
 
 
 def render_env_import_rejected(
-    rejection: EnvRejection, problems: Sequence[EnvProblem], *, target_name: str
+    rejection: EnvRejection,
+    problems: Sequence[EnvProblem],
+    *,
+    target_name: str,
+    pasted: bool = False,
 ) -> str:
     """Tell the person their uploaded file was rejected whole, and why.
 
@@ -402,7 +414,8 @@ def render_env_import_rejected(
             lines.append(f"…and {remaining} more.")
     else:
         lines.append(_ENV_FILE_REASONS[rejection])
-    lines.append("Nothing was changed. Upload a corrected file.")
+    # Teams dialogs take a paste, having no file input.
+    lines.append(f"Nothing was changed. {'Paste' if pasted else 'Upload'} a corrected file.")
     return "\n".join(lines)
 
 
@@ -517,6 +530,16 @@ def render_current_work_must_finish(target_name: str, *, handoff: bool) -> str:
         [
             f"{target_name} is still working on the previous message here.",
             "Your change is saved and it picks it up on the next message, not that one.",
+        ]
+    )
+
+
+def render_access_changed_try_again() -> str:
+    """Tell the person a seal landed while their turn was being prepared, so it didn't run."""
+    return "\n".join(
+        [
+            "This channel's access settings changed while I was getting ready.",
+            "Send your message again and I'll answer under the new settings.",
         ]
     )
 

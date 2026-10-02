@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
@@ -126,6 +126,7 @@ async def create_session(
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
+    before_create: Callable[[], Awaitable[None]] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -476,6 +477,9 @@ async def create_session(
             )
         )
 
+    if before_create is not None:
+        # The caller's last access decision, after every await above.
+        await before_create()
     return await anthropic.beta.sessions.create(
         agent=agent_argument,
         environment_id=environment.id,
@@ -495,6 +499,9 @@ async def create_isolated_session(
     resources: list[Resource],
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
+    budget_channel_id: str | None = None,
+    origin_channel_id: str | None = None,
+    origin_seal_ids: Collection[str] = (),
 ) -> BetaManagedAgentsSession:
     """Create an MA session for an isolated agent — `create_session` with every
     optional mount removed.
@@ -518,13 +525,21 @@ async def create_isolated_session(
     an isolated session with an empty resource list is a caller bug, not a
     degraded mode.
 
-    `billing_exempt` stamps the session the same way `create_session` does.
+    `billing_exempt`, `budget_channel_id` and the origin stamp the session the
+    same way `create_session` does: metadata only, never a mount.
 
     On MA failure: `anthropic.APIError` propagates uncaught.
     """
     metadata = _session_metadata(
-        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+        account_id=account_id,
+        tenant_id=tenant_id,
+        billing_exempt=billing_exempt,
+        budget_channel_id=budget_channel_id,
     )
+    if origin_channel_id is not None:
+        metadata.update(
+            origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
+        )
 
     return await anthropic.beta.sessions.create(
         agent=agent.id,

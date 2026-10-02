@@ -29,6 +29,11 @@ class SecurityAuditEntry(BaseModel):
     outcome: Literal["allowed", "denied", "error"]
     reason: str
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    token_kind: str | None = None
+    """``agent``, ``operator`` or ``cli`` for a registered token; None otherwise."""
+    token_jti: uuid.UUID | None = None
+    scope: str | None = None
+    """The operator-token scope the call was checked against."""
 
 
 class SecurityAuditRow(SecurityAuditEntry):
@@ -48,6 +53,9 @@ async def append_event(
     outcome: Literal["allowed", "denied", "error"],
     reason: str,
     occurred_at: datetime | None = None,
+    token_kind: str | None = None,
+    token_jti: uuid.UUID | None = None,
+    scope: str | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
         raise ValueError("occurred_at must include a timezone")
@@ -78,6 +86,9 @@ async def append_event(
         outcome=outcome,
         reason=reason,
         occurred_at=occurred_at or datetime.now(UTC),
+        token_kind=token_kind,
+        token_jti=token_jti,
+        scope=scope,
     )
     session.add(event)
     await session.flush()

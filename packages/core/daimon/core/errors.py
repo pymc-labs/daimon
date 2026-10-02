@@ -90,16 +90,5 @@ class BootstrapError(DaimonError):
     """
 
 
-class GitHubOAuthError(DaimonError):
-    """Raised when GitHub returns an error payload from OAuth token exchange."""
-
-
 class SlackOAuthError(DaimonError):
     """Raised when Slack oauth.v2.access returns an ok:false payload."""
-
-
-class OAuthCallbackPrincipalUnconfigured(DaimonError):
-    """Raised by the OAuth callback when no `account_id_for_state` resolver
-    was injected. The OAuth contract is shipped; the CLI and Discord adapters
-    (Discord) wire the real (platform, platform_user_id) → principal_id mapping.
-    """

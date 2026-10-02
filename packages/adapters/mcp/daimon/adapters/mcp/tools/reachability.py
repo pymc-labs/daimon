@@ -23,9 +23,10 @@ from typing import Final
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.access_policy import is_outside_agent_pin
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
+from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -35,6 +36,12 @@ from fastmcp.exceptions import ToolError
 REACHABILITY_GATED_FIELDS: Final[frozenset[str]] = frozenset(
     {"system", "model", "skills", "mcp_servers", "tools"}
 )
+
+UNPLACED_RUN_REASON: Final[str] = (
+    "has other people's conversations or routines whose channel is unknown, so they could "
+    "be in any channel"
+)
+"""Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
 
 
 def channel_admin_caller(auth: AuthIdentity) -> ChannelAdminCaller:
@@ -116,29 +123,35 @@ async def require_bindable_as_channel_default(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-        allowed = await may_bind_as_channel_default(
+        # Nobody, server admins included: the agent would refuse every turn here.
+        if not authorize(
+            policy,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            action=Action.BIND_CHANNEL_DEFAULT,
+            agent=AgentRef.of(*names),
+            place=Place(channel_id=channel_id),
+        ):
+            raise ToolError(
+                f"An operator pinned '{agent_name}' to other channels, so it would refuse "
+                "every turn here and cannot be this channel's default. Nothing was changed. "
+                "Pick another agent, or ask an operator to change the pin. Do not retry."
+            )
+        if await may_bind_as_channel_default(
             session,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
-            channel_id=channel_id,
             agent_names=names,
             ma_agent_id=str(agent.id) if agent is not None else None,
             default=runtime.deployment_default,
             caller=channel_admin_caller(auth),
             is_daimon_managed=is_daimon_managed,
-            policy=policy,
-        )
-    if allowed:
-        return
-    if is_outside_agent_pin(policy, agent_names=names, channel_id=channel_id):
-        raise ToolError(
-            f"An operator pinned '{agent_name}' to other channels, so it would refuse every "
-            "turn here and cannot be this channel's default. Nothing was changed. Pick "
-            "another agent, or ask an operator to change the pin. Do not retry."
-        )
+            caller_account_id=auth.account_id,
+        ):
+            return
     raise ToolError(
-        f"'{agent_name}' answers in channels this caller does not administer, or runs "
-        "unattended for someone with wider rights, so only a workspace or server admin can "
+        f"'{agent_name}' answers in channels this caller does not administer, has other "
+        "people's conversations or routines whose channel is unknown, or runs unattended for "
+        "someone with wider rights, so only a workspace or server admin can "
         "make it this channel's default. A channel admin may "
         "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
         "or one that answers only in their channels. Nothing was changed. Do not retry."
@@ -176,12 +189,18 @@ async def require_admin_for_reachable_agent(
     )
     outcome = decide_operation("agent_spec_edit", is_admin=False, target=facts)
     if outcome == "needs_admin":
-        why = (
-            "runs unattended (a routine or queued wake) for someone with wider rights than "
-            "this caller"
-            if facts.runs_unattended_beyond_caller
-            else "is currently the default agent for this workspace or a channel"
-        )
+        if facts.runs_unattended_beyond_caller:
+            why = (
+                "runs unattended (a routine or queued wake) for someone with wider rights "
+                "than this caller"
+            )
+        elif facts.has_unplaced_run:
+            why = UNPLACED_RUN_REASON
+        else:
+            why = (
+                "is currently a default agent here and answers or runs outside the channels "
+                "this caller administers"
+            )
         raise ToolError(
             f"'{agent_name}' {why}, so an admin must change its setup. Tell the caller to "
             f"ask a workspace or server admin to make the requested change to '{agent_name}'; "

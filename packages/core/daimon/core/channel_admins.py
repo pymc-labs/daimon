@@ -16,8 +16,10 @@ import uuid
 from collections.abc import Iterable, Sequence
 from typing import Final
 
+from daimon.core.authz import Subject, build_subject
+from daimon.core.stores.accounts import get_account
 from daimon.core.stores.channel_admins import list_channel_admins
-from daimon.core.stores.domain import ChannelAdminsRow
+from daimon.core.stores.domain import ChannelAdminsRow, Role
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -137,6 +139,55 @@ async def load_administered_channel_ids(
     return administered_channel_ids(caller, grants)
 
 
+async def load_live_subject(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
+) -> Subject:
+    """The caller as their live platform role and roles describe them.
+
+    For a panel click, where the platform says who the caller is right now. A
+    server admin's grants are not read; they need none.
+    """
+    if caller.is_server_admin:
+        return build_subject(is_admin=True, platform_user_id=caller.platform_user_id)
+    return build_subject(
+        is_admin=False,
+        platform_user_id=caller.platform_user_id,
+        administered_channel_ids=await load_administered_channel_ids(
+            session, tenant_id=tenant_id, platform=platform, caller=caller
+        ),
+    )
+
+
+async def load_stored_subject(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str | None,
+    account_id: uuid.UUID,
+    platform_user_id: str | None,
+) -> Subject:
+    """The caller as their stored role and grants describe them, as of their last chat turn.
+
+    For callers with no live platform role: a private form's submit and a hub
+    login. A server admin's grants are not read; they need none.
+    """
+    account = await get_account(session, account_id)
+    if account is None or account.role is Role.ADMIN:
+        return build_subject(is_admin=account is not None, platform_user_id=platform_user_id)
+    return build_subject(
+        is_admin=False,
+        platform_user_id=platform_user_id,
+        administered_channel_ids=await load_administered_channel_ids(
+            session,
+            tenant_id=tenant_id,
+            platform=platform or "",
+            caller=ChannelAdminCaller(
+                platform_user_id=platform_user_id, role_ids=frozenset(account.platform_role_ids)
+            ),
+        ),
+    )
+
+
 __all__ = [
     "CHANNEL_ADMIN_PLATFORMS",
     "MAX_CHANNEL_ADMIN_IDS",
@@ -148,5 +199,7 @@ __all__ = [
     "fold_mentions",
     "is_channel_admin",
     "load_administered_channel_ids",
+    "load_live_subject",
+    "load_stored_subject",
     "normalize_channel_admin_ids",
 ]

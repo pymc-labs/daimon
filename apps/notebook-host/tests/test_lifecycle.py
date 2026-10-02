@@ -360,19 +360,6 @@ def test_notebook_process_url_returns_public_url() -> None:
     assert np.url == "http://example.com:8001/n/my-nb/", "url should be the public-facing proxy URL"
 
 
-def test_notebook_process_internal_url_returns_localhost_url() -> None:
-    """NotebookProcess.internal_url returns http://localhost:<port>/n/<slug>/"""
-    from notebook_host.lifecycle import NotebookProcess
-
-    proc = _make_fake_popen()
-    np = NotebookProcess(
-        slug="my-nb", port=8100, process=proc, public_host="example.com", host_port=8001
-    )
-    assert np.internal_url == "http://localhost:8100/n/my-nb/", (
-        "internal_url should point to the subprocess directly"
-    )
-
-
 NOTEBOOK_TEMPLATE = '''import marimo
 
 __generated_with = "0.23.8"

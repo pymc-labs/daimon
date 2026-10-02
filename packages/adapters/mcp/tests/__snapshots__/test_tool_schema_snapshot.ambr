@@ -177,7 +177,8 @@
           channel, which can only be read from inside it. A workspace admin also
           sees everyone's channel conversations with this daimon, sealed ones
           included, and can read them with ``get_session``/``list_events``, but
-          can't continue a sealed one from here.
+          can't continue a sealed one from here. A channel admin sees the same
+          for the channels they administer.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -1521,6 +1522,105 @@
         'type': 'object',
       }),
     }),
+    'create_promo_code': dict({
+      'description': '''
+        Create a promo code any server or workspace can redeem for credit. Operator-only.
+        
+        ``amount_usd`` is the credit per redemption as a decimal string.
+        ``credit`` codes stay until spent; ``timed`` codes need
+        ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
+        at the end. Redemption is open between ``redeem_starts_at`` and
+        ``redeem_ends_at`` when given (a timed code's defaults to its credit
+        end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
+        only in this result.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'amount_usd': dict({
+            'type': 'string',
+          }),
+          'credit_ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'credit_starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'kind': dict({
+            'enum': list([
+              'credit',
+              'timed',
+            ]),
+            'type': 'string',
+          }),
+          'max_redemptions': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'note': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'redeem_ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'redeem_starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'amount_usd',
+          'kind',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'create_routine': dict({
       'description': '''
         Create a routine in the caller's tenant partition.
@@ -2274,6 +2374,23 @@
         'type': 'object',
       }),
     }),
+    'get_tenant_summary': dict({
+      'description': '''
+        Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
+        
+        Lists every channel with its own agent or environment setting, a
+        spending budget or channel admins, with the agent and environment that
+        apply there, the roles and members administering it, and the budget's
+        limit, window and spend (``budget`` is null without one). Money is a
+        decimal string.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_thread_participation': dict({
       'description': '''
         Report whether you follow a thread or channel, and which tier decided it.
@@ -2281,8 +2398,8 @@
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Reading needs no Manage Server;
-        changing channel or workspace scope does.
+        channel; neither for the workspace. Reading needs no admin; changing
+        channel or workspace scope does.
         
         Reports every tier (deployment, workspace, channel, thread) plus the
         winner. Read the returned ``explanation`` back to the user.
@@ -2650,6 +2767,15 @@
         is the bare name: pass it straight to delete_notebook to reclaim a host
         port, or to create_notebook_upload_url to re-upload over it.
       ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_promo_codes': dict({
+      'description': 'List every promo code on this deployment, newest first. Operator-only.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3091,6 +3217,10 @@
         should answer questions (defaults to this tenant's configured
         agent).
         
+        When the answering agent is pinned to channels, a non-admin may only
+        publish its reader from inside them: pass this turn's
+        ``origin_context_id``.
+        
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
         personal link.
@@ -3146,6 +3276,17 @@
                 'type': 'string',
               }),
             ]),
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'recipients': dict({
             'items': dict({
@@ -3748,6 +3889,25 @@
           'channel_id',
           'origin_context_id',
           'expected_ma_agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'revoke_promo_code': dict({
+      'description': '''
+        Stop a promo code from being redeemed again. Operator-only.
+        
+        Credit already redeemed stays, including timed credit that has not started.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'promo_code_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'promo_code_id',
         ]),
         'type': 'object',
       }),
@@ -4392,8 +4552,8 @@
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
-        channel; neither for the workspace. Channel and workspace scope need
-        Manage Server.
+        channel; neither for the workspace. Channel and workspace scope need an
+        admin (Manage Server on Discord, a listed admin on Teams).
         
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),

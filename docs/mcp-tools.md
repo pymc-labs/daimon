@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 98 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 102 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -18,17 +18,23 @@ tool is hidden by default and restored only for a matching caller.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **channel admins too** — carries the `channel-admin` tag.
 - **Discord callers** — carries the `discord` tag.
+- **operator tokens with channels:write** — carries the `scope:channels:write` tag.
+- **operator tokens with promo:create** — carries the `scope:promo:create` tag.
+- **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
+- **operator tokens with tenant:read** — carries the `scope:tenant:read` tag.
 - **Slack callers** — carries the `slack` tag.
 - **Teams callers** — carries the `teams` tag.
 
 A CLI token matches no platform tag, so it sees none of the Discord, Slack or Teams
 tools. An agent token is narrowed to the agent-chat tools alone — everything else is
-disabled for it, admin tools included.
+disabled for it, admin tools included. An operator token is narrowed the same way to the
+tools tagged with its scopes; the `promo:create` tools are hidden from every other
+caller.
 
 A caller does not necessarily receive this list in one response: the server applies a
 BM25 search transform, so an ordinary session discovers tools by searching the catalogue
-rather than listing it in full. Sessions narrowed to agent-chat tools skip the transform
-and see their tools directly.
+rather than listing it in full. Sessions narrowed to agent-chat tools or to an operator
+token's scopes skip the transform and see their tools directly.
 
 ## `agent_chat`
 
@@ -79,9 +85,9 @@ Channel admin tools: who administers one channel on top of the server admins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_channel_admins` | admin only | Remove every channel admin from one channel, leaving it to the server admins. |
-| `list_channel_admins` | admin only | List the channels that have their own admins, with the roles and members named for each. |
-| `set_channel_admins` | admin only | Name who administers one channel, on top of the server admins. |
+| `clear_channel_admins` | admin only, operator tokens with channels:write | Remove every channel admin from one channel, leaving it to the server admins. |
+| `list_channel_admins` | admin only, operator tokens with tenant:read | List the channels that have their own admins, with the roles and members named for each. |
+| `set_channel_admins` | admin only, operator tokens with channels:write | Name who administers one channel, on top of the server admins. |
 
 ## `channel_budgets`
 
@@ -89,10 +95,10 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_channel_budget` | admin only | Remove a channel's spending budget, so only the balance and caps apply. |
-| `get_channel_budget` | Discord callers, Slack callers | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only | List every channel budget in this server or workspace with its spend. |
-| `set_channel_budget` | admin only | Set or replace a channel's spending budget. |
+| `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
+| `get_channel_budget` | Discord callers, Slack callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
+| `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_isolation`
 
@@ -100,7 +106,7 @@ Channel isolation tool: keep a channel's own agents inside it.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_channel_isolation` | admin only | Isolate one channel, or end its isolation. |
+| `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
 
 ## `channels`
 
@@ -138,8 +144,8 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
-| `request_repo_binding` | Discord callers, Slack callers | Let an agent read a GitHub working repo or repository, public or private. |
-| `request_skill_repo_token` | Discord callers, Slack callers | The skills repo is private: collect a GitHub token to import its skills. |
+| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
+| `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
 ## `environments`
 
@@ -187,7 +193,17 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only | Redeem a promo code for credit on this server or workspace. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this server or workspace. |
+
+## `promo_issuing`
+
+Promo code issuing for operator tokens: create, list and revoke deployment-wide codes.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_promo_code` | operator tokens with promo:create | Create a promo code any server or workspace can redeem for credit. |
+| `list_promo_codes` | operator tokens with promo:create | List every promo code on this deployment, newest first. |
+| `revoke_promo_code` | operator tokens with promo:create | Stop a promo code from being redeemed again. |
 
 ## `propagation`
 
@@ -195,9 +211,9 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_agent_default` | admin only, channel admins too | Stop an agent answering in a channel by clearing its default routing. |
+| `clear_agent_default` | admin only, channel admins too, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers and which routing tier decided it. |
-| `set_agent_default` | admin only, channel admins too | Make an agent answer in a channel or become the whole server/workspace default. |
+| `set_agent_default` | admin only, channel admins too, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
 
 ## `publish`
 
@@ -280,6 +296,14 @@ Conversational task handoff and fresh start.
 | --- | --- | --- |
 | `hand_off_task` | all callers | Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this". |
 | `start_fresh_task` | all callers | Start this conversation's work over with an empty workspace: "let's start fresh", "start over", "clear the workspace and begin a new task". |
+
+## `tenant_summary`
+
+Tenant summary: the balance, funding mode and every configured channel in one read.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this server or workspace: balance, funding mode and each channel. |
 
 ## `thread_participation`
 

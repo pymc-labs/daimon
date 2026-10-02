@@ -28,6 +28,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -742,8 +743,9 @@ async def _require_mcp_replace_allowed(
     outcome = await decide_mcp_replacement(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
         agent=agent,
-        is_admin=auth.is_admin,
+        caller=reachability.channel_admin_caller(auth),
         default=runtime.deployment_default,
     )
     if outcome != "allow":
@@ -844,6 +846,7 @@ async def _fork_agent_impl(
             source=source,
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
         )
     except DaimonError as exc:
         raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc

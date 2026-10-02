@@ -11,6 +11,9 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import propagation
+from daimon.adapters.mcp.tools.agents import (
+    _require_mcp_replace_allowed,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.channel_admins import (
     _clear_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
@@ -31,7 +34,9 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_routine,
     make_tenant,
+    make_thread_session,
 )
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -186,8 +191,54 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
     await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
-    with pytest.raises(ToolError, match="is currently the default agent .* an admin must"):
+    with pytest.raises(ToolError, match="is currently a default agent here .* an admin must"):
         await require_admin_for_reachable_agent(runtime, role_member, agent_name="shared")
+
+
+async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another member's session whose channel was never recorded refuses, and says so."""
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    agent = ma_agent(
+        id="agent_helper",
+        name="helper",
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "helper"},
+    )
+
+    async def other_members_session(channel_id: str | None) -> None:
+        async with committing_sessionmaker.begin() as session:
+            tenant = await get_tenant(session, tenant_id)
+            assert tenant is not None, "the tenant exists"
+            await make_thread_session(
+                session,
+                tenant=tenant,
+                account=await make_account(session, tenant=tenant),
+                ma_agent_id="agent_helper",
+                channel_id=channel_id,
+            )
+
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    await other_members_session(CHANNEL)
+    await require_admin_for_reachable_agent(
+        runtime, _auth(tenant_id), agent_name="helper", agent=agent
+    )
+    await other_members_session(None)
+    with pytest.raises(ToolError, match="conversations or routines whose channel is unknown"):
+        await require_admin_for_reachable_agent(
+            runtime, _auth(tenant_id), agent_name="helper", agent=agent
+        )
 
 
 async def test_channel_admin_cannot_bind_another_channels_own_agent(
@@ -278,7 +329,11 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None, "the tenant exists"
         await make_routine(
-            session, tenant=tenant, created_by_user_id="777777777777777777", agent_name="helper"
+            session,
+            tenant=tenant,
+            created_by_user_id="777777777777777777",
+            agent_name="helper",
+            channel_id=CHANNEL,
         )
     await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
 
@@ -299,3 +354,36 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         )
     with pytest.raises(ToolError, match="runs unattended .* so an admin must change its setup"):
         await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+
+
+async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """`attach_mcp_server` replacing a server reads channel admin locality too."""
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    agent = ma_agent(
+        id="agent_helper",
+        name="helper",
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "helper"},
+        mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.example.com/a"}],
+    )
+    servers = [("linear", "https://mcp.example.com/b")]
+    member = _auth(tenant_id)
+    with pytest.raises(ToolError, match="repointing it needs a server or workspace admin"):
+        await _require_mcp_replace_allowed(runtime, member, agent, servers)
+
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    assert await _require_mcp_replace_allowed(runtime, member, agent, servers), (
+        "the admin of the only channel it answers in repoints its server"
+    )

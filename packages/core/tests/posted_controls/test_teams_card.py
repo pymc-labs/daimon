@@ -38,3 +38,10 @@ def test_every_later_state_renders_without_a_form_button(kind: str, state: str) 
 def test_a_form_button_without_its_token_is_refused() -> None:
     with pytest.raises(ValueError, match="token"):
         build_adaptive_card(build("mcp", "requested"))
+
+
+def test_an_env_file_card_asks_for_a_paste_on_teams() -> None:
+    """A dialog has no file input, so the Teams card never says upload."""
+    card = json.dumps(build_adaptive_card(build("env_file", "requested"), token=TOKEN))
+    assert "Paste it privately" in card, "the button names what the dialog takes"
+    assert "upload" not in card.lower(), "a core copy change must be mirrored in teams_card"

@@ -300,9 +300,9 @@ class CredentialRequestButton(
                 # MCP modal, so a kind added without a branch here silently
                 # opens the wrong modal rather than failing.
                 #
-                # No admin pre-filter, unlike the repo kind — this writes no
-                # agent_repo_binding, so the "changes what code the agent runs
-                # for every member" reasoning behind that gate does not apply.
+                # No click-time pre-filter, unlike the repo kind: the mint
+                # already refused a member on a shared agent, and the modal's
+                # submit re-checks before anything is spent.
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
                 )
@@ -341,6 +341,7 @@ class CredentialRequestButton(
                     runtime=runtime,
                     tenant_id=row.tenant_id,
                     agent_id=row.agent_id,
+                    caller_account_id=row.account_id,
                 ),
                 timeout=_PRE_FILTER_TIMEOUT_SECONDS,
             )

@@ -23,7 +23,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import structlog
-from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
@@ -205,11 +206,16 @@ def make_discord_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        if is_write_protected(
+        if not authorize(
             policy,
-            channel_id=target.channel_id,
-            parent_channel_id=parent_channel_id,
-            category_id=category_id,
+            subject=Subject(),
+            action=Action.POST,
+            surface=Surface.ROUTINE,
+            place=Place(
+                channel_id=target.channel_id,
+                parent_channel_id=parent_channel_id,
+                category_id=category_id,
+            ),
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import (
+    escape_mrkdwn,
+    escape_mrkdwn_preserving_mentions,
+    linkify_emphasized_urls,
+)
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.tables import MarkdownTable, render_tables
 
@@ -26,7 +30,13 @@ async def render_slack_tables(
     async def hook(table: MarkdownTable) -> tuple[str, dict[str, Any]]:
         return escape_mrkdwn(table.raw), await table_block(table)
 
-    escape_text = escape_mrkdwn_preserving_mentions if preserve_mentions else escape_mrkdwn
+    escape = escape_mrkdwn_preserving_mentions if preserve_mentions else escape_mrkdwn
+
+    def escape_text(prose: str) -> str:
+        # Linkify before escaping: it reads the raw markdown, and escaping adds
+        # no URLs or asterisks. Table cells are raw_text and keep their URLs as is.
+        return escape(linkify_emphasized_urls(prose))
+
     output: list[tuple[str, dict[str, Any]]] = []
     parts = await render_tables(text, hook=hook if enabled else None)
     if all(isinstance(part, str) for part in parts):

@@ -100,7 +100,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.credential_origin import (
     is_credential_interaction_valid,
-    refuse_if_credential_target_unavailable,
+    resolve_credential_target,
 )
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
@@ -109,7 +109,7 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import FormPinRefused, agent_pin_names, consume_form_unless_pinned
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
@@ -164,6 +164,7 @@ from daimon.core.posted_controls import (
     card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
@@ -174,6 +175,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 
 import discord
@@ -444,7 +446,10 @@ async def _decide_mcp_connect_at_submit(
         agent_id=row.agent_id,
         server_name=row.target,
         url=row.mcp_server_url,
-        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        platform="discord",
+        caller=channel_admin_caller(interaction.user).model_copy(
+            update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        ),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -494,9 +499,8 @@ class EnvCredentialModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         # The name a member may store is re-checked against the submitter's
         # live role: a key minted while they were an admin must not land as a
@@ -541,8 +545,8 @@ class EnvCredentialModal(discord.ui.Modal):
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await credential_requests.consume_credential_request(
-                    session, token=self._row.token, now=now
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
                 )
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
@@ -598,6 +602,10 @@ class EnvCredentialModal(discord.ui.Modal):
                 await credential_requests.set_credential_request_outcome(
                     session, token=consumed_row.token, outcome=outcome
                 )
+        except FormPinRefused as refused:
+            # Decided with the consume: rolled back, nothing stored.
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
@@ -765,9 +773,8 @@ class EnvFileModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
 
         now = datetime.now(UTC)
@@ -776,8 +783,8 @@ class EnvFileModal(discord.ui.Modal):
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await credential_requests.consume_credential_request(
-                    session, token=self._row.token, now=now
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
                 )
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
@@ -826,6 +833,10 @@ class EnvFileModal(discord.ui.Modal):
                     token=consumed_row.token,
                     outcome="stale_replacement" if collisions else "applied",
                 )
+        except FormPinRefused as refused:
+            # Decided with the consume: rolled back, nothing stored.
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
@@ -945,18 +956,21 @@ class McpCredentialModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         connect = await _decide_mcp_connect_at_submit(
             interaction, runtime=self._runtime, row=self._row
         )
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
@@ -1088,8 +1102,10 @@ class SkillRepoModal(discord.ui.Modal):
     (`set_skill_repo_credential`), which is the row later skill syncs resolve
     the token from. It deliberately writes no `agent_repo_binding`: the
     working repo is what the agent clones and runs, a separate decision with
-    its own admin gate, and a skill import must never move it. It does not
-    inherit the admin gate of direct skill imports either.
+    its own admin gate, and a skill import must never move it. The attach is
+    gated like the repo bind (`skill_repo_connect`): a member is refused on a
+    shared agent before the consume, and nobody attaches to a defaults-managed
+    agent.
     """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
@@ -1128,20 +1144,39 @@ class SkillRepoModal(discord.ui.Modal):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
+        if await refuse_if_shared_and_not_admin_for_request(
+            interaction,
+            runtime=self._runtime,
+            tenant_id=self._row.tenant_id,
+            agent_id=self._row.agent_id,
+            operation="skill_repo_connect",
+            caller_account_id=self._row.account_id,
+        ):
+            # Same shape as the repo bind: nothing is spent, and the card
+            # stops offering a form this submitter could never finish.
+            await _record_refused_outcome(self._runtime, self._row)
+            await edit_posted_card(
+                interaction.client, row=self._row, state="refused", refusal="admin_required"
+            )
+            return
+
         pat = str(self.pat_in.value or "").strip()
         if not pat:
             await interaction.followup.send("Enter a GitHub token.", ephemeral=True)
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
@@ -1206,6 +1241,9 @@ class SkillRepoModal(discord.ui.Modal):
                         ma_secret_ref=ma_secret_ref,
                         proof=proof,
                     )
+                    seeded_skill_names = await list_seeded_skill_names(
+                        session, tenant_id=consumed_row.tenant_id
+                    )
                 outcomes = await run_skill_sync(
                     self._runtime.anthropic,
                     http_client,
@@ -1213,6 +1251,8 @@ class SkillRepoModal(discord.ui.Modal):
                     branch=branch,
                     path=path,
                     tenant_id=consumed_row.tenant_id,
+                    seeded_skill_names=seeded_skill_names,
+                    is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                     token=pat,
                 )
         except DaimonError as err:
@@ -1250,23 +1290,48 @@ class SkillRepoModal(discord.ui.Modal):
                 await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
             return
 
-        if not outcomes:
-            # The token is stored and the repo was readable, but it carried
-            # nothing to import — which is the same thing to say as a failed
-            # import, and the opposite of what an `applied` card would claim.
-            await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
+        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        failure_detail = summarize_failed_imports(outcomes)
+        if not imported:
+            # Nothing reached the library (an empty repo, or every skill
+            # refused or failed), which the `applied` card must not claim.
+            await self._render_import_failed(
+                interaction, consumed_row, repo=owner_repo, detail=failure_detail
+            )
             return
 
         attach_failure = await self._attach_to_requested_agent(
             tenant_id=consumed_row.tenant_id,
             agent_id=consumed_row.agent_id,
-            outcomes=outcomes,
+            outcomes=imported,
         )
         if attach_failure is not None:
-            # Only the attach half failed: the skills are in the library, so
-            # this is reported to the submitter rather than rewritten onto
-            # the card as an import that did not happen.
-            await interaction.followup.send(attach_failure, ephemeral=True)
+            # The skills are in the library but not on the agent: the waiting
+            # task gets nothing to resume with, and the card says so.
+            await interaction.followup.send(
+                f"Skills imported to the library, but not added to {_agent_name(consumed_row)}. "
+                f"{attach_failure}",
+                ephemeral=True,
+            )
+            is_queued = await _settle_spent_request(
+                self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+            )
+            await edit_posted_card(
+                interaction.client,
+                row=consumed_row,
+                state="partial",
+                outcome=ConfigurationChange(
+                    target_name=_agent_name(consumed_row),
+                    kind="skills_bulk",
+                    availability="saved",
+                    count=len(imported),
+                    repo=owner_repo,
+                    detail="\n".join(line for line in (attach_failure, failure_detail) if line),
+                ),
+            )
+            if is_queued:
+                await _dispatch_origin_thread(interaction, consumed_row)
+            return
         is_continuation_queued = await _settle_spent_request(
             self._runtime, row=consumed_row, outcome="applied", carries_work=True
         )
@@ -1278,15 +1343,21 @@ class SkillRepoModal(discord.ui.Modal):
                 target_name=_agent_name(consumed_row),
                 kind="skills_bulk",
                 availability="next_message",
-                count=len(outcomes),
+                count=len(imported),
                 repo=owner_repo,
+                detail=failure_detail,
             ),
         )
         if is_continuation_queued:
             await _dispatch_origin_thread(interaction, consumed_row)
 
     async def _render_import_failed(
-        self, interaction: discord.Interaction, row: CredentialRequestRow, *, repo: str
+        self,
+        interaction: discord.Interaction,
+        row: CredentialRequestRow,
+        *,
+        repo: str,
+        detail: str | None = None,
     ) -> None:
         """Card and trail for a stored token whose skills did not import.
 
@@ -1308,6 +1379,7 @@ class SkillRepoModal(discord.ui.Modal):
                 # requires one, and nothing was imported to count.
                 count=1,
                 repo=repo,
+                detail=detail,
             ),
         )
         if is_queued:
@@ -1328,7 +1400,7 @@ class SkillRepoModal(discord.ui.Modal):
         no way to tell that anything worked.
 
         Returns None when there was nothing to attach or the attach landed,
-        and the person-facing prose for the failure otherwise — raising is
+        and a one-line reason for the failure otherwise — raising is
         not an option, because the import has already succeeded by the time
         this runs and both halves must be reported truthfully.
         """
@@ -1344,7 +1416,11 @@ class SkillRepoModal(discord.ui.Modal):
             self._runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
         )
         if agent is None:
-            return "Could not attach: that agent no longer exists. The skills are in the library."
+            return "That agent no longer exists."
+        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+            # Admins included: an attach never stamps the reconciler's spec
+            # hash, so the seeded agent would drift for good.
+            return f"`{agent.name}` is a built-in agent. Fork it and add them to the fork."
         new_skills: list[BetaManagedAgentsSkillParams] = [
             {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
         ]
@@ -1368,10 +1444,7 @@ class SkillRepoModal(discord.ui.Modal):
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
             )
-            return (
-                f"Skills imported, but attaching them to `{agent.name}` did not finish. "
-                "Ask again to retry."
-            )
+            return "Attaching them did not finish. Ask again to retry."
         return None
 
 
@@ -1428,6 +1501,7 @@ class RepoBindModal(discord.ui.Modal):
             runtime=self._runtime,
             tenant_id=self._row.tenant_id,
             agent_id=self._row.agent_id,
+            caller_account_id=self._row.account_id,
         ):
             # The gate runs before the consume, so the request is NOT spent —
             # an admin can still use this same card. The card itself is
@@ -1445,15 +1519,18 @@ class RepoBindModal(discord.ui.Modal):
 
         pat = str(self.pat_in.value or "").strip()
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return

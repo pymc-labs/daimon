@@ -5,10 +5,12 @@ card through the caller's platform. Secret values never enter tool arguments.
 Submission checks requester identity; these enrollment paths deliberately do
 not inherit the admin gate for direct agent-spec mutations.
 
-Replacing a key that already exists is the one exception: it destroys shared
-state, so `daimon.core.operation_policy` decides it here, *before* the mint,
-and a refusal posts no card at all — nobody is asked for a secret they were
-never going to be allowed to save.
+Two exceptions: replacing a key that already exists destroys shared state,
+and a skill-repo import attaches skills to the agent. `daimon.core.operation_policy`
+decides both here, *before* the mint, and a refusal posts no card at all —
+nobody is asked for a secret they were never going to be allowed to save. A
+skill-repo request naming a defaults-managed agent is refused for everyone,
+since its skills could never be attached.
 """
 
 from __future__ import annotations
@@ -24,13 +26,20 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools.agents import (
+    _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
-from daimon.adapters.mcp.tools.reachability import target_facts
+from daimon.adapters.mcp.tools.reachability import (
+    UNPLACED_RUN_REASON,
+    channel_admin_caller,
+    target_facts,
+)
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -64,7 +73,12 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
-from daimon.core.operation_policy import decide_operation
+from daimon.core.operation_policy import (
+    OperationKind,
+    PolicyOutcome,
+    TargetFacts,
+    decide_operation,
+)
 from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -250,6 +264,32 @@ async def _resolve_agent_uuid(
     return agent_uuid, ma_agent
 
 
+async def _decide_attachment_write(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    operation: OperationKind,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+) -> tuple[PolicyOutcome, TargetFacts]:
+    """Decide an attachment-family `operation` by this caller against `ma_agent`.
+
+    An admin is allowed on any target (that is the first-run onboarding step),
+    a non-admin is refused on a defaults-managed agent and on one that
+    currently answers somewhere in the tenant outside the channels they
+    administer. The reachability read is paid for only when the policy says
+    the answer actually depends on it.
+    """
+    facts = await target_facts(
+        runtime,
+        auth,
+        operation,
+        agent_names=agent_pin_names(ma_agent.name, ma_agent.metadata),
+        ma_agent_id=str(ma_agent.id),
+        is_daimon_managed=ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+    )
+    return decide_operation(operation, is_admin=auth.is_admin, target=facts), facts
+
+
 async def _require_key_replacement_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -262,26 +302,12 @@ async def _require_key_replacement_allowed(
 
     `adding` is set when `key` is not being overwritten but shadowed: a
     different name (`adding`) the same tool reads as `key`.
-
-    `key_replace` is an attachment operation: an admin is allowed on any
-    target (that is the first-run onboarding step), a non-admin is refused on
-    a defaults-managed agent and on one that currently answers somewhere in
-    the tenant outside the channels they administer. The reachability read is
-    paid for only when the policy says the answer actually depends on it.
     """
-    is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    facts = await target_facts(
-        runtime,
-        auth,
-        "key_replace",
-        agent_names=agent_pin_names(ma_agent.name, ma_agent.metadata),
-        ma_agent_id=str(ma_agent.id),
-        is_daimon_managed=is_daimon_managed,
-    )
-    outcome = decide_operation("key_replace", is_admin=auth.is_admin, target=facts)
+    outcome, facts = await _decide_attachment_write(runtime, auth, "key_replace", ma_agent=ma_agent)
+    shared = UNPLACED_RUN_REASON if facts.has_unplaced_run else "is shared with everyone here"
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
+            f"'{ma_agent.name}' {shared}, and adding '{adding}' "
             f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
             "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
@@ -290,7 +316,7 @@ async def _require_key_replacement_allowed(
         )
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
+            f"'{ma_agent.name}' {shared}, so replacing the key "
             f"'{key}' it already has needs an admin, and the caller "
             f"is not one. Nothing changed: the existing '{key}' is still in use and no "
             "card was posted. Tell them an admin can ask Daimon to replace the "
@@ -323,7 +349,8 @@ async def _require_mcp_replacement_allowed(
         agent_id=agent_id,
         server_name=server_name,
         url=url,
-        is_admin=auth.is_admin,
+        platform=auth.platform or "",
+        caller=channel_admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
     )
@@ -548,11 +575,6 @@ async def _request_agent_key_impl(
             raise ToolError(
                 f"You named one key ({named}); pass it as `key` instead of requesting a file."
             )
-        if auth.platform == "teams":
-            # A Teams dialog has no file input, so the upload form cannot exist here.
-            raise ToolError(
-                "Teams cannot take a .env file upload. Request each key by name with `key`."
-            )
     async with runtime.session_factory() as session:
         writable = agent_env_writes_allowed(session)
     if not writable:
@@ -774,6 +796,18 @@ async def _request_skill_repo_token_impl(
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    _reject_system_agent(ma_agent)
+    outcome, _ = await _decide_attachment_write(
+        runtime, auth, "skill_repo_connect", ma_agent=ma_agent
+    )
+    if outcome in ("managed_agent", "needs_admin"):
+        raise ToolError(
+            f"'{ma_agent.name}' is shared with everyone here, so importing skills onto it "
+            "needs a server or workspace admin, and the caller is not one. Nothing changed "
+            "and no card was posted. Tell them an admin can ask Daimon to import these "
+            f"skills, or fork '{ma_agent.name}' and import them onto the fork. Do not ask "
+            "anyone for a token here and do not retry."
+        )
     return await _mint_and_post(
         runtime,
         auth,
@@ -989,7 +1023,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_skill_repo_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -1035,7 +1069,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_repo_binding(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
