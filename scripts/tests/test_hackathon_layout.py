@@ -160,3 +160,17 @@ def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, mo
 
 def state_id(api: FakeDiscord) -> str:
     return str(api.channels[0]["id"])
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon.",
+        "discord:1 channel 123: already isolated; its own agent is team-a-copy.\n"
+        "This channel runs an environment with open network; a server admin should\n"
+        "confirm or change it.",
+    ],
+)
+def test_parse_agent_reads_the_name_alone(output: str) -> None:
+    """A rerun on an isolated channel prints no "copied from", and a warning may follow."""
+    assert layout.parse_agent(output) == "team-a-copy"
