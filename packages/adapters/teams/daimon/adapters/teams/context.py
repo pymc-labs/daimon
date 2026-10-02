@@ -4,33 +4,33 @@ Mirrors the Discord and Slack `context.py`: a first turn replays the thread
 (root plus the newest replies), a continuation only what came after the
 session watermark, and a top-level mention the channel's recent posts. Every
 replayed message rides in the shared untrusted envelope, every value escaped.
-Graph bodies are HTML; `html_to_text` keeps the words, names `<at>` mentions
+Graph bodies are HTML; `teams_graph.html_to_text` keeps the words, names `<at>` mentions
 and marks images. System events, deleted posts and the bot's own cards (the
 status card, notices) are dropped; its answers, plain messages, stay.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from xml.sax.saxutils import escape, quoteattr
 
 import httpx
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.teams_graph import GraphMessage, GraphPage, is_graph_url
+from daimon.core.teams_graph import (
+    FILE_ATTACHMENT_TYPES,
+    GraphMessage,
+    GraphPage,
+    image_sources,
+    is_graph_url,
+    message_text,
+)
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
 # Top-level posts replayed for a mention that starts a thread, as on Discord.
 CHANNEL_BACKFILL_LIMIT = 25
-_BLOCK_TAGS = frozenset(
-    {"p", "div", "br", "li", "tr", "blockquote", "pre", "codeblock", "h1", "h2", "h3", "h4"}
-)
-_SKIPPED_TAGS = frozenset({"script", "style", "attachment"})
-_FILE_TYPES = frozenset({"reference", "application/vnd.microsoft.teams.file.download.info"})
 
 
 @dataclass(frozen=True)
@@ -52,69 +52,11 @@ def newest_message_id(ids: Iterable[str | None]) -> str | None:
     return str(max(numeric)) if numeric else None
 
 
-class _Text(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self.images: list[str] = []
-        self._skip = 0
-        self._pre = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = dict(attrs)
-        if tag in _SKIPPED_TAGS:
-            self._skip += 1
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n- " if tag == "li" else "\n")
-        if tag in ("pre", "codeblock"):
-            self._pre += 1
-        elif tag == "at":
-            self.parts.append("@")
-        elif tag == "img" and "emoji" not in (values.get("itemtype") or "").lower():
-            self.parts.append("[image]")
-            if src := values.get("src"):
-                self.images.append(src)
-        elif tag in ("emoji", "img"):
-            self.parts.append(values.get("alt") or "")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIPPED_TAGS:
-            self._skip = max(0, self._skip - 1)
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-        if tag in ("pre", "codeblock"):
-            self._pre = max(0, self._pre - 1)
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip:
-            # Code keeps its spaces through the line strip below as NULs.
-            self.parts.append(data.replace(" ", "\0") if self._pre else re.sub(r"\s+", " ", data))
-
-
-def _parse_html(html: str) -> _Text:
-    parser = _Text()
-    parser.feed(html)
-    parser.close()
-    return parser
-
-
-def html_to_text(html: str) -> str:
-    """Readable text from a Teams HTML body: blocks become lines, `<at>` becomes `@name`."""
-    text = "".join(_parse_html(html.replace("\0", "")).parts).replace("\xa0", " ")
-    lines = [line.strip(" \t").replace("\0", " ") for line in text.split("\n")]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
-
-
-def _body_text(message: GraphMessage) -> str:
-    content = message.body.content or ""
-    return html_to_text(content) if message.body.content_type == "html" else content.strip()
-
-
 def _files(message: GraphMessage) -> list[SharedFile]:
     return [
         SharedFile(a.name or "file", a.content_url)
         for a in message.attachments
-        if a.content_type in _FILE_TYPES
+        if a.content_type in FILE_ATTACHMENT_TYPES
     ]
 
 
@@ -131,7 +73,7 @@ def channel_media(
         prefix = f"/v1.0/teams/{group_id}/channels/{channel_id}/messages/{root_id}"
         if message.id != root_id:
             prefix += f"/replies/{message.id}"
-        hosted = (src for src in _parse_html(message.body.content or "").images)
+        hosted = (src for src in image_sources(message.body.content or ""))
         images = tuple(
             src for src in hosted if _is_hosted_content(src, f"{prefix}/hostedContents/")
         )
@@ -158,7 +100,7 @@ def _render(message: GraphMessage, *, bot_app_id: str) -> list[str]:
     user = sender.user if sender is not None else None
     app = sender.application if sender is not None else None
     author = user or app
-    text, files = _body_text(message), _files(message)
+    text, files = message_text(message), _files(message)
     if not text and not files:
         return []  # a card (the bot's own status or notice) or an empty post
     is_bot = user is None and app is not None
@@ -243,7 +185,7 @@ def classifier_window(
     for message in _order(messages):
         if message.id in exclude_ids or message.message_type != "message":
             continue
-        if message.deleted_date_time is not None or not (text := _body_text(message)):
+        if message.deleted_date_time is not None or not (text := message_text(message)):
             continue
         sender = message.sender
         user = sender.user if sender is not None else None

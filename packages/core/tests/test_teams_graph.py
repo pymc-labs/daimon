@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups, skiptoken_of
 
 GROUP = "11111111-1111-1111-1111-111111111111"
 CHANNEL = "19:channel-1@thread.tacv2"
@@ -68,6 +68,10 @@ async def test_channel_posts_expand_their_replies_and_a_next_link_stays_on_graph
     assert seen[1].url.params["$skiptoken"] == "1", "the link is followed as given"
     with pytest.raises(GraphUnavailable, match="not a Graph URL"):
         await client.next_page("https://attacker.example/next")
+    await client.list_replies(GROUP, CHANNEL, "100", skiptoken="tok")
+    assert seen[-1].url.params["$skiptoken"] == "tok"
+    assert skiptoken_of("https://graph.microsoft.com/v1.0/x?$top=5&$skiptoken=abc") == "abc"
+    assert skiptoken_of(None) is None
 
 
 async def test_get_message_addresses_a_reply_under_its_root() -> None:

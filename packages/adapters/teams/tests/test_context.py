@@ -12,11 +12,10 @@ from daimon.adapters.teams.context import (
     channel_media,
     classifier_window,
     delta_block,
-    html_to_text,
     render_user_message,
     thread_block,
 )
-from daimon.core.teams_graph import GraphMessage, GraphPage
+from daimon.core.teams_graph import GraphMessage, GraphPage, html_to_text
 from daimon.core.thread_participation import ClassifierMessage
 
 from .conftest import make_inbound
