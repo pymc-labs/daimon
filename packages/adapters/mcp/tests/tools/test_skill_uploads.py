@@ -382,6 +382,52 @@ async def test_a_session_reported_without_its_overrides_confirms_from_the_record
     assert result.status == "added", "the recorded gated tools are the server's own evidence"
 
 
+async def test_a_session_reported_with_other_tools_is_taken_at_its_word(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """MA reporting tools that are neither the agent's own nor gated (a session
+    switched to always_allow out of band) refuses the confirm, whatever the bind
+    recorded sending it."""
+    world = await _world(db_session_factory)
+    world.state.agents["agent_helper"]["tools"] = [_daimon_toolset(gated=False)]
+    agent = BetaManagedAgentsAgent.model_validate(world.state.agents["agent_helper"])
+    recorded = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_1",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    auth, origin = await _chat_turn(world, live=False)
+    await _live_session(
+        world, thread_id=CHAT_THREAD, responder="agent_helper", gated=False, recorded=recorded
+    )
+    reported = world.sessions[f"sesn_{CHAT_THREAD}"]["agent"]["tools"][0]
+    reported["configs"].append(
+        {"name": "send_message", "enabled": True, "permission_policy": {"type": "always_allow"}}
+    )
+
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+            origin_context_id=origin,
+            **extra,
+        )
+
+    preview = await add()
+    with pytest.raises(ToolError, match="this conversation can't show one"):
+        await add(content_hash=preview.preview.content_hash)
+    assert world.created == [], "nothing was uploaded"
+
+
 async def test_a_session_that_cannot_be_read_previews_but_never_confirms(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

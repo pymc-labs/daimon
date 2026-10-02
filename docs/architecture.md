@@ -563,8 +563,8 @@ with the preview's hash, which is bound to the target agent, and only after the
 person presses Approve on the confirmation card (below). The server checks the
 card can exist: the confirm needs a verified origin whose live session runs the
 origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
-as MA reports the session or, when it reports the agent's own tools, as the
-bind recorded sending them. Without that, as with tool safety off, an
+as MA reports the session or, only when it reports the agent's own tools
+(leaving the per-session overrides out), as the bind recorded sending them. Without that, as with tool safety off, an
 `agent_chat` session or one whose tools have not caught up yet, a chat
 confirm adds nothing and points to Add skill in
 the setup panels' Details (Discord takes a paste or a file, Slack a paste),

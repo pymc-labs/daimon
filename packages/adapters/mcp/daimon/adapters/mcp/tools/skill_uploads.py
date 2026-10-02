@@ -51,6 +51,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
@@ -149,7 +150,13 @@ async def _session_asks_first(
             [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=_TOOL_NAME
         ):
             return True
-        return await _recorded_as_gated(runtime, auth, live, ma_agent_id=ma_session.agent.id)
+        return await _recorded_as_gated(
+            runtime,
+            auth,
+            live,
+            ma_agent_id=ma_session.agent.id,
+            reported_tools_sha256=hash_tools(ma_session.agent.tools),
+        )
     except anthropic.APIError as exc:
         # Unreadable (a deleted session, an outage) is not evidence of a card:
         # the confirm is refused like any other session without one.
@@ -160,14 +167,22 @@ async def _session_asks_first(
 
 
 async def _recorded_as_gated(
-    runtime: McpRuntime, auth: AuthIdentity, live: ThreadSessionRow, *, ma_agent_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    live: ThreadSessionRow,
+    *,
+    ma_agent_id: str,
+    reported_tools_sha256: str,
 ) -> bool:
     """Whether the tools daimon recorded for `live` are the gated ones, `add_skill` asking.
 
-    For a session MA reports without its per-session overrides. The bind records
-    the hash of the tools it last sent the session; equal to the gated tools a
-    session for this caller gets now (`session_tools`), it is the server's own
-    record of the card. An agent changed since that bind reads as not gated.
+    Only for a session MA reports without its per-session overrides, i.e. with
+    the agent's own tools (`reported_tools_sha256`): a report showing other
+    tools, such as a session switched to `always_allow` out of band, is taken
+    at its word. The bind records the hash of the tools it last sent the
+    session; equal to the gated tools a session for this caller gets now
+    (`session_tools`), it is the server's own record of the card. An agent
+    changed since that bind reads as not gated.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -180,6 +195,12 @@ async def _recorded_as_gated(
         account_id=auth.account_id,
         server_urls={server.name: server.url for server in agent.mcp_servers},
     )
+    # MA reporting the agent's own tools means it left the overrides out.
+    if reported_tools_sha256 not in {
+        hash_tools(agent.tools),
+        hash_tools(visible_tools(agent, hidden)),
+    }:
+        return False
     public_url = runtime.settings.mcp.public_url
     tools = session_tools(
         agent,
