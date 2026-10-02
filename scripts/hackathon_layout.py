@@ -268,11 +268,22 @@ def setup_team(
             f"[Thread {i}](https://discord.com/channels/{guild}/{tid})"
             for i, tid in enumerate(entry["threads"], 1)
         )
-        message = api.request(
-            "POST",
-            f"/channels/{channel_id}/messages",
-            json={"content": f"Start here: mention @Daimon in one of these threads. {links}"},
+        content = f"Start here: mention @Daimon in one of these threads. {links}"
+        bot_id = str(api.request("GET", "/users/@me")["id"])
+        messages = api.request("GET", f"/channels/{channel_id}/messages?limit=50")
+        message = next(
+            (
+                item
+                for item in messages
+                if item.get("content") == content
+                and str(item.get("author", {}).get("id")) == bot_id
+            ),
+            None,
         )
+        if message is None:
+            message = api.request(
+                "POST", f"/channels/{channel_id}/messages", json={"content": content}
+            )
         entry["pinned_message_id"] = str(message["id"])
         save(args.state, state)
     api.request("PUT", f"/channels/{channel_id}/pins/{entry['pinned_message_id']}")

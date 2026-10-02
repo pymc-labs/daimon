@@ -58,6 +58,8 @@ class FakeDiscord:
             return {"threads": self.threads}
         if method == "GET" and path == "/users/@me":
             return {"id": "999"}
+        if method == "GET" and "/messages?" in path:
+            return []
         if method == "POST":
             self.next_id += 1
             item = {"id": str(self.next_id), **kwargs["json"]}
