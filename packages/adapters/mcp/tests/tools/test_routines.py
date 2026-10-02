@@ -15,8 +15,9 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
 import pytest
@@ -31,6 +32,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.teams_graph import GraphUnavailable
 from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -1112,6 +1114,63 @@ async def test_create_routine_saves_a_slack_thread_destination(
     )
     assert row.destination_id == "C0123ABC:1717.5"  # type: ignore[attr-defined]
     assert row.channel_id == "C0123ABC", "spend is budgeted against the thread's channel"  # type: ignore[attr-defined]
+
+
+def _teams_channels(
+    monkeypatch: pytest.MonkeyPatch, *, member: bool, root: bool = True
+) -> list[str]:
+    located: list[str] = []
+    client = MagicMock()
+    client.is_member = AsyncMock(return_value=member)
+    graph = MagicMock()
+    graph.get_message = AsyncMock(side_effect=None if root else GraphUnavailable("x", status=404))
+    monkeypatch.setattr(_routines_mod, "graph_for", lambda _client: graph)
+
+    async def locate(runtime: object, auth: object, _client: object, channel_id: str) -> object:
+        located.append(channel_id)
+        return SimpleNamespace(channel_id=channel_id, channel_name="research", group_id="g")
+
+    monkeypatch.setattr(_routines_mod, "require_client", lambda runtime, auth: (client, "u_test"))
+    monkeypatch.setattr(_routines_mod, "locate_channel", locate)
+    return located
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_create_routine_saves_a_teams_thread_in_a_channel_the_caller_is_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    member: bool,
+) -> None:
+    located = _teams_channels(monkeypatch, member=member)
+    thread = "19:chan@thread.tacv2;messageid=17"
+    create = _create(
+        committing_sessionmaker, db_session, platform="teams", kind="thread", destination_id=thread
+    )
+    if not member:
+        with pytest.raises(ToolError, match="you are not in research"):
+            await create
+        return
+    row = await create
+    assert row.destination_id == thread  # type: ignore[attr-defined]
+    assert row.channel_id == "19:chan@thread.tacv2", "budgeted against the thread's channel"  # type: ignore[attr-defined]
+    assert located == ["19:chan@thread.tacv2"]
+
+
+async def test_create_routine_refuses_a_teams_thread_that_does_not_exist(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _teams_channels(monkeypatch, member=True, root=False)
+    with pytest.raises(ToolError, match="no thread 17 in research"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="teams",
+            kind="thread",
+            destination_id="19:chan@thread.tacv2;messageid=17",
+        )
 
 
 async def test_create_routine_needs_both_destination_fields(

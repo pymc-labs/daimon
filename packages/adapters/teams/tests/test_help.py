@@ -38,4 +38,6 @@ async def test_help_command_replies_with_every_registered_command(
 
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
     listed = [name for name in COMMAND_HELP if f'"title": "{name}"' in card]
-    assert set(listed) == set(COMMAND_HELP), "every wired command is listed"
+    assert set(listed) == set(COMMAND_HELP) - {"support"}, (
+        "every wired command is listed; support only when escalation is configured"
+    )

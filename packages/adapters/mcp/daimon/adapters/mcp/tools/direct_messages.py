@@ -20,10 +20,17 @@ from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.teams._direct import teams_direct_message
 from daimon.core.config import DirectMessagePolicy
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from slack_sdk.errors import SlackApiError
+
+_RECIPIENT = {
+    "discord": r"[0-9]+",
+    "slack": r"[UW][A-Z0-9]+",
+    "teams": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+}
 
 
 class DirectMessageResult(BaseModel):
@@ -37,12 +44,13 @@ async def send_direct_message_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str, content: str
 ) -> DirectMessageResult:
     """Validate policy before opening a DM; verify both people in the live tenant."""
-    if auth.platform not in {"discord", "slack"}:
+    if auth.platform not in _RECIPIENT:
         raise ToolError("direct messages are not supported on this platform")
     if not content.strip() or len(content) > 19000:
         raise ToolError("content must contain between 1 and 19000 characters")
-    pattern = r"[0-9]+" if auth.platform == "discord" else r"[UW][A-Z0-9]+"
-    if re.fullmatch(pattern, recipient_id) is None:
+    if auth.platform == "teams":
+        recipient_id = recipient_id.lower()  # Entra ids compare case-insensitively
+    if re.fullmatch(_RECIPIENT[auth.platform], recipient_id) is None:
         raise ToolError("recipient_id must be one platform user ID, not a mention or channel")
     policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
     if not policy.allows(recipient_id):
@@ -50,6 +58,13 @@ async def send_direct_message_impl(
     await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)
     chunks = [content[i : i + 1900] for i in range(0, len(content), 1900)]
     ids: list[str] = []
+    if auth.platform == "teams":
+        chat, ids = await teams_direct_message(
+            runtime, auth, recipient_id=recipient_id, chunks=chunks
+        )
+        return DirectMessageResult(
+            platform="teams", recipient_id=recipient_id, channel_id=chat, message_ids=ids
+        )
     if auth.platform == "discord":
         caller = _require_discord_identity(auth)
         guild_id = _require_guild_id(auth)

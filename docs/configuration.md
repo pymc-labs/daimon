@@ -66,8 +66,9 @@ apply.
 
 Per-tenant completion notification policy, keyed by tenant UUID. True enables
 accepted/done reactions and posts the final answer as a fresh reply mentioning only the
-requester on Discord and Slack. Missing/false preserves in-place delivery. Configure
-DAIMON_COMPLETION_PINGS as a JSON object.
+requester on Discord and Slack. On Teams it closes the status card and posts the answer
+fresh, mentioning the requester in channels (Teams bots cannot react). Missing/false
+preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON object.
 
 ### `DAIMON_DIRECT_MESSAGE_POLICIES`
 
@@ -838,10 +839,12 @@ they have asked for help.
 
 `str | None` · optional · default unset
 
-Channel id where human-support requests are posted. Unset (the default) disables the
-escalate affordance entirely — a request that reaches nobody is worse than no button at
-all. A channel rather than operator DMs: it survives one person's DMs being closed, and
-it leaves a shared record anyone on the rota can pick up. The bot must be able to post
+Channel id where human-support requests are posted: a Discord channel id, or a Teams
+channel id (`19:…`) that the Teams bot posts in. Teams requests reach a Discord channel
+only when the Discord bot token is also set. Unset (the default) disables the escalate
+affordance entirely — a request that reaches nobody is worse than no button at all. A
+channel rather than operator DMs: it survives one person's DMs being closed, and it
+leaves a shared record anyone on the rota can pick up. The bot must be able to post
 there.
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`

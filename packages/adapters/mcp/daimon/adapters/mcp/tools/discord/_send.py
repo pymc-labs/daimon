@@ -10,6 +10,7 @@ import aiohttp
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -28,7 +29,6 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.stores.file_uploads import get_upload
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -88,34 +88,14 @@ async def _build_files_from_handles(
     session_factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
 ) -> list[discord.File]:
-    """Resolve file handles into discord.File attachments.
-
-    Handles name rows staged in Postgres by ``create_file_upload_url``, which
-    the agent's sandbox filled with a direct PUT. Postgres rather than instance
-    storage because the PUT and this read are separate HTTP requests and mcp
-    runs several instances with no session affinity.
-
-    The error string must surface the rejected handle so an agent can fix the
-    call without inspecting structured tool output.
-    """
+    """Resolve file handles into discord.File attachments."""
     if len(filenames) > _MAX_ATTACHMENTS_PER_MESSAGE:
         raise ToolError("max 10 attachments per message")
-    files: list[discord.File] = []
-    for name in filenames:
-        async with session_factory() as session:
-            upload = await get_upload(session, tenant_id=tenant_id, handle_id=name)
-        if upload is None:
-            raise ToolError(
-                f"file handle {name!r} not found — mint one with create_file_upload_url, "
-                f"or check the handle id"
-            )
-        if upload.content is None:
-            raise ToolError(
-                f"file handle {name!r} has no bytes yet — PUT the file to its "
-                f"upload_url before posting it"
-            )
-        files.append(discord.File(fp=io.BytesIO(upload.content), filename=upload.display_filename))
-    return files
+    staged = await staged_uploads(filenames, session_factory=session_factory, tenant_id=tenant_id)
+    return [
+        discord.File(fp=io.BytesIO(content), filename=upload.display_filename)
+        for upload, content in staged
+    ]
 
 
 async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]

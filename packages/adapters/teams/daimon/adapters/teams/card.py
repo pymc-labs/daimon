@@ -20,7 +20,7 @@ from daimon.core.turn.status_lines import (
     format_tool_lines,
     has_running_tool,
 )
-from microsoft_teams.api import MessageActivityInput
+from microsoft_teams.api import Account, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
@@ -140,7 +140,19 @@ def notice_card(text: str) -> MessageActivityInput:
     return _card([TextBlock(text=body, wrap=True)], fallback=fallback)
 
 
-def answer_message(text: str, *, is_last: bool) -> MessageActivityInput:
-    """One chunk of the answer; the last carries the feedback buttons."""
+ANSWERED_BELOW = "✅ Done. The answer is below."
+
+
+def answer_message(
+    text: str, *, is_last: bool, mention: Account | None = None
+) -> MessageActivityInput:
+    """One chunk of the answer; the last carries the feedback buttons.
+
+    A completion ping leads with `mention` (an AAD object id is enough).
+    """
     message = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
+    if mention is not None:
+        tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
+        message.text = f"{tag}\n\n{text}"
+        message.add_entity(MentionEntity(mentioned=mention, text=tag))
     return message.add_feedback() if is_last else message

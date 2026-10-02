@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+import time
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,13 +16,16 @@ import pytest
 import structlog
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.channel_files import ChannelFiles
-from daimon.adapters.teams.graph import GraphClient, TeamGroups
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
     FILE_INFO_CONTENT_TYPE,
     TeamsOutputDelivery,
 )
-from daimon.adapters.teams.sharepoint import SharePoint
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.file_uploads import create_upload, store_upload_content
+from daimon.core.teams_file_offers import UploadOffer, sign_offer
+from daimon.core.teams_graph import GraphClient, TeamGroups
+from daimon.core.teams_sharepoint import SharePoint
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from microsoft_teams.api import Attachment, FileConsentCard, FileConsentInvokeActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .conftest import (
     AAD_OBJECT_ID,
     CHANNEL_ID,
+    CONVERSATION_ID,
+    ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     SERVICE_URL,
     TEAM_GROUP_ID,
@@ -108,7 +114,12 @@ def _harness(
 
 
 def _consent(
-    action: str, token: str, *, user: str = AAD_OBJECT_ID, upload_url: str = UPLOAD_URL
+    action: str,
+    token: str,
+    *,
+    user: str = AAD_OBJECT_ID,
+    upload_url: str = UPLOAD_URL,
+    key: str = "offer",
 ) -> Any:
     """A Teams `fileConsent/invoke` as the SDK hands it to the handler."""
     upload = {
@@ -121,7 +132,7 @@ def _consent(
     value = {
         "type": "fileUpload",
         "action": action,
-        "context": {"offer": token},
+        "context": {key: token},
         "uploadInfo": upload,
     }
     activity = FileConsentInvokeActivity.model_validate(
@@ -176,6 +187,53 @@ async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     assert harness.deletes == ["file_csv"], "the output is deleted only after the upload succeeded"
     info = _card(harness.sender, -1)
     assert (info.content_type, info.content_url) == (FILE_INFO_CONTENT_TYPE, CONTENT_URL)
+
+
+async def _staged(db_factory: async_sessionmaker[AsyncSession]) -> str:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_factory.begin() as session:
+        row, token = await create_upload(
+            session,
+            tenant_id=tenant_id,
+            title="chart",
+            display_filename="chart.png",
+            content_type="image/png",
+            now=NOW,
+        )
+        await store_upload_content(session, upload_token=token, data=b"png", now=NOW)
+    return row.id
+
+
+@pytest.mark.parametrize("user", [AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID])
+async def test_a_staged_file_offer_uploads_for_its_own_person_only(
+    db_session_factory: async_sessionmaker[AsyncSession], user: str
+) -> None:
+    """The MCP server's offer is signed: only its person in its chat gets the bytes."""
+    harness = _harness(db_session_factory)
+    offer = UploadOffer(await _staged(db_session_factory), AAD_OBJECT_ID, CONVERSATION_ID)
+    token = sign_offer(offer, secret="test-secret", now=time.time())
+
+    await harness.delivery.handle_consent(_consent("accept", token, user=user, key="upload"))
+    await harness.settle()
+
+    if user != AAD_OBJECT_ID:
+        assert harness.uploads == []
+        assert "expired" in (harness.sender.activities[-1].text or "")
+        return
+    [upload] = harness.uploads
+    assert (str(upload.url), upload.content) == (UPLOAD_URL, b"png")
+    assert _card(harness.sender, -1).content_type == FILE_INFO_CONTENT_TYPE
+
+
+async def test_a_forged_staged_offer_uploads_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    harness = _harness(db_session_factory)
+    offer = UploadOffer(await _staged(db_session_factory), AAD_OBJECT_ID, CONVERSATION_ID)
+    token = sign_offer(offer, secret="not-the-secret", now=time.time())
+    await harness.delivery.handle_consent(_consent("accept", token, key="upload"))
+    await harness.settle()
+    assert harness.uploads == []
 
 
 async def test_declined_offer_deletes_the_file_and_posts_nothing(

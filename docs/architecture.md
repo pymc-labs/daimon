@@ -1002,7 +1002,8 @@ tenants; usage recording and configured caps continue through the same path.
 
 `daimon promo create|list|revoke|redemptions` manages deployment-wide promo
 codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
-button, shown only while a code is redeemable, and a modal) or with the MCP
+button, shown only while a code is redeemable, and a modal), the Teams
+`billing` card (a code field and button, shown the same way) or with the MCP
 tool `redeem_promo_code`; each surface calls
 `daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
@@ -1075,7 +1076,9 @@ Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
 entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
-continuity notices and feedback target the new answer. Other adapters need no changes.
+continuity notices and feedback target the new answer. Teams posts the answer fresh (with
+an @mention in a channel), then sets its card to "Done. The answer is below."; bots cannot
+react there.
 
 ### Routine dispatch
 
@@ -1087,9 +1090,10 @@ by the routine MCP tools. See [routines.md](routines.md) for catch-up and shutdo
 ### Agent-initiated direct messages
 
 The shared channel tool `send_direct_message(recipient_id, content)` dispatches
-to Discord or Slack under the authenticated tenant. Both sender and recipient
-are checked for current platform membership before a DM is opened. Discord bot
-recipients and Slack inactive, external, or bot users are rejected. Other
+to Discord, Slack or Teams under the authenticated tenant. Both sender and recipient
+are checked for current platform membership before a DM is opened (on Teams,
+a team daimon is in that both belong to). Discord bot recipients, Slack
+inactive, external, or bot users and Teams anonymous members are rejected. Other
 platforms return unsupported. Channel tools continue to reject DM channel IDs.
 
 Default recipient policy is tenant members. `DAIMON_DIRECT_MESSAGE_POLICIES` is

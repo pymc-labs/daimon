@@ -4,9 +4,9 @@ Server (or workspace) admins administer every channel. A `channel_admins` row
 adds role ids and user ids for one channel; no row adds nobody, so a tenant
 that never configures one behaves exactly as before. Role ids are the ones the
 member held on their last chat turn (`accounts.platform_role_ids`): Discord has
-roles, Slack has none, so a Slack grant is by user id only (Discord-only roles,
-recorded in tests/parity/test_channel_admin_roles_discord_only.py). Teams has
-no channel admins (tests/parity/test_teams_deliberate_gaps.py).
+roles, Slack and Teams have none, so their grants are by user id only (Discord-only
+roles, recorded in tests/parity/test_channel_admin_roles_discord_only.py). A
+Teams user id is the member's Entra object id.
 """
 
 from __future__ import annotations
@@ -23,15 +23,20 @@ from daimon.core.stores.domain import ChannelAdminsRow, Role
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-CHANNEL_ADMIN_PLATFORMS: Final = ("discord", "slack")
+CHANNEL_ADMIN_PLATFORMS: Final = ("discord", "slack", "teams")
 """The platforms a channel can have its own admins on."""
 
 MAX_CHANNEL_ADMIN_IDS = 25
 """Per list and channel; matches the largest Discord or Slack multi-select."""
 
 # Slack DM ids (`D...`) are refused: nobody administers a DM.
-_CHANNEL_ID = {"discord": r"[0-9]{15,21}", "slack": r"[CG][A-Z0-9]+"}
-_USER_ID = {"discord": r"[0-9]{15,21}", "slack": r"[UW][A-Z0-9]+"}
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_CHANNEL_ID = {
+    "discord": r"[0-9]{15,21}",
+    "slack": r"[CG][A-Z0-9]+",
+    "teams": r"19:[\w-]+@thread\.(?:tacv2|skype)",
+}
+_USER_ID = {"discord": r"[0-9]{15,21}", "slack": r"[UW][A-Z0-9]+", "teams": _UUID}
 _ROLE_ID = {"discord": r"[0-9]{15,21}"}
 
 
@@ -89,7 +94,9 @@ def normalize_channel_admin_ids(
     if re.fullmatch(_CHANNEL_ID[platform], channel) is None:
         raise InvalidChannelAdminIds(f"invalid {platform} channel id {channel_id!r}")
     roles = tuple(dict.fromkeys(value.strip() for value in role_ids))
-    users = tuple(dict.fromkeys(value.strip() for value in user_ids))
+    # Entra object ids compare case-insensitively; Teams sends them lower-case.
+    fold = str.lower if platform == "teams" else str
+    users = tuple(dict.fromkeys(fold(value.strip()) for value in user_ids))
     if roles and platform not in _ROLE_ID:
         raise InvalidChannelAdminIds(f"{platform} has no roles; grant channel admin by user")
     for kind, ids, pattern in (

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0038_skill_uploads.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0039_skill_uploads.py"
     spec = importlib.util.spec_from_file_location("migration_skill_uploads", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

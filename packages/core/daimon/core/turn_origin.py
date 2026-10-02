@@ -21,6 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 #: same bound when the continuation is queued; this one is the render-time
 #: backstop for text that reached the controls by any other route.
 MAX_REQUESTED_WORK_CHARS = 500
+_ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
+# Slack has no list_threads: a thread there is a reply chain, not a listable object.
+_CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
 
 
 class SessionState(BaseModel):
@@ -216,7 +219,7 @@ def render_turn_origin(
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
         "state the switch briefly. Pass origin_context_id to credential-request tools and to "
-        "channel reads (read_channel, read_thread, get_message, list_threads, search_messages). "
+        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)}). "
         "These controls grant no additional mutation or routing permissions."
     )
     # The continuity paragraph is appended only when there is continuity to

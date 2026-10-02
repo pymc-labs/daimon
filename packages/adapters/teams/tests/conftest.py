@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.config import TeamsSettings, ThreadParticipationSettings
+from daimon.core.config import SupportSettings, TeamsSettings, ThreadParticipationSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
@@ -59,6 +59,7 @@ CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
 # The Entra group behind the fixtures' team, as Bot Framework's team details name it.
 TEAM_GROUP_ID = "00000000-0000-0000-0000-000000007ea3"
+DIRECT_CHAT_ID = "a:direct-chat"
 USER_NAME = "Ada Lovelace"
 # Vendored for an offline test from
 # https://raw.githubusercontent.com/microsoft/AdaptiveCards/main/schemas/1.5.0/adaptive-card.json
@@ -231,7 +232,7 @@ class TeamsApiFake:
 
     Passed to `create_teams_http_service(client=...)`; nothing reaches the
     network. POST /activities answers with `m-<n>`; PUT echoes the id; team
-    details name `TEAM_GROUP_ID`.
+    details name `TEAM_GROUP_ID`; everyone is a member, with 1:1 chat `DIRECT_CHAT_ID`.
     """
 
     requests: list[SentRequest] = dataclasses.field(default_factory=list[SentRequest])
@@ -260,6 +261,10 @@ class TeamsApiFake:
         if context.method == "GET" and team:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
+        if context.method == "GET" and "/members/" in context.url:
+            return httpx.Response(200, json={"id": "29:member"}, request=request)
+        if context.method == "POST" and httpx.URL(context.url).path.endswith("/v3/conversations"):
+            return httpx.Response(200, json={"id": DIRECT_CHAT_ID}, request=request)
         if context.method == "PUT" and update:
             return httpx.Response(200, json={"id": update.group(1)}, request=request)
         if context.method == "POST" and re.search(r"/conversations/[^/]+/activities$", context.url):
@@ -360,6 +365,7 @@ def build_teams_runtime(
     settings.billing.signup_credit = Decimal("0")
     settings.tool_safety = OPEN_TOOL_SAFETY
     settings.thread_participation = ThreadParticipationSettings()
+    settings.support = SupportSettings()  # Escalation off unless a test turns it on.
     client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
     deployment_default = deployment_default or DeploymentDefault(
         agent_name="daimon", environment_name="default"
@@ -465,6 +471,13 @@ def no_boot_provisioning() -> Iterator[AsyncMock]:
 def no_wake_poller() -> Iterator[AsyncMock]:
     """The wake poller would share the test connection with the turn under test."""
     with patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock) as poller:
+        yield poller
+
+
+@pytest.fixture(autouse=True)
+def no_delivery_poller() -> Iterator[AsyncMock]:
+    """The routine delivery poller would share the test connection too."""
+    with patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock) as poller:
         yield poller
 
 

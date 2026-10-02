@@ -39,7 +39,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `last_skipped_from` / `last_skipped_until` / `last_skip_reason` | most recent skipped range of scheduled slots and why (`stale` or `in_flight`) |
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
-| `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>` |
+| `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>`, on Teams `<channel id>;messageid=<root id>` |
 | `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
 | `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
@@ -66,13 +66,15 @@ A destination is set with `destination_kind` + `destination_id` on
 `update_routine(clear_destination=true)`. Before anything is saved the tool
 checks that the pair comes together, that the id has the platform's shape (a
 Discord id is a number; a Slack channel is `C…`, a Slack thread
-`<channel>:<ts>`), that the channel exists in the caller's own server or
+`<channel>:<ts>`; a Teams channel `19:…@thread.tacv2`, a Teams thread
+`<channel>;messageid=<root>`), that the channel exists in the caller's own server or
 workspace with daimon able to post there (on Slack, daimon must be a member;
 a thread must exist), that the kind matches (a Discord thread is not a
 channel), that **the caller themselves may post there** — the same checks
 `send_message` applies to a caller (Discord: view and send, send in threads,
 membership of a private thread unless they manage threads; Slack: membership
-of a private channel, or of any channel for a guest) — and that the tenant's
+of a private channel, or of any channel for a guest; Teams: on the channel's
+roster, in a team daimon is in) — and that the tenant's
 access policy does not protect it — checked
 with the parent channel and category resolved from the platform. Changing the
 destination drops a result still pending for the old one. The adapter checks
@@ -221,8 +223,8 @@ failed fire leaves the outbox alone and records `last_error` as always, so a
 result still pending from an earlier successful fire stays pending.
 
 The scheduler has no chat client, so the post happens in the chat adapter for
-the tenant's platform: Discord and Slack each run `run_delivery_poller` next
-to their wake poller. Each poll claims `pending` rows for its platform
+the tenant's platform: Discord, Slack and Teams each run `run_delivery_poller`
+next to their wake poller (Teams for its one organisation). Each poll claims `pending` rows for its platform
 (`FOR UPDATE SKIP LOCKED`, with a two-minute lease), posts, and settles:
 
 - **At most once.** A claim whose lease runs out is settled
@@ -245,8 +247,9 @@ to their wake poller. Each poll claims `pending` rows for its platform
 - **Only where the creator could post.** A routine posts on its creator's
   behalf, so the poster re-checks, every time, the same caller rules as at
   save time: a Discord creator who has lost view/send (or left the guild, or
-  is not in a private thread) or a Slack creator who is not in a private
-  channel gets the result by their own DM (`dm_fallback:creator_cannot_post`)
+  is not in a private thread), a Slack creator who is not in a private
+  channel or a Teams creator off the channel's roster gets the result by their
+  own DM (`dm_fallback:creator_cannot_post`)
   and nothing is posted to the destination. A stored Slack thread is looked
   up with `conversations.replies` before posting, as `send_message` does —
   Slack would otherwise post a reply to a deleted thread at the channel root —

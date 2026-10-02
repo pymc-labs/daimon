@@ -57,6 +57,7 @@ __all__ = [
     "clear_creator",
     "discord_creator_may_post",
     "slack_creator_may_post",
+    "teams_thread_id",
     "creator_refusal_for",
     "placement_unknown_is_unsafe",
     "delivery_refusal",
@@ -81,6 +82,8 @@ _CALL_TOOL: Final[str] = "call_tool"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
+_TEAMS_CHANNEL: Final[str] = r"19:[\w-]+@thread\.(?:tacv2|skype)"
+_TEAMS_THREAD: Final[re.Pattern[str]] = re.compile(rf"({_TEAMS_CHANNEL});messageid=([0-9]+)")
 
 #: A Slack thread destination is `<channel id>:<thread ts>`.
 _THREAD_SEPARATOR: Final[str] = ":"
@@ -103,7 +106,8 @@ class DeliveryTarget:
 
     `channel_id` is where the message is posted: the channel, or on Discord
     the thread itself (a thread is a channel there). `thread_ts` is set only
-    for a Slack thread.
+    for a thread on Slack (its ts) or Teams (its root message id), whose
+    channel is `channel_id`.
     """
 
     channel_id: str
@@ -115,12 +119,22 @@ def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
     is malformed (a Slack thread without `channel:ts`)."""
     if row.destination_kind is None or row.destination_id is None:
         return None
+    if platform == "teams" and row.destination_kind == "thread":
+        thread = _TEAMS_THREAD.fullmatch(row.destination_id)
+        return DeliveryTarget(*thread.groups()) if thread else None
     if platform == "slack" and row.destination_kind == "thread":
         channel_id, sep, thread_ts = row.destination_id.partition(_THREAD_SEPARATOR)
         if not sep or not channel_id or not thread_ts:
             return None
         return DeliveryTarget(channel_id=channel_id, thread_ts=thread_ts)
     return DeliveryTarget(channel_id=row.destination_id)
+
+
+def teams_thread_id(target: DeliveryTarget) -> str:
+    """The conversation a Teams target is posted to: the channel, or the thread in it."""
+    if target.thread_ts is None:
+        return target.channel_id
+    return f"{target.channel_id};messageid={target.thread_ts}"
 
 
 DirectPost = Literal["allowed", "protected", "unverified"]
@@ -148,6 +162,12 @@ def render_routine_controls(
                 "kind": row.destination_kind,
                 "channel_id": target.channel_id if target else row.destination_id,
                 **({"thread_ts": target.thread_ts} if target and target.thread_ts else {}),
+                # A Teams thread is posted to by its own id.
+                **(
+                    {"thread_id": row.destination_id}
+                    if platform == "teams" and target and target.thread_ts
+                    else {}
+                ),
             },
         }
     }
@@ -224,7 +244,8 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
     """Why `destination_id` cannot name a `kind` on `platform`, or None.
 
     Discord channels and threads are numeric ids. Slack channels are
-    `C…`/`G…` ids and a Slack thread is `<channel id>:<thread ts>`.
+    `C…`/`G…` ids and a Slack thread is `<channel id>:<thread ts>`. A Teams
+    channel is `19:…@thread.tacv2` and a thread `<channel>;messageid=<root id>`.
     """
     if platform == "discord":
         return None if destination_id.isdigit() else "a Discord channel or thread id is a number"
@@ -235,6 +256,14 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
             return None
         if _SLACK_CHANNEL.fullmatch(destination_id) is None:
             return "a Slack channel id looks like C0123ABC"
+        return None
+    if platform == "teams":
+        if kind == "thread":
+            if _TEAMS_THREAD.fullmatch(destination_id) is None:
+                return "a Teams thread is <channel id>;messageid=<root message id>"
+            return None
+        if re.fullmatch(_TEAMS_CHANNEL, destination_id) is None:
+            return "a Teams channel id looks like 19:abc123@thread.tacv2"
         return None
     return f"routine destinations are not supported on {platform}"
 

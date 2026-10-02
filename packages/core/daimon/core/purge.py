@@ -299,7 +299,7 @@ async def _purge_principal_in_session(
             )
         )
         # CLI principals never own wizard_session rows in practice (the wizard
-        # flow is Discord/Slack-only), so this always reports 0 — kept for
+        # flow is chat-platform-only), so this always reports 0 — kept for
         # symmetry with the platform branch and future-proofing.
         wizard_sessions_count = await wizard_session_store.delete_wizard_sessions_for_platform_user(
             session,

@@ -371,6 +371,15 @@ class SlackBotTokenRow(BaseModel):
     refresh_token: bytes | None = None
 
 
+class TeamsInstallationRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    team_id: str
+    group_id: str
+    name: str | None = None
+
+
 class SlackUserTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

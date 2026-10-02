@@ -17,7 +17,6 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic.types import Message, TextBlock, Usage
-from daimon.adapters.teams.graph import GraphUnavailable
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.thread_reader import ThreadReader
@@ -25,6 +24,7 @@ from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.thread_participation import set_participation_mode
+from daimon.core.teams_graph import GraphUnavailable
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ParticipationMode,
