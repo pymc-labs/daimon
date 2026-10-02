@@ -54,10 +54,12 @@ restart runs again.
 
 ### Commands and admins
 
-Commands answer in the 1:1 chat only, since their replies can carry account
-details; in a channel the bot points to the 1:1 chat. A message is a command
-only when it is the bare word (or `memory /<path>`); anything longer goes to
-the agent. None of them runs an agent turn.
+Commands answer in the 1:1 chat, since their replies can carry account
+details and Teams has no message only its sender sees. One typed in a channel
+is answered in the sender's 1:1 chat, opened if needed, with a short pointer
+in the channel; `new` there says each post is its own conversation. A message
+is a command only when it is the bare word (or `memory /<path>`, `support
+<note>`); anything longer goes to the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |
@@ -67,7 +69,8 @@ the agent. None of them runs an agent turn.
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
-| `billing` | Your usage this month; admins also see totals, top spenders and top-ups. No promo codes: admins redeem with the MCP tool `redeem_promo_code`. No channel budgets. |
+| `billing` | Your usage this month and recent credit grants; admins also see totals, top spenders and top-ups, and redeem promo codes. |
+| `support <note>` | Ask a person for help, spending one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -80,7 +83,8 @@ and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
-There are no channel admins: only the listed admins administer a channel.
+Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
+here) and channel budgets (`set_channel_budget`) work as on Discord and Slack.
 
 ### Channel history
 
@@ -88,9 +92,14 @@ Like Discord and Slack, a channel turn replays the conversation it sits in,
 read through Microsoft Graph and marked untrusted for the agent. The first
 turn in a thread gets the root post and its newest 50 replies, a later turn
 only the replies newer than the last message it read, and a mention that starts a
-thread the channel's 25 most recently active posts. One page is read per turn,
-marked `truncated` when there is more. System events, deleted posts and the
-bot's own cards are left out; mentions read as `@name`, files as names.
+thread the channel's 25 most recently active posts, each with its newest 10
+replies. One page is read per turn, marked `truncated` when there is more.
+Each message carries its sender, time and channel name. System events, deleted
+posts and the bot's own cards are left out; mentions read as `@name`. The
+newest 4 images in the replay are passed to the agent, and up to 10 shared
+files get a download link where channel files work (below). When Graph cannot
+be read, the agent is told history is unavailable and why, rather than
+guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
 the manifest. A team owner grants it when adding the app to a team, for that
@@ -208,15 +217,48 @@ repo is refused in the dialog, and the form stays open.
 
 ### Agent tools
 
-MCP tools that need a chat platform work from Teams turns: `send_message` and
-`create_thread` (text only, up to 6,000 characters, and only into a
-conversation the requester belongs to), task handoff and fresh starts,
-timers (`create_timer`, `list_timers`, `cancel_timer`), `bind_public_repo`
-and the GitHub App install link. The MCP server posts
-through the Bot Framework REST API with the same app registration.
+MCP tools that need a chat platform work from Teams turns, posting through
+the Bot Framework REST API and reading through Graph with the same app
+registration:
+
+- **Channel reads.** `list_channels`, `read_channel`, `read_thread`,
+  `get_message`, `list_threads`, `parse_link` (Teams message links) and
+  `search_messages`, over the consent above, so "summarise this channel"
+  works. The caller must be on the channel's roster; a private or shared
+  channel is read only from a turn inside it. Graph has no message search for
+  an app, so `search_messages` scans recent posts, bounded, and says when it
+  stopped short. A 1:1 chat cannot be read back.
+- **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
+  only into a conversation the requester belongs to). Files ride along: in a
+  channel whose site is granted they are saved to its Files tab and linked; in
+  a 1:1 chat they are offered with a file consent card.
+- **`send_direct_message`** opens a 1:1 chat with someone who shares a team
+  with the caller and daimon, named by Entra object ID.
+- **`post_wizard`** posts its form as an Adaptive Card that only the asker can
+  fill in (no step images); Submit starts their turn.
+- Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
+  `cancel_timer`), routines that post to a channel or thread (below),
+  `bind_public_repo` and the GitHub App install link.
+
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can
 answer.
+
+Nothing app-only lists the teams an app is in, so the adapter records each
+team when the app is added or anyone writes there; an older install shows up
+once someone writes in it. Adding the app posts a welcome (in the team's General
+channel, or the 1:1 chat); removing it from a team forgets that team.
+
+### Routines, pings and tables
+
+A routine's destination can be a channel or a thread
+(`<channel>;messageid=<root>`). Its creator must still be on the channel's
+roster; when they are not, or the post fails, the result goes to their 1:1
+chat if the direct-message policy allows. With completion pings on
+(`DAIMON_COMPLETION_PINGS`), a channel turn's card closes with "Done. The
+answer is below." and the answer is posted fresh, @mentioning the asker, so
+Teams notifies them; bots cannot react. Teams renders markdown tables
+natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
 
 ### Capacity
 
@@ -230,9 +272,9 @@ from the wake poller wait until a turn finishes. A post or edit Teams throttles
 
 On shutdown the adapter stops admitting, gives running turns 15 seconds, then
 cancels them. The next boot edits every card a restart cut off to an
-interrupted notice before admitting new turns. Teams cannot list a
-conversation's messages, so a card whose send never returned an id cannot be
-found and is left as is.
+interrupted notice before admitting new turns. A channel card whose send never
+returned an id is found by reading its thread through Graph; one in a 1:1 chat,
+which cannot be read back, is left as is.
 
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a
@@ -241,14 +283,8 @@ when the process died is not run twice. A timer whose chat now answers as a
 different agent posts a notice instead of running. A deployment with
 `DAIMON_TEAMS__ENABLED=false` runs no timers.
 
-### Not supported yet
+### Not supported
 
-Reactions, the agent's own channel-reading tools (`read_channel`,
-`read_thread`, `search_messages`, `get_message`, `list_channels` and
-`parse_link` are hidden from Teams turns), files in channels whose site is
-not granted and in private or shared channels, and file posting
-through `send_message`.
-Also Discord and Slack only: `send_direct_message`, `/dm` conversations,
-routine destinations (refused on save), table rendering
-(`DAIMON_TABLE_RENDERING`) and completion pings (`DAIMON_COMPLETION_PINGS`).
-Removing the app does not archive the organisation's tenant.
+Group chats, reactions, `/dm` conversations, and files in channels whose site
+is not granted or in private and shared channels. Removing the app does not
+archive the organisation's tenant: a deployment serves one organisation.
