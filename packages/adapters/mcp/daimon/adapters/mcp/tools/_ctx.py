@@ -107,7 +107,8 @@ async def _policy_gate(
         and account.role is Role.ADMIN
     )
     names: tuple[str | None, ...] = ()
-    if agent_names is not None and policy.agent_channel_pins and not hub_admin:
+    gated = bool(policy.agent_channel_pins or policy.isolated_channel_ids)
+    if agent_names is not None and gated and not hub_admin:
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -125,16 +126,20 @@ async def _policy_gate(
             and account is not None
             and account.role is Role.ADMIN
         )
-    if (
-        agent_names is not None
-        and policy.agent_channel_pins
-        and not hub_admin
-        and not authorize(
+        gated = bool(policy.agent_channel_pins or policy.isolated_channel_ids)
+    decision = (
+        authorize(
             policy,
             subject=(
                 # The hub mounts a person's own agent identity, never an
                 # agent key; a demoted hub admin is held like any member.
-                build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
+                # A channel admin keeps their grants: an isolated channel's
+                # own agent answers them in their hub, as it does an admin.
+                build_subject(
+                    is_admin=False,
+                    platform_user_id=auth.platform_user_id,
+                    administered_channel_ids=auth.administered_channel_ids,
+                )
                 if pin_exempt
                 else mcp_subject(auth)
             ),
@@ -143,15 +148,23 @@ async def _policy_gate(
             agent=AgentRef.of(*names),
             place=mcp_place(auth),
         )
-    ):
+        if agent_names is not None and gated and not hub_admin
+        else None
+    )
+    if decision is not None and not decision:
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),
             platform_user_id=auth.platform_user_id,
             tool=tool_name,
-            gate="agent_pin",
+            gate="channel_isolation" if decision.reason == "channel_isolated" else "agent_pin",
         )
         refused(TerminationReason.ADMISSION_DENIED)
+        if decision.reason == "channel_isolated":
+            raise ToolError(
+                "TERMINAL ERROR: This agent's key is bound to an isolated channel that "
+                "only that channel's own agents answer in, so it can't run here."
+            )
         raise ToolError(
             "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
             "only runs in a conversation inside them, not from here. Ask it in one of "

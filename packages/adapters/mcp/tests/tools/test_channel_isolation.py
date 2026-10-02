@@ -384,7 +384,7 @@ async def test_posts_and_direct_messages_stay_on_their_side(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
-    outside, inside = world.auth(), world.auth(executing="agent_local")
+    outside, inside = world.auth(executing="agent_shared"), world.auth(executing="agent_local")
 
     with pytest.raises(ToolError, match="only its own agents post"):
         await require_channel_writable(runtime, outside, channel_id=ROOM)
@@ -394,5 +394,6 @@ async def test_posts_and_direct_messages_stay_on_their_side(
         await require_channel_writable(runtime, inside, channel_id=OTHER)
     await require_channel_writable(runtime, inside, channel_id="t1", parent_channel_id=ROOM)
     await require_channel_writable(runtime, outside, channel_id=OTHER)
-    with pytest.raises(ToolError, match="only send a direct message to the person"):
+    await require_channel_writable(runtime, world.auth(), channel_id=ROOM)  # no agent: an operator
+    with pytest.raises(ToolError, match="sends no direct messages"):
         await send_direct_message_impl(runtime, inside, recipient_id="123", content="hi")

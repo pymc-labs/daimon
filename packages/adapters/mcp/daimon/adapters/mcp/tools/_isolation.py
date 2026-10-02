@@ -1,11 +1,12 @@
 """Channel isolation as the agent tools see it (`daimon.core.channel_isolation`).
 
-A call is inside isolated channel C when the agent executing it is one of C's
-own agents (`agent_id` for agent-session tokens, `chat_agent_id` for chat), or
-when a tool that knows its turn's location from a verified origin says it runs
-in C. From inside C a caller sees only C's own agents; from anywhere else it
-sees every agent but those. A tenant that isolates nothing pays one policy read
-and sees everything.
+A call is inside isolated channel C when an agent key is bound to C
+(`token_channel_id`), when a tool that knows its turn's location from a
+verified origin says it runs in C, or when a chat turn's agent is one of C's
+own. An agent key is never inside by its agent alone. From inside C a caller
+sees only C's own agents; from anywhere else it sees every agent but those. A
+tenant that isolates nothing pays one policy read and sees everything.
+What an agent may run, post or read is `daimon.core.authz`'s to decide.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
@@ -23,7 +24,7 @@ from daimon.core.access_policy import (
     isolated_channel_of,
     isolation_owner,
 )
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.channel_isolation import BindingRefusal, IsolationViewer, binding_refusal
 from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -42,9 +43,6 @@ _UNREADABLE_MSG = (
 @dataclass(frozen=True)
 class CallerIsolation(IsolationViewer):
     """The tenant's policy plus the isolated channel the call runs in, if any."""
-
-    def owner_of(self, agent_names: tuple[str | None, ...]) -> str | None:
-        return isolation_owner(self.policy, agent_names)
 
     def isolated_place(
         self, channel_id: str | None, parent_channel_id: str | None = None
@@ -101,10 +99,19 @@ def require_bindable(
     *,
     agent: BetaManagedAgentsAgent | None,
     channel_id: str | None,
+    parent_channel_id: str | None = None,
 ) -> None:
-    """Refuse routing `agent_name` at `channel_id` (None: tenant default; a thread: its parent)."""
+    """Refuse routing `agent_name` at `channel_id` (None: tenant default) for a pin or isolation.
+
+    A thread binding passes its parent channel too.
+    """
     names = (agent_name, *(agent_pin_names(agent.name, agent.metadata) if agent else ()))
-    refuse(binding_refusal(policy, agent_names=names, channel_id=channel_id), agent_name=agent_name)
+    refuse(
+        binding_refusal(
+            policy, agent_names=names, channel_id=channel_id, parent_channel_id=parent_channel_id
+        ),
+        agent_name=agent_name,
+    )
 
 
 async def load_isolation(runtime: McpRuntime, tenant_id: uuid.UUID) -> TenantAccessPolicy:
@@ -124,26 +131,32 @@ async def load_caller_isolation(
     location_channel_id: str | None = None,
 ) -> CallerIsolation:
     """Where the caller stands. Pass `agents` when already listed; `location_channel_id`
-    (a thread's parent) when the tool knows the turn's channel from its verified origin."""
+    (a thread's parent) when the tool knows the turn's channel from its verified origin.
+
+    A chat turn's own agent counts (only an isolated channel's own agents run
+    there); an agent key's does not, unless the key is bound to the channel.
+    """
     policy = await load_isolation(runtime, auth.tenant_id)
     if not policy.isolated_channel_ids:
         return OPEN_ISOLATION
-    inside = isolated_channel_of(policy, location_channel_id)
-    executing = auth.agent_id or auth.chat_agent_id
-    if inside is None and executing is not None:
-        if agents is None:
-            agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    if agents is None:
+        agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    inside = isolated_channel_of(policy, location_channel_id) or isolated_channel_of(
+        policy, token_channel_id(auth)
+    )
+    if inside is None and auth.chat_agent_id is not None:
         agent = next(
             (
                 agent
                 for agent in agents
-                if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id) == executing
+                if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id)
+                == auth.chat_agent_id
             ),
             None,
         )
         if agent is not None:
             inside = isolation_owner(policy, agent_pin_names(agent.name, agent.metadata))
-    return CallerIsolation(policy, inside)
+    return CallerIsolation(policy, inside, agent_aliases(agents))
 
 
 __all__ = [

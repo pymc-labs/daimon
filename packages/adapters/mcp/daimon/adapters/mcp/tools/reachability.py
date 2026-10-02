@@ -124,13 +124,20 @@ async def require_bindable_as_channel_default(
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
         # Nobody, server admins included: the agent would refuse every turn here.
-        if not authorize(
+        decision = authorize(
             policy,
             subject=mcp_subject(auth, is_admin=auth.is_admin),
             action=Action.BIND_CHANNEL_DEFAULT,
             agent=AgentRef.of(*names),
             place=Place(channel_id=channel_id),
-        ):
+        )
+        if decision.reason == "channel_isolated":
+            raise ToolError(
+                "This channel is isolated, so only its own agents (pinned to it alone) can be "
+                f"its default, and '{agent_name}' is not one. Nothing was changed. Pick one of "
+                "its own agents, or ask a server admin. Do not retry."
+            )
+        if not decision:
             raise ToolError(
                 f"An operator pinned '{agent_name}' to other channels, so it would refuse "
                 "every turn here and cannot be this channel's default. Nothing was changed. "
