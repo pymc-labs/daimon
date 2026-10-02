@@ -60,6 +60,9 @@ async def _save_in_channel(
     staged: Staged,
 ) -> str:
     ref = await locate_channel(runtime, auth, client, split_thread(conversation_id)[0])
+    if not ref.is_standard:
+        # Its files live in a site of its own; the team site's same-named folder is not it.
+        raise ToolError(f"{_NO_FILES}.")
 
     async def channel_name() -> str:
         return ref.channel_name
@@ -78,7 +81,14 @@ async def _save_in_channel(
     except GraphUnavailable as err:
         saved = f" ({len(links)} file(s) were saved to its Files first)" if links else ""
         raise ToolError(f"{_NO_FILES}{saved}.") from err
-    return await client.send(conversation_id, "\n\n".join(filter(None, [content, *links])))
+    try:
+        return await client.send(conversation_id, "\n\n".join(filter(None, [content, *links])))
+    except (httpx.HTTPError, ValueError) as err:
+        raise ToolError(
+            f"the {len(links)} file(s) were saved to the channel's Files, but posting the "
+            f"message failed ({type(err).__name__}); post it again without file_handles, "
+            "with these links:\n" + "\n".join(links)
+        ) from err
 
 
 async def _offer(

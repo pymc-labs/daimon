@@ -31,13 +31,14 @@ _TEAM = "19:team@thread.tacv2"
 _GROUP = "00000000-0000-4000-8000-0000000000aa"
 _CHANNEL = "19:chan@thread.tacv2"
 _THREAD = f"{_CHANNEL};messageid=1700000000000"
+_PRIVATE = "19:secret@thread.tacv2"
 _CHAT = "a:chat-1"
 _WEB_URL = "https://contoso.sharepoint.com/sites/Lab/Shared%20Documents/research/chart.png"
 
 
 class _Fake:
-    def __init__(self, *, graph_status: int = 200) -> None:
-        self.graph_status = graph_status
+    def __init__(self, *, graph_status: int = 200, post_status: int = 200) -> None:
+        self.graph_status, self.post_status = graph_status, post_status
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -46,7 +47,11 @@ class _Fake:
         if url.host == "login.microsoftonline.com":
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         if path.endswith(f"/v3/teams/{_TEAM}/conversations"):
-            channels = [{"id": _TEAM}, {"id": _CHANNEL, "name": "research", "type": "standard"}]
+            channels = [
+                {"id": _TEAM},
+                {"id": _CHANNEL, "name": "research", "type": "standard"},
+                {"id": _PRIVATE, "name": "secret", "type": "private"},
+            ]
             return httpx.Response(200, json={"conversations": channels})
         if "/members/" in path:
             return httpx.Response(200, json={"id": "29:x", "aadObjectId": _CALLER})
@@ -60,8 +65,13 @@ class _Fake:
                     201, json={"id": "i1", "name": "chart.png", "webUrl": _WEB_URL}
                 )
         if path.endswith("/activities"):
+            if self.post_status != 200:
+                return httpx.Response(self.post_status)
             return httpx.Response(200, json={"id": f"act-{len(self.posts())}"})
         return httpx.Response(404)
+
+    def graph(self) -> list[httpx.Request]:
+        return [r for r in self.requests if r.url.host == "graph.microsoft.com"]
 
     def posts(self) -> list[httpx.Request]:
         return [r for r in self.requests if r.url.path.endswith("/activities")]
@@ -141,6 +151,36 @@ async def test_a_channel_without_site_access_refuses_and_posts_nothing(
             file_handles=[handle],
         )
     assert fake.posts() == []
+
+
+async def test_a_private_channel_takes_no_files(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    (auth, handle), fake = await _setup(db_session), _Fake()
+    with pytest.raises(ToolError, match="private or shared"):
+        await _teams_send_message_impl(
+            _runtime(fake, sessionmaker),
+            auth,
+            channel_id=_PRIVATE,
+            content="x",
+            file_handles=[handle],
+        )
+    assert fake.graph() == [] and fake.posts() == [], "never the team site's same-named folder"
+
+
+async def test_a_failed_post_after_saving_says_the_files_are_saved(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    (auth, handle), fake = await _setup(db_session), _Fake(post_status=500)
+    with pytest.raises(ToolError, match="were saved") as refused:
+        await _teams_send_message_impl(
+            _runtime(fake, sessionmaker),
+            auth,
+            channel_id=_CHANNEL,
+            content="x",
+            file_handles=[handle],
+        )
+    assert _WEB_URL in str(refused.value), "the links let the agent post again without uploading"
 
 
 async def test_a_chat_file_is_a_consent_card_with_a_signed_offer(
