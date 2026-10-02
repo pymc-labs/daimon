@@ -437,7 +437,10 @@ async def test_a_denied_turn_says_why_without_a_card(
     denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
     with patch.object(app_module, "admit", denied):
         await teams._run_turn(make_inbound(), TENANT)
-    assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
+    assert [a.text for a in sender.activities] == [
+        "This organisation's credit is depleted. "
+        "An admin can top up with `billing` in a 1:1 chat with me."
+    ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 
 

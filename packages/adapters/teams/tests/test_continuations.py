@@ -30,6 +30,7 @@ from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
+from daimon.core.turn.notices import admission_refusal_text
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -185,17 +186,12 @@ async def test_a_newer_message_supersedes_the_queued_work(
 
 
 @pytest.mark.parametrize(
-    ("reason", "copy"),
-    [
-        ("balance_depleted", app_module._BALANCE_DEPLETED),
-        ("cap_exceeded", app_module._CAP_REACHED),
-        ("invoker_not_allowed", app_module._NOT_INVITED),
-        ("agent_pinned_elsewhere", app_module._PINNED_ELSEWHERE),
-    ],
+    "reason", ["balance_depleted", "cap_exceeded", "invoker_not_allowed", "agent_pinned_elsewhere"]
 )
 async def test_a_refused_turn_tells_only_a_live_person_then_raises(
-    db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason, copy: str
+    db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason
 ) -> None:
+    copy = admission_refusal_text(reason, app_module.TEAMS_REFUSAL_NOUNS)
     sender = FakeSender()
     teams = TeamsApp(
         runtime=build_teams_runtime(db_session_factory),
