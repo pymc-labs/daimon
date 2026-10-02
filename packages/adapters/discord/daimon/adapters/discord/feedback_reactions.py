@@ -52,7 +52,14 @@ from daimon.core.stores.message_feedback import record_vote
 from daimon.core.stores.support_escalation import count_escalations_for_user
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import has_credit, is_escalation_reaction, remaining_credits
+from daimon.core.support_escalation import (
+    OUT_OF_CREDITS,
+    has_credit,
+    is_enabled,
+    is_escalation_reaction,
+    offer_text,
+    remaining_credits,
+)
 
 import discord
 from discord.ext import commands
@@ -259,7 +266,7 @@ class FeedbackReactionCog(commands.Cog):
         """
         settings = self._bot.runtime.settings
         allowance = settings.support.credits_per_user
-        if settings.support.escalation_channel_id is None or allowance <= 0:
+        if not is_enabled(channel_id=settings.support.escalation_channel_id, allowance=allowance):
             log.info("support.disabled", message_id=str(payload.message_id))
             return
 
@@ -276,10 +283,7 @@ class FeedbackReactionCog(commands.Cog):
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
             if not has_credit(allowance=allowance, used=used):
-                await user.send(
-                    "You've used all your human-support requests. "
-                    "Contact us if you'd like more added to your account."
-                )
+                await user.send(OUT_OF_CREDITS)
                 return
             left = remaining_credits(allowance=allowance, used=used)
             view: discord.ui.View = discord.ui.View(timeout=None)
@@ -291,11 +295,7 @@ class FeedbackReactionCog(commands.Cog):
                 )
             )
             await user.send(
-                content=(
-                    f"You asked for a human on that answer. "
-                    f"You have {left} support request(s) left -- "
-                    "tell us what you need and we'll pick it up."
-                ),
+                content=offer_text(remaining=left),
                 view=view,
             )
         except discord.HTTPException as exc:

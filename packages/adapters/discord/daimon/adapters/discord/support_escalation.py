@@ -51,7 +51,15 @@ from daimon.core.stores.support_escalation import (
     record_escalation,
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE, build_custom_id
+from daimon.core.support_escalation import (
+    CUSTOM_ID_TEMPLATE,
+    EMPTY_NOTE,
+    OUT_OF_CREDITS,
+    RECORDED_UNDELIVERED,
+    UNAVAILABLE,
+    build_custom_id,
+    received_text,
+)
 
 import discord
 from discord.ext import commands
@@ -60,17 +68,11 @@ _log = structlog.get_logger()
 
 _CALLBACK_FAILED = "Something went wrong opening the form -- please try again."
 _SUBMIT_FAILED = "Something went wrong sending your request -- please try again."
-_EMPTY_NOTE = "Please describe what you need help with."
-_MALFORMED = "This support request is no longer available."
-_OUT_OF_CREDITS = (
-    "You've used all your human-support requests. "
-    "Contact us if you'd like more added to your account."
-)
-_RECEIVED = (
-    "Thanks -- your request has been recorded and someone will follow up. "
-    "You have {remaining} left."
-)
-_RECORDED_UNDELIVERED = "Thanks -- your request has been recorded and someone will follow up."
+# The person-facing copy is shared with Slack (`daimon.core.support_escalation`).
+_EMPTY_NOTE = EMPTY_NOTE
+_MALFORMED = UNAVAILABLE
+_OUT_OF_CREDITS = OUT_OF_CREDITS
+_RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
 
 
 class SupportModal(discord.ui.Modal, title="Ask a human"):
@@ -174,7 +176,7 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         remaining = max(
             settings.support.credits_per_user - (await self._used(tenant_id, user_id)), 0
         )
-        await interaction.followup.send(_RECEIVED.format(remaining=remaining), ephemeral=True)
+        await interaction.followup.send(received_text(remaining=remaining), ephemeral=True)
 
     async def _used(self, tenant_id: uuid.UUID, user_id: str) -> int:
         from daimon.core.stores.support_escalation import count_escalations_for_user

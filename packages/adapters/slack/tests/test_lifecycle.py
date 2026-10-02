@@ -209,6 +209,7 @@ def _make_lifecycle(
     render_tables: bool = False,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID | None = None,
+    ask_human: bool = False,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -228,6 +229,7 @@ def _make_lifecycle(
         deregistered.append(ts)
 
     lc = SlackTurnLifecycle(
+        ask_human=ask_human,
         notify_on_completion=notify_on_completion,
         trigger_ts=trigger_ts,
         render_tables=render_tables,
@@ -1402,6 +1404,33 @@ async def test_overflow_puts_feedback_buttons_on_last_chunk_only(
         )
     assert "feedback_vote:up" in _action_ids(overflow_bodies[-1]["blocks"]), (
         "the last overflow chunk must carry the vote buttons"
+    )
+
+
+async def test_ask_human_button_rides_with_the_vote_buttons_when_enabled(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client, ask_human=True)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert ids[-3:] == ["feedback_vote:up", "feedback_vote:down", "support_escalate"], (
+        "Ask a human sits after the two votes on the final answer"
+    )
+
+
+async def test_no_ask_human_button_when_support_is_off(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    assert "support_escalate" not in _action_ids(_last_update_blocks(fake_slack_web_client)), (
+        "an unset Slack escalation channel must not render the button"
     )
 
 

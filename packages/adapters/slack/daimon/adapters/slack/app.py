@@ -118,6 +118,14 @@ from daimon.adapters.slack.runtime import (
     responder_handle,
 )
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
+from daimon.adapters.slack.support_escalation import (
+    ASK_HUMAN_ACTION_ID,
+    SUPPORT_CALLBACK_ID,
+    evaluate_support_submission,
+    handle_ask_human_click,
+    run_support_submission,
+    slack_support_enabled,
+)
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     SlackConfirmationCards,
@@ -825,6 +833,14 @@ class SlackApp:
                         )
 
                     self._spawn(_run_feedback_text())
+            elif cb_id == SUPPORT_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _sup = evaluate_support_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_sup.response_payload)
+                )
+                if _sup.proceed:
+                    self._spawn(run_support_submission(self.runtime, _sup))
             else:
                 # Unknown view_submission callback_id — log and ack empty (T-82-20).
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
@@ -944,6 +960,8 @@ class SlackApp:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
+                elif action_id == ASK_HUMAN_ACTION_ID:
+                    self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
         else:
@@ -1839,6 +1857,7 @@ class SlackApp:
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2264,6 +2283,7 @@ class SlackApp:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                    ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
@@ -2641,6 +2661,7 @@ class SlackApp:
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2723,6 +2744,7 @@ class SlackApp:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,

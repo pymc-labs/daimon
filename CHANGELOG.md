@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord, from the same ledger. Each platform posts only to its own channel; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and on send. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it
   names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide
@@ -394,6 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `DAIMON_SUPPORT__CREDITS_PER_USER` now defaults to 20 human-support requests per person (was 3); 0 still turns escalation off. Two requests from one person can no longer both spend the last credit, on Discord too: the count and the write now run under a per-person lock.
 - **A tidier status card while a turn runs.** Discord shows one embed instead
   of two and Slack one matching card: a bold Thinking or Working headline with
   the elapsed time, up to six recent tool calls in a code block, and the latest
