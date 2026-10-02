@@ -84,6 +84,7 @@ def test_parse_repo_arg_branch_and_split_combined() -> None:
 
 class _FakeCli:
     local_user = "testuser"
+    workspace_id = "local"
 
 
 class _FakeCrypto:

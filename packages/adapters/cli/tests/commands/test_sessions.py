@@ -44,6 +44,7 @@ from ..harness import build_cli_runtime
 
 class _FakeCli:
     local_user = "testuser"
+    workspace_id = "local"
 
 
 class _FakeMcp:

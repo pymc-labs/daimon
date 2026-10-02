@@ -77,6 +77,7 @@ def _session_body(
 def _build_settings(defaults_root: Path) -> Settings:
     class _Cli:
         local_user = "testuser"
+        workspace_id = "local"
 
     class _Mcp:
         jwt_secret = None
