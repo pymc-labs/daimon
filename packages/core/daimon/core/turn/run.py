@@ -368,7 +368,7 @@ async def _replace_dead_session(
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
 ) -> _Replacement:
-    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker):
+    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
         return await _replace_dead_session_locked(
             deps,
             prepared,

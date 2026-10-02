@@ -503,7 +503,7 @@ async def prepare_session_for_turn(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
-    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker):
+    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
         return await _prepare_session_for_turn_locked(
             deps,
             admission,

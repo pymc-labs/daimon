@@ -2810,6 +2810,16 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
             await request_fresh_start(db, id=first.mapping_id, at=_NOW)
         return await _prepare(deps, first.admission, tenant=tenant, account=account)
 
+    async def compatible_preparation():
+        try:
+            return await _prepare(deps, first.admission, tenant=tenant, account=account)
+        except SessionBusyError as error:
+            # The fresh-start request can land after compatible preparation
+            # releases its lock for vault I/O. Its final recheck must refuse
+            # that stale result; retry against the now-current mapping.
+            assert error.pending_reasons == ("session_changed",)
+            return await _prepare(deps, first.admission, tenant=tenant, account=account)
+
     tasks = []
     try:
         tasks.append(asyncio.create_task(send(0)))
@@ -2836,9 +2846,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
                 if waits + queued == 14:
                     break
                 await asyncio.sleep(0.01)
-        tasks.append(
-            asyncio.create_task(_prepare(deps, first.admission, tenant=tenant, account=account))
-        )
+        tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 15)
@@ -2860,4 +2868,150 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         await asyncio.gather(*tasks, return_exceptions=True)
         await client.close()
         await deps.anthropic.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("entry", ["handle", "prepared"])
+async def test_sends_complete_while_two_replacements_block_on_ma_io(
+    db_session, db_nullpool_engine, db_schema, monkeypatch, entry
+):
+    """Two checkpoints, then two MA creates, must leave sends usable at 5+10."""
+    from daimon.core.session_preparation_gate import PreparationGate
+    from daimon.core.turn import run as turn_run
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.turn_fakes import RecordingLifecycle
+
+    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, seed_factory
+    )
+    account = await _account_of(seed_factory, first.admission.account_id)
+    send_turns = []
+    for thread in ("replacement-2", "send-1", "send-2"):
+        result = await _prepare(
+            deps, first.admission, tenant=tenant, account=account, thread_id=thread
+        )
+        assert isinstance(result, PreparedTurn)
+        if thread.startswith("send-"):
+            send_turns.append(result)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"],
+        db_schema,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=2,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    deps = replace(deps, sessionmaker=factory, preparation_gate=PreparationGate(2))
+    changed_agent = first.admission.agent.model_copy(
+        update={"model": _agent(model_id="claude-opus-5").model}
+    )
+    _register(transport.state, changed_agent)
+    changed = replace(first.admission, agent=changed_agent)
+    checkpoint_entered, create_entered = asyncio.Event(), asyncio.Event()
+    checkpoint_release, create_release = asyncio.Event(), asyncio.Event()
+    checkpoints = creates = 0
+    original_create = deps.anthropic.beta.sessions.create
+
+    async def blocked_create(*args, **kwargs):
+        nonlocal creates
+        creates += 1
+        if creates == 2:
+            create_entered.set()
+        await create_release.wait()
+        return await original_create(*args, **kwargs)
+
+    monkeypatch.setattr(deps.anthropic.beta.sessions, "create", blocked_create)
+
+    async def checkpoint(**kwargs):
+        nonlocal checkpoints
+        await kwargs["before_send"]()
+        checkpoints += 1
+        if checkpoints == 2:
+            checkpoint_entered.set()
+        await checkpoint_release.wait()
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
+        )
+
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="user-1",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
+    )
+    runtime = SimpleNamespace(client=deps.anthropic, session_factory=factory)
+    recheck = _admission_recheck(
+        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+    )
+
+    async def send(index, phase):
+        prepared = send_turns[index]
+        message = f"send during {phase} {index}"
+        if entry == "handle":
+            return await _continue_turn_impl(
+                runtime, auth, prepared.ma_session_id, message, recheck=recheck
+            )
+
+        async def reseed():
+            return message
+
+        return await turn_run.run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=f"send-{index + 1}",
+            external_user_id="user-1",
+            user_message=message,
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            render_interval_s=0.001,
+        )
+
+    tasks = [
+        asyncio.create_task(
+            _prepare(
+                deps, changed, tenant=tenant, account=account, thread_id=thread, transfer=checkpoint
+            )
+        )
+        for thread in ("thread-1", "replacement-2")
+    ]
+    try:
+        for phase, entered, release in (
+            ("checkpoint", checkpoint_entered, checkpoint_release),
+            ("create", create_entered, create_release),
+        ):
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+            except TimeoutError:
+                assert not any(task.done() for task in tasks), [
+                    task.result() for task in tasks if task.done()
+                ]
+                raise
+            assert all(not task.done() for task in tasks)
+            await asyncio.wait_for(asyncio.gather(*(send(i, phase) for i in range(2))), 2)
+            for prepared in send_turns:
+                assert any(
+                    e["type"] == "user.message" and phase in json.dumps(e["content"])
+                    for e in transport.state.events[prepared.ma_session_id]
+                )
+            assert all(not task.done() for task in tasks)
+            release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        assert all(isinstance(result, PreparedTurn) for result in results)
+    finally:
+        checkpoint_release.set()
+        create_release.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await deps.anthropic.close()
+        await admission_deps.anthropic.close()
         await engine.dispose()
