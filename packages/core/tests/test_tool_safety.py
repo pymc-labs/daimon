@@ -12,6 +12,7 @@ from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     classify_tool,
     decide_tool_call,
+    has_confirmation_gate,
     heal_reserved_server,
     session_tools_for_policy,
     toolset_permission_policy,
@@ -260,3 +261,18 @@ def test_daimon_add_skill_asks_only_when_it_uploads() -> None:
     assert decide(OPEN_TOOL_SAFETY, upload, attended=True, trusted_servers=trusted).reason == (
         "disabled"
     ), "off by default: nothing about add_skill changes until the policy is on"
+
+
+def test_only_a_session_created_gated_holds_add_skill_for_a_person() -> None:
+    """The server reads the session's own tools: the gate as created, never the model's word."""
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    gated = session_tools_for_policy(_ON, _tools(), trusted_servers=trusted)
+    assert gated is not None
+    assert has_confirmation_gate(gated, tool_name="add_skill"), "the per-tool ask"
+    untrusted = session_tools_for_policy(_ON, _tools())
+    assert untrusted is not None
+    assert has_confirmation_gate(untrusted, tool_name="add_skill"), "the whole toolset asks"
+    assert not has_confirmation_gate(_tools(), tool_name="add_skill"), (
+        "a session created before the gate, or without tool safety, never asks"
+    )
+    assert not has_confirmation_gate(_tools()[2:], tool_name="add_skill"), "no daimon toolset"

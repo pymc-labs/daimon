@@ -6,11 +6,16 @@ library skill (`{t8}-{name}`); a name that would mount beside one of those is
 refused. Its `user_skills` row is `source="upload"` under the agent's derived
 identity, so a later skill-repo sync never replaces or re-attaches it.
 
-A fork copies its parent's skill ids, so a skill id another agent also holds
-is never given a new version: that would change the other agent too.
+A fork drops agent-scoped skills (`copy_agent`), but one attached by id, or
+kept by an older fork, may still be held by another agent, so a skill id
+another agent also holds is never given a new version: that would change the
+other agent too.
 
 Who may add a skill is the caller's decision (`operation_policy`'s
-`skill_add`); this module only refuses what no caller may do.
+`skill_add` and the pin rule); the caller passes it as `recheck`, which runs
+again on the freshly read agent right before the upload and the attach. This
+module only refuses what no caller may do. Its refusals never name another
+agent, which the caller's isolation may hide.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import re
 import shutil
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 
@@ -49,6 +55,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "AgentRecheck",
     "SkillAddResult",
     "add_agent_skill",
     "fetch_attachment",
@@ -57,6 +64,9 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+AgentRecheck = Callable[[BetaManagedAgentsAgent], Awaitable[None]]
+"""The caller's own gate, run on a freshly read agent; it raises to refuse."""
 
 
 class SkillAddResult(BaseModel):
@@ -162,12 +172,16 @@ async def add_agent_skill(
     bundle: SkillBundle,
     origin: str,
     added_by_account_id: uuid.UUID | None,
+    recheck: AgentRecheck,
 ) -> SkillAddResult:
     """Upload `bundle` as `agent`'s own skill and attach it. Re-adding updates it.
 
     Everything that can refuse runs before the upload, so a refusal changes
-    nothing. An attach that still fails afterwards leaves the upload recorded;
-    adding the same skill again attaches it without uploading twice.
+    nothing. `recheck` runs on the agent as it is right before the upload and
+    again inside the attach, so a pin or a share added since the caller's
+    check still refuses. An attach that still fails afterwards leaves the
+    upload recorded; adding the same skill again attaches it without
+    uploading twice.
     """
     preview = bundle.preview
     ledger_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
@@ -220,6 +234,7 @@ async def add_agent_skill(
             name=preview.name,
             own_skill_id=skill_id,
         )
+        await recheck(await client.beta.agents.retrieve(agent.id))
         if skill_id is None:
             created = await client.beta.skills.create(
                 display_title=tenant_scoped_display_title(
@@ -253,7 +268,7 @@ async def add_agent_skill(
             added_by_account_id=added_by_account_id,
         )
     newly_attached = await _attach(
-        client, tenant_id=tenant_id, agent_id=agent.id, skill_id=skill_id
+        client, tenant_id=tenant_id, agent_id=agent.id, skill_id=skill_id, recheck=recheck
     )
     _log.info(
         "skill_upload.added",
@@ -305,17 +320,17 @@ async def _refuse_shared(
     name: str,
     skill_id: str,
 ) -> None:
-    """Refuse a new version of `skill_id` while any other agent in the tenant has it."""
-    others = sorted(
-        other.name
+    """Refuse a new version of `skill_id` while any other agent in the tenant has it.
+
+    The other agent stays unnamed: it may be an isolated channel's, hidden from the caller.
+    """
+    if any(
+        other.id != agent.id and any(skill.skill_id == skill_id for skill in other.skills)
         for other in await list_agents_by_tenant(client, tenant_id=tenant_id)
-        if other.id != agent.id and any(skill.skill_id == skill_id for skill in other.skills)
-    )
-    if others:
+    ):
         raise SkillIngestError(
-            f"'{name}' on {agent_name} is also attached to {', '.join(others[:3])}, which "
-            "would get the new version too. Add "
-            f"this under a new name (e.g. {name}-2)."
+            f"'{name}' on {agent_name} is also attached to another agent, which would get "
+            f"the new version too. Add this under a new name (e.g. {name}-2)."
         )
 
 
@@ -343,20 +358,27 @@ async def _refuse_mount_clash(
         if skill.skill_id == own_skill_id:
             continue
         body = skill.skill_id if skill.type == "anthropic" else bodies.get(skill.skill_id)
+        # Its title may carry another agent's name, so it is not repeated.
         if body is not None and body.rsplit("/", 1)[-1] == name:
             raise SkillIngestError(
-                f"{agent_name} already has a skill that loads as '{name}' ({body}). "
+                f"{agent_name} already has a skill that loads as '{name}'. "
                 f"Rename this one (e.g. {name}-2)."
             )
 
 
 async def _attach(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: str, skill_id: str
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    skill_id: str,
+    recheck: AgentRecheck,
 ) -> bool:
     attached = False
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         nonlocal attached
+        await recheck(fresh)
         if any(skill.skill_id == skill_id for skill in fresh.skills):
             return fresh
         wanted: list[BetaManagedAgentsSkillParams] = [{"type": "custom", "skill_id": skill_id}]

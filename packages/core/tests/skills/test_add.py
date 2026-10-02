@@ -16,6 +16,7 @@ from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skills.add import (
+    AgentRecheck,
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
@@ -119,7 +120,11 @@ async def _add(
     *,
     text: str | None = None,
     added_by: uuid.UUID | None = None,
+    recheck: AgentRecheck | None = None,
 ):
+    async def allow(_fresh: BetaManagedAgentsAgent) -> None:
+        return None
+
     return await add_agent_skill(
         build_fake_anthropic(fake.router().dispatch),
         factory,
@@ -129,6 +134,7 @@ async def _add(
         bundle=bundle_from_markdown(text or _md()),
         origin="pasted",
         added_by_account_id=added_by,
+        recheck=recheck or allow,
     )
 
 
@@ -239,6 +245,32 @@ async def test_an_agent_at_the_skill_cap_is_refused_before_uploading(
     assert fake.created_titles == []
 
 
+async def test_a_recheck_on_the_fresh_agent_refuses_before_the_upload_and_the_attach(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A pin or a share added after the caller's check still stops the write."""
+    tenant = await make_tenant(db_session)
+    fake = _FakeMA(agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id))
+    seen: list[str] = []
+
+    async def refuse(fresh: BetaManagedAgentsAgent) -> None:
+        seen.append(fresh.id)
+        raise SkillIngestError("pinned since")
+
+    with pytest.raises(SkillIngestError, match="pinned since"):
+        await _add(fake, db_session_factory, tenant.id, recheck=refuse)
+    assert seen == ["ag_1"] and fake.created_titles == [], "refused before uploading"
+
+    async def refuse_second(fresh: BetaManagedAgentsAgent) -> None:
+        seen.append(fresh.id)
+        if len(seen) > 2:
+            raise SkillIngestError("shared since")
+
+    with pytest.raises(SkillIngestError, match="shared since"):
+        await _add(fake, db_session_factory, tenant.id, recheck=refuse_second)
+    assert fake.updates == [], "refused at the attach, on the agent as it is then"
+
+
 async def _repo_skill(files: dict[str, bytes], path: str):
     tarball = make_tarball(files)
     transport = httpx.MockTransport(lambda _r: httpx.Response(200, content=tarball))
@@ -295,9 +327,10 @@ async def test_a_skill_a_fork_shares_is_never_given_a_new_version(
     fake.agent = ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, skills=held)
     fake.others = [ma_agent(id="ag_2", name="agent-fork", tenant_id=tenant.id, skills=held)]
 
-    with pytest.raises(SkillIngestError, match="also attached to agent-fork"):
+    with pytest.raises(SkillIngestError, match="also attached to another agent") as refused:
         await _add(fake, db_session_factory, tenant.id, text=_md("Write them twice."))
     assert fake.versions == [], "the fork's copy is untouched"
+    assert "agent-fork" not in str(refused.value), "the other agent may be hidden from the caller"
 
 
 async def test_an_earlier_upload_is_adopted_only_when_no_other_agent_holds_it(
@@ -311,7 +344,7 @@ async def test_an_earlier_upload_is_adopted_only_when_no_other_agent_holds_it(
         skills=[_skill("sk_old", title)],
         others=[ma_agent(id="ag_2", name="other", tenant_id=tenant.id, skills=held)],
     )
-    with pytest.raises(SkillIngestError, match="also attached to other"):
+    with pytest.raises(SkillIngestError, match="also attached to another agent"):
         await _add(fake, db_session_factory, tenant.id)
 
     fake.others = []
@@ -333,9 +366,12 @@ async def test_a_skill_already_loading_under_that_name_is_refused_before_uploadi
         ),
         skills=[_skill("sk_parent", inherited)],
     )
-    with pytest.raises(SkillIngestError, match="already has a skill that loads as 'notes'"):
+    with pytest.raises(
+        SkillIngestError, match="already has a skill that loads as 'notes'"
+    ) as refused:
         await _add(fake, db_session_factory, tenant.id)
     assert fake.created_titles == [] and fake.updates == []
+    assert "parent" not in str(refused.value), "its title names another agent, which stays unnamed"
 
 
 async def _fetch_with(handler: Any, *, path: str = "") -> None:

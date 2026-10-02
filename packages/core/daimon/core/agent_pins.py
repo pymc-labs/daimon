@@ -4,15 +4,16 @@ One rule for every path that adds to or edits an agent's configuration (keys,
 connector tokens, MCP servers, prompt, tools, skills): an admin always may, and
 so does a channel admin of every channel the agent is pinned to; on an agent
 the operator pinned to channels, anyone else may only act from a conversation
-inside those channels; an unpinned agent is unaffected. The
-request tools, the direct configuration tools and the private forms' submit
-paths all decide it with `daimon.core.authz.authorize(CONFIGURE)`, so the rule
-and its names can't drift.
+inside those channels; an unpinned agent is unaffected. The request tools,
+the direct configuration tools, the private forms' submit paths and the setup
+panels' Add skill all decide it with `daimon.core.authz.authorize(CONFIGURE)`,
+so the rule and its names can't drift.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import uuid
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -20,6 +21,7 @@ from daimon.core.authz import (
     Action,
     AgentRef,
     Place,
+    Subject,
     Surface,
     agent_names,
     authorize,
@@ -66,6 +68,41 @@ def agent_aliases(agents: Iterable[BetaManagedAgentsAgent]) -> dict[str, tuple[s
     return aliases
 
 
+async def pin_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    load_subject: Callable[[], Awaitable[Subject]],
+    load_agent: Callable[[], Awaitable[BetaManagedAgentsAgent | None]],
+    place: Place,
+) -> str | None:
+    """Refusal copy when `CONFIGURE` on the agent from `place` breaks a pin, else None.
+
+    The one decision behind every pin check outside the MCP tools: the private
+    forms (`request_pin_refusal`) and the setup panels. The subject and the
+    agent are read only when the tenant pins anything. An unreadable policy
+    refuses.
+    """
+    try:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        return POLICY_UNREADABLE_REFUSAL
+    if not policy.agent_channel_pins:
+        return None
+    agent = await load_agent()
+    decision = authorize(
+        policy,
+        subject=await load_subject(),
+        action=Action.CONFIGURE,
+        surface=Surface.CONFIG,
+        agent=(
+            AgentRef.unresolved() if agent is None else build_agent_ref(agent.name, agent.metadata)
+        ),
+        place=place,
+    )
+    return None if decision else PIN_WRITE_REFUSAL
+
+
 async def request_pin_refusal(
     session: AsyncSession, *, row: CredentialRequestRow, agent: BetaManagedAgentsAgent | None
 ) -> str | None:
@@ -78,31 +115,28 @@ async def request_pin_refusal(
     stored role, the signal the MCP gate reads too; so are the requester's
     channel admin grants, matched against the roles stored at their last turn.
     """
-    try:
-        policy = await load_access_policy(session, tenant_id=row.tenant_id)
-    except AccessPolicyUnreadable:
-        return POLICY_UNREADABLE_REFUSAL
-    if not policy.agent_channel_pins:
-        return None
-    decision = authorize(
-        policy,
-        subject=await load_stored_subject(
+
+    async def stored_subject() -> Subject:
+        return await load_stored_subject(
             session,
             tenant_id=row.tenant_id,
             platform=row.platform,
             account_id=row.account_id,
             platform_user_id=row.requester_platform_user_id,
-        ),
-        action=Action.CONFIGURE,
-        surface=Surface.CONFIG,
-        agent=(
-            AgentRef.unresolved() if agent is None else build_agent_ref(agent.name, agent.metadata)
-        ),
+        )
+
+    async def target() -> BetaManagedAgentsAgent | None:
+        return agent
+
+    return await pin_refusal(
+        session,
+        tenant_id=row.tenant_id,
+        load_subject=stored_subject,
+        load_agent=target,
         place=Place.from_origin(
             parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id
         ),
     )
-    return None if decision else PIN_WRITE_REFUSAL
 
 
 class FormPinRefused(Exception):

@@ -59,6 +59,7 @@ __all__ = [
     "VerdictReason",
     "classify_tool",
     "decide_tool_call",
+    "has_confirmation_gate",
     "heal_reserved_server",
     "session_tools_for_policy",
     "toolset_permission_policy",
@@ -521,3 +522,23 @@ def _ask_for_confirmed_tools(
             config["permission_policy"] = ask
             changed = True
     return out, changed
+
+
+def has_confirmation_gate(tools: Sequence[Mapping[str, Any]], *, tool_name: str) -> bool:
+    """Whether a session's tool list makes daimon's `tool_name` wait for a person.
+
+    `tools` is the session's own frozen agent (`sessions.retrieve`), dumped:
+    the per-tool `permission_policy` wins, else the toolset's default. A
+    session created before the gate, or without tool safety, answers False.
+    """
+    for entry in tools:
+        if entry.get("type") != "mcp_toolset" or entry.get("mcp_server_name") != DAIMON_SERVER_NAME:
+            continue
+        configs: Sequence[Mapping[str, Any]] = entry.get("configs") or []
+        config = next((c for c in configs if c.get("name") == tool_name), None)
+        default: Mapping[str, Any] = entry.get("default_config") or {}
+        policy: Mapping[str, Any] = (
+            (config or {}).get("permission_policy") or default.get("permission_policy") or {}
+        )
+        return policy.get("type") == "always_ask"
+    return False
