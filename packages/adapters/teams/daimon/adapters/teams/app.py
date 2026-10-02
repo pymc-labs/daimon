@@ -127,6 +127,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from microsoft_teams.api import (
+    Account,
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
@@ -802,6 +803,10 @@ class TeamsApp:
         cancel_key = (intent_id or uuid.uuid4()).hex
         # Every attempt's lifecycle; dead-session recovery adds one, the last is current.
         holder: list[TeamsTurnLifecycle] = []
+        # A ping mentions the asker in a channel; the 1:1 chat notifies them anyway.
+        requester = None
+        if inbound.kind == "channel":
+            requester = Account(id=inbound.user_id, name=inbound.user_name or "you")
 
         def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
             self._cancel_registry[cancel_key] = (cancel, inbound.user_id)
@@ -814,6 +819,8 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 unprompted=inbound.unprompted,
+                completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
+                requester=requester,
             )
             holder.append(attempt)
             return attempt

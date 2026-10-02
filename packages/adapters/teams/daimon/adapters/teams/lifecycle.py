@@ -2,7 +2,9 @@
 
 Like Slack's: the card is posted before session setup, edited at most every
 five seconds, and replaced by the first answer chunk; overflow chunks follow,
-the last with the feedback buttons; no usage footer. Teams streaming is unused:
+the last with the feedback buttons; no usage footer. With a completion ping
+the card closes instead and the answer is posted fresh, so Teams notifies,
+leading with an @mention of `requester` when given. Teams streaming is unused:
 it works only in personal chats and stops after two minutes. Cancel clicks
 route by `cancel_key` (the card intent id), carried from the first render.
 An `unprompted` turn (organic thread participation) posts no card: it stays
@@ -37,7 +39,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import termination_reason
-from microsoft_teams.api import MessageActivityInput, SentActivity
+from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from pydantic import SecretStr
 
 log = structlog.get_logger()
@@ -108,8 +110,12 @@ class TeamsTurnLifecycle:
         tenant_id: uuid.UUID | None = None,
         alert_webhook_url: SecretStr | None = None,
         unprompted: bool = False,
+        completion_ping: bool = False,
+        requester: Account | None = None,
     ) -> None:
         self._sender = sender
+        self._ping = completion_ping and not unprompted
+        self._requester = requester if self._ping else None
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -132,6 +138,8 @@ class TeamsTurnLifecycle:
         # A continuity notice that belongs above the answer it explains.
         self.answer_prefix: str | None = None
         self.answer_prefix_applied = False
+        # The first answer message: the card itself unless a ping posted it fresh.
+        self._answer_id: str | None = None
         # Each answer message as on screen, id -> (text, is_last), for later edits.
         self._shown: dict[str, tuple[str, bool]] = {}
         # Shown messages that are notice cards, not answers: edited as cards.
@@ -212,7 +220,7 @@ class TeamsTurnLifecycle:
     async def _close(self, text: str) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
         self._message_id = message_id = await self._edit(card.notice_card(text), self._message_id)
-        self.final_message_id = message_id
+        self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
         self._notices.add(message_id)
@@ -253,15 +261,21 @@ class TeamsTurnLifecycle:
                 answer = f"{answer}\n\n{degraded}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             last = len(chunks) - 1
+            fresh = self._ping and self._message_id is not None
+            if fresh:
+                await self._close(card.ANSWERED_BELOW)
             current = self._message_id
             for index, chunk in enumerate(chunks):
                 is_last = index == last
-                message = card.answer_message(chunk, is_last=is_last)
-                if index == 0:
+                mention = self._requester if index == 0 else None
+                message = card.answer_message(chunk, is_last=is_last, mention=mention)
+                if index == 0 and not fresh:
                     current = self._message_id = await self._edit(message, current)
-                    replaced = self.card_closed = True
+                    self.card_closed = True
                 else:
                     current = await self._send(message, message_id=None)
+                if index == 0:
+                    self._answer_id, replaced = current, True
                 self._shown[current] = (chunk, is_last)
             self.final_message_id = current
         except TEAMS_SEND_ERRORS as exc:
@@ -296,7 +310,7 @@ class TeamsTurnLifecycle:
         message, or the edit fails; the caller then sends it on its own.
         """
         return await self._amend(
-            self._message_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
+            self._answer_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
         )
 
     async def append_to_answer(self, text: str) -> bool:
@@ -317,7 +331,8 @@ class TeamsTurnLifecycle:
             if message_id in self._notices:
                 rendered = card.notice_card(updated)
             else:
-                rendered = card.answer_message(updated, is_last=shown[1])
+                mention = self._requester if message_id == self._answer_id else None
+                rendered = card.answer_message(updated, is_last=shown[1], mention=mention)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:

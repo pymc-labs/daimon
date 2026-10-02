@@ -1046,7 +1046,9 @@ class Settings(BaseSettings):
             "Per-tenant completion notification policy, keyed by tenant UUID. "
             "True enables accepted/done reactions and posts the final answer as a fresh reply "
             "mentioning only the requester "
-            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "on Discord and Slack. On Teams it closes the status card and posts the answer "
+            "fresh, mentioning the requester in channels (Teams bots cannot react). "
+            "Missing/false preserves in-place delivery. "
             "Configure DAIMON_COMPLETION_PINGS as a JSON object."
         ),
     )

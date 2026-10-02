@@ -26,7 +26,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
-from microsoft_teams.api import MessageActivityInput, SentActivity
+from microsoft_teams.api import Account, MentionEntity, MessageActivityInput, SentActivity
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
@@ -240,6 +240,36 @@ async def test_a_timed_out_cancel_notice_is_resent_then_collapsed_without_an_ans
     assert sender.activities[-1].id == "m-1"
     assert "went wrong finishing this turn" in _card_json(sender, -1), "no answer is claimed"
     assert lifecycle.card_closed
+
+
+async def test_a_completion_ping_closes_the_card_and_posts_the_answer_mentioning_the_asker() -> (
+    None
+):
+    sender = FakeSender()
+    asker = Account(id="aad-1", name="Ada")
+    lifecycle = await _posted(sender, completion_ping=True, requester=asker)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    closed, answer = sender.activities[1:]
+    assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json()
+    assert answer.id is None and answer.text == "<at>Ada</at>\n\nThe posterior mean is 3."
+    assert [e.mentioned.id for e in answer.entities or [] if isinstance(e, MentionEntity)] == [
+        "aad-1"
+    ]
+    assert lifecycle.card_closed and lifecycle.final_message_id == "m-3"
+
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    edited = sender.activities[-1]
+    assert edited.id == "m-3" and edited.text is not None
+    assert edited.text.startswith("<at>Ada</at>\n\nI lost the workspace."), "edits keep the ping"
+
+
+async def test_without_a_requester_a_ping_still_posts_fresh() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, completion_ping=True)
+    await lifecycle.on_terminal_success(_answer("Done."))
+    assert [a.id for a in sender.activities] == [None, "m-1", None], "the 1:1 chat gets no @"
+    assert sender.activities[-1].text == "Done."
 
 
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
