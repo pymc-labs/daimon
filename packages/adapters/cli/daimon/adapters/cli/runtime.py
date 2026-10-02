@@ -29,7 +29,12 @@ class CliRuntime:
 
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
-    engine = build_engine(str(settings.database.url))
+    engine = build_engine(
+        str(settings.database.url),
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+        pool_timeout=settings.database.pool_timeout,
+    )
     sessionmaker = build_session_factory(
         engine,
         crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),

@@ -40,6 +40,18 @@ def test_load_settings_parses_nested_delimiter_when_env_provided(
     assert settings.log.level == "DEBUG"
 
 
+def test_database_pool_settings_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_DATABASE__POOL_SIZE", "20")
+    monkeypatch.setenv("DAIMON_DATABASE__MAX_OVERFLOW", "10")
+    monkeypatch.setenv("DAIMON_DATABASE__POOL_TIMEOUT", "12.5")
+
+    database = load_settings(_env_file=None).database
+
+    assert (database.pool_size, database.max_overflow, database.pool_timeout) == (20, 10, 12.5)
+
+
 def test_ops_webhook_is_optional_and_reads_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")

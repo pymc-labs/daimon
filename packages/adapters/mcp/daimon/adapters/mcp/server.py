@@ -198,7 +198,12 @@ def create_mcp_app(
     effective_sessionmaker = sessionmaker
     engine = None
     if effective_sessionmaker is None:
-        engine = build_engine(str(effective_settings.database.url))
+        engine = build_engine(
+            str(effective_settings.database.url),
+            pool_size=effective_settings.database.pool_size,
+            max_overflow=effective_settings.database.max_overflow,
+            pool_timeout=effective_settings.database.pool_timeout,
+        )
         effective_sessionmaker = build_session_factory(
             engine,
             crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys),

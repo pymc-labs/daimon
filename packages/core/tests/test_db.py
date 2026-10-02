@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import pytest
+from daimon.core.config import DatabaseSettings
 from daimon.core.db import build_engine, build_session_factory
+from pydantic import PostgresDsn, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.pool import QueuePool
 
 
 @pytest.mark.asyncio
@@ -104,3 +108,35 @@ def test_build_engine_hides_bound_parameters_in_errors() -> None:
     engine = build_engine("postgresql+asyncpg://u:p@localhost:1/d")
 
     assert engine.sync_engine.hide_parameters is True
+
+
+def test_pool_settings_are_passed_to_engine() -> None:
+    settings = DatabaseSettings(
+        url=PostgresDsn("postgresql+asyncpg://u:p@localhost:1/d"),
+        pool_size=7,
+        max_overflow=3,
+        pool_timeout=8,
+    )
+    engine = build_engine(
+        str(settings.url),
+        pool_size=settings.pool_size,
+        max_overflow=settings.max_overflow,
+        pool_timeout=settings.pool_timeout,
+    )
+    try:
+        pool = cast(QueuePool, engine.sync_engine.pool)
+        assert pool.size() == 7
+        assert pool._max_overflow == 3  # pyright: ignore[reportPrivateUsage]
+        assert pool.timeout() == 8
+    finally:
+        engine.sync_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "name,value", [("pool_size", 0), ("max_overflow", -1), ("pool_timeout", 0)]
+)
+def test_invalid_pool_settings_are_rejected(name: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseSettings.model_validate(
+            {"url": "postgresql+asyncpg://u:p@localhost:1/d", name: value}
+        )

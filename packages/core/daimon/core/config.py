@@ -37,6 +37,29 @@ class DatabaseSettings(BaseModel):
             "development data. Unset in production."
         ),
     )
+    pool_size: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Persistent Postgres connections per process. Default 5; size against all "
+            "application processes and the database connection limit."
+        ),
+    )
+    max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Temporary Postgres connections above pool_size per process. Default 10; "
+            "include these in the database connection budget."
+        ),
+    )
+    pool_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Seconds to wait for a free Postgres connection before failing. Default 30 seconds."
+        ),
+    )
 
 
 class AnthropicSettings(BaseModel):
