@@ -1,6 +1,6 @@
 # Self-hosting daimon
 
-This guide expands the [agent-driven setup](../SETUP.md). It covers Docker
+This guide expands the [agent-driven setup](https://github.com/pymc-labs/daimon/blob/main/SETUP.md). It covers Docker
 Compose, chat-platform registration, running the processes by hand, the Claude
 Code login mounts, Microsoft Teams, chart storage and connecting MCP servers.
 
@@ -13,7 +13,7 @@ Code login mounts, Microsoft Teams, chart storage and connecting MCP servers.
 
 ## 1. Configure the environment
 
-From a checkout, ask your coding agent to follow [SETUP.md](../SETUP.md), or
+From a checkout, ask your coding agent to follow [SETUP.md](https://github.com/pymc-labs/daimon/blob/main/SETUP.md), or
 run its setup command yourself. The command creates `.env`, generates the MCP
 JWT secret, Postgres password and Fernet encryption key, and prints JSON with
 the next action. It preserves existing values when run again. Only the
