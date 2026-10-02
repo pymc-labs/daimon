@@ -860,7 +860,8 @@
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
         
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. Pass this turn's ``origin_context_id`` so a channel admin
+        creating it for their channel may set it up there.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -1267,6 +1268,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'skill_repos': dict({
             'anyOf': list([
