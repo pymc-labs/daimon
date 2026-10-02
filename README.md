@@ -19,6 +19,7 @@ back into the thread.
 or self-host it from this repo.
 
 [Documentation site](https://pymc-labs.github.io/daimon/) ·
+[Setup with a coding agent](SETUP.md) ·
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
 [Teams setup](docs/self-hosting.md#microsoft-teams-optional) ·
@@ -67,36 +68,35 @@ them; on Teams they are plain words (`setup`, `routines`, `help`) sent in a
 ## Quickstart
 
 You need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API
-key in a workspace dedicated to this deployment.
+key in a workspace dedicated to this deployment. If you use Claude Code or
+Codex, give it [SETUP.md](SETUP.md) and ask it to get a local first reply.
 
 1. Configure the environment.
 
    ```bash
    git clone https://github.com/pymc-labs/daimon.git && cd daimon
-   cp .env.example .env
+   python3 scripts/setup.py
    ```
 
-   In `.env`, set `DAIMON_ANTHROPIC__API_KEY`, `DAIMON_MCP__JWT_SECRET` (any
-   random string), `DAIMON_MCP__PUBLIC_URL` (`http://localhost:8765/mcp` for
-   local use), `POSTGRES_PASSWORD` and `DAIMON_CRYPTO__KEYS` (a Fernet key,
-   without which agent keys can't be saved).
+   Setup generates the signing secret, Postgres password and encryption key.
+   Put `DAIMON_ANTHROPIC__API_KEY` from the dedicated workspace in `.env`.
+   Run `python3 scripts/setup.py` again to check what remains.
 
-2. Create a Discord bot in the
-   [Developer Portal](https://discord.com/developers/applications), enable
-   the **Message Content Intent**, put its token in `.env` as
-   `DAIMON_DISCORD__BOT_TOKEN`, and invite it to a server you control.
-
-3. Start the stack.
+2. Start the stack and get a local first reply before creating a chat app.
 
    ```bash
-   docker compose up --build -d
+   docker compose up --build -d postgres init
+   docker compose run --rm --no-deps --entrypoint daimon init sessions create --json
    ```
 
-   This brings up Postgres, runs migrations, seeds the default agents and
-   skills, and starts the MCP, Discord and scheduler services.
+   Use the returned `session_id` with `daimon run` as shown in
+   [SETUP.md](SETUP.md#local-first-reply).
 
-`@mention` the bot in a channel. It replies in a new thread. If it stays
-silent, check `docker compose logs discord`.
+3. If you want Discord, create a bot in the
+   [Developer Portal](https://discord.com/developers/applications), enable
+   Message Content Intent, put its token in `.env`, invite it to your server,
+   and follow the [Discord checklist](docs/self-hosting.md#3-create-the-discord-application-optional).
+   Slack can be added with the [app manifest](docs/slack-app-manifest.yaml).
 
 The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
 detail, running without Docker, Slack, Microsoft Teams, the Claude Code login

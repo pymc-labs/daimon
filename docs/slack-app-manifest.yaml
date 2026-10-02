@@ -6,14 +6,19 @@
 # 3. Basic Information → App-Level Tokens → generate one with `connections:write`
 #    → DAIMON_SLACK__APP_TOKEN. Signing secret and OAuth client id/secret are on
 #    the same page → DAIMON_SLACK__SIGNING_SECRET / __CLIENT_ID / __CLIENT_SECRET.
-# 4. Manage Distribution → activate public distribution (the install flow needs it).
-# 5. Visit https://DAIMON_HOST/oauth/slack/install and install to your workspace.
+# 4. For installs outside the app owner's workspace, enable distribution in
+#    Manage Distribution. Socket Mode apps cannot be listed in Slack Marketplace.
+# 5. Route https://DAIMON_HOST/oauth/slack/* to the MCP service and visit
+#    https://DAIMON_HOST/oauth/slack/install to install to a workspace.
 #    The bot token is stored encrypted in daimon's database by that callback —
 #    there is no env var for it.
 #
 # The scope lists mirror SLACK_BOT_SCOPES / SLACK_USER_SCOPES in
 # packages/core/daimon/core/slack_oauth.py. They are code constants, not config:
 # if you edit them here, edit them there too or the install will fail.
+# Slack manifests support the scopes, bot events, commands, OAuth redirect and
+# Socket Mode settings below; app-level tokens and app credentials are issued
+# separately. https://docs.slack.dev/app-manifests/configuring-apps-with-app-manifests/
 
 display_information:
   name: daimon

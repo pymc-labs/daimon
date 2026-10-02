@@ -35,6 +35,9 @@ locally. A server you never authenticate simply has no daimons to list.
   decisions, or discussions that live in Slack or Discord, or name a daimon directly. It
   lists the daimons you can reach, picks the ones likely to have the answer, asks them,
   and merges the replies with their source workspace.
+- **`/daimon:setup` skill**: follows [`SETUP.md`](../SETUP.md) when you ask Claude
+  Code to self-host Daimon OS. It checks each step and gets a local first reply
+  before Discord or Slack registration.
 - **`/daimon:daimon-status` command**: lists every connected `daimon-*` server and the daimons
   reachable through it, without asking any of them a question. Use it to check what's
   connected before asking something.
