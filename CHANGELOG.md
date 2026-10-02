@@ -167,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord delivers files generated during tool-using turns into the chat thread,
   with upload-limit notices and protected-channel checks.
-- **Channel budgets.** Admins can cap what one Discord or Slack channel may
+- **Channel budgets.** Admins can cap what one Discord, Slack or Teams channel may
   spend, monthly, in total or over a fixed date range, with
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
@@ -186,7 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in channels they run (instructions, skills, keys, MCP servers, repos)
   and set or clear those channels' default agent, though never to another
   channel's own agent; built-in agents and the server default stay with server
-  admins. Slack grants are by member only. A routine or wake set up by someone
+  admins. Slack and Teams grants are by member only. A routine or wake set up by someone
   with more rights keeps the agent out of a channel admin's hands, and so do a
   personal default, someone else's live session or routine in another channel
   or in no known one, and, for key, MCP server and skill repo changes,

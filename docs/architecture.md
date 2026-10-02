@@ -439,7 +439,8 @@ else wrote. The check reads requesters' rights at edit time, as stored at
 their last chat turn: a requester promoted later runs earlier edits with the
 new rights. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
-panel, or with the CLI:
+panel, or with the CLI (`discord`, `slack` or `teams`; a Slack or Teams thread
+id names its channel):
 
 ```bash
 daimon channels admins get discord GUILD_ID [CHANNEL_ID] [--json]

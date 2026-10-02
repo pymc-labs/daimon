@@ -24,6 +24,7 @@ from daimon.adapters.cli.commands.channels import (
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.stores import channel_budgets
+from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -104,6 +105,42 @@ async def test_bad_requests_are_refused_before_any_write(
         )
     async with db_session_factory() as s:
         assert await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id) == []
+
+
+TEAMS_CHANNEL = "19:growth@thread.tacv2"
+TEAMS_USER = "0b8e2c1a-1d2e-4f3a-9b4c-5d6e7f8a9b0c"
+
+
+async def test_a_teams_thread_budgets_and_admins_its_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Teams channel ids contain ":", so only the `;messageid=` suffix is cut."""
+    rt = build_cli_runtime(db_session_factory)
+    console = _console()
+    tenant = await provision_tenant(db_session_factory, platform="teams", workspace_id="tid")
+    args = {"rt": rt, "console": console, "platform": "teams", "workspace_id": "tid"}
+    thread = f"{TEAMS_CHANNEL};messageid=1717"
+
+    await budget_set(
+        **args, channel_id=thread, usd="5", window="monthly", starts_at=None, ends_at=None
+    )
+    await channels_admins_set(
+        **args, channel_id=thread, roles=[], users=[TEAMS_USER.upper()], as_json=False
+    )
+
+    async with db_session_factory() as s:
+        budget = await channel_budgets.get_channel_budget(
+            s, tenant_id=tenant.tenant_id, platform="teams", channel_id=TEAMS_CHANNEL
+        )
+        admins = await get_channel_admins(
+            s, tenant_id=tenant.tenant_id, platform="teams", channel_id=TEAMS_CHANNEL
+        )
+    assert budget is not None, "a Teams thread budgets against its whole channel id"
+    assert admins is not None and admins.user_ids == (TEAMS_USER,), (
+        "the channel's admins are stored under the channel, Entra ids lower-cased"
+    )
+    await budget_clear(**args, channel_id=thread)
+    assert f"channel {TEAMS_CHANNEL}: budget cleared" in _out(console), "clear finds it"
 
 
 GUILD = "900000000000000001"

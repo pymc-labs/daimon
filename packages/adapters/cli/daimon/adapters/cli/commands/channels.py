@@ -46,8 +46,9 @@ admins_app = typer.Typer(
 )
 channels_app.add_typer(admins_app, name="admins")
 
-_PLATFORMS = ("discord", "slack")
+_PLATFORMS = ("discord", "slack", "teams")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
+_TEAMS_THREAD = ";messageid="
 _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
@@ -70,9 +71,14 @@ def _validate_platform(value: str) -> Platform:
     raise typer.BadParameter(f"unsupported platform {value!r}; valid: {', '.join(_PLATFORMS)}")
 
 
-def _channel(value: str) -> str:
-    """A Slack `<channel>:<thread ts>` id budgets against its channel."""
-    channel_id = value.strip().partition(":")[0]
+def _channel(platform: str, value: str) -> str:
+    """A thread id budgets against its channel.
+
+    Slack threads are `<channel>:<thread ts>`, Teams threads
+    `<channel>;messageid=<root>`; a Teams channel id itself contains ":".
+    """
+    separator = _TEAMS_THREAD if platform == "teams" else ":"
+    channel_id = value.strip().partition(separator)[0].strip()
     if not channel_id:
         raise typer.BadParameter("channel id must not be empty")
     return channel_id
@@ -191,7 +197,7 @@ async def budget_set(
         spec = parse_budget_spec(limit_usd=usd, window=window, starts_at=starts_at, ends_at=ends_at)
     except ChannelBudgetError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    target = _channel(channel_id)
+    target = _channel(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     if platform == "discord":
         target = await _discord_budget_channel(
@@ -245,7 +251,7 @@ async def budget_clear(
     channel_id: str,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    target = _channel(channel_id)
+    target = _channel(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     if platform == "discord":
         target = await _discord_budget_channel(
@@ -319,7 +325,7 @@ def _ids(
 ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     try:
         return normalize_channel_admin_ids(
-            platform, channel_id=channel_id, role_ids=roles, user_ids=users
+            platform, channel_id=_channel(platform, channel_id), role_ids=roles, user_ids=users
         )
     except InvalidChannelAdminIds as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -377,9 +383,13 @@ def channels_admins_set_command(
     workspace_id: str,
     channel_id: str,
     role: Annotated[
-        list[str] | None, typer.Option(help="Discord role id (repeatable). Slack has no roles.")
+        list[str] | None,
+        typer.Option(help="Discord role id (repeatable). Slack and Teams have no roles."),
     ] = None,
-    user: Annotated[list[str] | None, typer.Option(help="Platform user id (repeatable).")] = None,
+    user: Annotated[
+        list[str] | None,
+        typer.Option(help="Platform user id; on Teams the Entra object id (repeatable)."),
+    ] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """Replace one channel's admins with the given roles and users."""
