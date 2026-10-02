@@ -72,6 +72,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
+    _refused,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
@@ -590,7 +591,7 @@ async def _continue_turn_impl(
     A channel-bound key's channel sealed since the session opened refuses the
     follow-up: the session's memory is writable and its stamp lacks the seal,
     so sealed messages would outlive an unseal (`_bound_seal`). The session's
-    own budget channel, which the follow-up is charged to, is gated too.
+    own budget channel, which a billed follow-up is charged to, is gated too.
     """
     _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -601,13 +602,26 @@ async def _continue_turn_impl(
         await recheck()
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
-    if await is_over_channel_budget(
+    if auth.platform_user_id is not None and await is_over_channel_budget(
         sessionmaker=runtime.session_factory,
         tenant_id=auth.tenant_id,
         platform=auth.platform or "",
         channel_id=(session.metadata or {}).get(MA_METADATA_KEY_BUDGET_CHANNEL),
         now=dt.datetime.now(dt.UTC),
     ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool="continue_turn",
+            gate="channel_budget",
+        )
+        _refused(
+            runtime.session_factory,
+            auth,
+            "continue_turn",
+            TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+        )
         raise ToolError(_CHANNEL_BUDGET_SPENT_MSG)
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
