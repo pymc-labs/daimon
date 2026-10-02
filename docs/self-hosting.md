@@ -166,7 +166,7 @@ Two things work differently from Discord and Slack:
 
 - **Teams pushes messages to you.** Microsoft delivers every message to an
   HTTPS address you give it, so the Teams service needs a public hostname
-  with a valid certificate. Discord and Slack dial out and need neither.
+  with a valid certificate. Discord and Slack dial out for messages instead.
 - **One deployment serves one organisation.** The bot answers only people in
   the Microsoft 365 organisation it is registered in, and turns away
   messages from anywhere else.
@@ -196,7 +196,7 @@ You need:
 | Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
 | Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
 | Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
-| Turn on channel files (optional) | A global administrator, once |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin per team |
 
 ### 1. Register the app in Entra
 
@@ -251,9 +251,9 @@ az bot msteams create -g <resource-group> -n <bot-name>
 
 **Find your admins.** Teams doesn't tell bots who its admins are, so you list
 daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
-the person → copy **Object ID**. Admins can create agents and routines,
-replace shared keys, top up and see everyone's usage. Everyone else is a
-regular user, and you can change the list later.
+the person → copy **Object ID**. Admins can create routines, mint
+coding-tool tokens, replace shared keys, top up and see everyone's usage.
+Anyone can create an agent. You can change the list later.
 
 **Add the values to `.env`:**
 
@@ -348,12 +348,15 @@ Before you zip it, check these fields in `manifest.json`:
 
 - `termsOfUseUrl` should point at your own terms page, since daimon serves
   none.
+- `websiteUrl` and `privacyUrl` should point at pages you serve. The Teams
+  host itself answers 404 outside the four bot paths.
 - `name` is what people see. If you run more than one deployment, say a test
   one and a production one, give each its own Entra app, Azure Bot and
   package, with a distinct name such as `daimon (test)`.
 
-Then add the two icons (the `assets/` folder has daimon's artwork if you want
-it) and zip the three files, not the folder that holds them:
+Then add the two icons. `assets/icon.png` can be resized to 192×192 for
+`color.png`; the white-on-transparent `outline.png` you make yourself. Zip
+the three files, not the folder that holds them:
 
 ```bash
 cd teams-app && zip ../daimon-teams.zip manifest.json color.png outline.png
@@ -364,10 +367,11 @@ cd teams-app && zip ../daimon-teams.zip manifest.json color.png outline.png
 In the [Teams admin center](https://admin.teams.microsoft.com):
 
 1. **Teams apps** → **Manage apps** → **Upload new app**, then choose the zip.
-2. Open the uploaded app and make sure its status is **Allowed**.
-3. If people can't find it, check **Teams apps** → **Permission policies**:
-   the policy they're on must allow custom apps.
-4. Optional: under **Setup policies**, add the app to *Installed apps* to
+2. Open the uploaded app → **Users and groups** → **Edit availability**, and
+   make it available to everyone or to the people who'll use it. (Tenants not
+   yet on app centric management: check that its status is **Allowed** and
+   that **Permission policies** allow custom apps.)
+3. Optional: under **Setup policies**, add the app to *Installed apps* to
    install and pin it for everyone.
 
 A new upload can take anywhere from a few minutes to a few hours to show up
@@ -378,8 +382,8 @@ your apps** → **Upload an app**.
 ### 7. Say hello
 
 - **1:1 chat:** in Teams, **Apps** → **Built for your org** → your app →
-  **Add**. That opens a chat with the bot and it greets you. Send `help`, and
-  as an admin, `setup`.
+  **Add**. That opens a chat with the bot and it greets you. Send `help` or
+  `setup`.
 - **A team:** on the app's page, open the menu next to **Add** → **Add to a
   team**, then pick the team and a channel. A team owner is asked to allow
   the app to read the team's channel messages. Accept, since that's how the
@@ -405,7 +409,8 @@ bot open those files and save its own outputs to the channel's Files tab:
 2. Same app → **Authentication** → **Add a platform** → **Web**, with the
    redirect URI `https://teams.example.com/oauth/teams/files/callback`.
 3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
-   hostname, without `/api/messages`) and restart the `teams` service.
+   hostname, without `/api/messages`) and run
+   `docker compose --profile teams up -d` so the service picks it up.
 4. When a daimon admin shares a file in a team daimon can't open yet, the bot
    posts an **Enable files** card. Click it and sign in as a SharePoint or
    global admin. The first sign-in in your organisation must be a global
@@ -418,8 +423,8 @@ also shows how to grant a site by hand.
 
 ### If the bot doesn't answer
 
-- **"Make sure the app is registered and the Teams channel is enabled" when
-  adding the app:** the Azure Bot's Teams channel isn't on (step 2), or the
+- **Teams won't add the app and asks you to check that it's registered and
+  the Teams channel is enabled:** the Azure Bot's Teams channel isn't on (step 2), or the
   manifest's `id` and `botId` don't match the client ID.
 - **No answer anywhere, and nothing in `docker compose logs teams`:** the
   messages aren't reaching daimon. Check the messaging endpoint (step 4),
@@ -436,7 +441,8 @@ also shows how to grant a site by hand.
   setting up your organisation, and it refuses turns until it does. The log
   line says why.
 - **It stopped answering after months of working:** the client secret has
-  probably expired. Create a new one (step 1) and update `.env`.
+  probably expired. Create a new one (step 1), update `.env` and run
+  `docker compose --profile teams up -d`, which also recreates `mcp`.
 
 ### Updating the app
 

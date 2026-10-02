@@ -21,7 +21,7 @@ or self-host it from this repo.
 [Documentation site](https://pymc-labs.github.io/daimon/) ·
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
-[Teams setup](docs/teams.md) ·
+[Teams setup](docs/self-hosting.md#microsoft-teams-optional) ·
 [Claude Code plugin](plugin/README.md) ·
 [Changelog](CHANGELOG.md)
 
