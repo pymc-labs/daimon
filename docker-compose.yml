@@ -47,6 +47,7 @@ services:
     environment:
       DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required for `daimon defaults apply`}
+      DAIMON_CLI__WORKSPACE_ID: ${DAIMON_CLI__WORKSPACE_ID:-local}
     volumes:
       - ./defaults:/app/defaults:ro
     entrypoint: ["sh", "-c"]

@@ -82,7 +82,17 @@ def run_setup(env_file: Path) -> dict[str, int | list[str] | list[dict[str, str 
     """Prepare missing secrets; return a stable, secret-free JSON payload."""
     content = read_env(env_file)
     values = values_from_env(content)
+    # Earlier setup versions created these three values but left the CLI tenant at
+    # the implicit `local` default. Pin that identity before generating anything;
+    # changing it on a setup rerun would orphan an existing installation's tenant.
+    legacy_install = all(values.get(name) for name in _GENERATED)
     completed: list[str] = []
+    workspace_name = "DAIMON_CLI__WORKSPACE_ID"
+    if not values.get(workspace_name):
+        workspace_id = "local" if legacy_install else f"install-{secrets.token_hex(16)}"
+        content = _set_value(content, workspace_name, workspace_id)
+        values[workspace_name] = workspace_id
+    completed.append(workspace_name)
     for name in _GENERATED:
         if values.get(name):
             completed.append(name)

@@ -5,10 +5,17 @@ import uuid
 import pytest
 from daimon.adapters.cli.sessions_bootstrap import SessionBootstrapError
 from daimon.adapters.cli.tenant import discover_tenant
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.no_cli_local_seed
+
+
+def test_probe_cli_tenant_uuid_differs_from_local() -> None:
+    assert derive_tenant_uuid(platform="cli", workspace_id="local") != derive_tenant_uuid(
+        platform="cli", workspace_id="agent-setup-probe"
+    )
 
 
 @pytest.mark.asyncio

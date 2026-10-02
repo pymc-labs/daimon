@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands import setup as setup_mod
 from daimon.adapters.cli.main import app
+from daimon.core.ma_identity import derive_tenant_uuid
 from typer.testing import CliRunner
 
 
@@ -63,6 +65,10 @@ def test_setup_generates_valid_secrets_and_schema(
         == "Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace."
     )
     values = _env_values(env_file.read_text())
+    assert values["DAIMON_CLI__WORKSPACE_ID"].startswith("install-")
+    assert derive_tenant_uuid(platform="cli", workspace_id="local") != derive_tenant_uuid(
+        platform="cli", workspace_id=values["DAIMON_CLI__WORKSPACE_ID"]
+    )
     assert len(values["POSTGRES_PASSWORD"]) >= 40
     assert all(char.isalnum() or char in "_-" for char in values["POSTGRES_PASSWORD"])
     assert len(values["DAIMON_MCP__JWT_SECRET"]) >= 40
@@ -91,6 +97,77 @@ def test_setup_is_idempotent_and_preserves_existing_values(tmp_path: Path) -> No
     assert _env_values(first.decode())["POSTGRES_PASSWORD"] == "existing_password"
     assert _env_values(first.decode())["DAIMON_MCP__PUBLIC_URL"] == "https://mcp.example.test/mcp"
     assert "DAIMON_ANTHROPIC__API_KEY" not in payload["missing"]
+
+
+def test_fresh_installs_get_distinct_stable_cli_tenants(tmp_path: Path) -> None:
+    first_file = tmp_path / "one.env"
+    second_file = tmp_path / "two.env"
+    assert _invoke("--env-file", str(first_file))[0] == 0
+    assert _invoke("--env-file", str(second_file))[0] == 0
+    first_id = _env_values(first_file.read_text())["DAIMON_CLI__WORKSPACE_ID"]
+    second_id = _env_values(second_file.read_text())["DAIMON_CLI__WORKSPACE_ID"]
+    assert first_id != second_id
+    assert derive_tenant_uuid(platform="cli", workspace_id=first_id) != derive_tenant_uuid(
+        platform="cli", workspace_id=second_id
+    )
+    before = first_file.read_bytes()
+    assert _invoke("--env-file", str(first_file))[0] == 0
+    assert first_file.read_bytes() == before
+
+
+def test_legacy_install_keeps_cli_local_tenant(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=existing-password\n"
+        "DAIMON_MCP__JWT_SECRET=existing-jwt-secret\n"
+        "DAIMON_CRYPTO__KEYS=existing-crypto-key\n"
+    )
+    assert _invoke("--env-file", str(env_file))[0] == 0
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"] == "local"
+
+
+def test_setup_preserves_explicit_cli_workspace(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("DAIMON_CLI__WORKSPACE_ID=cli-probe\n")
+    assert _invoke("--env-file", str(env_file))[0] == 0
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"] == "cli-probe"
+
+
+def test_compose_forwards_probe_workspace_to_init_and_cli(tmp_path: Path) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is not installed")
+    compose_file = Path(__file__).resolve().parents[5] / "docker-compose.yml"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=test-password\n"
+        "DAIMON_ANTHROPIC__API_KEY=test-key\n"
+        "DAIMON_MCP__JWT_SECRET=test-jwt\n"
+        "DAIMON_CLI__WORKSPACE_ID=from-file\n"
+    )
+    environment = os.environ.copy()
+    environment["DAIMON_CLI__WORKSPACE_ID"] = "agent-setup-probe"
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(env_file),
+            "-f",
+            str(compose_file),
+            "config",
+            "--format",
+            "json",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # `docker compose run init ...` uses this same service environment.
+    assert (
+        json.loads(result.stdout)["services"]["init"]["environment"]["DAIMON_CLI__WORKSPACE_ID"]
+        == "agent-setup-probe"
+    )
 
 
 def test_setup_rejects_symlink(tmp_path: Path) -> None:

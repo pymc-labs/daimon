@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- New self-hosted installs now get a stable, unique CLI workspace identifier. Previously, two installs sharing one Anthropic workspace both used `cli:local` and could select the same Managed Agents resources. Existing installs keep their current CLI identity.
 - **An isolated channel's content no longer leaves through new agents, timers
   or reads.** An isolated channel's own agent, wherever it runs and through
   any of its coding-tool tokens, could call `create_agent`, and the new agent
