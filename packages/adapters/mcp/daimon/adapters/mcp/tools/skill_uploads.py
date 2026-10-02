@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlparse
 
 import anthropic
 import httpx
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import InvalidToken
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -96,6 +97,7 @@ class AddSkillResult(BaseModel):
 
 
 _TOOL_NAME = "add_skill"
+_log = structlog.get_logger(__name__)
 
 
 def _no_card_refusal(agent_name: str, *, deployment_has_cards: bool) -> str:
@@ -135,7 +137,15 @@ async def _session_asks_first(
         )
     if live is None:
         return False
-    ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
+    try:
+        ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
+    except anthropic.APIError as exc:
+        # Unreadable (a deleted session, an outage) is not evidence of a card:
+        # the confirm is refused like any other session without one.
+        _log.warning(
+            "add_skill.session_check_failed", ma_session_id=live.ma_session_id, error=str(exc)
+        )
+        return False
     return ma_session.agent.id == origin.responder_ma_agent_id and has_confirmation_gate(
         [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=_TOOL_NAME
     )

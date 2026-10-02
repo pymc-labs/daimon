@@ -50,6 +50,7 @@ from daimon.testing.ma import (
     combine_handlers,
     list_response,
     make_fake_ma_handler,
+    not_found_response,
 )
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
@@ -120,8 +121,10 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
 
     def sessions_handler(request: httpx.Request) -> httpx.Response:
         found = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)", request.url.path)
-        if request.method != "GET" or found is None or found["id"] not in sessions:
+        if request.method != "GET" or found is None:
             raise NotHandled
+        if found["id"] not in sessions:
+            return not_found_response(f"no such session: {found['id']}")
         return httpx.Response(200, json=sessions[found["id"]])
 
     settings = MagicMock()
@@ -307,6 +310,32 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
 
     preview = await add()
     assert "content_hash=" not in preview.summary and "/agent-setup" in preview.summary
+    with pytest.raises(ToolError, match="this conversation can't show one"):
+        await add(content_hash=preview.preview.content_hash)
+    assert world.created == [], "nothing was uploaded"
+
+
+async def test_a_session_that_cannot_be_read_previews_but_never_confirms(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A live row whose MA session is gone fails closed with the no-card refusal."""
+    world = await _world(db_session_factory)
+    auth, origin = await _chat_turn(world)
+    del world.sessions[f"sesn_{CHAT_THREAD}"]
+
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+            origin_context_id=origin,
+            **extra,
+        )
+
+    preview = await add()
+    assert "/agent-setup" in preview.summary, "the preview still shows, pointing at the panel"
     with pytest.raises(ToolError, match="this conversation can't show one"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "nothing was uploaded"
