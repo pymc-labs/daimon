@@ -10,10 +10,10 @@ preview returned, bound to this agent, and it never lands on the model's word
 alone: the server confirms only from a chat turn's verified origin whose live
 session itself makes ``add_skill`` wait for the person's Approve on the card
 (`has_confirmation_gate`). Anything else (tool safety off, an ``agent_chat``
-or unattended run, a session created before the gate) adds nothing and points
-to Add skill in ``/agent-setup``, which previews and adds on the person's own
-click. The pin and sharing gates run again on the fresh agent right before
-the upload and the attach.
+or unattended run, a session whose tools have not caught up with tool safety
+yet) adds nothing and points to Add skill in ``/agent-setup``, which previews
+and adds on the person's own click. The pin and sharing gates run again on
+the fresh agent right before the upload and the attach.
 """
 
 from __future__ import annotations
@@ -105,8 +105,8 @@ _log = structlog.get_logger(__name__)
 
 def _no_card_refusal(agent_name: str, *, deployment_has_cards: bool) -> str:
     why = (
-        "this conversation can't show one (it runs without a person, or it started "
-        "before the card existed; a new thread shows it)"
+        "this conversation can't show one (it runs without a person, or its session "
+        "has not picked the card up yet; the next message does)"
         if deployment_has_cards
         else "this deployment shows none"
     )

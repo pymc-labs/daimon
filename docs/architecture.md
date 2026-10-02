@@ -557,9 +557,11 @@ skill forgets it. `add_skill` previews first and adds only when called again
 with the preview's hash, which is bound to the target agent, and only after the
 person presses Approve on the confirmation card (below). The server checks the
 card can exist: the confirm needs a verified origin whose live session runs the
-origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`).
-Without that, as with tool safety off, an `agent_chat` session or one created
-before the card, a chat confirm adds nothing and points to Add skill in
+origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
+as MA reports the session or, when it reports the agent's own tools, as the
+bind recorded sending them. Without that, as with tool safety off, an
+`agent_chat` session or one whose tools have not caught up yet, a chat
+confirm adds nothing and points to Add skill in
 the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
@@ -654,9 +656,10 @@ the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
 their `operation_policy` checks), except `add_skill`: its confirming call, the
 one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
-`unattended_writes` allows. Gating is fixed when a session is created, so a
-session started before tool safety was turned on keeps running ungated until
-it is replaced; `add_skill` refuses in one. The
+`unattended_writes` allows. Each bind compares a reused session's tools with
+the gated ones a new session would get and updates them in place, so a
+session started before tool safety was turned on is gated from its next turn,
+and a tools change never writes the agent's own `always_allow` back. The
 exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
