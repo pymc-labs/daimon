@@ -16,21 +16,38 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 
-async def _shared_channel_ids(client: AsyncWebClient, user_id: str) -> set[str]:
-    """Channels both the bot and caller belong to, across Slack's cursor pages."""
-    result: set[str] = set()
+async def _channels(client: AsyncWebClient, *, user_id: str | None, types: str) -> dict[str, bool]:
+    """Collect every channel in a bot or caller membership listing."""
+    result: dict[str, bool] = {}
     cursor: str | None = None
     while True:
-        response = await client.users_conversations(  # pyright: ignore[reportUnknownMemberType]
-            user=user_id, types="public_channel,private_channel", limit=200, cursor=cursor
-        )
+        kwargs: dict[str, Any] = {"types": types, "limit": 200, "cursor": cursor}
+        if user_id is not None:
+            kwargs["user"] = user_id
+        response = await client.users_conversations(**kwargs)  # pyright: ignore[reportUnknownMemberType]
         result.update(
-            row["id"] for row in cast(list[dict[str, str]], response.get("channels") or [])
+            (str(row["id"]), bool(row.get("is_private")))
+            for row in cast(list[dict[str, Any]], response.get("channels") or [])
         )
         metadata = cast(dict[str, str], response.get("response_metadata") or {})
         cursor = metadata.get("next_cursor") or None
         if cursor is None:
             return result
+
+
+async def _visible_channel_ids(client: AsyncWebClient, user_id: str) -> set[str]:
+    """Bot channels the caller may see, including public channels for members."""
+    bot_channels = await _channels(client, user_id=None, types="public_channel,private_channel")
+    info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
+    user = cast(dict[str, Any], info.get("user") or {})
+    guest = bool(user.get("is_restricted") or user.get("is_ultra_restricted"))
+    member_types = "public_channel,private_channel" if guest else "private_channel"
+    member_ids = await _channels(client, user_id=user_id, types=member_types)
+    return {
+        channel_id
+        for channel_id, is_private in bot_channels.items()
+        if (not is_private and not guest) or channel_id in member_ids
+    }
 
 
 def _plain_blocks(card_text: str) -> list[dict[str, Any]]:
@@ -56,9 +73,9 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         channel = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownArgumentType]
-        bot_view = bool(channel.get("is_member")) if channel.get("is_private") else True
+        bot_view = bool(channel.get("is_member"))
         caller_view = True  # Slack delivered this command from the caller's channel.
-        visible_ids = await _shared_channel_ids(client, user_id)
+        visible_ids = await _visible_channel_ids(client, user_id)
         visible_ids.add(channel_id)
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         github = runtime.settings.github
