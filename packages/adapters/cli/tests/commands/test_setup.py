@@ -49,11 +49,15 @@ def test_setup_generates_valid_secrets_and_schema(
         "missing",
         "next_step",
         "next_optional",
+        "optional_actions",
     }
     assert payload["schema_version"] == 1
     assert payload["status"] == "needs_input"
     assert payload["next_optional"] == []
     assert payload["missing"] == ["DAIMON_ANTHROPIC__API_KEY"]
+    assert payload["optional_actions"][0]["id"] == "discord"
+    assert payload["optional_actions"][0]["status"] == "needs_token"
+    assert "DAIMON_DISCORD__BOT_TOKEN" in payload["optional_actions"][0]["next_step"]
     assert (
         payload["next_step"]
         == "Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace."
@@ -75,7 +79,9 @@ def test_setup_generates_valid_secrets_and_schema(
 def test_setup_is_idempotent_and_preserves_existing_values(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "POSTGRES_PASSWORD=existing_password\nDAIMON_ANTHROPIC__API_KEY=existing_api_key\n"
+        "POSTGRES_PASSWORD=existing_password\n"
+        "DAIMON_ANTHROPIC__API_KEY=existing_api_key\n"
+        "DAIMON_MCP__PUBLIC_URL=https://mcp.example.test/mcp\n"
     )
     assert _invoke("--env-file", str(env_file))[0] == 0
     first = env_file.read_bytes()
@@ -83,6 +89,7 @@ def test_setup_is_idempotent_and_preserves_existing_values(tmp_path: Path) -> No
     assert rc == 0
     assert env_file.read_bytes() == first
     assert _env_values(first.decode())["POSTGRES_PASSWORD"] == "existing_password"
+    assert _env_values(first.decode())["DAIMON_MCP__PUBLIC_URL"] == "https://mcp.example.test/mcp"
     assert "DAIMON_ANTHROPIC__API_KEY" not in payload["missing"]
 
 
@@ -96,6 +103,7 @@ def test_setup_rejects_symlink(tmp_path: Path) -> None:
     assert actual.read_text() == "POSTGRES_PASSWORD=kept\n"
     assert payload["completed"] == []
     assert payload["status"] == "error"
+    assert payload["optional_actions"] == []
 
 
 def test_stdlib_bootstrap_matches_installed_cli(
@@ -127,11 +135,20 @@ def test_stdlib_bootstrap_matches_installed_cli(
     assert (
         set(script_payload)
         == set(cli_payload)
-        == {"schema_version", "status", "completed", "missing", "next_step", "next_optional"}
+        == {
+            "schema_version",
+            "status",
+            "completed",
+            "missing",
+            "next_step",
+            "next_optional",
+            "optional_actions",
+        }
     )
     assert script_payload["missing"] == cli_payload["missing"]
     assert script_payload["next_step"] == cli_payload["next_step"]
     assert script_payload["next_optional"] == cli_payload["next_optional"]
+    assert script_payload["optional_actions"] == cli_payload["optional_actions"]
     assert first.stderr == ""
     for value in _env_values(before.decode()).values():
         assert value not in first.stdout
@@ -156,6 +173,7 @@ def test_ready_step_names_seeded_cli_first_reply(
     assert rc == 0
     assert payload["missing"] == []
     assert payload["status"] == "ready"
+    assert payload["optional_actions"][0]["status"] == "ready_to_verify"
     assert payload["next_optional"] == [
         {
             "id": "github_app",
@@ -193,6 +211,7 @@ def test_cli_first_reply_step_precedes_optional_discord_setup(
     assert rc == 0
     assert payload["missing"] == []
     assert payload["status"] == "ready"
+    assert payload["optional_actions"][0]["status"] == "needs_token"
     assert payload["next_optional"][0]["available"] is False
     assert "docker compose up --build -d postgres init" in payload["next_step"]
     assert "sessions create --json" in payload["next_step"]

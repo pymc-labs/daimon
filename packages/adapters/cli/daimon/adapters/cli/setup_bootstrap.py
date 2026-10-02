@@ -31,6 +31,7 @@ _GITHUB_OPTIONAL: dict[str, str | bool] = {
     "status": "planned",
     "available": False,
 }
+_DISCORD_VERIFY_COMMAND = "daimon setup verify discord --guild-id GUILD_ID"
 
 
 def values_from_env(content: str) -> dict[str, str]:
@@ -114,6 +115,23 @@ def run_setup(env_file: Path) -> dict[str, int | list[str] | list[dict[str, str 
     required_missing = set(missing)
     next_step = next((step for name, step in _HUMAN_STEPS if name in required_missing), _READY_STEP)
     next_optional = [_GITHUB_OPTIONAL.copy()] if not required_missing else []
+    has_discord_token = bool(
+        values.get("DAIMON_DISCORD__BOT_TOKEN") or os.environ.get("DAIMON_DISCORD__BOT_TOKEN")
+    )
+    optional_actions: list[dict[str, str | bool]] = [
+        {
+            "id": "discord",
+            "status": "ready_to_verify" if has_discord_token else "needs_token",
+            "command": _DISCORD_VERIFY_COMMAND,
+            "why": "connect a Discord server after the local CLI first reply",
+            "next_step": (
+                f"Run `{_DISCORD_VERIFY_COMMAND}` for your test server."
+                if has_discord_token
+                else "Create a Discord app and bot, set DAIMON_DISCORD__BOT_TOKEN in .env, "
+                f"then run `{_DISCORD_VERIFY_COMMAND}`."
+            ),
+        }
+    ]
     return {
         "schema_version": 1,
         "status": "needs_input" if required_missing else "ready",
@@ -121,4 +139,5 @@ def run_setup(env_file: Path) -> dict[str, int | list[str] | list[dict[str, str 
         "missing": missing,
         "next_step": next_step,
         "next_optional": next_optional,
+        "optional_actions": optional_actions,
     }
