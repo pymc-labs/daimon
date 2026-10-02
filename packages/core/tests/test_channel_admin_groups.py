@@ -12,9 +12,11 @@ from daimon.core.channel_admins import (
     GroupMembersCache,
     channel_admin_user_ids,
     confirm_stored_group_ids,
+    confirm_stored_subject,
     load_member_group_ids,
     load_stored_subject,
     member_group_ids,
+    read_stored_admin,
 )
 from daimon.core.stores.accounts import set_platform_role_ids
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -164,14 +166,14 @@ async def test_a_stored_slack_group_grants_only_while_a_live_lookup_admits_the_p
     await _grant(db_session, tenant, "S1", [])
 
     async def administered(members: Callable[[str], Awaitable[frozenset[str]]] | None) -> set[str]:
-        subject = await load_stored_subject(
+        stored = await read_stored_admin(
             db_session,
             tenant_id=tenant.id,
             platform="slack",
             account_id=account_id,
             platform_user_id="U1",
-            members=members,
         )
+        subject = await confirm_stored_subject(stored, members)
         return set(subject.administered_channel_ids)
 
     _, still_in = _fetcher({"S1": frozenset({"U1"})})

@@ -342,6 +342,73 @@ async def load_live_subject(
     )
 
 
+class StoredAdmin(BaseModel):
+    """A caller's stored role and groups, and their tenant's grants, as read from the DB."""
+
+    model_config = ConfigDict(frozen=True)
+
+    is_admin: bool
+    platform: str | None
+    platform_user_id: str | None
+    role_ids: tuple[str, ...] = ()
+    grants: tuple[ChannelAdminsRow, ...] = ()
+
+
+async def read_stored_admin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str | None,
+    account_id: uuid.UUID,
+    platform_user_id: str | None,
+) -> StoredAdmin:
+    """The DB half of a stored subject; `confirm_stored_subject` is the live half.
+
+    A server admin's grants are not read; they need none.
+    """
+    account = await get_account(session, account_id)
+    if account is None or account.role is Role.ADMIN:
+        return StoredAdmin(
+            is_admin=account is not None, platform=platform, platform_user_id=platform_user_id
+        )
+    grants = (
+        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+        if platform in CHANNEL_ADMIN_PLATFORMS
+        else []
+    )
+    return StoredAdmin(
+        is_admin=False,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        role_ids=account.platform_role_ids,
+        grants=tuple(grants),
+    )
+
+
+async def confirm_stored_subject(stored: StoredAdmin, members: GroupMembers | None) -> Subject:
+    """The caller as their stored role and grants describe them, as of their last chat turn.
+
+    For callers with no live platform role: a private form's submit and a hub
+    login. Stored Slack groups and Teams teams count only as `members`
+    confirms them now. Run it with no DB session open: a lookup may be slow.
+    """
+    if stored.is_admin:
+        return build_subject(is_admin=True, platform_user_id=stored.platform_user_id)
+    role_ids = await confirm_stored_group_ids(
+        stored.platform,
+        stored.platform_user_id,
+        stored.role_ids,
+        members,
+        named=grant_group_ids(stored.grants),
+    )
+    caller = ChannelAdminCaller(platform_user_id=stored.platform_user_id, role_ids=role_ids)
+    return build_subject(
+        is_admin=False,
+        platform_user_id=stored.platform_user_id,
+        administered_channel_ids=administered_channel_ids(caller, stored.grants),
+    )
+
+
 async def load_stored_subject(
     session: AsyncSession,
     *,
@@ -349,35 +416,21 @@ async def load_stored_subject(
     platform: str | None,
     account_id: uuid.UUID,
     platform_user_id: str | None,
-    members: GroupMembers | None = None,
 ) -> Subject:
-    """The caller as their stored role and grants describe them, as of their last chat turn.
+    """The stored subject with no live lookup, for a caller inside a session or a lock.
 
-    For callers with no live platform role: a private form's submit and a hub
-    login. A server admin's grants are not read; they need none. Stored Slack
-    groups and Teams teams count only as `members` confirms them now.
+    A stored Slack group or Teams team grants nothing here; a caller that can
+    look them up reads (`read_stored_admin`), closes its session, then
+    confirms (`confirm_stored_subject`).
     """
-    account = await get_account(session, account_id)
-    if account is None or account.role is Role.ADMIN:
-        return build_subject(is_admin=account is not None, platform_user_id=platform_user_id)
-    grants = (
-        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
-        if platform in CHANNEL_ADMIN_PLATFORMS
-        else []
-    )
-    role_ids = await confirm_stored_group_ids(
-        platform,
-        platform_user_id,
-        account.platform_role_ids,
-        members,
-        named=grant_group_ids(grants),
-    )
-    caller = ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids)
-    return build_subject(
-        is_admin=False,
+    stored = await read_stored_admin(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        account_id=account_id,
         platform_user_id=platform_user_id,
-        administered_channel_ids=administered_channel_ids(caller, grants),
     )
+    return await confirm_stored_subject(stored, None)
 
 
 async def live_group_member_ids(
@@ -449,9 +502,11 @@ __all__ = [
     "GroupMembersCache",
     "GroupMembersFor",
     "InvalidChannelAdminIds",
+    "StoredAdmin",
     "administered_channel_ids",
     "channel_admin_user_ids",
     "confirm_stored_group_ids",
+    "confirm_stored_subject",
     "fit_lines",
     "fold_mentions",
     "grant_group_ids",
@@ -462,5 +517,6 @@ __all__ = [
     "load_member_group_ids",
     "member_group_ids",
     "load_stored_subject",
+    "read_stored_admin",
     "normalize_channel_admin_ids",
 ]

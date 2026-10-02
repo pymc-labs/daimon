@@ -7,10 +7,13 @@ double-submit idempotency, sealed origins, and the access refusals.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +31,7 @@ from daimon.adapters.slack.support_escalation import (
     slack_support_enabled,
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores import accounts
@@ -542,3 +546,60 @@ async def test_unreachable_channel_admins_fall_back_to_server_admins_then_the_ch
     assert [p["channel"] for p in _posts(permalink)] == ["D_U_SERVER", _ESC_CHANNEL], (
         "with no admin reachable, the escalation channel still gets it"
     )
+
+
+_GROUP_USERS_PATTERN = re.compile(r"https://slack\.com/api/usergroups\.users\.list.*")
+
+
+async def test_a_stored_group_is_looked_up_with_no_session_open(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    """A slow Slack must hold neither a pooled connection nor the ledger transaction."""
+    tenant_id, key = await _seed(db_session)
+    tenant = await get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="slack", external_id=_USER, tenant=tenant, account=account
+    )
+    await accounts.set_platform_role_ids(db_session, account.id, ["S1"])
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=_CHANNEL,
+        role_ids=["S1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    open_sessions = [0]
+    seen: list[int] = []
+
+    @asynccontextmanager
+    async def counting() -> AsyncIterator[AsyncSession]:
+        open_sessions[0] += 1
+        try:
+            async with db_session_factory() as session:
+                yield session
+        finally:
+            open_sessions[0] -= 1
+
+    def listed(url: yarl.URL, **_: Any) -> CallbackResult:
+        seen.append(open_sessions[0])
+        return CallbackResult(payload={"ok": True, "users": [_USER]})
+
+    permalink.mock.get(_GROUP_USERS_PATTERN, callback=listed, repeat=True)
+    _dms(permalink)
+    runtime = dataclasses.replace(
+        _runtime(key, cast(Any, counting), _support()), group_members=GroupMembersCache(ttl_s=0)
+    )
+    runtime.settings.direct_message_policies = {}
+
+    await handle_ask_human_click(runtime, _click())
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert len(seen) >= 2, "the click and the submit each looked the group up"
+    assert set(seen) == {0}, "every lookup ran after its session closed"

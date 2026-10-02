@@ -58,8 +58,8 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
-from daimon.core.authz import Action, Place, Subject, authorize, build_subject, build_turn_place
-from daimon.core.channel_admins import GroupMembers, load_stored_subject
+from daimon.core.authz import Action, Place, Subject, authorize, build_turn_place
+from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -259,9 +259,9 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
-async def _subject(
-    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str, members: GroupMembers
-) -> tuple[Subject, uuid.UUID | None]:
+async def _stored_admin(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
+) -> tuple[StoredAdmin, uuid.UUID | None]:
     """The clicker as their stored role describes them, and their account id.
 
     Read-only, like the feedback vote: asking for help must not mint an
@@ -273,16 +273,15 @@ async def _subject(
     )
     account_id = principal.account_id if principal is not None else None
     if account_id is None:
-        return build_subject(is_admin=False, platform_user_id=user_id), None
-    subject = await load_stored_subject(
+        return StoredAdmin(is_admin=False, platform="slack", platform_user_id=user_id), None
+    stored = await read_stored_admin(
         session,
         tenant_id=tenant_id,
         platform="slack",
         account_id=account_id,
         platform_user_id=user_id,
-        members=members,
     )
-    return subject, account_id
+    return stored, account_id
 
 
 def _may_ask(
@@ -366,16 +365,16 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         except AccessPolicyUnreadable:
             await reply(POLICY_UNREADABLE)
             return
-        subject, _account_id = await _subject(
-            session,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            members=user_group_members(runtime, client, tenant_id=tenant_id),
-        )
-        if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
-            log.info("support.refused", tenant_id=str(tenant_id))
-            await reply(NOT_ALLOWED)
-            return
+        stored, _account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=user_id)
+    # Looked up with no session open: a slow Slack must not hold a connection.
+    subject = await confirm_stored_subject(
+        stored, user_group_members(runtime, client, tenant_id=tenant_id)
+    )
+    if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
+        log.info("support.refused", tenant_id=str(tenant_id))
+        await reply(NOT_ALLOWED)
+        return
+    async with runtime.sessionmaker() as session:
         already = await find_escalation_for_message(
             session,
             tenant_id=tenant_id,
@@ -434,17 +433,17 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=s.team_id)
     # What the authoritative source check saw, for the reply and the post.
     decided: dict[str, Any] = {}
+    async with runtime.sessionmaker() as session:
+        stored, account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=s.user_id)
+    # Looked up with no session open: a slow Slack must not hold a connection.
+    subject = await confirm_stored_subject(
+        stored, user_group_members(runtime, client, tenant_id=tenant_id)
+    )
     async with runtime.sessionmaker() as session, session.begin():
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
             log.info("support.tenant_missing", tenant_id=str(tenant_id))
             return
-        subject, account_id = await _subject(
-            session,
-            tenant_id=tenant_id,
-            user_id=s.user_id,
-            members=user_group_members(runtime, client, tenant_id=tenant_id),
-        )
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=s.thread_ts
         )

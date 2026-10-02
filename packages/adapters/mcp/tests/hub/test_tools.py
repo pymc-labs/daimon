@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import HubIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._session_access import load_hub_subject
 from daimon.adapters.mcp.tools.hub import (  # pyright: ignore[reportPrivateUsage]
     _auth_for,
     _list_daimons_impl,
@@ -21,6 +26,8 @@ from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import set_platform_role_ids
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent
@@ -170,6 +177,85 @@ async def test_hub_never_lists_or_resolves_an_isolated_channels_own_agent(
     hidden = str(derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_2"))
     with pytest.raises(ToolError, match="not found"):
         await _resolve_daimon(runtime, hub, hidden)
+
+
+async def test_hub_looks_up_a_stored_slack_group_with_no_session_open(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A slow Slack must not hold a pooled connection while the hub lists or reads."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0HUB")
+    principal = await make_platform_principal(
+        db_session, platform="slack", external_id="U1", tenant=tenant
+    )
+    await set_platform_role_ids(db_session, principal.account_id, ["S1"])
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C0ROOM",
+        role_ids=["S1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C0ROOM",),
+            isolated_channel_ids=("C0ROOM",),
+            agent_channel_pins={"local": ("C0ROOM",)},
+        ),
+    )
+    await db_session.commit()
+    open_sessions = [0]
+    seen: list[int] = []
+
+    @asynccontextmanager
+    async def counting() -> AsyncIterator[AsyncSession]:
+        open_sessions[0] += 1
+        try:
+            async with db_session_factory() as session:
+                yield session
+        finally:
+            open_sessions[0] -= 1
+
+    async def members(group_id: str) -> frozenset[str]:
+        seen.append(open_sessions[0])
+        return frozenset({"U1"})
+
+    lookups = MagicMock()
+    lookups.members.return_value = members
+    router = _agents_router({tenant.id: [("ag_1", "local")]})
+    runtime = replace(
+        _runtime(build_fake_anthropic(router.dispatch), counting), group_lookups=lookups
+    )
+    hub = HubIdentity(
+        platform="slack",
+        platform_user_id="U1",
+        tenants=(
+            HubTenant(
+                tenant_id=tenant.id,
+                account_id=principal.account_id,
+                workspace_id="T0HUB",
+                workspace_name="Acme",
+            ),
+        ),
+    )
+    auth = AuthIdentity(
+        account_id=principal.account_id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="slack",
+        external_id="T0HUB",
+        platform_user_id="U1",
+    )
+
+    daimons = await _list_daimons_impl(runtime, hub)
+    subject = await load_hub_subject(runtime, auth)
+
+    assert [d.name for d in daimons] == ["local"], "the live group admin sees the channel's agent"
+    assert subject.administered_channel_ids == frozenset({"C0ROOM"}), "and administers it"
+    assert seen == [0, 0], "each lookup ran after its session closed"
 
 
 async def test_list_daimons_pages_the_org_once_however_many_tenants_the_caller_has(

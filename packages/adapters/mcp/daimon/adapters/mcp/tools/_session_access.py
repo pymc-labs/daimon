@@ -15,7 +15,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, SessionFacts, Subject, Surface, authorize, build_subject
-from daimon.core.channel_admins import GroupMembers, load_stored_subject
+from daimon.core.channel_admins import GroupMembers, confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
@@ -65,7 +65,8 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
     person's own hub login qualifies: an agent-scoped key, a chat-turn
     credential or a token with no platform user is never an admin here,
     whatever role its account holds. A stored Slack group or Teams team
-    counts only while a live lookup still admits the person.
+    counts only while a live lookup, run after the session closes, still
+    admits the person.
     """
     if (
         auth.platform_user_id is None
@@ -74,14 +75,16 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
     ):
         return build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
     async with runtime.session_factory() as db:
-        return await load_stored_subject(
+        stored = await read_stored_admin(
             db,
             tenant_id=auth.tenant_id,
             platform=auth.platform,
             account_id=auth.account_id,
             platform_user_id=auth.platform_user_id,
-            members=stored_group_members(runtime, auth.platform, auth.external_id),
         )
+    return await confirm_stored_subject(
+        stored, stored_group_members(runtime, auth.platform, auth.external_id)
+    )
 
 
 def stored_group_members(
