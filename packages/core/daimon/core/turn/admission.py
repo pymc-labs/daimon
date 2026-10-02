@@ -28,6 +28,7 @@ from time import perf_counter
 from typing import Literal
 
 import structlog
+from anthropic import APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     TenantAccessPolicy,
@@ -355,10 +356,26 @@ async def admit_impl(
     elif config.thread_binding_id is not None:
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     else:
-        agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+        try:
+            agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+        except APIStatusError as err:
+            if err.status_code not in (400, 404):
+                raise
+            deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+            raise MAResolverMissError(
+                kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name
+            ) from err
     if (observation := current_outcome.get()) is not None:
         observation.agent_id = agent.id
-    environment = await deps.anthropic.beta.environments.retrieve(env_id)
+    try:
+        environment = await deps.anthropic.beta.environments.retrieve(env_id)
+    except APIStatusError as err:
+        if err.status_code not in (400, 404):
+            raise
+        deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        raise MAResolverMissError(
+            kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
+        ) from err
     mark("agent_environment")
 
     # --- Liveness check on the already-retrieved agent: it was archived out of
@@ -368,9 +385,15 @@ async def admit_impl(
     # raise the existing resolver-miss error so the friendly copy at the four
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
+        deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
         async with deps.sessionmaker() as session, session.begin():
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
+    if environment.archived_at is not None:
+        deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        raise MAResolverMissError(
+            kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
+        )
 
     # --- Agent pin: an operator can tie an agent to named channels because of
     # what its credentials reach. It runs after the cascade because it depends

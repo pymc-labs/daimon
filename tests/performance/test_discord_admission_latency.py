@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
@@ -40,7 +42,7 @@ from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -139,14 +141,14 @@ async def _seed(
 
 async def _run_batch(
     factory: async_sessionmaker[AsyncSession],
-    router: MARouter,
+    anthropic: AsyncAnthropic,
     targets: list[tuple[uuid.UUID, str]],
     defaults_root: Path,
     observer: AsyncEngine,
     resolver_cache: ResolverCache,
 ) -> tuple[list[float], Counter[str], dict[str, list[float]]]:
     deps = TurnDeps(
-        anthropic=build_fake_anthropic(router.dispatch),
+        anthropic=anthropic,
         sessionmaker=factory,
         deployment_default=DeploymentDefault(),
         resolver_cache=resolver_cache,
@@ -271,6 +273,7 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
     engine = build_test_engine(url, db_schema, pool_size=20, max_overflow=10)
     observer = build_test_engine(url, db_schema, pool_size=1, max_overflow=0)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    anthropic: AsyncAnthropic | None = None
     try:
         router = MARouter()
         all_agents: list[BetaManagedAgentsAgent] = []
@@ -297,6 +300,17 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
                 many.append((tenant_id, tenant_channels[0]))
         router.add_agent_list(*all_agents)
         router.add_environment_list(*all_environments)
+        api_calls: Counter[str] = Counter()
+
+        async def delayed_ma(request: httpx.Request) -> httpx.Response:
+            api_calls[f"{request.method} {request.url.path}"] += 1
+            await asyncio.sleep(0.2)
+            return router.dispatch(request)
+
+        anthropic = AsyncAnthropic(
+            api_key="test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(delayed_ma)),
+        )
         cold_resolver_cache = new_resolver_cache()
         warm_resolver_cache = new_resolver_cache()
         for agent in all_agents:
@@ -339,13 +353,32 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
             *[(label, targets, warm_resolver_cache) for label, targets in cases.items()],
         ]
         for label, targets, resolver_cache in runs:
+            calls_before = api_calls.copy()
             values, waits, stages = await _run_batch(
-                factory, router, targets, tmp_path, observer, resolver_cache
+                factory, anthropic, targets, tmp_path, observer, resolver_cache
+            )
+            calls = api_calls - calls_before
+            call_summary = Counter(
+                {
+                    "agents_list": calls["GET /v1/agents"],
+                    "environments_list": calls["GET /v1/environments"],
+                    "agents_retrieve": sum(
+                        count
+                        for route, count in calls.items()
+                        if route.startswith("GET /v1/agents/")
+                    ),
+                    "environments_retrieve": sum(
+                        count
+                        for route, count in calls.items()
+                        if route.startswith("GET /v1/environments/")
+                    ),
+                }
             )
             print(
                 f"\n{label}: p50={statistics.median(values):.3f}s "
                 f"p95={_percentile(values, 0.95):.3f}s "
-                f"max={max(values):.3f}s waits={waits.most_common(10)}"
+                f"max={max(values):.3f}s api_calls={dict(call_summary)} "
+                f"waits={waits.most_common(10)}"
             )
             print(
                 "stage p95:",
@@ -355,5 +388,7 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
                 },
             )
     finally:
+        if anthropic is not None:
+            await anthropic.close()
         await engine.dispose()
         await observer.dispose()

@@ -9,6 +9,7 @@ parsing run end-to-end on every call.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -16,7 +17,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from anthropic import APIStatusError
+from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from cachetools import TTLCache
 from daimon.core.ma_resolver import (
@@ -346,7 +347,7 @@ async def test_resolve_agent_ttl_expiry_revalidates(tenant_id: uuid.UUID) -> Non
     def timer() -> float:
         return fake_time[0]
 
-    cache: ResolverCache = TTLCache(maxsize=500, ttl=300, timer=timer)
+    cache = ResolverCache(maxsize=500, ttl=1800, timer=timer)
 
     await resolve_agent(
         client,
@@ -355,8 +356,17 @@ async def test_resolve_agent_ttl_expiry_revalidates(tenant_id: uuid.UUID) -> Non
         apply_callable=_noop_apply,
         cache=cache,
     )
-    # Advance past the 5-minute TTL
+    # Still cached after the former five-minute TTL.
     fake_time[0] = 301.0
+    await resolve_agent(
+        client,
+        tenant_id=tenant_id,
+        daimon_tag="daimon",
+        apply_callable=_noop_apply,
+        cache=cache,
+    )
+    assert list_calls == 1
+    fake_time[0] = 1801.0
     await resolve_agent(
         client,
         tenant_id=tenant_id,
@@ -366,6 +376,132 @@ async def test_resolve_agent_ttl_expiry_revalidates(tenant_id: uuid.UUID) -> Non
     )
 
     assert list_calls == 2, "TTL expiry must force a fresh tag lookup"
+
+
+async def test_concurrent_tag_misses_share_listing_and_cache_every_name(
+    tenant_id: uuid.UUID,
+) -> None:
+    agents = [ma_agent(id=f"ag_{n}", name=f"agent-{n}", tenant_id=tenant_id) for n in range(65)]
+    other = ma_agent(id="ag_other", name="agent-0", tenant_id=uuid.uuid4())
+    list_calls = 0
+    router = MARouter()
+    router.add_agent_list(*agents, other)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_calls
+        if request.url.path == "/v1/agents":
+            list_calls += 1
+            await asyncio.sleep(0.02)
+        return router.dispatch(request)
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    cache = new_resolver_cache()
+    try:
+        found = await asyncio.gather(
+            *(
+                resolve_agent(
+                    client,
+                    tenant_id=tenant_id,
+                    daimon_tag=f"agent-{n % 65}",
+                    apply_callable=_noop_apply,
+                    cache=cache,
+                )
+                for n in range(100)
+            )
+        )
+        assert found == [f"ag_{n % 65}" for n in range(100)]
+        assert list_calls == 1
+        assert len(cache) == 65
+        assert cache[(tenant_id, "agent", "agent-0")] == "ag_0"
+    finally:
+        await client.close()
+
+
+async def test_environment_listing_populates_all_tenant_tags(
+    tenant_id: uuid.UUID, resolver_cache: ResolverCache
+) -> None:
+    environments = [
+        ma_environment(id=f"env_{n}", name=f"env-{n}", tenant_id=tenant_id) for n in range(3)
+    ]
+    other = ma_environment(id="env_other", name="env-0", tenant_id=uuid.uuid4())
+    calls = 0
+
+    def list_handler(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return list_response([_env_payload(env) for env in [*environments, other]])
+
+    router = MARouter()
+    router.add("GET", r"/v1/environments", list_handler)
+    client = build_fake_anthropic(router.dispatch)
+    for n in range(3):
+        assert (
+            await resolve_environment(
+                client,
+                tenant_id=tenant_id,
+                daimon_tag=f"env-{n}",
+                apply_callable=_noop_apply,
+                cache=resolver_cache,
+            )
+            == f"env_{n}"
+        )
+    assert calls == 1
+    assert (tenant_id, "environment", "env-0") in resolver_cache
+
+
+async def test_failed_shared_listing_allows_retry(tenant_id: uuid.UUID) -> None:
+    agent = ma_agent(id="ag_fresh", name="daimon", tenant_id=tenant_id)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        if calls == 1:
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "bad"},
+                },
+            )
+        return list_response([_agent_payload(agent)])
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    cache = new_resolver_cache()
+    try:
+        failures = await asyncio.gather(
+            *(
+                resolve_agent(
+                    client,
+                    tenant_id=tenant_id,
+                    daimon_tag="daimon",
+                    apply_callable=_noop_apply,
+                    cache=cache,
+                )
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+        assert all(isinstance(error, APIStatusError) for error in failures)
+        assert calls == 1
+        assert (
+            await resolve_agent(
+                client,
+                tenant_id=tenant_id,
+                daimon_tag="daimon",
+                apply_callable=_noop_apply,
+                cache=cache,
+            )
+            == agent.id
+        )
+        assert calls == 2
+    finally:
+        await client.close()
 
 
 async def test_resolve_agent_invalidates_cache_on_archived_retrieve(
@@ -426,7 +562,7 @@ def test_cache_key_round_trip(tenant_id: uuid.UUID) -> None:
 
 def test_new_resolver_cache_size_eviction() -> None:
     """Cache evicts oldest entries when maxsize is exceeded."""
-    small: TTLCache[tuple[int, str, str], str] = TTLCache(maxsize=3, ttl=300)
+    small = TTLCache[tuple[int, str, str], str](maxsize=3, ttl=300)
     for i in range(5):
         small[(i, "agent", "tag")] = f"ag_{i}"
     assert len(small) <= 3, "size-eviction must cap the cache at maxsize"
@@ -439,7 +575,7 @@ def test_new_resolver_cache_ttl_expiry_via_timer() -> None:
     def timer() -> float:
         return fake_time[0]
 
-    cache: TTLCache[str, str] = TTLCache(maxsize=10, ttl=300, timer=timer)
+    cache = TTLCache[str, str](maxsize=10, ttl=300, timer=timer)
     cache["k"] = "v"
     assert "k" in cache, "key should be present before TTL expires"
 

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cold Managed Agents tag resolution now caches every tenant tag returned by a listing, and concurrent misses for the same tenant and resource kind share that listing. Resolver entries last 30 minutes; a missing or archived resource found during turn admission invalidates its entry, and an archived agent still triggers the existing scope cleanup.
 - Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations as `prep_gate`.
 - Compatible session preparation releases its Postgres connection during vault I/O, and the detached turn outcome writer allows ten seconds for a busy pool before logging a failed write.
 
