@@ -409,6 +409,62 @@ async def _count_live_rows(
         return int(result.scalar_one())
 
 
+async def test_a_foreign_daimon_server_is_healed_at_the_bind_and_in_the_update(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent whose `daimon-mcp` points elsewhere gets sessions pointed at this
+    deployment: the next bind reads that as current, and a real tools change
+    pushes the healed server, so neither updates the session on every turn."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+
+    def foreign(*extra: BetaManagedAgentsCustomTool) -> BetaManagedAgentsAgent:
+        payload = _agent_with_servers(*extra).model_dump(mode="json")
+        payload["mcp_servers"][0]["url"] = "https://elsewhere.example/mcp"
+        return BetaManagedAgentsAgent.model_validate(payload)
+
+    agent = foreign()
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+
+    async def prepare(current: BetaManagedAgentsAgent) -> PreparedTurn:
+        prepared = await _prepare(
+            deps, _admission(account=account, agent=current), tenant=tenant, account=account
+        )
+        assert isinstance(prepared, PreparedTurn)
+        return prepared
+
+    first = await prepare(agent)
+    session_servers = transport.state.sessions[first.ma_session_id].agent.mcp_servers
+    assert [server.url for server in session_servers if server.name == "daimon-mcp"] == [
+        _PUBLIC_URL
+    ], "the session runs this deployment's server"
+    second = await prepare(agent)
+    assert (second.continuity, transport.updates) == (ContinuityOutcome(), []), (
+        "the healed server reads as current on the next bind"
+    )
+
+    search = BetaManagedAgentsCustomTool(
+        description="search the corpus",
+        input_schema=BetaManagedAgentsCustomToolInputSchema(type="object"),
+        name="search",
+        type="custom",
+    )
+    changed = foreign(search)
+    _register(transport.state, changed)
+    third = await prepare(changed)
+    assert third.continuity.applied == ("tools",), "one in-place update"
+    [update] = transport.updates
+    assert [
+        server["url"] for server in update["agent"]["mcp_servers"] if server["name"] == "daimon-mcp"
+    ] == [_PUBLIC_URL], "the update pushes the healed server"
+    fourth = await prepare(changed)
+    assert fourth.continuity == ContinuityOutcome(), "and that reads as current after"
+
+
 async def test_a_compatible_session_is_reused_without_touching_ma(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
