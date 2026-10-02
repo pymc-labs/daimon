@@ -44,6 +44,7 @@ from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_subject
+from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -151,18 +152,31 @@ class SetupPanel:
         window = paginate(roster.rows, page=page, page_size=cards.PAGE_SIZE)
         return cards.roster_card(roster, window, routed=routed, notice=notice)
 
-    async def _answering_map(self, tenant_id: uuid.UUID) -> AnsweringMap:
+    async def _answering_map(
+        self, tenant_id: uuid.UUID, viewer: Actor | None = None
+    ) -> AnsweringMap:
+        """The install's routing; as `viewer` sees it across isolated channels, if given."""
         async with self._runtime.sessionmaker() as session:
             return await load_answering_map(
                 session,
                 tenant_id=tenant_id,
                 platform="teams",
                 default=self._runtime.deployment_default,
+                viewer=None
+                if viewer is None
+                else await load_isolation_viewer(
+                    session,
+                    self._runtime.anthropic,
+                    tenant_id=tenant_id,
+                    channel_id=viewer.conversation_id,
+                    is_admin=viewer.is_admin,
+                ),
             )
 
     async def _routing(self, actor: Actor, page: int) -> AdaptiveCard:
         roster = await self._roster(actor.tenant_id, actor.conversation_id)
-        answering_map = await self._answering_map(actor.tenant_id)
+        # A non-admin sees only their side of every isolated channel, as on Discord and Slack.
+        answering_map = await self._answering_map(actor.tenant_id, actor)
         # The request names an agent nobody reaches yet, else the one answering here.
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)

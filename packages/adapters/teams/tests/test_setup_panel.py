@@ -17,12 +17,16 @@ from daimon.adapters.teams import setup_panel
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.setup_card import ENDED
 from daimon.core._models import ThreadSession
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.setup_conversations import setup_thread_name
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
 from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.ma import FakeMAState, make_fake_ma_handler
@@ -126,6 +130,38 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     assert "Model:" in json.dumps(details) and "Use from your coding tools" in json.dumps(details)
     assert "Organisation default" in json.dumps(routing)
     assert setup_panel.GONE in json.dumps(gone), "the roster returns with a notice"
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
+async def test_routing_hides_an_isolated_channels_environment_from_outside(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """As on Discord and Slack: a member outside an isolated channel never sees its
+    environment in Who answers where; an admin sees every channel's."""
+    isolated, open_channel = "19:vault@thread.tacv2", "19:lobby@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
+            ),
+        )
+        for channel, environment in ((isolated, "vault-env"), (open_channel, "lobby-env")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                environment_name=environment,
+            )
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+        routing = json.dumps(await post_activity(service, _click("routing")))
+
+    assert "lobby-env" in routing, "an open channel's environment is listed"
+    assert ("vault-env" in routing) is admin, "the isolated channel's shows only to an admin"
 
 
 async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
