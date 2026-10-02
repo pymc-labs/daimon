@@ -19,6 +19,7 @@ from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
     LIFT_ISOLATION_WARNING,
+    ChannelIsolationRefused,
     isolation_refusal,
 )
 from daimon.core.config import load_settings
@@ -424,26 +425,50 @@ async def _require_isolatable(
 ) -> None:
     """Exit unless every newly isolated channel's default agent is its own in `policy`.
 
+    A change to the pins or seals re-checks every isolated channel: widening its
+    own agent's pin would leave the channel with no agent of its own, refusing
+    every turn there, while the agent carries what it remembered there out.
     Run under the policy lock, in the transaction that writes.
     """
     added = [c for c in policy.isolated_channel_ids if c not in current.isolated_channel_ids]
-    for channel_id in added:
-        refused = await isolation_refusal(
+    rechecks = (
+        policy.agent_channel_pins != current.agent_channel_pins
+        or policy.sealed_channel_ids != current.sealed_channel_ids
+    )
+
+    async def refusal(channel_id: str, under: TenantAccessPolicy) -> ChannelIsolationRefused | None:
+        return await isolation_refusal(
             rt.anthropic,
             session,
             tenant_id=tenant_id,
             platform=platform,
             channel_id=channel_id,
-            policy=policy,
+            policy=under,
             default=rt.deployment_default,
         )
-        if refused is not None:
+
+    for channel_id in policy.isolated_channel_ids:
+        if channel_id not in added and not rechecks:
+            continue
+        refused = await refusal(channel_id, policy)
+        # An isolation broken already is not this change's doing.
+        if refused is None or (
+            channel_id not in added and await refusal(channel_id, current) is not None
+        ):
+            continue
+        if channel_id in added:
             console.print(
                 f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
                 "alone in the same command, or use the setup panel's Isolate or "
                 "set_channel_isolation, which do both. Nothing was changed.[/red]"
             )
-            raise typer.Exit(1)
+        else:
+            console.print(
+                f"[red]{channel_id} is isolated, and this change would break it: "
+                f"{escape(str(refused))} Keep its own agent pinned to it alone, or end its "
+                "isolation first (drop it from --isolated-channel). Nothing was changed.[/red]"
+            )
+        raise typer.Exit(1)
 
 
 def _ended_isolation_warning(policy: TenantAccessPolicy, channel_id: str) -> str:

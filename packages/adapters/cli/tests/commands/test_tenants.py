@@ -1005,6 +1005,69 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
     assert "no longer private" in err, "clearing everything leaves no seal or pin behind"
 
 
+@pytest.mark.asyncio
+async def test_access_policy_refuses_a_pin_edit_that_breaks_an_isolation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Widening an isolated channel's own agent's pin would leave the channel with no
+    agent of its own, so the edit is refused; an edit that leaves it whole goes through."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+    from daimon.testing.ma_models import ma_agent
+
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id="iso2")
+    local, other = "111111111111111111", "222222222222222222"
+    async with db_session_factory() as session, session.begin():
+        for channel, agent in ((local, "local"), (other, "shared")):
+            await scoped_config_write.set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.tenant_id, channel_id=channel),
+                tenant_id=tenant.tenant_id,
+                agent_name=agent,
+                mode="agent",
+            )
+    state = FakeMAState()
+    for agent_id, name in (("agent_local", "local"), ("agent_shared", "shared")):
+        agent = ma_agent(id=agent_id, name=name, tenant_id=tenant.tenant_id)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(make_fake_ma_handler(state)),
+        settings=_FakeSettings(),
+    )
+    await _set(
+        rt,
+        "iso2",
+        sealed_channel=[local],
+        isolated_channel=[local],
+        add_pin_agent=[f"local={local}"],
+    )
+    isolated = await _policy(db_session_factory, workspace_id="iso2")
+
+    for flags in (
+        {"add_pin_agent": [f"local={other}"]},
+        {"pin_agent": [f"local={other}"], "replace_pins": True},
+        {"remove_pin_agent": ["local"]},
+    ):
+        console = _make_console()
+        with pytest.raises(typer.Exit):
+            await tenants_access_policy_set(
+                rt=rt, console=console, platform="discord", external_id="iso2", **flags
+            )
+        output = " ".join(_output(console).split())
+        assert f"{local} is isolated, and this change would break it" in output, output
+        assert "Nothing was changed" in output
+        assert await _policy(db_session_factory, workspace_id="iso2") == isolated, (
+            "a refused edit writes nothing"
+        )
+
+    await _set(rt, "iso2", add_pin_agent=[f"shared={other}"])
+    policy = await _policy(db_session_factory, workspace_id="iso2")
+    assert policy.agent_channel_pins == {"local": (local,), "shared": (other,)}, (
+        "an edit that keeps the isolation whole goes through"
+    )
+
+
 def test_ended_isolation_warning_says_how_to_lift_what_is_left() -> None:
     """Ending one channel's isolation keeps its seal and pin; the warning names both."""
     policy = TenantAccessPolicy(sealed_channel_ids=("c1",), agent_channel_pins={"local": ("c1",)})
