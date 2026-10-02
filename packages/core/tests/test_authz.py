@@ -14,7 +14,9 @@ import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
+    AgentReach,
     AgentRef,
+    AgentStanding,
     Decision,
     Place,
     SessionFacts,
@@ -22,6 +24,7 @@ from daimon.core.authz import (
     Surface,
     authorize,
     build_subject,
+    channel_admin_holds,
 )
 
 PINNED = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME",)})
@@ -66,6 +69,27 @@ def _deny(reason: str) -> Decision:
 ALLOW = Decision(True)
 
 ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
+    # --- shared agent change: a channel admin needs a local agent that is theirs ---
+    *[
+        (
+            f"shared change by channel admin {name}",
+            OPEN,
+            {
+                "subject": ACME_CHANNEL_ADMIN,
+                "action": Action.CHANGE_SHARED_AGENT,
+                "surface": Surface.CONFIG,
+                "operation_family": family,
+                "reach": AgentReach(reachable=True, local_to_caller=local, held_by_caller=held),
+            },
+            ALLOW if local and held else _deny("admin_required"),
+        )
+        for family in ("spec", "attachment")
+        for name, local, held in (
+            (f"{family} local and theirs", True, True),
+            (f"{family} local, someone else's", True, False),
+            (f"{family} theirs, lost its locality", False, True),
+        )
+    ],
     # --- G_pin_turn: a pinned agent runs only in its channels ---
     (
         "G_pin_turn member outside",
@@ -1544,3 +1568,92 @@ def test_build_subject_gives_grants_only_to_a_person_without_an_agent_key() -> N
     assert person.administered_channel_ids == frozenset(grants), "a person keeps their grants"
     assert key.administered_channel_ids == frozenset(), "an agent key holds none"
     assert bearer.administered_channel_ids == frozenset(), "a platform-less token holds none"
+
+
+ACME_MADE = AgentStanding(created_for_channel_id="C_ACME")
+ACME_ASSIGNED = AgentStanding(admin_default_channel_ids=frozenset({"C_ACME"}))
+UNPINNED = AgentRef.of("helper", "helper")
+
+HOLD_ROWS: list[tuple[str, TenantAccessPolicy, Subject, AgentRef, AgentStanding, bool, bool]] = [
+    # (name, policy, subject, agent, standing, binding, expected)
+    ("made for their channel", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_MADE, False, True),
+    ("made for their channel, binding", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_MADE, True, True),
+    (
+        "made for a channel they do not administer",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(created_for_channel_id="C_OTHER"),
+        False,
+        False,
+    ),
+    (
+        "unpinned, made by someone else",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(),
+        False,
+        False,
+    ),
+    (
+        "pinned inside their channels",
+        PINNED,
+        ACME_CHANNEL_ADMIN,
+        ACME,
+        AgentStanding(),
+        False,
+        True,
+    ),
+    ("pinned inside, binding", PINNED, ACME_CHANNEL_ADMIN, ACME, AgentStanding(), True, True),
+    (
+        "pinned beyond their channels",
+        TWO_CHANNELS,
+        ACME_CHANNEL_ADMIN,
+        ACME,
+        AgentStanding(),
+        False,
+        False,
+    ),
+    ("pinned to no channel", NOWHERE, ACME_CHANNEL_ADMIN, ACME, AgentStanding(), False, False),
+    ("default a server admin set", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_ASSIGNED, False, True),
+    (
+        "default a server admin set, binding",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        ACME_ASSIGNED,
+        True,
+        False,
+    ),
+    (
+        "default a server admin set elsewhere",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(admin_default_channel_ids=frozenset({"C_OTHER"})),
+        False,
+        False,
+    ),
+    ("an agent key", OPEN, AGENT_KEY_CHANNEL_ADMIN, UNPINNED, ACME_MADE, False, False),
+    ("no grant", OPEN, MEMBER, UNPINNED, ACME_MADE, False, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("policy", "subject", "agent", "standing", "binding", "expected"),
+    [pytest.param(*row[1:], id=row[0]) for row in HOLD_ROWS],
+)
+def test_channel_admin_holds_table(
+    policy: TenantAccessPolicy,
+    subject: Subject,
+    agent: AgentRef,
+    standing: AgentStanding,
+    binding: bool,
+    expected: bool,
+) -> None:
+    """Made for, pinned inside, or set as a default by a server admin of their channels."""
+    held = channel_admin_holds(
+        policy, subject=subject, agent=agent, standing=standing, binding=binding
+    )
+    assert held is expected, "a channel admin holds only an agent that came to them that way"
