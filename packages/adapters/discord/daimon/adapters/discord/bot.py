@@ -452,7 +452,7 @@ class DaimonBot(commands.Bot):
 
     def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
-        self.runtime = with_budget_notifier(runtime, self.open_member_dm)
+        self.runtime = with_budget_notifier(runtime, self.open_member_dm, self.is_closed)
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
