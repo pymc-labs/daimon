@@ -1,81 +1,61 @@
 """Executable record of Teams' deliberate gaps against Discord and Slack.
 
 Teams group chats have no thread to scope a session to, so the adapter refuses
-them and the manifest does not offer the scope. Teams also cannot list a
-conversation's messages, so unlike Discord's and Slack's bounded history
-lookup its boot sweep retires a card intent with no message id without editing
-anything; `packages/adapters/teams/tests/test_boot_sweep.py` asserts that.
+them and the manifest does not offer the scope. Neither Bot Framework nor
+app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
+lost its id only in a channel thread; in a 1:1 chat that intent retires
+untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
 
-The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
-answer only in the 1:1 chat, which has no threads, so a setup conversation is
-keyed inside it; a turn replays its channel thread through Microsoft Graph,
-but the agent's own channel-reading tools stay hidden; files in a channel
+The rest follows from what a Teams bot can do (see `docs/teams.md`): there is
+no message only its sender sees, so a command typed in a channel is answered
+in the 1:1 chat and the manifest offers commands there only; the 1:1 chat has
+no threads, so a setup conversation is keyed inside it; files in a channel
 work only once a tenant admin grants the app the team's SharePoint site
-(`Sites.Selected`), because no team-scoped permission reaches it; a dialog
-has no file input, so a `.env` file is pasted rather than uploaded; and once a
+(`Sites.Selected`), because no team-scoped permission reaches it; a dialog has
+no file input, so a `.env` file is pasted rather than uploaded; and once a
 dialog closes nothing private reaches the requester, so a GitHub token is
 checked against its repo before the request is spent (Discord and Slack spend
 it first, then say so privately; the Teams adapter's credential tests assert
-the unspent request). Removing the app archives nothing. Channel budgets are Discord and Slack only, so the card shows no channel budget either. So are
-channel admins: only the listed admins administer a Teams channel. A Teams
-answer carries no usage line (agent, time, tokens, cost, balance) where the
-finished Discord or Slack card has one; spend is on the `billing` card.
-Thread participation shares Discord's gates
-(`test_thread_participation_platforms.py`) but needs Graph, so without the
-consent a followed thread stays mention-only; and where Discord's unprompted
-card appears once there is output, Teams posts only the answer, so there is
-no running card or Cancel button.
+the unspent request). Removing the app from a team forgets that team and
+archives no tenant: a deployment serves one organisation. A bot cannot react,
+so a completion ping is an @mention alone and human support is the `support`
+command; a post_wizard form has no step images. Thread participation shares
+Discord's gates (`test_thread_participation_platforms.py`) but needs Graph, so
+without the consent a followed thread stays mention-only; and where Discord's
+unprompted card appears once there is output, Teams posts only the answer, so
+there is no running card or Cancel button.
 
 No platform parametrization, no database -- this is a scope check.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
 import yaml
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools.channel_admins import (
-    _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
-)
-from daimon.adapters.mcp.tools.channel_budgets import (
-    _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
-)
-from daimon.adapters.mcp.tools.channels import register_channel_tools
-from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
-from daimon.adapters.teams import card as teams_card
+from daimon.adapters.teams import installations
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
     InboundFile,
     SharedFile,
     prepare_attachments,
 )
-from daimon.adapters.teams.billing_panel import panel_card
 from daimon.adapters.teams.credential_requests import credential_form
-from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
-from daimon.core.billing_panel import BillingPanelState
-from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
-from daimon.core.channel_budget import ChannelBudgetStatus
-from daimon.core.config import TeamsSettings
 from daimon.core.credential_requests import ENV_FILE_TARGET
-from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, Role
+from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
-from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 from microsoft_teams.api import MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.api.activities.install_update import UninstalledActivity
-from pydantic import SecretStr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TENANT = "00000000-0000-0000-0000-000000000001"
@@ -116,7 +96,7 @@ def test_teams_manifest_does_not_offer_group_chats() -> None:
 def test_teams_commands_are_offered_only_in_the_one_to_one_chat() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     assert all(cl["scopes"] == ["personal"] for cl in manifest["bots"][0]["commandLists"]), (
-        "command replies can carry account details; channels get a pointer to the 1:1 chat"
+        "command replies can carry account details; one typed in a channel is answered in the 1:1"
     )
 
 
@@ -125,21 +105,6 @@ def test_a_teams_setup_conversation_lives_inside_its_chat() -> None:
     assert conversation_of(new_setup_thread_id(chat)) == chat, (
         "a 1:1 chat has no threads, so its setup conversation is a key within the chat"
     )
-
-
-async def test_teams_turns_lack_the_graph_reading_and_dm_tools() -> None:
-    mcp = FastMCP(name="t")
-    runtime = cast(Any, MagicMock())
-    register_channel_tools(mcp, runtime)
-    register_credential_request_tools(mcp, runtime)
-    tools = await mcp.list_tools()
-    teams = {tool.name for tool in tools if "teams" in tool.tags}
-    hidden = {"read_channel", "read_thread", "search_messages", "get_message", "list_channels"}
-    hidden |= {"parse_link", "send_direct_message"}
-    assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
-    assert teams >= {"send_message", "create_thread", "request_agent_key"}
-    assert teams >= {"request_repo_binding", "request_skill_repo_token"}, "every form exists"
-    assert not teams & hidden, "these need tool-side Graph reads or Discord/Slack DMs"
 
 
 def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
@@ -171,88 +136,6 @@ async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched(
     )
 
 
-async def test_teams_has_no_channel_budgets() -> None:
-    """The budget tools refuse Teams, and the card renders no budget line even if given one."""
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform="teams"
-    )
-    with pytest.raises(ToolError, match="only for Discord servers and Slack workspaces"):
-        await _get_channel_budget_impl(cast(Any, MagicMock()), auth, "19:chat")
-    now = datetime(2026, 5, 14, tzinfo=UTC)
-    budget = ChannelBudgetRow(
-        id=uuid.uuid4(),
-        tenant_id=auth.tenant_id,
-        platform="teams",
-        channel_id="19:chat",
-        limit_usd=Decimal("5"),
-        window="monthly",
-        starts_at=None,
-        ends_at=None,
-        set_by_account_id=None,
-        created_at=now,
-        updated_at=now,
-    )
-    state = BillingPanelState(
-        is_admin=False,
-        caller_user_id="u",
-        caller_spend=0.0,
-        caller_turns=0,
-        caller_cap=None,
-        guild_balance_usd=Decimal("10"),
-        guild_spend=0.0,
-        guild_turns=0,
-        guild_distinct_members=0,
-        member_rows=(),
-        over_cap_count=0,
-        channel_budget=ChannelBudgetStatus(budget, Decimal("1"), True),
-    )
-    card = json.dumps(panel_card(state, since=now).model_dump(by_alias=True, exclude_none=True))
-    assert "this channel" not in card.lower(), (
-        "Teams has no channel budgets on purpose; if it gains them, replace this record"
-    )
-
-
-async def test_teams_has_no_channel_admins() -> None:
-    """The grant tools refuse Teams, and no Teams caller administers a channel."""
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        platform="teams",
-        is_admin=True,
-    )
-    with pytest.raises(ToolError, match="only on Discord and Slack"):
-        await _list_channel_admins_impl(cast(Any, MagicMock()), auth)
-    administered = await load_administered_channel_ids(
-        cast(Any, MagicMock()),
-        tenant_id=auth.tenant_id,
-        platform="teams",
-        caller=ChannelAdminCaller(platform_user_id="u", role_ids=frozenset({"r"})),
-    )
-    assert administered == frozenset(), (
-        "Teams has no channel admins on purpose; if it gains them, replace this record"
-    )
-
-
-def test_removing_the_teams_app_archives_nothing() -> None:
-    settings = TeamsSettings(client_id="bot", client_secret=SecretStr("s"), tenant_id=TENANT)
-    service = create_teams_http_service(settings=settings, runtime=cast(Any, MagicMock()))
-    removal = UninstalledActivity.model_validate(
-        {
-            "type": "installationUpdate",
-            "action": "remove",
-            "id": "a-1",
-            "channelId": "msteams",
-            "from": {"id": "29:u"},
-            "recipient": {"id": "28:bot"},
-            "conversation": {"id": "a:chat-1", "tenantId": TENANT},
-        }
-    )
-    assert not service.teams_app.router.select_handlers(removal), (
-        "Teams has no uninstall to archive on (docs/teams.md); if one lands, run the parity scenario"
-    )
-
-
 def test_a_teams_env_file_is_pasted_not_uploaded() -> None:
     now = datetime(2026, 5, 14, tzinfo=UTC)
     row = CredentialRequestRow(
@@ -275,14 +158,6 @@ def test_a_teams_env_file_is_pasted_not_uploaded() -> None:
     inputs = [item for item in body if str(item.get("type", "")).startswith("Input.")]
     assert [(i["type"], i.get("isMultiline")) for i in inputs] == [("Input.Text", True)], (
         "a dialog has no file input; if Teams gains one, replace this record"
-    )
-
-
-def test_a_teams_answer_carries_no_usage_line() -> None:
-    message = teams_card.answer_message("The posterior mean is 3.", is_last=True)
-    assert message.text == "The posterior mean is 3.", "the answer alone, no usage footer"
-    assert message.channel_data is not None and message.channel_data.feedback_loop is not None, (
-        "the last part still asks for feedback"
     )
 
 
@@ -309,3 +184,30 @@ async def test_an_unprompted_teams_turn_shows_no_running_card() -> None:
     assert sent == [], "no card while it runs, so no Cancel button"
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
     assert [a.text for a in sent] == ["Done."], "only the answer is posted"
+
+
+async def test_removing_the_teams_app_forgets_the_team_and_archives_nothing() -> None:
+    removal = UninstalledActivity.model_validate(
+        {
+            "type": "installationUpdate",
+            "action": "remove",
+            "id": "a-1",
+            "channelId": "msteams",
+            "from": {"id": "29:u"},
+            "recipient": {"id": "28:bot"},
+            "conversation": {"id": "19:general@thread.tacv2", "tenantId": TENANT},
+            "channelData": {"team": {"id": "19:general@thread.tacv2"}, "tenant": {"id": TENANT}},
+        }
+    )
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.begin.return_value.__aenter__.return_value = session
+    installs = TeamInstalls(
+        sessionmaker, MagicMock(), tenant_id=uuid.uuid4(), entra_tenant_id=TENANT
+    )
+    with patch.object(installations, "delete_teams_installation", new_callable=AsyncMock) as forget:
+        await installs.on_uninstall(cast(Any, SimpleNamespace(activity=removal)))
+    forget.assert_awaited_once()
+    assert session.method_calls == [], (
+        "only the team's row goes; if removal ever archives, run the uninstall parity scenario"
+    )
