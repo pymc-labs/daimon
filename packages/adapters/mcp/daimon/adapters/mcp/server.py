@@ -19,6 +19,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
+from daimon.adapters.mcp.auth.group_members import GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -214,6 +215,20 @@ def create_mcp_app(
             allow_plaintext=effective_settings.crypto.allow_plaintext,
         )
 
+    fernet = (
+        build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
+        if effective_settings.crypto.keys
+        else None
+    )
+    teams_client = (
+        build_teams_client(effective_settings.teams)
+        if effective_settings.teams is not None
+        else None
+    )
+    group_lookups = GroupLookups(
+        sessionmaker=effective_sessionmaker, fernet=fernet, teams_client=teams_client
+    )
+
     effective_auth = auth
     if effective_auth is None:
         secret_value = effective_settings.mcp.jwt_secret
@@ -224,6 +239,7 @@ def create_mcp_app(
         effective_auth = DaimonJWTVerifier(
             secret=secret_value.get_secret_value().encode(),
             sessionmaker=effective_sessionmaker,
+            group_members=group_lookups.members,
         )
 
     effective_resolver = subject_resolver or production_subject_resolver
@@ -330,12 +346,6 @@ def create_mcp_app(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
 
-    fernet = (
-        build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
-        if effective_settings.crypto.keys
-        else None
-    )
-
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
     artifact_store = (
         build_artifact_store(effective_settings.artifacts)
@@ -353,11 +363,8 @@ def create_mcp_app(
         bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
-        teams_client=(
-            build_teams_client(effective_settings.teams)
-            if effective_settings.teams is not None
-            else None
-        ),
+        teams_client=teams_client,
+        group_lookups=group_lookups,
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)

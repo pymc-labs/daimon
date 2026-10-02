@@ -53,6 +53,7 @@ from daimon.adapters.mcp.tools._session_access import (
     load_hub_subject,
     session_belongs_to_caller,
     sessions_outside_seals,
+    stored_group_members,
 )
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
@@ -139,6 +140,7 @@ async def _agents_by_tenant(
                         platform=hub.platform,
                         account_id=tenant.account_id,
                         platform_user_id=hub.platform_user_id,
+                        members=stored_group_members(runtime, hub.platform, tenant.workspace_id),
                     )
                     if policy.isolated_channel_ids
                     else Subject()

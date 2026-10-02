@@ -490,6 +490,60 @@ async def test_verifier_computes_the_administered_channels_from_stored_roles(
     assert after.claims["platform_role_ids"] == ["r1"], "the stored role ids ride along"
 
 
+async def test_verifier_rechecks_a_stored_slack_group_live(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Any member may edit a Slack user group by default, so the stored one is looked up again."""
+    from daimon.core.channel_admins import GroupLookupFailed
+    from daimon.core.stores.accounts import set_platform_role_ids
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="slack", workspace_id="T0VERIFY")
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="slack", external_id="U1", tenant=tenant, account=account
+        )
+        await set_platform_role_ids(s, account.id, ["S1"])
+        await set_channel_admins(
+            s,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C1",
+            role_ids=["S1"],
+            user_ids=[],
+            actor_account_id=None,
+        )
+    token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
+    group: dict[str, frozenset[str]] = {"S1": frozenset({"U1"})}
+    asked: list[tuple[str, str, str]] = []
+
+    def lookup(platform: str, workspace_id: str):
+        async def members(group_id: str) -> frozenset[str]:
+            asked.append((platform, workspace_id, group_id))
+            if group_id not in group:
+                raise GroupLookupFailed("gone")
+            return group[group_id]
+
+        return members
+
+    async def claims(verifier: DaimonJWTVerifier) -> tuple[object, object]:
+        access = await verifier.verify_token(token)
+        assert access is not None, "the token verifies either way"
+        return access.claims["administered_channel_ids"], access.claims["platform_role_ids"]
+
+    live = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker, group_members=lookup)
+    assert await claims(live) == (["C1"], ["S1"]), "still in the group: still C1's admin"
+    assert asked == [("slack", "T0VERIFY", "S1")], "the person's own workspace is asked"
+    group["S1"] = frozenset({"U2"})
+    assert await claims(live) == ([], []), "removed from the group: no rights before a new turn"
+    del group["S1"]
+    assert await claims(live) == ([], []), "a failed lookup grants nothing"
+    blind = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    assert await claims(blind) == ([], []), "no lookup at all grants nothing"
+
+
 async def _agent_token(
     sessionmaker: async_sessionmaker[AsyncSession], *, platform: str | None, channel_id: str | None
 ) -> str:
