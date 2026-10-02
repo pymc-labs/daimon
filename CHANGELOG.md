@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A Teams routine posting into an isolated channel no longer falls back to its creator's 1:1 chat when the post fails, matching Discord and Slack: the result is skipped and stays inside the channel.
 - A chat turn's credential can now act only on its own responder's turn origin in the tools that require one (credential requests, publishing, repo binding, task continuity, timers, channel budgets and setup targets), as agent keys already could. Before, it could name another responder's origin on the same account.
 - A routine's session is now stamped with the channel it fires into and the seal over it, as a chat turn there is. The transcript of a sealed or isolated channel's routine can no longer be read from outside that channel, including by the routine's owner.
 - A private form's pinned-agent check now runs in the same transaction that spends the form, on Discord, Slack and Teams, so a pin committed after the earlier check still refuses it and the form stays unspent. That transaction holds the tenant's policy lock from the check until the form is spent, so a pin edit made meanwhile waits and applies to the next form. The routine fire and delivery checks (protected destination, the creator still on the invoker allowlist), the protection of a turn's own notices, and the shared-agent replace/remove table now all go through the one access decision. They decide exactly as before.

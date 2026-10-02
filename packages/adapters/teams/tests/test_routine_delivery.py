@@ -131,3 +131,28 @@ async def test_another_organisations_routine_is_not_posted(
     teams = _Teams()
     outcome = await _post(db_session_factory, teams, _row(tenant_id=uuid.uuid4()))
     assert outcome.status == "skipped" and teams.posts == []
+
+
+@pytest.mark.parametrize("channel_id", [CHANNEL, None], ids=["saved-channel", "legacy-row"])
+async def test_an_isolated_channels_result_never_falls_back_to_a_dm(
+    db_session_factory: async_sessionmaker[AsyncSession], channel_id: str | None
+) -> None:
+    """A routine into an isolated channel whose post fails is skipped, never sent to
+    the creator's 1:1 chat, as on Discord and Slack; a row saved without its channel
+    is placed by its thread id."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(CHANNEL,), isolated_channel_ids=(CHANNEL,)
+            ),
+        )
+    teams = _Teams(post_status=404)
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
+    )
+    outcome = await poster(_row(tenant_id=tenant.id, channel_id=channel_id))
+    assert outcome == DeliveryOutcome(status="skipped", note="destination_unavailable")
+    assert teams.posts == [], "the result stays inside the isolated channel"
