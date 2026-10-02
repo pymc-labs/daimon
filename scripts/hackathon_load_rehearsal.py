@@ -612,7 +612,9 @@ async def _discord_watch(
     deadline = time.monotonic() + 300
     outcome_seen = False
     while time.monotonic() < deadline:
-        await asyncio.sleep(2)
+        # At 100 pre-created threads, two-second polling alone would consume
+        # Discord's 50-request/second global bot allowance.
+        await asyncio.sleep(4 if existing_thread_id else 2)
         if result.thread_id is None:
             response = await rest.client.get(f"/channels/{message_id}")
             if response.status_code == 200:
