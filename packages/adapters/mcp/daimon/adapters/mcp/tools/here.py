@@ -27,20 +27,11 @@ async def _where_am_i_impl(
     caller = await load_caller_isolation(runtime, auth)
     if caller.isolated_place(channel_id) != caller.inside_channel_id:
         raise ToolError("That channel is across an isolated channel's line.")
-    category: tuple[tuple[str, str], ...] = ()
     if auth.platform == "discord":
         rows = await _list_channels_impl(runtime, auth)
         visible = {row.id for row in rows}
         if channel_id not in visible:
             raise ToolError("missing channel access")
-        here = next(row for row in rows if row.id == channel_id)
-        category = tuple(
-            (row.id, f"#{row.name}: yes")
-            for row in rows
-            if row.id != channel_id
-            and here.category_id is not None
-            and row.category_id == here.category_id
-        )
     elif auth.platform == "slack":
         visible = {row.id for row in await _slack_list_channels_impl(runtime, auth)}
         if channel_id not in visible:
@@ -64,12 +55,13 @@ async def _where_am_i_impl(
             public_mcp_url=str(runtime.settings.mcp.public_url)
             if runtime.settings.mcp.public_url is not None
             else None,
-            is_admin=auth.is_admin,
+            # This result enters the model's channel turn and can be repeated
+            # to everyone there. Admin-only views belong in private surfaces.
+            is_admin=False,
             caller_account_id=auth.account_id,
             visible_channel_ids=visible,
-            bot_can_view=True,
+            bot_can_view=None,
             caller_can_view=True,
-            category_channels_bot_can_view=category,
         )
 
 
