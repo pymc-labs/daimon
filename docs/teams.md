@@ -94,6 +94,8 @@ Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
 `daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
 counts as its channel, and the isolated agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
+The setup panel lives in the 1:1 chat, outside every channel, so a member's
+Agents list leaves out each isolated channel's own agents; an admin sees all.
 
 ### Channel history
 
