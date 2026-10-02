@@ -1,5 +1,8 @@
 """Redeem-code modal for /billing. Admin only: the credit lands on the whole server.
 
+A channel budget code raises the budget of the channel /billing ran in (a
+thread's parent).
+
 The admin gate runs again on submit, because the modal outlives the click that
 opened it. Redemption goes through ``daimon.core.promo_credit``; the panel is
 re-rendered so the new balance and any timed credit show at once.
@@ -12,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
+from daimon.adapters.discord.billing_panel.read import invoking_channel_id
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -19,7 +23,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.promo_codes import describe_refusal
-from daimon.core.promo_credit import PromoRedeemRefused, PromoRedeemResult, redeem_promo_code
+from daimon.core.promo_credit import (
+    BudgetChannel,
+    PromoRedeemRefused,
+    PromoRedeemResult,
+    redeem_promo_code,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -38,6 +47,11 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
     if isinstance(result, PromoRedeemRefused):
         return f"🎟️ {describe_refusal(result.reason)}"
     amount = f"**${result.amount_usd:,.2f}**"
+    if result.channel_limit_usd is not None:
+        return (
+            f"🎟️ Raised <#{result.channel_id}>'s budget by {amount}, "
+            f"to **${result.channel_limit_usd:,.2f}**."
+        )
     if result.credit_ends_at is None:
         return f"🎟️ Redeemed {amount} of credit. Balance: **${result.balance_usd:,.2f}**."
     window = f"until {_ts(result.credit_ends_at)}"
@@ -47,6 +61,11 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
         f"🎟️ Redeemed {amount} of timed credit, usable {window}. "
         "It is spent before other credit, and what is left then expires."
     )
+
+
+def _budget_channel(interaction: discord.Interaction) -> BudgetChannel | None:
+    channel_id = invoking_channel_id(interaction)  # pyright: ignore[reportArgumentType]  # only reads channel/channel_id
+    return None if channel_id is None else BudgetChannel(platform="discord", channel_id=channel_id)
 
 
 class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
@@ -82,6 +101,7 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
                 account_id=self.account_id,
                 code=str(self.code_in.value or ""),
                 now=datetime.now(UTC),
+                channel=_budget_channel(interaction),
             )
             await interaction.followup.send(redeem_result_text(result), ephemeral=True)
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:

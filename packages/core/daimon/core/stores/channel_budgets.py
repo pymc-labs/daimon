@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,3 +93,28 @@ async def delete_channel_budget(
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount > 0
+
+
+async def raise_channel_budget(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    amount_usd: Decimal,
+) -> ChannelBudgetRow | None:
+    """Add ``amount_usd`` to the channel's limit in one statement; None when it has no budget."""
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.tenant_id == tenant_id,
+            ChannelBudget.platform == platform,
+            ChannelBudget.channel_id == channel_id,
+        )
+        .values(limit_usd=ChannelBudget.limit_usd + amount_usd, updated_at=func.now())
+        .returning(ChannelBudget)
+        .execution_options(populate_existing=True)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    await session.flush()
+    return None if orm is None else ChannelBudgetRow.model_validate(orm)

@@ -1,7 +1,9 @@
 """Redeem promo codes and report live timed credit.
 
 A grant is an idempotent ledger row keyed ``promo:{code_id}:{tenant_id}``, so a
-retry never double-writes. The balance stays ``SUM(delta_usd)`` and the
+retry never double-writes. A ``channel_budget`` code writes no ledger row: it
+raises one channel's budget limit for good (on a monthly budget, every
+month's), once per tenant like any code. The balance stays ``SUM(delta_usd)`` and the
 balance and cap gates never look at promo state. Timed windows are settled by
 ``daimon.core.promo_settlement``.
 
@@ -17,6 +19,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import structlog
+from daimon.core.authz import Subject
+from daimon.core.channel_budget import may_set_channel_budget
+from daimon.core.errors import StoreError
 from daimon.core.promo_allocation import (
     TimedGrant,
     relevant_grants,
@@ -31,9 +36,10 @@ from daimon.core.promo_codes import (
     normalize_promo_code,
     redeem_refusal,
 )
+from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.domain import PromoCodeKind, TimedPromoGrantRow
+from daimon.core.stores.domain import PromoCodeKind, PromoCodeRow, TimedPromoGrantRow
 from daimon.core.usage_recording import SPEND_LEDGER_REASONS
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -55,6 +61,18 @@ class PromoRedeemed:
     credit_ends_at: datetime | None
     granted: bool  # False: a timed code whose credit starts later
     balance_usd: Decimal
+    channel_id: str | None = None
+    """The channel a channel_budget code raised."""
+    channel_limit_usd: Decimal | None = None
+    """That channel's budget limit after the raise."""
+
+
+@dataclasses.dataclass(frozen=True)
+class BudgetChannel:
+    """Where a channel_budget code would land: the redeeming channel, a thread's parent."""
+
+    platform: str
+    channel_id: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,8 +108,15 @@ async def redeem_promo_code(
     account_id: uuid.UUID | None,
     code: str,
     now: datetime,
+    channel: BudgetChannel | None = None,
+    redeemer: Subject | None = None,
 ) -> PromoRedeemResult:
     """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
+
+    ``redeemer`` is who redeems, as `authorize` sees them: a credit or timed
+    code needs a server admin, a channel_budget code whoever may set
+    ``channel``'s budget (SET_CHANNEL_BUDGET). None means the caller already
+    checked for a server admin.
 
     The tenant's attempts are serialized first, so concurrent guesses cannot
     all pass the throttle on the same count. The code row is then locked, so
@@ -107,7 +132,13 @@ async def redeem_promo_code(
             log.warning("promo_code.redeem_throttled", tenant_id=str(tenant_id))
             return PromoRedeemRefused(reason="throttled")
         result = await _redeem_in_session(
-            session, tenant_id=tenant_id, account_id=account_id, code=code, now=now
+            session,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            code=code,
+            now=now,
+            channel=channel,
+            redeemer=redeemer,
         )
         if isinstance(result, PromoRedeemRefused):
             await promo_store.record_redeem_failure(
@@ -132,6 +163,8 @@ async def _redeem_in_session(
     account_id: uuid.UUID | None,
     code: str,
     now: datetime,
+    channel: BudgetChannel | None = None,
+    redeemer: Subject | None = None,
 ) -> PromoRedeemResult:
     normalized = normalize_promo_code(code)
     if not is_well_formed_promo_code(normalized):
@@ -141,9 +174,14 @@ async def _redeem_in_session(
         return PromoRedeemRefused(reason="invalid")
     if await promo_store.has_redemption(session, promo_code_id=row.id, tenant_id=tenant_id):
         return PromoRedeemRefused(reason="already_redeemed")
-    refusal = redeem_refusal(row, now=now)
+    refusal = redeem_refusal(row, now=now) or _redeemer_refusal(row, channel, redeemer)
     if refusal is not None:
         return PromoRedeemRefused(reason=refusal)
+    if row.kind == "channel_budget":
+        assert channel is not None  # `_redeemer_refusal` refuses a channel code without one
+        return await _raise_budget(
+            session, row=row, tenant_id=tenant_id, account_id=account_id, now=now, channel=channel
+        )
     granted = is_granted_on_redeem(row, now=now)
     if not await promo_store.insert_redemption(
         session,
@@ -166,6 +204,67 @@ async def _redeem_in_session(
         credit_ends_at=row.credit_ends_at,
         granted=granted,
         balance_usd=await tenant_ledger.get_balance(session, tenant_id=tenant_id),
+    )
+
+
+def _redeemer_refusal(
+    row: PromoCodeRow, channel: BudgetChannel | None, redeemer: Subject | None
+) -> PromoRefusal | None:
+    if row.kind != "channel_budget":
+        return None if redeemer is None or redeemer.is_admin else "not_allowed"
+    if channel is None:
+        return "needs_channel"
+    if redeemer is not None and not may_set_channel_budget(redeemer, channel.channel_id):
+        return "not_allowed"
+    return None
+
+
+async def _raise_budget(
+    session: AsyncSession,
+    *,
+    row: PromoCodeRow,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    now: datetime,
+    channel: BudgetChannel,
+) -> PromoRedeemResult:
+    """Raise the channel's limit by the code's amount; refused when it has no budget."""
+    platform, channel_id = channel.platform, channel.channel_id
+    existing = await budget_store.get_channel_budget(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+    if existing is None:
+        return PromoRedeemRefused(reason="no_channel_budget")
+    if not await promo_store.insert_redemption(
+        session,
+        promo_code_id=row.id,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        now=now,
+        granted=True,
+        channel_id=channel.channel_id,
+    ):
+        return PromoRedeemRefused(reason="already_redeemed")
+    budget = await budget_store.raise_channel_budget(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        amount_usd=row.amount_usd,
+    )
+    if budget is None:
+        # Cleared since the read above: fail the whole transaction, redemption included.
+        raise StoreError(f"channel {channel.channel_id}'s budget was removed while redeeming")
+    return PromoRedeemed(
+        promo_code_id=row.id,
+        kind=row.kind,
+        amount_usd=row.amount_usd,
+        credit_starts_at=None,
+        credit_ends_at=None,
+        granted=True,
+        balance_usd=await tenant_ledger.get_balance(session, tenant_id=tenant_id),
+        channel_id=channel.channel_id,
+        channel_limit_usd=budget.limit_usd,
     )
 
 

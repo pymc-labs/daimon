@@ -202,7 +202,7 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this server or workspace. |
+| `redeem_promo_code` | admin only, channel admins too, operator tokens with promo:redeem | Redeem a promo code for credit on this server or workspace. |
 
 ## `promo_issuing`
 

@@ -1685,7 +1685,9 @@
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
-        at the end. Redemption is open between ``redeem_starts_at`` and
+        at the end. ``channel_budget`` codes add the amount to one channel's
+        budget limit for good instead of the balance; that channel's admins
+        may redeem them too. Redemption is open between ``redeem_starts_at`` and
         ``redeem_ends_at`` when given (a timed code's defaults to its credit
         end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
         only in this result.
@@ -1722,6 +1724,7 @@
             'enum': list([
               'credit',
               'timed',
+              'channel_budget',
             ]),
             'type': 'string',
           }),
@@ -3669,11 +3672,25 @@
         per server or workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        Manage Server (Discord) or workspace admin (Slack).
+        Manage Server (Discord) or workspace admin (Slack). A channel budget
+        code raises one channel's budget limit instead: pass that channel's
+        ``channel_id`` (the id from <channel role="parent_channel">); that
+        channel's admins may redeem it too.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'code': dict({
             'type': 'string',
           }),

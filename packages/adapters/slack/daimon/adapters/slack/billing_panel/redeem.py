@@ -26,7 +26,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.promo_codes import describe_refusal
-from daimon.core.promo_credit import PromoRedeemRefused, PromoRedeemResult, redeem_promo_code
+from daimon.core.promo_credit import (
+    BudgetChannel,
+    PromoRedeemRefused,
+    PromoRedeemResult,
+    redeem_promo_code,
+)
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -95,6 +100,11 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
     if isinstance(result, PromoRedeemRefused):
         return describe_refusal(result.reason)
     amount = f"*${result.amount_usd:,.2f}*"
+    if result.channel_limit_usd is not None:
+        return (
+            f"🎟️ Raised <#{result.channel_id}>'s budget by {amount}, "
+            f"to *${result.channel_limit_usd:,.2f}*."
+        )
     if result.credit_ends_at is None:
         return f"🎟️ Redeemed {amount} of credit. Balance: *${result.balance_usd:,.2f}*."
     window = f"until {slack_time(result.credit_ends_at)}"
@@ -241,6 +251,11 @@ async def run_redeem_submission(
             account_id=principal.account_id,
             code=decision.code,
             now=now,
+            channel=(
+                BudgetChannel(platform="slack", channel_id=decision.channel_id)
+                if decision.channel_id
+                else None
+            ),
         )
         if isinstance(result, PromoRedeemRefused):
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]

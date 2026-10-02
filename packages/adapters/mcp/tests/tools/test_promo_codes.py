@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -10,15 +11,18 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools.promo_codes import (
     _redeem_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.scope import DeploymentDefault
+from daimon.core.security_audit import capture_decision
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import Role
-from daimon.testing.factories import make_account, make_tenant
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -120,3 +124,44 @@ async def test_non_admin_is_refused_before_redeeming(
     assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == 0, (
         "a refused non-admin should add no credit"
     )
+
+
+async def test_a_channel_admin_raises_their_channels_budget_and_nothing_else(
+    db_session: AsyncSession, db_session_factory: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def visible(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+        return channel_id
+
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
+    member = await _setup(db_session, is_admin=False)
+    tenant = await get_tenant(db_session, member.tenant_id)
+    assert tenant is not None
+    await make_channel_budget(db_session, tenant=tenant, channel_id="111", limit_usd=Decimal("5"))
+    await _code(db_session, "CHANNEL-RAISE-26", timed=False, channel_budget=True)
+    await _code(db_session, "WELCOME-2026", timed=False)
+    await db_session.commit()
+    channel_admin = dataclasses.replace(
+        member,
+        platform=tenant.platform,
+        platform_user_id="u-ca",
+        administered_channel_ids=frozenset({"111"}),
+    )
+    runtime = _runtime(db_session_factory)
+
+    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+        await _redeem_promo_code_impl(runtime, member, "CHANNEL-RAISE-26", "111")
+    with capture_decision() as denied:
+        credit = await _redeem_promo_code_impl(runtime, channel_admin, "WELCOME-2026", "111")
+    assert (credit.redeemed, credit.refusal) == (False, "not_allowed"), "credit is a server's"
+    assert denied.reason == "authz:admin_required", "the refusal is audited"
+    missing = await _redeem_promo_code_impl(runtime, channel_admin, "CHANNEL-RAISE-26")
+    assert missing.refusal == "needs_channel", "a channel code needs its channel"
+
+    raised = await _redeem_promo_code_impl(runtime, channel_admin, "CHANNEL-RAISE-26", "111")
+
+    assert (raised.kind, raised.channel_id, raised.channel_limit_usd) == (
+        "channel_budget",
+        "111",
+        "17.50",
+    ), "the channel's limit rose by the code's amount"
+    assert raised.message == "Raised channel 111's budget by $12.50, to $17.50."

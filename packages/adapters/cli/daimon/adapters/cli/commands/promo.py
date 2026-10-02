@@ -57,6 +57,12 @@ def promo_create_command(
     timed: Annotated[
         bool, typer.Option("--timed", help="Credit that only exists between --starts and --ends.")
     ] = False,
+    channel_budget: Annotated[
+        bool,
+        typer.Option(
+            "--channel-budget", help="Raise one channel's budget limit instead of the balance."
+        ),
+    ] = False,
     starts: Annotated[str | None, typer.Option("--starts", help=f"Credit start ({_ISO}).")] = None,
     ends: Annotated[str | None, typer.Option("--ends", help=f"Credit end ({_ISO}).")] = None,
     redeem_from: Annotated[
@@ -81,6 +87,7 @@ def promo_create_command(
             console=console,
             amount=amount,
             timed=timed,
+            channel_budget=channel_budget,
             starts=starts,
             ends=ends,
             redeem_from=redeem_from,
@@ -99,6 +106,7 @@ async def promo_create(
     console: Console,
     amount: str,
     timed: bool = False,
+    channel_budget: bool = False,
     starts: str | None = None,
     ends: str | None = None,
     redeem_from: str | None = None,
@@ -115,6 +123,7 @@ async def promo_create(
         terms = build_promo_code_terms(
             amount_usd=amount_usd,
             timed=timed,
+            channel_budget=channel_budget,
             credit_starts_at=_timestamp(starts),
             credit_ends_at=_timestamp(ends),
             redeem_starts_at=_timestamp(redeem_from),

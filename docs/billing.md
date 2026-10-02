@@ -213,8 +213,8 @@ the same with or without Stripe and for either funding mode. Budgets exist on
 Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
-  markup included: what the tenant was charged for turns there, not the
-  pre-markup usage `/billing` totals. Debits carry the parent channel, so a
+  markup included, whatever paid for them (promo credit too): what the
+  tenant was charged for turns there, not the pre-markup usage `/billing` totals. Debits carry the parent channel, so a
   thread counts toward its channel. A session records it in its own
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
@@ -363,6 +363,15 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   only. Spend inside a window draws on timed credit first, the credit that
   ends earliest first, then on ordinary credit. A window that opens and closes
   while the scheduler is down expires without a grant.
+- **Channel budget** codes (`--channel-budget`, `kind=channel_budget`) add
+  their amount to one channel's [budget](#channel-budgets) limit instead of
+  the balance, and write no ledger row. The raise is permanent: on a
+  monthly budget it raises every month's limit. They are redeemed in the
+  channel they raise (`/billing` there, or `redeem_promo_code` with
+  `channel_id`), which must have a budget; server admins and that channel's
+  admins may redeem them, and the redemption records the channel
+  (`promo_redemptions.channel_id`). Credit and timed codes stay with server
+  admins.
 - **Late spend.** Every turn debit stores `occurred_at`, the model call's own
   time, so a call the [sweep](#the-tables) records after the window closed
   still counts as spend inside it. Fifteen minutes after the close a
@@ -380,9 +389,11 @@ many tenants may redeem it. Each tenant redeems a code at most once.
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
 credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
-`billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
+`billing` on Teams, or with the MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
-`already_redeemed` and `throttled`; five refusals in 15 minutes pause a
+`already_redeemed`, `throttled`, `needs_channel` (a channel budget code
+redeemed outside a channel), `no_channel_budget` and `not_allowed` (the
+caller may not redeem that kind of code there); five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses
 cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
@@ -406,7 +417,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`), and the channel a channel budget code raised (`channel_id`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 

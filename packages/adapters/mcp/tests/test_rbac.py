@@ -581,9 +581,9 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_channel_environment" not in await _search(
         app, member, "set channel environment"
     ), "a member without a grant may not"
-    assert "### set_channel_budget" in await _search(
-        app, channel_admin, "set channel budget"
-    ), "a channel admin may set their channel's budget"
+    assert "### set_channel_budget" in await _search(app, channel_admin, "set channel budget"), (
+        "a channel admin may set their channel's budget"
+    )
     assert "### list_channel_budgets" not in await _search(
         app, channel_admin, "list channel budgets"
     ), "listing every budget stays with server admins"

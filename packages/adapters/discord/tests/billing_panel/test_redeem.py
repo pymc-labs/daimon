@@ -25,9 +25,9 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
+from daimon.core.stores import channel_budgets, tenant_ledger
 from daimon.core.stores import promo_codes as promo_store
-from daimon.core.stores import tenant_ledger
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -385,3 +385,35 @@ async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> N
     assert [c.remaining_usd for c in state.timed_credit] == [Decimal("5")], (
         "the snapshot should carry the live timed credit"
     )
+
+
+async def test_modal_submit_raises_the_invoking_channels_budget(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A channel budget code raises the budget of the channel /billing ran in."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    account = await make_account(db_session, tenant=tenant)
+    await make_channel_budget(db_session, tenant=tenant, channel_id="555", limit_usd=Decimal("5"))
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False, channel_budget=True)
+    await promo_store.insert_promo_code(
+        db_session, code_hash=hash_promo_code(normalize_promo_code("CHANNEL-RAISE-26")), terms=terms
+    )
+    await db_session.commit()
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.sessionmaker = db_session_factory
+    modal = RedeemCodeModal(runtime=runtime, account_id=account.id, rerender=AsyncMock())
+    modal.code_in._value = "CHANNEL-RAISE-26"
+    interaction = _interaction(admin=True)
+    interaction.channel = MagicMock(spec=discord.TextChannel)
+    interaction.channel_id = 555
+
+    await modal.on_submit(interaction)
+
+    assert interaction.followup.send.call_args.args[0] == (
+        "🎟️ Raised <#555>'s budget by **$10.00**, to **$15.00**."
+    ), "the reply names the channel and its new limit"
+    budget = await channel_budgets.get_channel_budget(
+        db_session, tenant_id=tenant_id, platform="discord", channel_id="555"
+    )
+    assert budget is not None and budget.limit_usd == Decimal("15"), "the limit rose"

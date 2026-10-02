@@ -521,7 +521,7 @@ class TenantLedgerRow(BaseModel):
 
 # `credit` codes add credit that never expires; `timed` codes add credit that
 # exists only inside their credit window. Column is Text + CHECK.
-PromoCodeKind = Literal["credit", "timed"]
+PromoCodeKind = Literal["credit", "timed", "channel_budget"]
 
 
 class PromoCodeRow(BaseModel):
@@ -558,6 +558,8 @@ class PromoRedemptionRow(BaseModel):
     granted_at: datetime | None
     expired_at: datetime | None
     expired_usd: Decimal | None
+    channel_id: str | None = None
+    """The channel a channel_budget code raised."""
 
 
 class TimedPromoGrantRow(BaseModel):

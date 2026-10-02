@@ -116,6 +116,7 @@ async def insert_redemption(
     account_id: uuid.UUID | None,
     now: datetime,
     granted: bool,
+    channel_id: str | None = None,
 ) -> bool:
     """Record the tenant's redemption and count it. False when it already redeemed."""
     stmt = (
@@ -126,6 +127,7 @@ async def insert_redemption(
             redeemed_by_account_id=account_id,
             redeemed_at=now,
             granted_at=now if granted else None,
+            channel_id=channel_id,
         )
         .on_conflict_do_nothing(index_elements=["promo_code_id", "tenant_id"])
     )
@@ -155,6 +157,7 @@ async def list_redemptions(
             PromoRedemption.granted_at,
             PromoRedemption.expired_at,
             PromoRedemption.expired_usd,
+            PromoRedemption.channel_id,
         )
         .join(Tenant, Tenant.id == PromoRedemption.tenant_id)
         .where(PromoRedemption.promo_code_id == promo_code_id)

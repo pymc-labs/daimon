@@ -1025,7 +1025,9 @@ codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
 button, shown only while a code is redeemable, and a modal), the Teams
 `billing` card (a code field and button, shown the same way) or with the MCP
 tool `redeem_promo_code`; each surface calls
-`daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
+`daimon.core.promo_credit.redeem_promo_code`. A channel budget code raises
+the invoking channel's budget limit, and a channel admin may redeem one for
+a channel they administer (`SET_CHANNEL_BUDGET`) through the MCP tool. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
 
