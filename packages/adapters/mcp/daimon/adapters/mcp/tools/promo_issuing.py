@@ -217,11 +217,11 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
         at the end. ``channel_budget`` codes add the amount to one channel's
-        budget limit for good instead of the balance; that channel's admins
-        may redeem them too. Redemption is open between ``redeem_starts_at`` and
-        ``redeem_ends_at`` when given (a timed code's defaults to its credit
-        end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
-        only in this result.
+        budget limit for good instead of the balance; only a server admin
+        redeems them, never the channel's own admins. Redemption is open
+        between ``redeem_starts_at`` and ``redeem_ends_at`` when given (a
+        timed code's defaults to its credit end). Dates are ISO 8601, UTC
+        without an offset. ``code`` is shown only in this result.
         """
         return await _create_promo_code_impl(
             runtime,
