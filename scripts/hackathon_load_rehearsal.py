@@ -403,9 +403,15 @@ async def _turn_one(
         )
         from daimon.core.stores.turn_outcomes import list_for_tenant
 
-        async with sm() as session:
-            outcomes = await list_for_tenant(session, tenant_id, limit=20)
-        outcome = next((row for row in outcomes if row.started_at >= started_at), None)
+        outcome = None
+        for attempt in range(10):
+            async with sm() as session:
+                outcomes = await list_for_tenant(session, tenant_id, limit=20)
+            outcome = next((row for row in outcomes if row.started_at >= started_at), None)
+            if outcome is not None:
+                break
+            if attempt < 9:
+                await asyncio.sleep(0.2)
         if outcome is not None:
             result.status = str(outcome.reason)
             result.input_tokens = outcome.input_tokens
