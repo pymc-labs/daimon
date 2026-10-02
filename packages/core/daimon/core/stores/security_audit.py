@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import Account, SecurityAuditEvent, Tenant
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,13 @@ class SecurityAuditEntry(BaseModel):
     token_jti: uuid.UUID | None = None
     scope: str | None = None
     """The operator-token scope the call was checked against."""
+    target_channel_id: str | None = None
+    """Channel tidy tools only: the channel of the message edited or deleted."""
+    target_message_id: str | None = None
+    content_sha256: str | None = None
+    """SHA-256 of the text an edit or delete replaced; never the text."""
+    turn_ref: str | None = None
+    """The turn a tidy action ran in: ``origin:<id>`` or ``token:<jti>``."""
 
 
 class SecurityAuditRow(SecurityAuditEntry):
@@ -56,6 +63,10 @@ async def append_event(
     token_kind: str | None = None,
     token_jti: uuid.UUID | None = None,
     scope: str | None = None,
+    target_channel_id: str | None = None,
+    target_message_id: str | None = None,
+    content_sha256: str | None = None,
+    turn_ref: str | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
         raise ValueError("occurred_at must include a timezone")
@@ -89,6 +100,10 @@ async def append_event(
         token_kind=token_kind,
         token_jti=token_jti,
         scope=scope,
+        target_channel_id=target_channel_id,
+        target_message_id=target_message_id,
+        content_sha256=content_sha256,
+        turn_ref=turn_ref,
     )
     session.add(event)
     await session.flush()
@@ -120,6 +135,35 @@ async def list_events(
         .offset(offset)
     )
     return [SecurityAuditRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
+
+
+async def count_allowed(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    tool_names: frozenset[str],
+    since: datetime | None = None,
+    turn_ref: str | None = None,
+) -> int:
+    """Allowed events for one agent and set of tools, since a time or in one turn."""
+    if since is not None and since.utcoffset() is None:
+        raise ValueError("since must include a timezone")
+    stmt = (
+        select(func.count())
+        .select_from(SecurityAuditEvent)
+        .where(
+            SecurityAuditEvent.tenant_id == tenant_id,
+            SecurityAuditEvent.agent_id == agent_id,
+            SecurityAuditEvent.tool_name.in_(sorted(tool_names)),
+            SecurityAuditEvent.outcome == "allowed",
+        )
+    )
+    if since is not None:
+        stmt = stmt.where(SecurityAuditEvent.occurred_at >= since)
+    if turn_ref is not None:
+        stmt = stmt.where(SecurityAuditEvent.turn_ref == turn_ref)
+    return int(await session.scalar(stmt) or 0)
 
 
 @asynccontextmanager

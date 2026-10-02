@@ -11,6 +11,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
+from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -144,7 +145,21 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             await _ensure_thread_parent_cached(channel)
         _check_send_permission(channel, member)
         await _require_discord_channel_writable(runtime, auth, channel)
+        parent_id = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
         sent = await channel.send(content=content, files=files)
+        await record_agent_posts(
+            runtime,
+            auth,
+            platform="discord",
+            posts=[
+                PostRecord(
+                    channel_id=str(channel.id),
+                    message_id=str(sent.id),
+                    parent_channel_id=parent_id,
+                    content=content,
+                )
+            ],
+        )
         return _to_message_row(sent)

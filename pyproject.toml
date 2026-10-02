@@ -113,6 +113,7 @@ source_modules = [
     "daimon.core.channel_environments",
     "daimon.core.channel_isolation",
     "daimon.core.channel_isolation_setup",
+    "daimon.core.channel_tidy",
     "daimon.core.checkpoint_prompt",
     "daimon.core.config",
     "daimon.core.confirmation",

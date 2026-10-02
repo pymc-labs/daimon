@@ -16,6 +16,7 @@ from __future__ import annotations
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -100,6 +101,25 @@ async def _create_thread_impl(  # pyright: ignore[reportUnusedFunction]
                     "daimon is missing the permission needed to create this thread"
                 ) from e
 
+        await record_agent_posts(
+            runtime,
+            auth,
+            platform="discord",
+            posts=[
+                PostRecord(
+                    channel_id=str(channel.id),
+                    message_id=str(thread.id),
+                    kind="thread",
+                    parent_channel_id=str(channel.id),
+                ),
+                PostRecord(
+                    channel_id=str(thread.id),
+                    message_id=str(starter.id),
+                    parent_channel_id=str(channel.id),
+                    content=content,
+                ),
+            ],
+        )
         return ThreadRow(
             id=str(thread.id),
             name=thread.name,

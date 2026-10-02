@@ -402,6 +402,38 @@
         'type': 'object',
       }),
     }),
+    'archive_thread': dict({
+      'description': '''
+        Archive a Discord thread you opened with create_thread.
+        
+        Its messages stay readable and a new post reopens it. Use it for a
+        finished or abandoned thread of yours that others wrote in. Pass
+        origin_context_id. Discord-only: Slack threads cannot be archived.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'thread_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'thread_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'ask': dict({
       'description': '''
         Ask one question and wait for the final answer and any chart images. Starts a
@@ -1975,6 +2007,42 @@
         'type': 'object',
       }),
     }),
+    'delete_message': dict({
+      'description': '''
+        Delete one message you posted with send_message or create_thread.
+        
+        Use it for your own stale or failed posts, one message per call.
+        The same rules as edit_message: only your own posts, pass
+        origin_context_id, the same limits and the same refused channels.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'message_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'message_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_notebook': dict({
       'description': '''
         Un-publish a notebook or blog you published (frees its host port).
@@ -2052,6 +2120,41 @@
         }),
         'required': list([
           'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'delete_thread': dict({
+      'description': '''
+        Delete a thread you opened with create_thread, while every message
+        in it is still your own (at most 50).
+        
+        A thread anyone else wrote in is refused: archive it instead
+        (Discord), or delete only your own messages. Discord: thread_id is
+        the thread's id. Slack: thread_id is channel_id:thread_ts. Pass
+        origin_context_id. Counts as one action against the same limits as
+        edit_message.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'thread_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'thread_id',
         ]),
         'type': 'object',
       }),
@@ -2144,6 +2247,52 @@
         'required': list([
           'agent_name',
           'server_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'edit_message': dict({
+      'description': '''
+        Replace the text of a message you posted with send_message or create_thread.
+        
+        Use it to correct or update your own post instead of posting again.
+        Only your own posts: a person's message, another agent's, another
+        bot's, or your normal chat replies are refused. channel_id is where
+        the message is (Discord: the thread id for a message in a thread;
+        Slack: the channel id, and message_id is the message ts). Pass this
+        turn's origin_context_id. Limited to 10 edits or deletes per turn and
+        40 per hour. Refused in protected channels, channels you may not post
+        in, sealed channels outside their own conversations and the support
+        escalation channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'content': dict({
+            'type': 'string',
+          }),
+          'message_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'message_id',
+          'content',
         ]),
         'type': 'object',
       }),

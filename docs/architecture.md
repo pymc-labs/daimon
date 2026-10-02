@@ -1286,6 +1286,13 @@ row), it writes a `denied` row under the token's own tenant with tool name
 verifier establishes a tenant cannot be safely attributed and are outside this trail.
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
+The channel tidy tools (`edit_message`, `delete_message`, `archive_thread`,
+`delete_thread`) also write their own row per action, committed before the
+platform call: `target_channel_id`, `target_message_id`, a SHA-256 of the text
+replaced (`content_sha256`) and the turn (`turn_ref`), never the text. Those
+`allowed` rows are what the tidy limits count. An agent may tidy only messages
+recorded in `agent_posted_messages` under its own agent id, which
+`send_message` and `create_thread` write at send time.
 The policy remains synchronous and does no I/O outside an MCP audit scope;
 Discord/Slack setup-panel actions and the separate hub OAuth applications
 (`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
