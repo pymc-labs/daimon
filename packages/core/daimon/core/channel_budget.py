@@ -22,7 +22,7 @@ from typing import get_args
 from daimon.core.errors import DaimonError
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from daimon.core.stores.tenant_ledger import get_channel_spend
+from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 BUDGET_WINDOWS: tuple[BudgetWindow, ...] = get_args(BudgetWindow)
@@ -249,3 +249,23 @@ async def is_over_channel_budget(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
         )
     return status is not None and status.is_exceeded
+
+
+async def balance_footer(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    budget_channel_id: str | None,
+    now: datetime,
+) -> str | None:
+    """A turn footer's money line: what an active channel budget has left, else the
+    prepaid balance; None for an operator-funded tenant outside a budgeted channel."""
+    if budget_channel_id is not None:
+        status = await get_channel_budget_status(
+            session, tenant_id=tenant_id, platform=platform, channel_id=budget_channel_id, now=now
+        )
+        if status is not None and status.is_active:
+            return f"${status.remaining_usd:.2f} of channel budget left"
+    balance = await get_prepaid_balance(session, tenant_id=tenant_id)
+    return None if balance is None else f"${balance:.2f} left"

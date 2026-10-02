@@ -592,6 +592,7 @@ async def run_wizard_submit_turn_observed(
                 sessionmaker=bot.runtime.sessionmaker,
                 alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
                 send=_send_embed,
@@ -627,6 +628,7 @@ async def run_wizard_submit_turn_observed(
                 sessionmaker=bot.runtime.sessionmaker,
                 alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
                 send=_send_embed,

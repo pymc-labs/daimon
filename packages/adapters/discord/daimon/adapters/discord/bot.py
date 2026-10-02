@@ -2087,6 +2087,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2199,6 +2200,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2608,6 +2610,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2969,6 +2972,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
+                budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
