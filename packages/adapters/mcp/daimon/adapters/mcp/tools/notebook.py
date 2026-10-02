@@ -29,15 +29,14 @@ from fastmcp.exceptions import ToolError
 async def _create_notebook_upload_impl(
     runtime: McpRuntime,
     *,
-    auth: AuthIdentity | None = None,
+    auth: AuthIdentity,
     slug: str | None,
     permanent: bool,
     principal_key: str,
     editable: bool = False,
     tenant: str | None = None,
 ) -> dict[str, str]:
-    if auth is not None:
-        await require_external_publish_allowed(runtime, auth)
+    await require_external_publish_allowed(runtime, auth)
     if permanent and editable:
         raise ToolError("editable=True is for scratch notebooks only; a blog is always read-only")
     try:
@@ -62,14 +61,13 @@ async def _create_notebook_upload_impl(
 async def _create_attachment_upload_impl(
     runtime: McpRuntime,
     *,
-    auth: AuthIdentity | None = None,
+    auth: AuthIdentity,
     slug: str,
     name: str,
     principal_key: str,
     tenant: str | None = None,
 ) -> dict[str, str]:
-    if auth is not None:
-        await require_external_publish_allowed(runtime, auth)
+    await require_external_publish_allowed(runtime, auth)
     try:
         return create_attachment_upload(
             slug=slug,

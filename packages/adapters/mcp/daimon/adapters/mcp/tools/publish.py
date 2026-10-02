@@ -38,6 +38,7 @@ from daimon.core.reports.publish import (
     delete_report,
     publish_report,
 )
+from daimon.core.stores.domain import TurnOriginRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -62,18 +63,15 @@ def _report_host_error_message(err: ReportHostError) -> str:
     return str(err)
 
 
-async def _source_authorizer(
-    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+def _source_authorizer(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None
 ) -> Callable[[BetaManagedAgentsAgent], Awaitable[None]]:
     """The pinned-agent write rule for the agent whose reader variant is published.
 
     A reader answers as its source agent, so publishing one is a change to
     what that agent reaches: an admin may, and a member only from a turn
-    inside the source's pinned channels (``origin_context_id``).
+    inside the source's pinned channels (the verified ``origin``).
     """
-    origin = (
-        await require_turn_origin(runtime, auth, origin_context_id) if origin_context_id else None
-    )
 
     async def authorize_source(source: BetaManagedAgentsAgent) -> None:
         await require_pin_write_access(runtime, auth, ma_agent=source, origin=origin)
@@ -102,18 +100,16 @@ async def _publish_report_impl(
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
+    origin = (
+        await require_turn_origin(runtime, auth, origin_context_id)
+        if auth is not None and origin_context_id
+        else None
+    )
     if auth is not None:
-        origin = (
-            await require_turn_origin(runtime, auth, origin_context_id)
-            if origin_context_id
-            else None
-        )
         await require_external_publish_allowed(
             runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
         )
-    authorize_source = (
-        await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
-    )
+    authorize_source = _source_authorizer(runtime, auth, origin) if auth is not None else None
     try:
         async with client_factory() as client:
             result = await publish_report(

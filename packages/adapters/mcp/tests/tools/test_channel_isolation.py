@@ -56,6 +56,7 @@ from daimon.adapters.mcp.tools.skills import (
     _list_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import NotebookSettings
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -78,7 +79,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
 )
 from fastmcp.exceptions import ToolError
-from pydantic import SecretStr
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -372,6 +373,64 @@ async def test_an_isolated_agent_cannot_mint_external_publish_uploads(
             recipients=[],
             cap_usd="1",
             agent="local",
+        )
+
+
+async def test_channel_bound_non_owner_key_cannot_publish(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    bound_key = replace(
+        world.auth(admin=False),
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_shared"),
+        bound_channel_id=ROOM,
+    )
+    runtime.settings.mcp.jwt_secret = SecretStr("a" * 32)
+
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _create_notebook_upload_impl(
+            runtime, auth=bound_key, slug="notes", permanent=False, principal_key="account"
+        )
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _publish_report_impl(
+            runtime,
+            auth=bound_key,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            slug="notes",
+            title="Notes",
+            recipients=[],
+            cap_usd="1",
+            agent="shared",
+        )
+
+
+async def test_unresolved_agent_gets_distinct_publishing_refusal(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    vanished = world.auth(admin=False, executing="missing-agent")
+
+    with pytest.raises(ToolError, match="publishing agent could not be resolved"):
+        await _create_notebook_upload_impl(
+            runtime, auth=vanished, slug="notes", permanent=False, principal_key="account"
+        )
+
+
+async def test_outside_agent_and_agentless_caller_can_publish_with_isolation_active(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    runtime.settings.notebook = NotebookSettings(
+        host_url=HttpUrl("http://notebook-host:8001"), admin_secret=SecretStr("test-secret")
+    )
+
+    for caller in (world.auth(admin=False, executing="agent_shared"), world.auth(admin=False)):
+        result = await _create_notebook_upload_impl(
+            runtime, auth=caller, slug="notes", permanent=False, principal_key="account"
+        )
+        assert result["upload_url"].startswith("http://notebook-host:8001/upload/"), (
+            "an outside agent or agentless caller may publish while another channel is isolated"
         )
 
 

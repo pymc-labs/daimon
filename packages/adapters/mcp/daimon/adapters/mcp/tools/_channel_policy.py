@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -209,8 +209,13 @@ async def require_external_publish_allowed(
         subject=mcp_subject(auth),
         action=Action.PUBLISH_EXTERNAL,
         agent=await _executing_agent(runtime, auth, policy),
-        origin=origin,
+        origin=origin if origin is not None else mcp_place(auth),
     )
+    if decision.reason == "agent_unresolved":
+        raise ToolError(
+            "the publishing agent could not be resolved while channel isolation is active. "
+            "Nothing was published."
+        )
     if not decision:
         raise ToolError(
             "this call is bound to an isolated channel, so it cannot publish outside it. "

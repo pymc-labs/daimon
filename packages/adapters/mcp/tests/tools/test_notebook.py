@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from collections.abc import Callable
 from typing import Any, cast
 from unittest.mock import create_autospec
@@ -11,6 +12,7 @@ from unittest.mock import create_autospec
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.notebook import (
     _create_attachment_upload_impl,  # pyright: ignore[reportPrivateUsage]
@@ -18,6 +20,7 @@ from daimon.adapters.mcp.tools.notebook import (
     _delete_notebook_impl,  # pyright: ignore[reportPrivateUsage]
     _list_notebooks_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -26,9 +29,22 @@ from daimon.core.config import (
 )
 from daimon.core.notebooks.publish import _principal_prefix  # pyright: ignore[reportPrivateUsage]
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_AUTH = AuthIdentity(account_id=uuid.UUID(int=1), tenant_id=uuid.UUID(int=2), role=Role.USER)
+
+
+@pytest.fixture(autouse=True)
+def _open_policy_for_minter_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def load_open_policy(runtime: McpRuntime, auth: AuthIdentity) -> TenantAccessPolicy:
+        return OPEN_ACCESS_POLICY
+
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools._channel_policy.load_channel_policy", load_open_policy
+    )
 
 
 def _make_settings(
@@ -83,7 +99,7 @@ def _factory(handler: Callable[[httpx.Request], httpx.Response]) -> type[httpx.A
 async def test_create_notebook_upload_impl_permanent_mints_blog_op() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     out = await _create_notebook_upload_impl(
-        runtime, slug="radar", permanent=True, principal_key="acct-1"
+        runtime, auth=_AUTH, slug="radar", permanent=True, principal_key="acct-1"
     )
     assert out["upload_url"].startswith("http://nb:8001/upload/"), "returns a host upload URL"
     assert _token_payload(out["upload_url"])["op"] == "blog", (
@@ -94,7 +110,7 @@ async def test_create_notebook_upload_impl_permanent_mints_blog_op() -> None:
 async def test_create_notebook_upload_impl_random_slug() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     out = await _create_notebook_upload_impl(
-        runtime, slug=None, permanent=False, principal_key="acct-1"
+        runtime, auth=_AUTH, slug=None, permanent=False, principal_key="acct-1"
     )
     assert _token_payload(out["upload_url"])["op"] == "notebook", "token op is notebook"
 
@@ -102,7 +118,7 @@ async def test_create_notebook_upload_impl_random_slug() -> None:
 async def test_create_attachment_upload_impl_signs_name() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     out = await _create_attachment_upload_impl(
-        runtime, slug="radar", name="d.nc", principal_key="acct-1"
+        runtime, auth=_AUTH, slug="radar", name="d.nc", principal_key="acct-1"
     )
     assert _token_payload(out["upload_url"])["name"] == "d.nc", "attachment name signed into token"
 
@@ -111,7 +127,7 @@ async def test_create_notebook_upload_impl_raises_when_host_unset() -> None:
     runtime = _make_runtime(_make_settings(host_url=None, admin_secret=None))
     with pytest.raises(ToolError, match="not configured"):
         await _create_notebook_upload_impl(
-            runtime, slug="x", permanent=True, principal_key="acct-1"
+            runtime, auth=_AUTH, slug="x", permanent=True, principal_key="acct-1"
         )
 
 
@@ -119,7 +135,7 @@ async def test_create_attachment_upload_impl_rejects_bad_name() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     with pytest.raises(ToolError):
         await _create_attachment_upload_impl(
-            runtime, slug="x", name="../bad", principal_key="acct-1"
+            runtime, auth=_AUTH, slug="x", name="../bad", principal_key="acct-1"
         )
 
 
@@ -203,7 +219,7 @@ async def test_create_notebook_upload_impl_editable_mints_editor_op() -> None:
         _make_settings(host_url="http://nb:8001", admin_secret="s", allow_editable=True)
     )
     out = await _create_notebook_upload_impl(
-        runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
+        runtime, auth=_AUTH, slug="x", permanent=False, editable=True, principal_key="acct-1"
     )
     assert _token_payload(out["upload_url"])["op"] == "notebook_edit"
 
@@ -212,7 +228,7 @@ async def test_create_notebook_upload_impl_refuses_editable_blog() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     with pytest.raises(ToolError, match="editable"):
         await _create_notebook_upload_impl(
-            runtime, slug="x", permanent=True, editable=True, principal_key="acct-1"
+            runtime, auth=_AUTH, slug="x", permanent=True, editable=True, principal_key="acct-1"
         )
 
 
@@ -220,5 +236,5 @@ async def test_create_notebook_upload_impl_refuses_editable_unless_operator_allo
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     with pytest.raises(ToolError, match="allow_editable"):
         await _create_notebook_upload_impl(
-            runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
+            runtime, auth=_AUTH, slug="x", permanent=False, editable=True, principal_key="acct-1"
         )

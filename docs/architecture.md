@@ -515,9 +515,12 @@ other MCP servers don't see the policy; an agent created inside C isn't C's
 own until it is pinned there; `/dm` from C is refused; a call is held to C
 only where its tool takes a verified origin (report publishing and routine
 creation do; send, DM, self-edit and routine edit tools do not). C's own
-agent remains confined by its identity when no origin is named. Other agents'
-calls that name none are judged from outside. File uploads are staged by a
-tenant-scoped handle; delivery still passes the channel send check.
+agent remains confined by its identity when no origin is named. A channel-bound
+agent key is judged from its bound channel. Other agents' unbound calls that
+name none are judged from outside. Notebook tools take no verified turn origin,
+so the setup-thread built-in agent can still publish a notebook from C. File
+uploads are staged by a tenant-scoped handle; delivery still passes the channel
+send check.
 
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
