@@ -37,8 +37,8 @@ class SecurityAuditEntry(BaseModel):
     target_channel_id: str | None = None
     """Channel tidy tools only: the channel of the message edited or deleted."""
     target_message_id: str | None = None
-    content_sha256: str | None = None
-    """SHA-256 of the text an edit or delete replaced; never the text."""
+    content_hmac: str | None = None
+    """Keyed HMAC-SHA256 of the text an edit or delete replaced; never the text."""
     turn_ref: str | None = None
     """The turn a tidy action ran in: ``origin:<id>`` or ``token:<jti>``."""
 
@@ -65,7 +65,7 @@ async def append_event(
     scope: str | None = None,
     target_channel_id: str | None = None,
     target_message_id: str | None = None,
-    content_sha256: str | None = None,
+    content_hmac: str | None = None,
     turn_ref: str | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
@@ -102,7 +102,7 @@ async def append_event(
         scope=scope,
         target_channel_id=target_channel_id,
         target_message_id=target_message_id,
-        content_sha256=content_sha256,
+        content_hmac=content_hmac,
         turn_ref=turn_ref,
     )
     session.add(event)
@@ -137,17 +137,21 @@ async def list_events(
     return [SecurityAuditRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
 
 
-async def count_allowed(
+async def count_tidy_events(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
-    tool_names: frozenset[str],
-    since: datetime | None = None,
+    outcome: Literal["allowed", "denied", "error"],
+    since: datetime,
     turn_ref: str | None = None,
 ) -> int:
-    """Allowed events for one agent and set of tools, since a time or in one turn."""
-    if since is not None and since.utcoffset() is None:
+    """Channel tidy rows for one agent since a time, optionally in one turn.
+
+    Only tidy rows carry `turn_ref`, so the partial index `ix_security_audit_tidy`
+    serves this count and `since` bounds it.
+    """
+    if since.utcoffset() is None:
         raise ValueError("since must include a timezone")
     stmt = (
         select(func.count())
@@ -155,12 +159,11 @@ async def count_allowed(
         .where(
             SecurityAuditEvent.tenant_id == tenant_id,
             SecurityAuditEvent.agent_id == agent_id,
-            SecurityAuditEvent.tool_name.in_(sorted(tool_names)),
-            SecurityAuditEvent.outcome == "allowed",
+            SecurityAuditEvent.occurred_at >= since,
+            SecurityAuditEvent.turn_ref.is_not(None),
+            SecurityAuditEvent.outcome == outcome,
         )
     )
-    if since is not None:
-        stmt = stmt.where(SecurityAuditEvent.occurred_at >= since)
     if turn_ref is not None:
         stmt = stmt.where(SecurityAuditEvent.turn_ref == turn_ref)
     return int(await session.scalar(stmt) or 0)
@@ -179,7 +182,8 @@ async def _maintenance(session: AsyncSession) -> AsyncIterator[None]:
 async def erase_account(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> int:
-    """Remove this account's personal identifiers within one tenant."""
+    """Remove this account's personal identifiers within one tenant, and the
+    tidy content HMACs on its rows."""
     async with _maintenance(session):
         result = await session.execute(
             update(SecurityAuditEvent)
@@ -187,7 +191,7 @@ async def erase_account(
                 SecurityAuditEvent.tenant_id == tenant_id,
                 SecurityAuditEvent.account_id == account_id,
             )
-            .values(account_id=None, platform_user_id=None)
+            .values(account_id=None, platform_user_id=None, content_hmac=None)
         )
     return cast(CursorResult[Any], result).rowcount
 

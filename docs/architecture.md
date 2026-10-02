@@ -1288,11 +1288,17 @@ verifier establishes a tenant cannot be safely attributed and are outside this t
 row (tool name `cli/<command>`) in the same transaction as their change.
 The channel tidy tools (`edit_message`, `delete_message`, `archive_thread`,
 `delete_thread`) also write their own row per action, committed before the
-platform call: `target_channel_id`, `target_message_id`, a SHA-256 of the text
-replaced (`content_sha256`) and the turn (`turn_ref`), never the text. Those
-`allowed` rows are what the tidy limits count. An agent may tidy only messages
-recorded in `agent_posted_messages` under its own agent id, which
-`send_message` and `create_thread` write at send time.
+platform call: `target_channel_id`, `target_message_id`, an HMAC-SHA256 of the
+text replaced (`content_hmac`, keyed from the first `DAIMON_CRYPTO__KEYS` key,
+else the MCP JWT secret, under its own label) and the turn (`turn_ref`), never
+the text. Those `allowed` rows are what the tidy limits count; `denied` rows
+count toward a separate hourly cap. After the row is committed the write
+guard and the seal are decided again on a fresh policy, and a refusal there
+adds a `denied` row with no platform call; a failed platform call adds an
+`error` row. An agent may tidy only messages recorded in
+`agent_posted_messages` under its own agent id, which `send_message` and
+`create_thread` write at send time. `daimon audit prune` also removes those
+records past the retention, and account erasure clears `content_hmac`.
 The policy remains synchronous and does no I/O outside an MCP audit scope;
 Discord/Slack setup-panel actions and the separate hub OAuth applications
 (`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not

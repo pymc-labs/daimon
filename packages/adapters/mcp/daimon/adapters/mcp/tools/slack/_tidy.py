@@ -2,28 +2,32 @@
 
 Provides: _slack_edit_message_impl, _slack_delete_message_impl,
 _slack_delete_thread_impl. The ownership, limit and audit rules live in
-``tools/_tidy.py``. Bot token only: Slack itself lets a bot token change
+``tools/_tidy.py``. After the audit row is committed the write guard and the
+seal are checked again on a fresh policy, right before the Slack call. Bot
+token only: Slack itself lets a bot token change
 only the bot's own messages, on top of the ledger check. Slack threads have
 no archive state, so there is no archive_thread here.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools._tidy import (
+    Check,
     TidyContext,
     TidyResult,
-    begin_action,
     finish_delete,
     finish_edit,
-    record_failure,
+    policy_recheck,
     require_not_escalation_channel,
     require_own_post,
     resolve_tidy_context,
+    run_action,
 )
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
@@ -37,7 +41,7 @@ from daimon.adapters.mcp.tools.slack._send import (
     _validate_channel_access,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.slack._visibility import map_slack_api_error
-from daimon.core.channel_tidy import TidyTarget
+from daimon.core.channel_tidy import TidyOperation, TidyTarget
 from daimon.core.stores.agent_posts import AgentPostRow, list_posts_in
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
@@ -80,6 +84,35 @@ def _require_thread_unsealed(ctx: TidyContext, channel_id: str, post: AgentPostR
     ctx.read_policy.require(f"{channel_id}:{post.thread_ts or post.message_id}", channel_id)
 
 
+def _recheck(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    post: AgentPostRow,
+) -> Check:
+    async def writable() -> None:
+        await require_channel_writable(runtime, auth, channel_id=channel_id, origin=ctx.origin)
+
+    return policy_recheck(
+        runtime,
+        ctx,
+        writable=writable,
+        sealed=[
+            (channel_id, None),
+            (f"{channel_id}:{post.thread_ts or post.message_id}", channel_id),
+        ],
+    )
+
+
+def _describe(verb: str) -> Callable[[Exception], ToolError | None]:
+    def describe(exc: Exception) -> ToolError | None:
+        return _platform_error(exc, verb) if isinstance(exc, SlackApiError) else None
+
+    return describe
+
+
 def _platform_error(err: SlackApiError, verb: str) -> ToolError:
     code = _slack_error_code(err)
     if code == "message_not_found":
@@ -111,7 +144,8 @@ async def _slack_edit_message_impl(  # pyright: ignore[reportUnusedFunction]
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
     client = await slack_web_client(runtime, team_id=_require_team_id(auth))
-    tool, operation = "edit_message", "message.edit"
+    tool: str = "edit_message"
+    operation: TidyOperation = "message.edit"
     await _check_place(runtime, ctx, auth, client, channel_id=channel_id)
     post = await require_own_post(
         runtime,
@@ -122,27 +156,27 @@ async def _slack_edit_message_impl(  # pyright: ignore[reportUnusedFunction]
         message_id=message_id,
     )
     _require_thread_unsealed(ctx, channel_id, post)
-    target = TidyTarget(
-        channel_id=channel_id, message_id=message_id, content_sha256=post.content_sha256
-    )
-    await begin_action(runtime, ctx, tool_name=tool, operation=operation, target=target)
-    try:
+
+    async def act() -> None:
         await client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             ts=message_id,
             text=_notification_text(content),
             blocks=[{"type": "markdown", "text": content}],
         )
-    except SlackApiError as err:
-        await record_failure(
-            runtime,
-            ctx,
-            tool_name=tool,
-            operation=operation,
-            target=target,
-            reason="platform_refused",
-        )
-        raise _platform_error(err, "edit") from err
+
+    await run_action(
+        runtime,
+        ctx,
+        tool_name=tool,
+        operation=operation,
+        target=TidyTarget(
+            channel_id=channel_id, message_id=message_id, content_hmac=post.content_hmac
+        ),
+        checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=post)],
+        act=act,
+        describe_error=_describe("edit"),
+    )
     await finish_edit(runtime, post=post, content=content)
     return TidyResult(
         platform=_PLATFORM, channel_id=channel_id, message_id=message_id, action="edited"
@@ -161,7 +195,8 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
     client = await slack_web_client(runtime, team_id=_require_team_id(auth))
-    tool, operation = "delete_message", "message.delete"
+    tool: str = "delete_message"
+    operation: TidyOperation = "message.delete"
     await _check_place(runtime, ctx, auth, client, channel_id=channel_id)
     post = await require_own_post(
         runtime,
@@ -172,22 +207,22 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         message_id=message_id,
     )
     _require_thread_unsealed(ctx, channel_id, post)
-    target = TidyTarget(
-        channel_id=channel_id, message_id=message_id, content_sha256=post.content_sha256
-    )
-    await begin_action(runtime, ctx, tool_name=tool, operation=operation, target=target)
-    try:
+
+    async def act() -> None:
         await client.chat_delete(channel=channel_id, ts=message_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-    except SlackApiError as err:
-        await record_failure(
-            runtime,
-            ctx,
-            tool_name=tool,
-            operation=operation,
-            target=target,
-            reason="platform_refused",
-        )
-        raise _platform_error(err, "delete") from err
+
+    await run_action(
+        runtime,
+        ctx,
+        tool_name=tool,
+        operation=operation,
+        target=TidyTarget(
+            channel_id=channel_id, message_id=message_id, content_hmac=post.content_hmac
+        ),
+        checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=post)],
+        act=act,
+        describe_error=_describe("delete"),
+    )
     await finish_delete(runtime, post_ids=[post.id])
     return TidyResult(
         platform=_PLATFORM,
@@ -230,6 +265,8 @@ async def _slack_delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
 ) -> TidyResult:
     """Delete a thread whose root and every reply this agent posted.
 
+    Only the agent's own messages are deleted, by ts: a reply someone posts
+    after the read survives, and Slack keeps it under a "deleted" root.
     Replies go first, then the root, so a failure part-way leaves the root
     and says how many replies were removed. A thread anyone else replied in
     is refused: delete your own replies with delete_message instead.
@@ -239,7 +276,8 @@ async def _slack_delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
     client = await slack_web_client(runtime, team_id=_require_team_id(auth))
-    tool, operation = "delete_thread", "thread.delete"
+    tool: str = "delete_thread"
+    operation: TidyOperation = "thread.delete"
     await _check_place(runtime, ctx, auth, client, channel_id=channel_id)
     root = await require_own_post(
         runtime,
@@ -267,29 +305,35 @@ async def _slack_delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
             "this thread has replies that are not yours, so it cannot be deleted. "
             "Use delete_message on your own replies instead."
         )
-    target = TidyTarget(channel_id=channel_id, message_id=thread_ts)
-    await begin_action(runtime, ctx, tool_name=tool, operation=operation, target=target)
     replies = [ts for ts in ts_list if ts != thread_ts]
     deleted: list[str] = []
-    try:
+
+    async def act() -> None:
         for ts in [*replies, thread_ts]:
             await client.chat_delete(channel=channel_id, ts=ts)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             deleted.append(ts)
-    except SlackApiError as err:
-        await record_failure(
+
+    def describe(exc: Exception) -> ToolError | None:
+        if not isinstance(exc, SlackApiError):
+            return None
+        return ToolError(
+            f"slack refused part-way: {len(deleted)} of {len(ts_list)} messages were deleted "
+            f"({_slack_error_code(exc) or 'unknown error'})"
+        )
+
+    try:
+        await run_action(
             runtime,
             ctx,
             tool_name=tool,
             operation=operation,
-            target=target,
-            reason="platform_refused",
+            target=TidyTarget(channel_id=channel_id, message_id=thread_ts),
+            checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=root)],
+            act=act,
+            describe_error=describe,
         )
+    finally:
         await finish_delete(runtime, post_ids=[own_by_ts[ts].id for ts in deleted])
-        raise ToolError(
-            f"slack refused part-way: {len(deleted)} of {len(ts_list)} messages were deleted "
-            f"({_slack_error_code(err) or 'unknown error'})"
-        ) from err
-    await finish_delete(runtime, post_ids=[own_by_ts[ts].id for ts in deleted])
     return TidyResult(
         platform=_PLATFORM,
         channel_id=channel_id,

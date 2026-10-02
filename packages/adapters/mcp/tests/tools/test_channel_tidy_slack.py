@@ -7,20 +7,18 @@ layer with ``aioresponses``.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from aioresponses import aioresponses
-from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _tidy as tidy_module
 from daimon.adapters.mcp.tools._channel_policy import SealedChannelError
 from daimon.adapters.mcp.tools.slack._send import (  # pyright: ignore[reportPrivateUsage]
     _slack_create_thread_impl,
@@ -32,6 +30,7 @@ from daimon.adapters.mcp.tools.slack._tidy import (  # pyright: ignore[reportPri
     _slack_edit_message_impl,
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_tidy import content_hash, derive_content_key
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -48,7 +47,9 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,6 +75,7 @@ class _World:
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     sessionmaker: async_sessionmaker[AsyncSession]
+    content_key: bytes
 
     async def turn(
         self, *, agent: str = _AGENT, parent: str = _CHANNEL
@@ -110,6 +112,10 @@ class _World:
         async with self.sessionmaker() as s:
             return await list_events(s, tenant_id=self.tenant_id)
 
+    async def set_policy(self, policy: TenantAccessPolicy) -> None:
+        async with self.sessionmaker.begin() as s:
+            await set_access_policy(s, tenant_id=self.tenant_id, policy=policy)
+
 
 async def _world(
     sessionmaker: async_sessionmaker[AsyncSession], *, escalation_channel_id: str | None = None
@@ -129,14 +135,30 @@ async def _world(
         mcp=McpSettings(),
         support=SupportSettings(slack_escalation_channel_id=escalation_channel_id),
     )
+    router = MARouter()
+    agents: list[dict[str, Any]] = [
+        ma_agent(
+            id=agent_id,
+            name=agent_id,
+            metadata={"daimon_tenant": str(tenant.id), "daimon_name": agent_id},
+        ).model_dump(mode="json")
+        for agent_id in (_AGENT, _OTHER_AGENT)
+    ]
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response(agents))
     runtime = McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),
+        client=build_fake_anthropic(router.dispatch),  # type: ignore[arg-type]
         settings=settings,
         deployment_default=DeploymentDefault(),
         fernet=fernet,
     )
-    return _World(runtime, tenant.id, account.id, sessionmaker)
+    return _World(
+        runtime,
+        tenant.id,
+        account.id,
+        sessionmaker,
+        derive_content_key(fernet_key.get_secret_value()),
+    )
 
 
 def _channel_access(m: aioresponses, *, times: int = 10) -> None:
@@ -215,7 +237,7 @@ async def test_an_agent_edits_then_deletes_its_own_message_and_each_is_audited_w
         ("edit_message", "allowed"),
         ("delete_message", "allowed"),
     ], "each action writes one allowed audit row"
-    assert rows[0].content_sha256 == hashlib.sha256(b"first draft").hexdigest(), (
+    assert rows[0].content_hmac == content_hash("first draft", world.content_key), (
         "the edit row records a hash of the text it replaced"
     )
     for row in rows:
@@ -346,3 +368,63 @@ async def test_delete_thread_needs_every_message_to_be_the_agents_own(
     assert [(r.outcome, r.target_message_id) for r in rows] == [("allowed", root)], (
         "a thread delete is one audited action"
     )
+
+
+_POLICY_CHANGES = {
+    "protect": TenantAccessPolicy(protected_channel_ids=(_CHANNEL,)),
+    "pin": TenantAccessPolicy(agent_channel_pins={_AGENT: ("C_ELSEWHERE",)}),
+}
+
+
+@pytest.mark.parametrize("change", sorted(_POLICY_CHANGES))
+@pytest.mark.parametrize("action", ["edit", "delete", "delete_thread"])
+async def test_a_policy_change_during_the_audit_commit_stops_the_slack_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    change: str,
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    original = tidy_module.record_tidy_actions
+
+    async def wrapped(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        await world.set_policy(_POLICY_CHANGES[change])
+
+    with aioresponses() as m:
+        _channel_access(m)
+        ts = await _post(world, auth, m, "1700000006.000100")
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES, payload={"ok": True, "messages": [{"ts": ts}]}
+        )
+        monkeypatch.setattr(tidy_module, "record_tidy_actions", wrapped)
+        with pytest.raises(ToolError, match="protected|pinned"):
+            if action == "edit":
+                await _slack_edit_message_impl(
+                    world.runtime,
+                    auth,
+                    channel_id=_CHANNEL,
+                    message_id=ts,
+                    content="late",
+                    origin_context_id=origin,
+                )
+            elif action == "delete":
+                await _slack_delete_message_impl(
+                    world.runtime,
+                    auth,
+                    channel_id=_CHANNEL,
+                    message_id=ts,
+                    origin_context_id=origin,
+                )
+            else:
+                await _slack_delete_thread_impl(
+                    world.runtime, auth, thread_id=f"{_CHANNEL}:{ts}", origin_context_id=origin
+                )
+        assert not _deletes(m) and not _calls(m, _CHAT_UPDATE), (
+            "no edit or delete reached Slack after the policy changed"
+        )
+    rows = await world.audit()
+    assert [(r.outcome, r.reason) for r in rows if r.outcome != "allowed"] == [
+        ("denied", "policy_changed")
+    ], "the begun action is closed with a denied row"

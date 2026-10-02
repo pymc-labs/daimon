@@ -1,7 +1,8 @@
 """Async store for agent_posted_messages: what each agent posted through the channel tools.
 
 The channel tidy tools read this to decide whether a message is the calling
-agent's own. Rows hold ids and a SHA-256 of the text, never the text.
+agent's own. Rows hold ids and a keyed HMAC of the text, never the text.
+Rows older than the audit retention are removed with `prune_posts`.
 
 No try/except anywhere in this module: exceptions propagate to the adapter
 boundary. Callers own the transaction; every write ends with
@@ -12,11 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal, cast
 
 from daimon.core._models import AgentPostedMessage
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +36,7 @@ class AgentPostRow(BaseModel):
     thread_ts: str | None
     kind: PostKind
     agent_id: uuid.UUID
-    content_sha256: str | None
+    content_hmac: str | None
     posted_at: datetime
     deleted_at: datetime | None
 
@@ -51,7 +52,7 @@ async def record_post(
     kind: PostKind = "message",
     parent_channel_id: str | None = None,
     thread_ts: str | None = None,
-    content_sha256: str | None = None,
+    content_hmac: str | None = None,
 ) -> None:
     """Record one post. A second record of the same target keeps the first owner."""
     await session.execute(
@@ -65,7 +66,7 @@ async def record_post(
             thread_ts=thread_ts,
             kind=kind,
             agent_id=agent_id,
-            content_sha256=content_sha256,
+            content_hmac=content_hmac,
         )
         .on_conflict_do_nothing(constraint="uq_agent_posted_messages_target")
     )
@@ -118,12 +119,14 @@ async def list_posts_in(
     return [AgentPostRow.model_validate(row) for row in rows.all()]
 
 
-async def set_post_hash(session: AsyncSession, *, post_id: uuid.UUID, content_sha256: str) -> None:
+async def set_post_hash(
+    session: AsyncSession, *, post_id: uuid.UUID, content_hmac: str | None
+) -> None:
     """After an edit: the hash of the text the message now carries."""
     await session.execute(
         update(AgentPostedMessage)
         .where(AgentPostedMessage.id == post_id)
-        .values(content_sha256=content_sha256)
+        .values(content_hmac=content_hmac)
     )
     await session.flush()
 
@@ -136,3 +139,20 @@ async def mark_deleted(session: AsyncSession, *, post_ids: list[uuid.UUID], now:
         update(AgentPostedMessage).where(AgentPostedMessage.id.in_(post_ids)).values(deleted_at=now)
     )
     await session.flush()
+
+
+async def prune_posts(session: AsyncSession, *, tenant_id: uuid.UUID, older_than: datetime) -> int:
+    """Remove a tenant's post records older than the cutoff (`daimon audit prune`).
+
+    A pruned post can no longer be tidied with the tools.
+    """
+    if older_than.utcoffset() is None:
+        raise ValueError("older_than must include a timezone")
+    result = await session.execute(
+        delete(AgentPostedMessage).where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.posted_at < older_than,
+        )
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount

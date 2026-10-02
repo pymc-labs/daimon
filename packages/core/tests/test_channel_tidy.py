@@ -157,3 +157,49 @@ async def test_the_ledger_keeps_the_first_owner_and_hides_deleted_posts(
         )
         == []
     ), "a deleted post is not listed"
+
+
+async def test_account_erasure_clears_tidy_hmacs_and_prune_removes_old_posts(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.stores.agent_posts import prune_posts
+    from daimon.core.stores.security_audit import erase_account
+    from daimon.testing.factories import make_account
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    actor = TidyActor(
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+        platform="discord",
+        platform_user_id="42",
+        turn_ref="origin:a",
+    )
+    await record_tidy_actions(
+        db_session,
+        actor=actor,
+        tool_name="delete_message",
+        operation="message.delete",
+        targets=[TidyTarget(channel_id="222", message_id="1", content_hmac="ab" * 32)],
+        now=datetime.now(UTC),
+    )
+    await erase_account(db_session, tenant_id=tenant.id, account_id=account.id)
+    (row,) = await list_events(db_session, tenant_id=tenant.id)
+    assert (row.account_id, row.platform_user_id, row.content_hmac) == (None, None, None), (
+        "erasing the account clears the HMAC with its identifiers"
+    )
+
+    await record_post(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="222",
+        message_id="1",
+        agent_id=actor.agent_id,
+        content_hmac="cd" * 32,
+    )
+    removed = await prune_posts(
+        db_session, tenant_id=tenant.id, older_than=datetime.now(UTC) + timedelta(seconds=1)
+    )
+    assert removed == 1, "post records expire with the audit retention"

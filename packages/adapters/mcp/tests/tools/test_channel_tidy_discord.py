@@ -8,20 +8,23 @@ tidied through the tidy impls. Discord is faked at the HTTP transport
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import importlib.util
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import aiohttp
 import discord
 import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _tidy as tidy_module
 from daimon.adapters.mcp.tools._channel_policy import SealedChannelError
 from daimon.adapters.mcp.tools.discord._send import (
     _send_message_impl,  # pyright: ignore[reportPrivateUsage]
@@ -36,10 +39,12 @@ from daimon.adapters.mcp.tools.discord._tidy import (
     _edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_tidy import content_hash, derive_content_key
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
+    McpSettings,
     Settings,
     SupportSettings,
 )
@@ -73,6 +78,11 @@ _BOT = "1"  # the fake static_login reports the bot as user "1"
 _AGENT = "ag_acme"
 _OTHER_AGENT = "ag_other"
 _ALL_PERMS = (1 << 10) | (1 << 11) | (1 << 35) | (1 << 38)
+_JWT_SECRET = "j" * 32
+
+
+def _hmac(text: str) -> str:
+    return content_hash(text, derive_content_key(_JWT_SECRET))
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +109,9 @@ class _FakeDiscord:
     next_id: int = 1_400_000_000_000_000_000
     thread_archived: bool = False
     thread_deleted: bool = False
+    # Test hooks: run when a message is fetched; raise on a message delete or edit.
+    on_fetch: Callable[[], Awaitable[None]] | None = None
+    fail_with: BaseException | None = None
 
     def add(
         self,
@@ -236,7 +249,11 @@ class _FakeDiscord:
             if message is None or message["channel_id"] != str(route.channel_id):
                 raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Message"})
             if method == "GET":
+                if self.on_fetch is not None:
+                    await self.on_fetch()
                 return message
+            if self.fail_with is not None:
+                raise self.fail_with
             if method == "PATCH":
                 message["content"] = kwargs["json"]["content"]
                 return message
@@ -321,6 +338,7 @@ async def _world(
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
+        mcp=McpSettings(jwt_secret=SecretStr(_JWT_SECRET)),
         support=SupportSettings(escalation_channel_id=escalation_channel_id),
     )
     runtime = McpRuntime(
@@ -390,10 +408,10 @@ async def test_an_agent_edits_then_deletes_its_own_message_and_each_is_audited_w
         ("delete_message", "allowed"),
     ], "each action writes one allowed audit row"
     first, second = rows
-    assert first.content_sha256 == hashlib.sha256(b"first draft").hexdigest(), (
+    assert first.content_hmac == _hmac("first draft"), (
         "the edit row records a hash of the text it replaced"
     )
-    assert second.content_sha256 == hashlib.sha256(b"second draft").hexdigest(), (
+    assert second.content_hmac == _hmac("second draft"), (
         "the delete row records a hash of the text it removed"
     )
     assert {r.target_channel_id for r in rows} == {_CHANNEL}, "rows carry the channel id"
@@ -757,3 +775,268 @@ async def test_a_thread_this_agent_did_not_open_is_refused(
     with pytest.raises(ToolError, match="another agent"):
         await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
     assert not fake.thread_archived and not fake.thread_deleted, "the thread is untouched"
+
+
+# ---------------------------------------------------------------------------
+# The access decision is made again after every other await
+# ---------------------------------------------------------------------------
+
+_POLICY_CHANGES = {
+    "protect": TenantAccessPolicy(protected_channel_ids=(_CHANNEL,)),
+    "pin": TenantAccessPolicy(agent_channel_pins={_AGENT: (_OTHER_CHANNEL,)}),
+}
+
+
+def _commit_during_audit(
+    monkeypatch: pytest.MonkeyPatch, world: _World, policy: TenantAccessPolicy
+) -> None:
+    """A policy change that commits while the action's audit row is being written."""
+    original = tidy_module.record_tidy_actions
+
+    async def wrapped(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        await world.set_policy(policy)
+
+    monkeypatch.setattr(tidy_module, "record_tidy_actions", wrapped)
+
+
+@pytest.mark.parametrize("change", sorted(_POLICY_CHANGES))
+@pytest.mark.parametrize("action", ["edit", "delete", "delete_thread"])
+async def test_a_policy_change_during_the_audit_commit_stops_the_platform_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    change: str,
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    if action == "delete_thread":
+        await _create_thread_impl(
+            world.runtime, auth, channel_id=_CHANNEL, name="tidy", content="starter"
+        )
+    message_id = await _post(world, auth)
+    _commit_during_audit(monkeypatch, world, _POLICY_CHANGES[change])
+
+    with pytest.raises(ToolError, match="protected|pinned"):
+        if action == "edit":
+            await _edit_message_impl(
+                world.runtime,
+                auth,
+                channel_id=_CHANNEL,
+                message_id=message_id,
+                content="late",
+                origin_context_id=origin,
+            )
+        elif action == "delete":
+            await _delete_message_impl(
+                world.runtime,
+                auth,
+                channel_id=_CHANNEL,
+                message_id=message_id,
+                origin_context_id=origin,
+            )
+        else:
+            await _delete_thread_impl(
+                world.runtime, auth, thread_id=_THREAD, origin_context_id=origin
+            )
+    assert not any(m in {"PATCH", "DELETE"} for m, _ in fake.calls), (
+        "no edit or delete reached Discord after the policy changed"
+    )
+    rows = await world.audit()
+    assert [(r.outcome, r.reason) for r in rows if r.outcome != "allowed"] == [
+        ("denied", "policy_changed")
+    ], "the begun action is closed with a denied row"
+
+
+@pytest.mark.parametrize("change", sorted(_POLICY_CHANGES))
+async def test_a_policy_change_during_the_ownership_fetch_stops_the_delete(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    change: str,
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    message_id = await _post(world, auth)
+
+    async def commit_policy() -> None:
+        await world.set_policy(_POLICY_CHANGES[change])
+
+    fake.on_fetch = commit_policy
+    with pytest.raises(ToolError, match="protected|pinned"):
+        await _delete_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            origin_context_id=origin,
+        )
+    assert message_id in fake.messages, "the message survives a policy change mid-call"
+
+
+async def test_a_message_posted_after_the_thread_was_read_stops_its_delete(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    await _create_thread_impl(
+        world.runtime, auth, channel_id=_CHANNEL, name="tidy", content="starter"
+    )
+    original = tidy_module.record_tidy_actions
+
+    async def person_replies(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        fake.add(_THREAD, author_id=_CALLER, bot=False, content="wait, one more thing")
+
+    monkeypatch.setattr(tidy_module, "record_tidy_actions", person_replies)
+    with pytest.raises(ToolError, match="someone posted in this thread"):
+        await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
+    assert not fake.thread_deleted, "the person's late message is not deleted with the thread"
+    reasons = [r.reason for r in await world.audit() if r.outcome == "denied"]
+    assert reasons == ["thread_changed"], "the refusal closes the begun action"
+
+
+# ---------------------------------------------------------------------------
+# Failures after the audit row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason", "raised"),
+    [
+        (
+            discord.Forbidden(MagicMock(status=403), {"message": "Missing Access"}),
+            "platform_refused",
+            ToolError,
+        ),
+        (aiohttp.ClientConnectionError("reset"), "platform_error", aiohttp.ClientConnectionError),
+        (TimeoutError(), "platform_error", asyncio.TimeoutError),
+    ],
+    ids=["discord-refused", "connection-dropped", "timeout"],
+)
+async def test_a_failed_platform_call_writes_an_error_row(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    failure: BaseException,
+    reason: str,
+    raised: type[BaseException],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    message_id = await _post(world, auth)
+    fake.fail_with = failure
+
+    with pytest.raises(raised):
+        await _delete_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            origin_context_id=origin,
+        )
+    rows = [r for r in await world.audit() if r.target_message_id == message_id]
+    assert [(r.outcome, r.reason) for r in rows] == [
+        ("allowed", "own_message"),
+        ("error", reason),
+    ], "a begun action that failed always gets an error row"
+    async with committing_sessionmaker() as s:
+        post = await get_post(
+            s,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=_CHANNEL,
+            message_id=message_id,
+        )
+    assert post is not None, "a failed delete leaves the post the agent's to retry"
+
+
+async def test_a_send_still_succeeds_when_its_record_cannot_be_written(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+
+    async def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(tidy_module, "record_post", broken)
+    message_id = await _post(world, auth)
+    assert message_id in fake.messages, "the post went out"
+
+    with pytest.raises(ToolError, match="not posted by you"):
+        await _delete_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            origin_context_id=origin,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Budgets
+# ---------------------------------------------------------------------------
+
+
+async def test_an_agent_key_has_one_turn_bucket_whatever_origins_it_names(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
+) -> None:
+    world = await _world(committing_sessionmaker)
+    chat_auth, first = await world.turn()
+    _, second = await world.turn()
+    message_id = await _post(world, chat_auth)
+    key = AuthIdentity(
+        account_id=world.account_id,
+        tenant_id=world.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        external_id=_GUILD,
+        platform_user_id=_CALLER,
+        agent_id=chat_auth.chat_agent_id,
+        token_jti=uuid.uuid4(),
+    )
+    for i in range(10):
+        await _edit_message_impl(
+            world.runtime,
+            key,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            content=f"draft {i}",
+            origin_context_id=first,
+        )
+
+    with pytest.raises(ToolError, match="this turn's tidy limit"):
+        await _edit_message_impl(
+            world.runtime,
+            key,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            content="another origin",
+            origin_context_id=second,
+        )
+    rows = [r for r in await world.audit() if r.outcome == "allowed"]
+    assert {r.turn_ref for r in rows} == {f"token:{key.token_jti}"}, "the key's bucket is its token"
+
+
+async def test_repeated_refusals_pause_tidying_for_the_hour(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    own = await _post(world, auth)
+    for _ in range(20):
+        human = fake.add(_CHANNEL, author_id=_CALLER, bot=False)
+        with pytest.raises(ToolError, match="not posted by you"):
+            await _delete_message_impl(
+                world.runtime, auth, channel_id=_CHANNEL, message_id=human, origin_context_id=origin
+            )
+
+    with pytest.raises(ToolError, match="tidying is paused"):
+        await _delete_message_impl(
+            world.runtime, auth, channel_id=_CHANNEL, message_id=own, origin_context_id=origin
+        )
+    assert own in fake.messages, "even its own post waits out the pause"

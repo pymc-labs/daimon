@@ -22,10 +22,12 @@ return carries message text.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -45,8 +47,10 @@ from daimon.core.channel_tidy import (
     TidyOperation,
     TidyTarget,
     content_hash,
+    derive_content_key,
     record_tidy_actions,
     record_tidy_outcome,
+    require_refusals_under_cap,
 )
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.agent_posts import (
@@ -58,7 +62,7 @@ from daimon.core.stores.agent_posts import (
     set_post_hash,
 )
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 log = structlog.get_logger(__name__)
 
@@ -87,6 +91,10 @@ _LIMIT_MSG = {
         f"you have used this hour's tidy limit ({PER_HOUR_LIMIT} edits or deletes). "
         "Stop and tell the caller what is left."
     ),
+    "denied": (
+        "too many of your tidy calls were refused this hour, so tidying is paused "
+        "for you. Stop and tell the caller."
+    ),
 }
 
 RefusalReason = Literal["not_posted_by_agent", "other_agent", "not_bot_author", "not_own_thread"]
@@ -109,6 +117,7 @@ class TidyContext:
     auth: AuthIdentity
     actor: TidyActor
     origin: Place | None
+    origin_context_id: str | None
     read_policy: ChannelReadPolicy
 
 
@@ -122,34 +131,65 @@ async def resolve_tidy_context(
 ) -> TidyContext:
     """Who is acting, in which turn, and the read policy for the seal check.
 
-    A chat turn names its turn with `origin_context_id`; an agent key's turn
-    is its token. A call with neither is refused, since the per-turn limit
-    has nothing to count against.
+    Each caller has exactly one per-turn bucket. An agent key's bucket is its
+    token, whatever origin it names, so naming several origins adds none. A
+    chat turn's bucket is its verified `origin_context_id`; a chat call
+    without one is refused, since the per-turn limit has nothing to count.
+    An agent refused too often this hour is refused here before any lookup.
     """
     agent_id = executing_agent_id(auth)
     if agent_id is None:
         raise ToolError(_NO_AGENT_MSG)
-    origin = await get_verified_origin(runtime, auth, origin_context_id or None)
-    if origin is not None:
-        turn_ref = f"origin:{origin.id}"
-    elif auth.agent_id is not None and auth.token_jti is not None:
+    origin_context_id = origin_context_id or None
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    if auth.agent_id is not None and auth.token_jti is not None:
         turn_ref = f"token:{auth.token_jti}"
+    elif origin is not None:
+        turn_ref = f"origin:{origin.id}"
     else:
         raise ToolError(_NO_TURN_MSG)
-    read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id or None)
+    actor = TidyActor(
+        tenant_id=auth.tenant_id,
+        agent_id=agent_id,
+        account_id=auth.account_id,
+        platform=platform,
+        platform_user_id=auth.platform_user_id,
+        turn_ref=turn_ref,
+    )
+    try:
+        async with runtime.session_factory() as session:
+            await require_refusals_under_cap(session, actor=actor, now=datetime.now(UTC))
+    except TidyLimitReached as exc:
+        record_denial("tidy_denied_limit")
+        raise ToolError(_LIMIT_MSG[exc.scope]) from exc
+    read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
     return TidyContext(
         auth=auth,
-        actor=TidyActor(
-            tenant_id=auth.tenant_id,
-            agent_id=agent_id,
-            account_id=auth.account_id,
-            platform=platform,
-            platform_user_id=auth.platform_user_id,
-            turn_ref=turn_ref,
-        ),
+        actor=actor,
         origin=turn_origin_place(origin) if origin is not None else None,
+        origin_context_id=origin_context_id,
         read_policy=read_policy,
     )
+
+
+def _content_key(runtime: McpRuntime) -> bytes | None:
+    """The content-HMAC key, from the first DAIMON_CRYPTO__KEYS key or else the MCP
+    JWT secret, under the tidy label. None when neither is set: no hash is kept."""
+    settings = runtime.settings
+    keys = getattr(getattr(settings, "crypto", None), "keys", ())
+    if isinstance(keys, tuple) and keys:
+        first = cast(object, keys[0])
+        if isinstance(first, SecretStr):
+            return derive_content_key(first.get_secret_value())
+    jwt_secret = getattr(getattr(settings, "mcp", None), "jwt_secret", None)
+    if isinstance(jwt_secret, SecretStr):
+        return derive_content_key(jwt_secret.get_secret_value())
+    return None
+
+
+def hash_content(runtime: McpRuntime, content: str) -> str | None:
+    key = _content_key(runtime)
+    return content_hash(content, key) if key is not None else None
 
 
 def require_not_escalation_channel(
@@ -265,32 +305,123 @@ async def begin_action(
         raise ToolError(_LIMIT_MSG[exc.scope]) from exc
 
 
-async def record_failure(
+async def _record_after_begin(
     runtime: McpRuntime,
     ctx: TidyContext,
     *,
     tool_name: str,
     operation: TidyOperation,
     target: TidyTarget,
+    outcome: Literal["denied", "error"],
     reason: str,
 ) -> None:
-    """The platform refused after the `allowed` row was written."""
+    """A begun action that was refused or failed: one more row with the same ids."""
     async with runtime.session_factory.begin() as session:
         await record_tidy_outcome(
             session,
             actor=ctx.actor,
             tool_name=tool_name,
             operation=operation,
-            outcome="error",
+            outcome=outcome,
             reason=reason,
             target=target,
             now=datetime.now(UTC),
         )
 
 
+Check = tuple[str, Callable[[], Awaitable[None]]]
+
+
+def policy_recheck(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    *,
+    writable: Callable[[], Awaitable[None]],
+    sealed: list[tuple[str, str | None]],
+) -> Check:
+    """The last check before the platform call, on a freshly loaded policy: the
+    seal for each ``(channel, parent)`` and then the tenant write guard."""
+
+    async def check() -> None:
+        read_policy = await load_read_policy(
+            runtime, ctx.auth, origin_context_id=ctx.origin_context_id
+        )
+        for channel_id, parent_id in sealed:
+            read_policy.require(channel_id, parent_id)
+        await writable()
+
+    return ("policy_changed", check)
+
+
+async def run_action(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    *,
+    tool_name: str,
+    operation: TidyOperation,
+    target: TidyTarget,
+    checks: list[Check],
+    act: Callable[[], Awaitable[None]],
+    describe_error: Callable[[Exception], ToolError | None],
+) -> None:
+    """Commit the `allowed` row, run `checks` in order, then `act`.
+
+    The last check is `policy_recheck`, so the access decision is made on the
+    policy as it stands after every other await, and nothing else is awaited
+    between it and the platform call. A failed check writes a `denied` row
+    and makes no platform call. Any failure of the call itself, Discord or
+    Slack, a timeout or a dropped connection, writes an `error` row.
+    """
+    await begin_action(runtime, ctx, tool_name=tool_name, operation=operation, target=target)
+    for reason, check in checks:
+        try:
+            await check()
+        except ToolError:
+            await _record_after_begin(
+                runtime,
+                ctx,
+                tool_name=tool_name,
+                operation=operation,
+                target=target,
+                outcome="denied",
+                reason=reason,
+            )
+            record_denial(reason)
+            raise
+    try:
+        await act()
+    except asyncio.CancelledError:
+        await asyncio.shield(
+            _record_after_begin(
+                runtime,
+                ctx,
+                tool_name=tool_name,
+                operation=operation,
+                target=target,
+                outcome="error",
+                reason="cancelled",
+            )
+        )
+        raise
+    except Exception as exc:
+        mapped = describe_error(exc)
+        await _record_after_begin(
+            runtime,
+            ctx,
+            tool_name=tool_name,
+            operation=operation,
+            target=target,
+            outcome="error",
+            reason="platform_refused" if mapped is not None else "platform_error",
+        )
+        if mapped is not None:
+            raise mapped from exc
+        raise
+
+
 async def finish_edit(runtime: McpRuntime, *, post: AgentPostRow, content: str) -> None:
     async with runtime.session_factory.begin() as session:
-        await set_post_hash(session, post_id=post.id, content_sha256=content_hash(content))
+        await set_post_hash(session, post_id=post.id, content_hmac=hash_content(runtime, content))
 
 
 async def finish_delete(runtime: McpRuntime, *, post_ids: list[uuid.UUID]) -> None:
@@ -336,7 +467,9 @@ async def record_agent_posts(
                     kind=post.kind,
                     parent_channel_id=post.parent_channel_id,
                     thread_ts=post.thread_ts,
-                    content_sha256=content_hash(post.content) if post.content is not None else None,
+                    content_hmac=(
+                        hash_content(runtime, post.content) if post.content is not None else None
+                    ),
                 )
     except Exception as exc:  # the post is out; never fail the send over its record
         log.warning(
