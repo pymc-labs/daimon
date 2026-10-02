@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 105 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 106 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -116,6 +116,14 @@ Channel isolation tool: keep a channel's own agents inside it.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
+
+## `channel_protection`
+
+Channel protection tool: protect or seal one channel, or lift either.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_channel_protection` | admin only, channel admins too, operator tokens with channels:write | Protect or seal one channel, or lift either. |
 
 ## `channels`
 

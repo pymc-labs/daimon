@@ -1342,6 +1342,59 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         },
         ALLOW,
     ),
+    # --- channel protection and seals: a channel admin never lifts a seal ---
+    (
+        "server admin lifts any channel's seal",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_OTHER"),
+            "lifts_seal": True,
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin protects or seals their channel",
+        SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_ACME"),
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin never lifts their channel's seal",
+        ACME_SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_ACME"),
+            "lifts_seal": True,
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "channel admin protects nothing in another channel",
+        SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_OTHER"),
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "an agent key protects nothing, whoever minted it",
+        PINNED,
+        {
+            "subject": AGENT_KEY_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_ACME"),
+        },
+        _deny("admin_required"),
+    ),
     (
         "an agent key picks no environment, whoever minted it",
         PINNED,

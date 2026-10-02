@@ -55,6 +55,7 @@ from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tool
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
 from daimon.adapters.mcp.tools.channel_isolation import register_channel_isolation_tools
+from daimon.adapters.mcp.tools.channel_protection import register_channel_protection_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
@@ -385,6 +386,7 @@ def create_mcp_app(
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_channel_admin_tools(mcp, runtime)  # who administers a channel
     register_channel_isolation_tools(mcp, runtime)  # channels whose own agents stay inside
+    register_channel_protection_tools(mcp, runtime)  # protect or seal one channel
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets

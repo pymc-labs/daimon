@@ -1,4 +1,4 @@
-"""daimon channels ... sub-app: per-channel spend budgets, channel admins and isolation."""
+"""daimon channels ... sub-app: per-channel spend budgets, admins, isolation and protection."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from daimon.core.channel_budget import (
     parse_budget_spec,
 )
 from daimon.core.channel_isolation_setup import set_channel_isolation
+from daimon.core.channel_protection import ChannelProtectionRefused, set_channel_protection
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
@@ -45,7 +46,9 @@ from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
 
-channels_app = typer.Typer(help="Channels: a summary, spend budgets, channel admins and isolation.")
+channels_app = typer.Typer(
+    help="Channels: a summary, spend budgets, channel admins, isolation and protection."
+)
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
 )
@@ -718,3 +721,81 @@ async def channels_isolate(
     for note in (change.dropped_skills_note, change.network_warning):
         if note:
             console.print(f"[yellow]{escape(note)}[/yellow]")
+
+
+@channels_app.command("protect")
+def channels_protect_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: Annotated[
+        str, typer.Argument(help="The channel's id; a thread names its channel.")
+    ],
+    protect: Annotated[
+        bool | None,
+        typer.Option("--protect/--unprotect", help="Stop, or allow again, every post there."),
+    ] = None,
+    seal: Annotated[
+        bool | None,
+        typer.Option(
+            "--seal/--unseal", help="Make its content readable only from inside it, or lift that."
+        ),
+    ] = None,
+) -> None:
+    """Protect or seal one channel, or lift either; an isolated channel stays sealed."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_protect(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                protect=protect,
+                seal=seal,
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def channels_protect(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    protect: bool | None,
+    seal: bool | None,
+) -> None:
+    _validate_platform(platform)
+    if protect is None and seal is None:
+        raise typer.BadParameter("pass --protect/--unprotect, --seal/--unseal or both")
+    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    try:
+        change = await set_channel_protection(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            channel_id=channel,
+            protected=protect,
+            sealed=seal,
+            # The CLI is the deployment operator.
+            subject=Subject(is_admin=True),
+            default=rt.deployment_default,
+        )
+    except ChannelProtectionRefused as exc:
+        console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
+        raise typer.Exit(1) from exc
+    state = ", ".join(
+        [
+            "protected" if change.protected else "not protected",
+            "sealed" if change.sealed else "not sealed",
+        ]
+    )
+    status = "now" if change.changed else "already"
+    console.print(f"{platform}:{workspace_id} channel {channel}: {status} {state}.")
+    if change.network_warning:
+        console.print(f"[yellow]{escape(change.network_warning)}[/yellow]")

@@ -328,11 +328,12 @@ STILL_ADMIN_TOOL_NAMES = (
     "clear_channel_budget",
     "set_channel_environment",
     "clear_channel_environment",
+    "set_channel_protection",
 )
 """Tools a plain member never sees.
 
-Most are tenant-wide and admin-only. The agent default and channel environment
-tools also admit channel admins, but only for channels they run.
+Most are tenant-wide and admin-only. The agent default, channel environment and
+protection tools also admit channel admins, but only for channels they run.
 `create_environment` is deliberately absent: a new environment is inert until an
 admin or a channel's admin picks it, so its blast radius is nothing until a gated
 call widens it. Mutating an environment others already resolve to is a different

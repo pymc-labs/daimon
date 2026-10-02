@@ -24,6 +24,7 @@ from daimon.adapters.cli.commands.channels import (
     channels_admins_set,
     channels_isolate,
     channels_list,
+    channels_protect,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
@@ -521,6 +522,49 @@ async def test_isolate_refuses_bad_flag_mixes(
         await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
     with pytest.raises(typer.BadParameter, match="only applies with --end"):
         await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)
+
+
+async def test_protect_toggles_a_teams_channel_and_keeps_an_isolated_seal(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _isolatable(db_session_factory, "teams", "tid", (TEAMS_CHANNEL, CHANNEL))
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    args = {"rt": rt, "platform": "teams", "workspace_id": "tid"}
+    with pytest.raises(typer.BadParameter, match="pass --protect"):
+        await channels_protect(
+            **args, console=_console(), channel_id=TEAMS_CHANNEL, protect=None, seal=None
+        )
+    console = _console()
+    await channels_protect(
+        **args,
+        console=console,
+        channel_id=f"{TEAMS_CHANNEL};messageid=1700000000000",
+        protect=True,
+        seal=True,
+    )
+    assert "now protected, sealed" in _out(console), _out(console)
+    await channels_isolate(
+        rt=rt,
+        console=_console(),
+        platform="teams",
+        workspace_id="tid",
+        channel_id=TEAMS_CHANNEL,
+        fork_from="shared",
+    )
+    console = _console()
+    with pytest.raises(typer.Exit):
+        await channels_protect(
+            **args, console=console, channel_id=TEAMS_CHANNEL, protect=False, seal=False
+        )
+    assert "end its isolation first" in _out(console), _out(console)
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert (policy.protected_channel_ids, policy.sealed_channel_ids) == (
+        (TEAMS_CHANNEL,),
+        (TEAMS_CHANNEL,),
+    ), "a refusal writes nothing, the protection included"
 
 
 async def test_list_shows_the_balance_and_each_configured_channel(

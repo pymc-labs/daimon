@@ -398,6 +398,12 @@ non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
 `--clear` is also the way out of that state. There is no setup-panel editor.
+One channel's protection and seal toggle without restating the lists, with
+`set_channel_protection` or `daimon channels protect PLATFORM WORKSPACE_ID
+CHANNEL_ID [--protect/--unprotect] [--seal/--unseal]`
+(`packages/core/daimon/core/channel_protection.py`). Server admins and
+operator tokens change any channel, a channel admin their own except lifting
+its seal, and an isolated channel stays sealed until its isolation ends.
 
 **Channel admins.** A tenant can name, per channel, roles and members who run
 that channel on top of the server admins (`channel_admins`,
@@ -1325,7 +1331,7 @@ registered and expire too, while older jti-less ones keep working.
 | Scope | Tools |
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_protection`, `set_channel_environment` and `clear_channel_environment` (channels only) |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 

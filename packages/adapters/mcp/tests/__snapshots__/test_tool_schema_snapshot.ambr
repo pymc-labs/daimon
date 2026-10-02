@@ -4762,6 +4762,54 @@
         'type': 'object',
       }),
     }),
+    'set_channel_protection': dict({
+      'description': '''
+        Protect or seal one channel, or lift either. For example, stop daimon posting
+        in #announcements, or make #legal readable only from inside it. Leave a flag out
+        to keep it as it is.
+        
+        ``protected`` stops every post into the channel and its threads, replies
+        included. ``sealed`` makes its messages and conversations readable only from
+        inside it. A server admin may change any channel; an admin of the channel may
+        change that channel, except lifting its seal. An isolated channel stays sealed
+        until its isolation ends (``set_channel_isolation``). ``channel_id`` is the
+        channel's id; a Slack or Teams thread id names its channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'protected': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'sealed': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_display_identity': dict({
       'description': '''
         Change how daimon appears in this Discord server: its display name,

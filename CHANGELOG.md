@@ -265,6 +265,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
+- **Channel protection.** `set_channel_protection` (also under an operator
+  token's `channels:write`) and `daimon channels protect` protect or seal one
+  channel, or lift either, without restating the policy's lists. A channel
+  admin may change their own channel, except lifting its seal; an isolated
+  channel stays sealed until its isolation ends.
 - **Channel environments.** Admins can pick the environment a Discord,
   Slack or Teams channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
