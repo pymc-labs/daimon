@@ -880,29 +880,51 @@ async def test_access_policy_accepts_platform_ids(
     assert policy.sealed_channel_ids == tuple(channels)
 
 
-async def test_access_policy_refuses_a_teams_isolated_channel(
+async def test_access_policy_isolates_a_teams_channel_with_its_own_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
-    stub_anthropic: AsyncAnthropic,
 ) -> None:
-    """Teams can't keep an isolated channel's routine output inside it, so the
-    CLI refuses isolation there, as the MCP tool does."""
-    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    """Teams takes a whole channel's pin and isolation, as Discord and Slack do."""
+    from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+    from daimon.testing.ma_models import ma_agent
+
+    channel = "19:abc123@thread.tacv2"
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="teams", workspace_id="teams-isolate")
-    channel = "19:abc123@thread.tacv2"
-
-    with pytest.raises(typer.BadParameter, match="only on Discord and Slack"):
-        await tenants_access_policy_set(
-            rt=rt,
-            console=_make_console(),
-            platform="teams",
-            external_id="teams-isolate",
-            sealed_channel=[channel],
-            isolated_channel=[channel],
+        await scoped_config_write.set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+            tenant_id=tenant.id,
+            agent_name="local",
+            mode="agent",
         )
+    state = FakeMAState()
+    agent = ma_agent(id="agent_local", name="local", tenant_id=tenant.id)
+    state.agents[agent.id] = agent.model_dump(mode="json")
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(make_fake_ma_handler(state)),
+        settings=_FakeSettings(),
+    )
+    args = {"rt": rt, "platform": "teams", "external_id": "teams-isolate"}
+
+    with pytest.raises(typer.BadParameter, match="invalid teams id"):
+        await tenants_access_policy_set(
+            **args,  # type: ignore[arg-type]
+            console=_make_console(),
+            sealed_channel=[channel],
+            isolated_channel=[f"{channel};messageid=1"],
+        )
+    await tenants_access_policy_set(
+        **args,  # type: ignore[arg-type]
+        console=_make_console(),
+        sealed_channel=[channel],
+        isolated_channel=[channel],
+        add_pin_agent=[f"local={channel}"],
+    )
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
-    assert policy == OPEN_ACCESS_POLICY, "nothing is written"
+    assert policy.isolated_channel_ids == (channel,), "a Teams channel is isolated"
+    assert policy.agent_channel_pins == {"local": (channel,)}, "and its own agent pinned to it"
 
 
 async def test_access_policy_seals_a_single_slack_thread(

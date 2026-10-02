@@ -160,7 +160,10 @@ def isolated_agent_name(
 ) -> str:
     """A new agent name from the channel's name, unique among `taken`. Pure."""
     slug = re.sub(r"[^a-z0-9]+", "-", (channel_label or "").lower()).strip("-")[:40].strip("-")
-    base = slug or f"channel-{channel_id[-6:].lower()}"
+    # A Teams id (`19:<id>@thread.tacv2`) ends in its domain and holds ":", so
+    # the tail comes from its id part, letters and digits only.
+    tail = re.sub(r"[^a-z0-9]", "", channel_id.partition("@")[0].lower())[-6:]
+    base = slug or f"channel-{tail}"
     name, suffix = base, 2
     while name in taken:
         name, suffix = f"{base}-{suffix}", suffix + 1

@@ -175,7 +175,6 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "channel_budget_exceeded": ("turn.skipped.channel_budget_exceeded", _CHANNEL_BUDGET),
     # A protected channel hears nothing, a refusal included.
     "channel_protected": ("turn.skipped.channel_protected", None),
-    # Teams isolates no channels, so this is unreachable; the reply keeps the map total.
     "channel_isolated": ("turn.skipped.channel_isolated", _ISOLATED),
 }
 

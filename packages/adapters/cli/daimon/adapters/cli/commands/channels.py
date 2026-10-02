@@ -558,9 +558,6 @@ async def channels_admins_clear(
     console.print("cleared" if removed else "no channel admins to clear")
 
 
-_ISOLATION_PLATFORMS = ("discord", "slack")
-
-
 @channels_app.command("isolate")
 def channels_isolate_command(
     platform: str,
@@ -609,7 +606,10 @@ async def _channel_label(
     slack_transport: httpx.AsyncBaseTransport | None,
 ) -> str | None:
     """The channel's name, to name a copied agent after; None when it can't be
-    read, as `set_channel_isolation` the tool does."""
+    read, as `set_channel_isolation` the tool does. The CLI holds no Teams Graph
+    access, so a Teams copy is named from the channel id."""
+    if platform == "teams":
+        return None
     if platform == "slack":
         return await _fetch_slack_channel_name(
             rt, team_id=workspace_id, channel_id=channel_id, transport=slack_transport
@@ -670,8 +670,7 @@ async def channels_isolate(
     discord_transport: httpx.AsyncBaseTransport | None = None,
     slack_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    if platform not in _ISOLATION_PLATFORMS:
-        raise typer.BadParameter("channel isolation exists only on Discord and Slack")
+    _validate_platform(platform)
     if end and fork_from is not None:
         raise typer.BadParameter("--fork-from only applies when isolating")
     if lift_seal_and_pins and not end:

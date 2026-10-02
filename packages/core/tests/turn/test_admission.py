@@ -1222,6 +1222,79 @@ async def test_admit_refuses_an_agent_that_is_not_the_isolated_channels_own(
     assert exc_info.value.reason == "channel_isolated"
 
 
+_TEAMS_ROOM = "19:room@thread.tacv2"
+_TEAMS_ISOLATED = TenantAccessPolicy(
+    sealed_channel_ids=(_TEAMS_ROOM,),
+    isolated_channel_ids=(_TEAMS_ROOM,),
+    agent_channel_pins={"own": (_TEAMS_ROOM,)},
+)
+
+
+async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A Teams thread counts as its channel; its agent answers in no 1:1 chat."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_TEAMS_ISOLATED)
+    await _answer_in(db_session, tenant, _TEAMS_ROOM, "own")
+    await _answer_in(db_session, tenant, "a:chat-1", "own")
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    args = {"tenant_id": tenant.id, "platform": "teams", "external_user_id": "anyone"}
+
+    admission = await admit(
+        deps,
+        **args,
+        channel_id=_TEAMS_ROOM,
+        thread_id=f"{_TEAMS_ROOM};messageid=1700000000000",
+        now=_NOW,
+        role=Role.USER,
+    )
+    assert not admission.memory_read_only, "its own agent writes memory in the channel's threads"
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            **args,
+            channel_id="a:chat-1",
+            thread_id="a:chat-1",
+            now=_NOW,
+            role=Role.USER,
+            is_dm=True,
+        )
+    assert exc_info.value.reason == "agent_pinned_elsewhere", (
+        "the isolated agent never answers a 1:1 chat"
+    )
+
+
+async def test_admit_refuses_an_outside_agent_in_an_isolated_teams_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_TEAMS_ISOLATED)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="teams",
+            external_user_id="anyone",
+            channel_id=_TEAMS_ROOM,
+            thread_id=f"{_TEAMS_ROOM};messageid=1700000000000",
+            now=_NOW,
+            role=Role.USER,
+        )
+
+    assert exc_info.value.reason == "channel_isolated", "the workspace default stays outside"
+
+
 async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

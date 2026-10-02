@@ -90,8 +90,10 @@ Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
 here), channel budgets (`set_channel_budget`) and channel environments
 (`set_channel_environment`) work as on Discord and Slack; Who answers where
 lists each channel's environment, with no select, so pick one in chat.
-Channel isolation does not exist on Teams yet: `set_channel_isolation` and
-`daimon tenants access-policy set --isolated-channel` refuse a Teams channel.
+Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
+`daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
+counts as its channel, and the isolated agents send nothing to 1:1 chats. The
+CLI can't read channel names, so a copy it makes is named from the channel id.
 
 ### Channel history
 

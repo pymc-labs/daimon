@@ -4731,7 +4731,8 @@
         handed tasks from elsewhere; inside it only they appear. Its messages are
         readable only from inside it. Ending isolation keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
-        ``channel_id`` MUST be the parent channel's id, never a thread's.
+        ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
+        thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,

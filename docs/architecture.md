@@ -392,7 +392,8 @@ Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
 `C`, `G` or `D`, followed by uppercase letters or digits (a sealed Slack
-thread is `channel_id:thread_ts`; an isolated one is never a `D` DM). CLI ids must be
+thread is `channel_id:thread_ts`; an isolated one is never a `D` DM). A Teams pin or
+isolated channel is a whole `19:…@thread.tacv2` channel, never a thread. CLI ids must be
 non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
