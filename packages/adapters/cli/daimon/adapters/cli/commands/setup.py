@@ -51,6 +51,7 @@ def setup(
                 "completed": [],
                 "missing": [],
                 "next_step": "Choose a readable regular environment file with --env-file.",
+                "next_optional": [],
             }
         )
         raise typer.Exit(1) from None

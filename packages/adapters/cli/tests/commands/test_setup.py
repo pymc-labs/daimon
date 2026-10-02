@@ -42,7 +42,8 @@ def test_setup_generates_valid_secrets_and_schema(
     env_file = tmp_path / ".env"
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
-    assert set(payload) == {"completed", "missing", "next_step"}
+    assert set(payload) == {"completed", "missing", "next_step", "next_optional"}
+    assert payload["next_optional"] == []
     assert payload["missing"] == [
         "DAIMON_ANTHROPIC__API_KEY",
         "DAIMON_MCP__PUBLIC_URL",
@@ -116,9 +117,14 @@ def test_stdlib_bootstrap_matches_installed_cli(
     rc, cli_payload = _invoke("--env-file", str(env_file))
     assert rc == 0
     assert env_file.read_bytes() == before
-    assert set(script_payload) == set(cli_payload) == {"completed", "missing", "next_step"}
+    assert (
+        set(script_payload)
+        == set(cli_payload)
+        == {"completed", "missing", "next_step", "next_optional"}
+    )
     assert script_payload["missing"] == cli_payload["missing"]
     assert script_payload["next_step"] == cli_payload["next_step"]
+    assert script_payload["next_optional"] == cli_payload["next_optional"]
     assert first.stderr == ""
     for value in _env_values(before.decode()).values():
         assert value not in first.stdout
@@ -142,6 +148,15 @@ def test_ready_step_names_seeded_cli_first_reply(
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
     assert payload["missing"] == []
+    assert payload["next_optional"] == [
+        {
+            "id": "github_app",
+            "command": "daimon github register-app --org <org> --origin <url> --json",
+            "why": "let agents read and open PRs on your repos",
+            "status": "planned",
+            "available": False,
+        }
+    ]
     assert (
         "docker compose run --rm --no-deps --entrypoint daimon init sessions create --json"
         in payload["next_step"]
@@ -169,6 +184,7 @@ def test_cli_first_reply_step_precedes_optional_discord_setup(
     rc, payload = _invoke("--env-file", str(env_file))
     assert rc == 0
     assert payload["missing"] == ["DAIMON_DISCORD__BOT_TOKEN"]
+    assert payload["next_optional"][0]["available"] is False
     assert "docker compose up --build -d postgres init" in payload["next_step"]
     assert "sessions create --json" in payload["next_step"]
 

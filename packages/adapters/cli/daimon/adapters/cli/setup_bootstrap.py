@@ -31,6 +31,13 @@ _READY_STEP = (
     "then `docker compose run --rm --no-deps --entrypoint daimon init run --session ID "
     '"Hello"` using its session_id.'
 )
+_GITHUB_OPTIONAL: dict[str, str | bool] = {
+    "id": "github_app",
+    "command": "daimon github register-app --org <org> --origin <url> --json",
+    "why": "let agents read and open PRs on your repos",
+    "status": "planned",
+    "available": False,
+}
 
 
 def values_from_env(content: str) -> dict[str, str]:
@@ -78,7 +85,7 @@ def _write_env(path: Path, content: str) -> None:
         temp.unlink(missing_ok=True)
 
 
-def run_setup(env_file: Path) -> dict[str, list[str] | str]:
+def run_setup(env_file: Path) -> dict[str, list[str] | list[dict[str, str | bool]] | str]:
     """Prepare missing secrets; return a stable, secret-free JSON payload."""
     content = read_env(env_file)
     values = values_from_env(content)
@@ -109,4 +116,10 @@ def run_setup(env_file: Path) -> dict[str, list[str] | str]:
     ]
     required_missing = {"DAIMON_ANTHROPIC__API_KEY", "DAIMON_MCP__PUBLIC_URL"} & set(missing)
     next_step = next((step for name, step in _HUMAN_STEPS if name in required_missing), _READY_STEP)
-    return {"completed": completed, "missing": missing, "next_step": next_step}
+    next_optional = [_GITHUB_OPTIONAL.copy()] if not required_missing else []
+    return {
+        "completed": completed,
+        "missing": missing,
+        "next_step": next_step,
+        "next_optional": next_optional,
+    }

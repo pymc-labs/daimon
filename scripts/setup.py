@@ -25,6 +25,7 @@ def main() -> int:
             "completed": [],
             "missing": [],
             "next_step": "Choose a readable regular environment file with --env-file.",
+            "next_optional": [],
         }
         print(json.dumps(payload, sort_keys=True))
         return 1
