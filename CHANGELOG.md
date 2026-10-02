@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fork's name, as independent skills with their own ids and upload rows. A
   skill scoped to another agent is still left off, and one that fails to copy
   is named while the fork still succeeds.
+- **One wording for a refused turn.** Discord, Slack, Teams and `/dm` now
+  word each admission refusal (credit, usage cap, channel budget, invoker list,
+  agent pin, channel isolation) the same way, each in its own nouns ("a server
+  admin", "a workspace admin"). A DM turn refused for anything but the channel
+  budget no longer shows the raw reason code, and `/dm` on Discord names the
+  server rather than a workspace. The usage cap is per person and set by the
+  operator, so the reply now says "You've reached your monthly usage cap. An
+  operator can raise it." instead of naming the server and `/billing`.
 - When a channel's budget is used up, its channel admins (or the server admins, when it has none) get one DM per budget window on Discord, Slack and Teams. Setting or raising the budget re-arms it; `DAIMON_BUDGET_NOTICES` turns it off per tenant.
 - `daimon channels budget set` and `clear` now record the change in `security_audit_events`.
 - Promo codes can raise a channel's budget instead of the tenant balance: `daimon promo create --channel-budget` or `create_promo_code(kind="channel_budget")`. Redeeming one in a channel with a budget (from `/billing` there, or `redeem_promo_code` with `channel_id`) adds its amount to that budget's limit for good. Only server admins redeem it, never the channel's own admins.
