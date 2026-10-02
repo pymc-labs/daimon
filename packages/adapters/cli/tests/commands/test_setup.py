@@ -244,17 +244,19 @@ def test_discord_verification_passes_all_checks(
         "completed",
         "missing",
         "failures",
+        "warnings",
         "next_step",
     }
     assert payload["schema_version"] == 1
     assert payload["status"] == "passed"
     assert payload["completed"] == [
         "token",
-        "message_content_intent",
+        "message_content_intent_flag",
         "guild_membership",
         "guild_permissions",
     ]
     assert payload["failures"] == []
+    assert payload["warnings"] == []
     assert "test-token" not in json.dumps(payload)
 
 
@@ -307,6 +309,47 @@ def test_discord_verification_reports_missing_human_steps(
     assert rc == 1
     assert payload["missing"] == ["DAIMON_DISCORD__BOT_TOKEN", "guild_id"]
     assert payload["next_step"].startswith("Set DAIMON_DISCORD__BOT_TOKEN")
+
+
+@pytest.mark.parametrize(
+    ("verified", "guild_count", "expect_warning"),
+    [(True, 100, True), (True, 99, False), (False, 100, False), (None, 100, False)],
+)
+def test_discord_review_warning_uses_exposed_verified_guild_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verified: bool | None,
+    guild_count: int,
+    expect_warning: bool,
+) -> None:
+    monkeypatch.delenv("DAIMON_DISCORD__BOT_TOKEN", raising=False)
+    env_file = _discord_env(tmp_path)
+    application: dict[str, Any] = {
+        "flags": 1 << 18,
+        "approximate_guild_count": guild_count,
+    }
+    if verified is not None:
+        application["verified"] = verified
+    _mock_discord(
+        monkeypatch,
+        {
+            "/api/v10/users/@me": (200, {"id": "123", "bot": True}),
+            "/api/v10/oauth2/applications/@me": (200, application),
+            "/api/v10/guilds/456/members/123": (200, {"roles": ["789"]}),
+            "/api/v10/guilds/456/roles": (
+                200,
+                [{"id": "789", "permissions": str(_PERMISSION_BITS)}],
+            ),
+        },
+    )
+    rc, payload = _invoke("verify", "discord", "--env-file", str(env_file), "--guild-id", "456")
+    assert rc == 0
+    assert payload["completed"][1] == "message_content_intent_flag"
+    assert bool(payload["warnings"]) is expect_warning
+    if expect_warning:
+        assert "10,000 reachable users" in payload["warnings"][0]
+        assert "do not prove approval" in payload["warnings"][0]
+    assert "test-token" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize(

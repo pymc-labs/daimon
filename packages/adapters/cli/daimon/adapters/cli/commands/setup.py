@@ -153,6 +153,7 @@ def verify_discord(
     completed: list[str] = []
     missing: list[str] = []
     failures: list[str] = []
+    warnings: list[str] = []
     try:
         values = values_from_env(read_env(env_file))
     except (OSError, UnicodeError, ValueError):
@@ -199,12 +200,21 @@ def verify_discord(
                         "in the Developer Portal."
                     )
                 elif application["flags"] & _MESSAGE_CONTENT_FLAGS:
-                    completed.append("message_content_intent")
+                    completed.append("message_content_intent_flag")
                 else:
                     failures.append(
                         "Message Content Intent is disabled or unapproved; enable it under Bot "
                         "in the Discord Developer Portal."
                     )
+                if isinstance(application, dict) and application.get("verified") is True:
+                    guild_count = application.get("approximate_guild_count")
+                    if type(guild_count) is int and guild_count >= 100:
+                        warnings.append(
+                            "Verified app has approximately 100 or more guilds. Discord now "
+                            "requires privileged intent review at 10,000 reachable users; "
+                            "guild count and intent flags do not prove approval. Check the "
+                            "Developer Portal review status."
+                        )
                 if guild_id and guild_id.isdecimal():
                     member, error = _get(client, f"/guilds/{guild_id}/members/{user['id']}")
                     if error:
@@ -315,6 +325,7 @@ def verify_discord(
             "completed": completed,
             "missing": missing,
             "failures": failures,
+            "warnings": warnings,
             "next_step": next_step,
         }
     )
