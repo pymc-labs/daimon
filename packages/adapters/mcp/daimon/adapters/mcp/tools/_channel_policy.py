@@ -211,7 +211,9 @@ async def require_agent_creatable(
     """An isolated channel's own agent, a key bound inside one, or a call whose
     verified turn origin (`turn_origin_place`) lies in one, such as its setup
     thread, creates no agent (`authorize(CREATE_AGENT)`): a new agent answers
-    outside it, so a prompt written there would carry the channel's content out."""
+    outside it, so a prompt written there would carry the channel's content out.
+    A chat turn that names no verified origin is refused too: it may be running
+    in that setup thread, and judged from outside it would slip the rule."""
     if auth.chat_agent_id is None and auth.agent_id is None:
         return
     policy = await load_channel_policy(runtime, auth)
@@ -230,6 +232,13 @@ async def require_agent_creatable(
             "this conversation is held to an isolated channel, so it creates no agents: a "
             "new agent would answer outside it. Tell the caller to create it from a "
             "conversation outside that channel. Nothing was created. Do not retry."
+        )
+    if auth.agent_id is None and origin is None:
+        record_authz_denial(Action.CREATE_AGENT, "origin_missing")
+        raise ToolError(
+            "create_agent needs this turn's origin_context_id while a channel in this "
+            "workspace is isolated: call it again with origin_context_id set. Nothing "
+            "was created."
         )
 
 

@@ -548,6 +548,23 @@ async def test_the_setup_thread_is_held_to_its_channel(
     assert "notes-bot" not in names, "a new agent would carry the setup thread's text out of C"
 
 
+@pytest.mark.parametrize("origin_id", [None, "not-a-uuid", str(uuid.uuid4())])
+async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], origin_id: str | None
+) -> None:
+    """Left out or made up, the origin could hide C's setup thread: refuse, and say to pass it."""
+    world, runtime = await _world(committing_sessionmaker)
+    await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(admin=True, executing="agent_shared")
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="what C's room said")
+
+    with pytest.raises(ToolError, match="origin_context_id"):
+        await _create_agent_impl(runtime, builtin, spec, origin_id)
+
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert "notes-bot" not in names, "nothing was created"
+
+
 def _key(world: _World, *, bound: str | None) -> AuthIdentity:
     """An agent key of C's own agent, minted in C (``bound``) or anywhere else."""
     return AuthIdentity(
