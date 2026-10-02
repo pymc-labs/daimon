@@ -5,6 +5,7 @@ resolve+retrieve -> balance gate -> cap gate.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -15,7 +16,7 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_budget_notice import BudgetNotice
+from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
@@ -282,9 +283,12 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
     await set_role(db_session, admin.account_id, Role.ADMIN)
     await db_session.commit()
     sent: list[BudgetNotice] = []
+    release = asyncio.Event()
 
-    async def notifier(notice: BudgetNotice) -> None:
+    async def notifier(notice: BudgetNotice) -> int:
+        await release.wait()
         sent.append(notice)
+        return 1
 
     base = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
@@ -293,11 +297,17 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
     opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
     with pytest.raises(AdmissionDenied):
         await admit(opted_out, **args, channel_id="chan-1", now=_NOW)
+    release.set()
+    await drain_budget_notices()
     assert sent == [], "an opted-out tenant gets no notice"
 
+    release.clear()
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(replace(base, budget_notifier=notifier), **args, channel_id="chan-1", now=_NOW)
     assert exc_info.value.reason == "channel_budget_exceeded", "the notice leaves the refusal as is"
+    assert sent == [], "the refusal returns while the notice is still being sent"
+    release.set()
+    await drain_budget_notices()
     assert [(n.channel_id, n.recipient_ids) for n in sent] == [("chan-1", ("u-admin",))]
 
 

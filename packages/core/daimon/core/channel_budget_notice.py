@@ -6,8 +6,9 @@ channel's admins (its grant's users, plus members whose stored roles match a
 granted role), or the server admins when it has none. Setting or raising the
 budget clears the claim, and so does a notice no admin received, so a later
 refusal tries again. Delivery is the adapter's `BudgetNotifier`, held to the
-tenant's DM policy; it runs under a timeout and never changes the refusal. A
-tenant opts out with the `budget_notices` setting.
+tenant's DM policy; it runs in the background under a timeout and never
+changes or delays the refusal. A tenant opts out with the `budget_notices`
+setting.
 """
 
 from __future__ import annotations
@@ -66,6 +67,8 @@ class BudgetNotice:
 
 BudgetNotifier = Callable[[BudgetNotice], Awaitable[int]]
 """Sends the notice and returns how many DMs landed."""
+
+_PENDING: set[asyncio.Task[None]] = set()
 
 
 def notice_key(budget: ChannelBudgetRow, *, now: datetime) -> str:
@@ -171,7 +174,41 @@ async def notify_budget_exhausted(
             channel_id=channel_id,
             now=now,
         )
-    except Exception as exc:  # a notice must never turn a refusal into a crash
+    except Exception as exc:  # background notice: a failure is logged, never raised
         log.warning(
             "channel_budget.notice_failed", tenant_id=str(tenant_id), err_type=type(exc).__name__
         )
+
+
+def spawn_budget_notice(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    notifier: BudgetNotifier | None,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str | None,
+    now: datetime,
+) -> None:
+    """Send the notice off the refusal path, so a slow DM API never holds the reply."""
+    if notifier is None or channel_id is None:
+        return
+    task = asyncio.create_task(
+        notify_budget_exhausted(
+            sessionmaker=sessionmaker,
+            notifier=notifier,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            now=now,
+        ),
+        name="channel_budget.notice",
+    )
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
+
+
+async def drain_budget_notices() -> None:
+    """Runtime shutdown/test barrier, never awaited by a turn."""
+    tasks = [task for task in _PENDING if task.get_loop() is asyncio.get_running_loop()]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

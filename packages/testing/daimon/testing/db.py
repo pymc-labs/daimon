@@ -386,9 +386,11 @@ async def db_clean(
     try:
         yield
     finally:
+        from daimon.core.channel_budget_notice import drain_budget_notices
         from daimon.core.turn.outcomes import drain_outcomes
 
         await drain_outcomes()
+        await drain_budget_notices()
         _last_db_test = item.nodeid
 
 
