@@ -7,20 +7,44 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from daimon.adapters.slack.here import (  # pyright: ignore[reportPrivateUsage]
     _plain_blocks,
-    _shared_channel_ids,
+    _visible_channel_ids,
     handle_here_command,
 )
 
 
-async def test_shared_channels_follow_all_pages() -> None:
+async def test_member_sees_public_bot_channels_and_shared_private_channels() -> None:
     client = MagicMock()
     client.users_conversations = AsyncMock(
         side_effect=[
-            {"channels": [{"id": "C1"}], "response_metadata": {"next_cursor": "next"}},
-            {"channels": [{"id": "C2"}], "response_metadata": {"next_cursor": ""}},
+            {
+                "channels": [{"id": "C1", "is_private": False}],
+                "response_metadata": {"next_cursor": "next"},
+            },
+            {
+                "channels": [{"id": "G1", "is_private": True}],
+                "response_metadata": {"next_cursor": ""},
+            },
+            {
+                "channels": [{"id": "G1", "is_private": True}],
+                "response_metadata": {"next_cursor": ""},
+            },
         ]
     )
-    assert await _shared_channel_ids(client, "U1") == {"C1", "C2"}
+    client.users_info = AsyncMock(return_value={"user": {}})
+    assert await _visible_channel_ids(client, "U1") == {"C1", "G1"}
+    assert client.users_conversations.await_args_list[2].kwargs["types"] == "private_channel"
+
+
+async def test_guest_sees_only_shared_channels() -> None:
+    client = MagicMock()
+    client.users_conversations = AsyncMock(
+        side_effect=[
+            {"channels": [{"id": "C1", "is_private": False}, {"id": "C2", "is_private": False}]},
+            {"channels": [{"id": "C2", "is_private": False}]},
+        ]
+    )
+    client.users_info = AsyncMock(return_value={"user": {"is_restricted": True}})
+    assert await _visible_channel_ids(client, "U1") == {"C2"}
 
 
 def test_card_blocks_keep_names_plain() -> None:
@@ -33,6 +57,7 @@ async def test_here_posts_ephemeral_card() -> None:
     client = MagicMock()
     client.conversations_info = AsyncMock(return_value={"channel": {"is_private": False}})
     client.users_conversations = AsyncMock(return_value={"channels": []})
+    client.users_info = AsyncMock(return_value={"user": {}})
     client.chat_postEphemeral = AsyncMock()
     runtime = MagicMock()
     runtime.settings.github.fallback_pat = None
@@ -54,6 +79,7 @@ async def test_here_posts_ephemeral_card() -> None:
     ):
         await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U1"})
     assert load.await_count == 1
+    assert load.await_args.kwargs["bot_can_view"] is False
     client.chat_postEphemeral.assert_awaited_once_with(
         channel="C1",
         user="U1",
