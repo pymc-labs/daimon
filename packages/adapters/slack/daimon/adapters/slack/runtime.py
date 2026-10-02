@@ -11,6 +11,7 @@ from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembersCache
+from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -129,4 +130,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
             )
         finally:
             await drain_outcomes()
+            await drain_budget_notices()
             await engine.dispose()
