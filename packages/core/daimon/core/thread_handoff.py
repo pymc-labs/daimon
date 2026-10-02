@@ -17,6 +17,15 @@ Lock order, held to the end of the caller's transaction:
 4. whatever the caller writes after `hand_over_thread` returns (its own
    thread session row, a queued continuation).
 
+Session creation, seal publication and replacement closure take the same tenant
+lock in short DB transactions. Session seals are monotone, and NULL legacy
+facts fail closed until collected. The decision reads the live set and these
+facts under step 1, without MA I/O. Preparation's advisory lock precedes the
+session mutation advisory fence; sends take only the mutation fence and read
+policy without locking it. Neither handoff nor policy writers, purge, audit,
+form consume or support acquire either advisory lock, so there is no reverse
+edge to those locks. Recovery creates MA before locking or updating DB rows.
+
 The policy is read after 1, so an edit committed first refuses the switch and
 one arriving later waits for the commit. Why the order can't deadlock with the
 other lock holders: the policy writers (CLI, isolation setup), a private form's
@@ -75,7 +84,7 @@ from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
-from daimon.core.stores.thread_sessions import list_live_thread_sessions
+from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -167,8 +176,39 @@ async def recorded_thread_sessions(
             facts = SessionFacts(seal_ids=frozenset({_UNREAD_SEAL}))
         else:
             facts = session_facts(ma_session.metadata, owned=True)
+        async with sessionmaker.begin() as db:
+            await record_session_seals(
+                db,
+                tenant_id=tenant_id,
+                ma_session_id=row.ma_session_id,
+                seals=facts.seal_ids,
+                channel_id=facts.channel,
+            )
         recorded.append(RecordedSession(account_id=row.account_id, facts=facts))
     return tuple(recorded)
+
+
+async def locked_thread_sessions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> tuple[RecordedSession, ...]:
+    """Read under the tenant lock, shared by mapping and seal publishers."""
+    rows = await list_live_thread_sessions(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+    )
+    return tuple(
+        RecordedSession(
+            account_id=row.account_id,
+            facts=SessionFacts(
+                channel=row.channel_id,
+                thread=row.thread_id,
+                owned=True,
+                seal_ids=frozenset({_UNREAD_SEAL})
+                if row.seal_ids is None
+                else frozenset(row.seal_ids),
+            ),
+        )
+        for row in rows
+    )
 
 
 def may_carry_work(
@@ -248,8 +288,8 @@ async def hand_over_thread(
     transaction, after this returns, so the decision covers it too.
 
     `recorded` is the thread's live sessions (`recorded_thread_sessions`).
-    Their seals decide a channel admin's switch as the policy's do; None
-    (not read) counts as sealed.
+    Its facts are a conservative floor; the authoritative live set and seals
+    are read again under the tenant lock. None (not read) counts as sealed.
     """
     await lock_access_policy(session, tenant_id=tenant_id)
     if caller.account_id is not None:
@@ -261,6 +301,16 @@ async def hand_over_thread(
         platform=platform,
         parent_channel_id=parent_channel_id,
         thread_id=thread_id,
+    )
+    # Session publication and seal stamping take the tenant lock too. No MA
+    # request runs here: the live set and monotone facts are authoritative DB reads.
+    snapshot_seals = (
+        frozenset({_UNREAD_SEAL})
+        if recorded is None
+        else frozenset(seal for item in recorded for seal in item.facts.seal_ids)
+    )
+    recorded = await locked_thread_sessions(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
     reachable = await is_agent_reachable_in_tenant(
@@ -281,9 +331,8 @@ async def hand_over_thread(
         # A DM scope runs in no channel, so it is outside every pin.
         place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
         answers_here=channel_config.agent_name == destination.name,
-        recorded_seal_ids=frozenset({_UNREAD_SEAL})
-        if recorded is None
-        else frozenset(seal for item in recorded for seal in item.facts.seal_ids),
+        recorded_seal_ids=snapshot_seals
+        | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
     )
     decision = decide_handoff(
         destination_ma_agent_id=destination.ma_agent_id,

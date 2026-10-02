@@ -57,6 +57,7 @@ from daimon.core.thread_handoff import (
     HandoffDestination,
     ThreadHandoffRefused,
     hand_over_thread,
+    locked_thread_sessions,
     may_carry_work,
     recorded_thread_sessions,
     render_handoff_refused,
@@ -257,6 +258,9 @@ async def _hand_off_task_impl(
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
+            recorded = await locked_thread_sessions(
+                session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
+            )
             if request is not None and not may_carry_work(
                 await load_access_policy(session, tenant_id=auth.tenant_id),
                 destination=handoff_destination,

@@ -33,6 +33,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_stages import lock_preparation
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
@@ -422,7 +423,18 @@ async def _replace_dead_session_locked(
                 thread_id=thread_id,
                 account_id=session_account_id,
             )
-            await mark_dead(db, id=dead_mapping_id)
+            if dead_row is not None and (
+                dead_row.status == "retired"
+                or (
+                    dead_row.status == "superseded"
+                    and (
+                        live is None
+                        or live.id == dead_mapping_id
+                        or live.ma_agent_id != admission.agent.id
+                    )
+                )
+            ):
+                raise SessionRetired("This session was replaced. Continue in its successor.")
 
             if live is not None and live.id != dead_mapping_id:
                 # The lock wait above can be long: decide again before adopting
@@ -440,6 +452,8 @@ async def _replace_dead_session_locked(
                         pending_reasons=("seal",),
                         retry_after=datetime.now(UTC) + timedelta(seconds=1),
                     )
+                if live.ma_agent_id is not None and live.ma_agent_id != admission.agent.id:
+                    raise SessionRetired("This session belongs to the handoff successor.")
                 admission = current
                 await stamp_session_seal(
                     deps, live.ma_session_id, admission, now=lambda: datetime.now(UTC)
@@ -498,6 +512,7 @@ async def _replace_dead_session_locked(
             # Close the chain from the other end. The dead row keeps
             # `status="dead"` -- it says how this session ended, which a supersede
             # would overwrite -- and gains only the pointer forward.
+            await mark_dead(db, id=dead_mapping_id)
             await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
     except BaseException:
         # The locked transaction rolled back after the upstream session was
@@ -691,6 +706,7 @@ async def run_prepared_turn_impl(
             image_blocks=image_blocks,
             system_blocks=prepared.continuity.system_blocks,
             before_send=decide_before_send(deps, prepared.admission),
+            send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
         )
 
         if not (_is_dead_session(state) and mapping_id is not None):
@@ -824,6 +840,9 @@ async def run_prepared_turn_impl(
                     # Reseeding and opening the stream await platform and MA
                     # calls after recovery's last decision.
                     before_send=decide_before_send(deps, recovery.admission or prepared.admission),
+                    send_guard=lambda: session_mutation_fence(
+                        deps.sessionmaker, recovery.ma_session_id
+                    ),
                 )
             finally:
                 if not mirror_task.done():

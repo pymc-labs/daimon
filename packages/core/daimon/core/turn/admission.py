@@ -538,6 +538,31 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     )
 
 
+async def restrict_inherited_memory(
+    deps: TurnDeps, admission: Admission, seals: frozenset[str]
+) -> Admission:
+    """Historical work retains read-only memory after its channel is unsealed."""
+    if not seals or admission.memory_read_only:
+        return admission
+    grant = admission.grant
+    own = False
+    if grant is not None:
+        async with deps.sessionmaker() as db:
+            policy = await load_access_policy(db, tenant_id=grant.tenant_id)
+        own_channel = isolation_owner(policy, grant.agent.names)
+        own = _is_own_agent(policy, grant) and all(
+            seal
+            in {
+                own_channel,
+                grant.thread_id,
+                f"{own_channel}:{grant.thread_id}" if grant.thread_id is not None else None,
+            }
+            or isolated_channel_of(policy, seal) == own_channel
+            for seal in seals
+        )
+    return admission if own else replace(admission, memory_read_only=True)
+
+
 def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awaitable[None]]:
     """A last decision to run right before a message is sent into a session.
 

@@ -57,8 +57,10 @@ from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
     get_thread_session_by_id,
+    read_session_seals,
+    record_session_seals,
 )
-from daimon.core.turn.admission import Admission, reauthorize
+from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
@@ -185,6 +187,7 @@ class CreatedSession:
     snapshot: SessionSnapshot
     # The admission as decided again right before `sessions.create`.
     admission: Admission | None = None
+    seal_ids: frozenset[str] = frozenset()
 
 
 async def create_ma_session(
@@ -226,10 +229,18 @@ async def create_ma_session(
             tenant_seals_anything=bool(policy.sealed_channel_ids),
         )
     if predecessor_session_id is not None:
+        async with deps.sessionmaker() as db:
+            seal.update(
+                await read_session_seals(
+                    db, tenant_id=tenant_id, ma_session_id=predecessor_session_id
+                )
+            )
+    if predecessor_session_id is not None:
         # The predecessor lookup above awaits MA: decide again after it, so a
         # pin or seal saved during it applies to the successor being built.
         admission = await reauthorize(deps, admission)
         seal |= admission.origin_seal_ids
+    admission = await restrict_inherited_memory(deps, admission, frozenset(seal))
     built = admission
 
     async def fence() -> None:
@@ -238,8 +249,18 @@ async def create_ma_session(
         # A pin raises `AdmissionDenied`; a seal the session was not built
         # with makes the turn wait and be prepared again read-only.
         current = await reauthorize(deps, built)
+        final_seal = set(seal)
+        if predecessor_session_id is not None:
+            async with deps.sessionmaker() as db:
+                final_seal.update(
+                    await read_session_seals(
+                        db, tenant_id=tenant_id, ma_session_id=predecessor_session_id
+                    )
+                )
+        current = await restrict_inherited_memory(deps, current, frozenset(final_seal))
         if (
-            current.origin_seal_ids != built.origin_seal_ids
+            final_seal != seal
+            or current.origin_seal_ids != built.origin_seal_ids
             or current.memory_read_only != built.memory_read_only
         ):
             raise SessionBusyError(
@@ -290,7 +311,12 @@ async def create_ma_session(
         repo_token_issued_at=int(time.time()) if has_repo else None,
         vault_id=next(iter(ma_session.vault_ids), None),
     )
-    return CreatedSession(ma_session_id=ma_session.id, snapshot=snapshot, admission=admission)
+    return CreatedSession(
+        ma_session_id=ma_session.id,
+        snapshot=snapshot,
+        admission=admission,
+        seal_ids=frozenset(seal),
+    )
 
 
 async def insert_mapping(
@@ -326,6 +352,7 @@ async def insert_mapping(
         ma_agent_id=admission.agent.id,
         channel_id=admission.budget_channel_id,
         effective_config=snapshot,
+        seal_ids=created.seal_ids,
         identity_fingerprint=fingerprint_identity(snapshot),
         mutable_fingerprint=fingerprint_mutable(snapshot),
         predecessor_id=predecessor_id,
@@ -540,6 +567,14 @@ async def stamp_session_seal(
     """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
     if not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
+    # Publish first, in a short transaction; no MA request holds the policy lock.
+    async with deps.sessionmaker.begin() as db:
+        await record_session_seals(
+            db,
+            tenant_id=admission.grant.tenant_id if admission.grant is not None else None,
+            ma_session_id=ma_session_id,
+            seals=admission.origin_seal_ids,
+        )
     try:
         current = await deps.anthropic.beta.sessions.retrieve(ma_session_id)
         recorded = seal_ids(current.metadata)

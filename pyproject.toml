@@ -186,6 +186,7 @@ source_modules = [
     "daimon.core.scheduler",
     "daimon.core.scope",
     "daimon.core.session_compat",
+    "daimon.core.session_mutation",
     "daimon.core.session_preparation",
     "daimon.core.session_preparation_gate",
     "daimon.core.session_preparation_stages",

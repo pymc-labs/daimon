@@ -29,6 +29,7 @@ the mapping is still current afterward.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import uuid
 from collections.abc import Callable
@@ -51,6 +52,7 @@ from daimon.core.session_compat import (
     UpdateOp,
     decide_session_compatibility,
 )
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_preparation_stages import (
     FreshSessionFactory,
     PreparationStageName,
@@ -64,7 +66,7 @@ from daimon.core.session_preparation_stages import (
     retry_after,
     turn_is_active,
 )
-from daimon.core.session_seal import session_facts
+from daimon.core.session_seal import inherited_seal_ids, session_facts
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity, fingerprint_mutable
 from daimon.core.session_update_ops import (
     AppliedOps,
@@ -72,7 +74,7 @@ from daimon.core.session_update_ops import (
     SessionBusy,
     apply_update_ops,
 )
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind
 from daimon.core.stores.session_preparations import (
     advance_stage,
@@ -87,7 +89,12 @@ from daimon.core.stores.thread_session_lineage import (
 )
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
 from daimon.core.thread_handoff import destination_may_read
-from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
+from daimon.core.turn.admission import (
+    Admission,
+    decide_before_send,
+    reauthorize,
+    restrict_inherited_memory,
+)
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenied,
@@ -281,7 +288,7 @@ async def _persist_refresh(
         )
 
 
-async def _heal_lineage(session: AsyncSession, *, row: ThreadSessionRow) -> None:
+async def _heal_lineage(deps: TurnDeps, session: AsyncSession, *, row: ThreadSessionRow) -> None:
     """Finish a supersede that a crash left half-done.
 
     The successor is written and committed before the old row is superseded —
@@ -301,7 +308,12 @@ async def _heal_lineage(session: AsyncSession, *, row: ThreadSessionRow) -> None
         mapping_id=str(row.id),
         predecessor_id=str(row.predecessor_id),
     )
-    await mark_superseded(session, id=row.predecessor_id, replaced_by_id=row.id)
+    async with session_mutation_fence(deps.sessionmaker, predecessor.ma_session_id, check=False):
+        with contextlib.suppress(anthropic_pkg.NotFoundError):
+            await deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)
+        async with deps.sessionmaker.begin() as closing:
+            await lock_access_policy(closing, tenant_id=row.tenant_id)
+            await mark_superseded(closing, id=row.predecessor_id, replaced_by_id=row.id)
 
 
 async def _close_out(
@@ -417,7 +429,10 @@ async def _run_replacement(
         await advance_stage(
             session, id=preparation.id, stage="created", now=now, new_mapping_id=fresh.mapping_id
         )
+    with contextlib.suppress(anthropic_pkg.NotFoundError):
+        await deps.anthropic.beta.sessions.archive(row.ma_session_id)
     async with deps.sessionmaker() as session, session.begin():
+        await lock_access_policy(session, tenant_id=row.tenant_id)
         await _close_out(session, row=row, new_mapping_id=fresh.mapping_id, fresh_start=fresh_start)
         await advance_stage(session, id=preparation.id, stage="completed", now=now)
 
@@ -606,7 +621,7 @@ async def _prepare_session_for_turn_locked(
             )
             return from_fresh(fresh, CONTINUED)
 
-        await _heal_lineage(db, row=row)
+        await _heal_lineage(deps, db, row=row)
 
         handed_over = False
         recorded: SessionSnapshot | None = None
@@ -640,6 +655,17 @@ async def _prepare_session_for_turn_locked(
                     continuity=CONTINUED,
                 )
 
+        # New rows carry authoritative seals; legacy rows are read only on a
+        # handoff, while ordinary legacy reuse keeps its existing MA call budget.
+        inherited = frozenset(row.seal_ids or ())
+        if handed_over and row.seal_ids is None:
+            inherited = await inherited_seal_ids(
+                deps.anthropic,
+                predecessor_session_id=row.ma_session_id,
+                own_thread_id=thread_id,
+                tenant_seals_anything=bool(admission.origin_seal_ids),
+            )
+        admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
         desired = await desired_snapshot_for(
             deps.sessionmaker,
@@ -714,25 +740,35 @@ async def _prepare_session_for_turn_locked(
             # A handoff carries the old work only to an agent that could read
             # it itself from here; otherwise the new agent starts with nothing.
             carry = not handed_over or await _destination_may_carry(deps, admission, row)
-            outcome = await _run_replacement(
-                deps,
-                admission,
-                ops=ops,
-                row=row,
-                recorded=recorded,
-                desired=desired,
-                reasons=decision.reasons,
-                fresh_start=fresh_start,
-                # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only.
-                transfer=None if tightening_memory or not carry else transfer,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=thread_id,
-                session_account_id=session_account_id,
-                deadline=bound_deadline,
-                now=moment,
-            )
+            async with session_mutation_fence(deps.sessionmaker, row.ma_session_id):
+                try:
+                    observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                except anthropic_pkg.NotFoundError:
+                    observed = None
+                if observed is not None and observed.status not in ("idle", "terminated"):
+                    raise SessionBusyError(
+                        pending_reasons=("session_active",),
+                        retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
+                    )
+                outcome = await _run_replacement(
+                    deps,
+                    admission,
+                    ops=ops,
+                    row=row,
+                    recorded=recorded,
+                    desired=desired,
+                    reasons=decision.reasons,
+                    fresh_start=fresh_start,
+                    # A checkpoint executes the old session. Never run it with
+                    # a writable mount after the origin has become read-only.
+                    transfer=None if tightening_memory or not carry else transfer,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    session_account_id=session_account_id,
+                    deadline=bound_deadline,
+                    now=moment,
+                )
             if isinstance(outcome, PreparationFailure):
                 return outcome
             return from_fresh(outcome.fresh, outcome.continuity)
