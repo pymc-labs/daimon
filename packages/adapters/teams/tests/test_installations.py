@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.teams_installations import get_teams_installation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -69,6 +70,23 @@ async def test_an_install_records_the_team_and_welcomes_it_and_a_removal_forgets
 
         await post_activity(service, _installation("remove"))
         assert await _row(db_session_factory) is None
+
+
+async def test_a_group_chat_install_is_told_group_chats_are_not_answered(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    chat = "19:group@thread.v2"
+    install = _installation("add")
+    install["conversation"] = {
+        "id": chat,
+        "conversationType": "groupChat",
+        "tenantId": ENTRA_TENANT_ID,
+    }
+    install["channelData"] = {"tenant": {"id": ENTRA_TENANT_ID}}
+    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
+        await post_activity(service, install)
+    [reply] = teams_api_fake.activity_requests
+    assert reply.body["text"] == GROUP_CHAT_UNSUPPORTED
 
 
 async def test_another_organisations_install_records_nothing(

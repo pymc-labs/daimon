@@ -13,7 +13,7 @@ import asyncio
 import uuid
 
 import structlog
-from daimon.adapters.teams.identity import canonical_uuid
+from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, canonical_uuid
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.stores.teams_installations import (
@@ -104,7 +104,8 @@ class TeamInstalls:
         activity = ctx.activity
         if not self.is_ours(activity):
             return
-        is_team = activity.conversation.conversation_type == "channel"
+        kind = activity.conversation.conversation_type
+        is_team = kind == "channel"
         if is_team:
             await self.observe(activity)
             team = activity.channel_data.team if activity.channel_data else None
@@ -115,7 +116,10 @@ class TeamInstalls:
             )
         bot = activity.recipient.name or "daimon"
         try:
-            await asyncio.wait_for(ctx.send(welcome_text(bot, team=is_team)), SEND_TIMEOUT_S)
+            text = (
+                GROUP_CHAT_UNSUPPORTED if kind == "groupChat" else welcome_text(bot, team=is_team)
+            )
+            await asyncio.wait_for(ctx.send(text), SEND_TIMEOUT_S)
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.welcome.send_failed", error=type(err).__name__)
 

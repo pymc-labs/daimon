@@ -7,10 +7,11 @@ Routine fallbacks and commands sent in a channel go through here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 import httpx
-from daimon.adapters.teams.lifecycle import TeamsSender
+from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TeamsSender
 from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import Account, MessageActivityInput
 from microsoft_teams.api.clients.conversation import CreateConversationParams
@@ -34,7 +35,7 @@ class DirectChats(Protocol):
 
 
 class SdkDirectChats:
-    """`DirectChats` over the SDK app, sending through the adapter's timed sender."""
+    """`DirectChats` over the SDK app, every call timed: the SDK's HTTP client sets no timeout."""
 
     def __init__(self, app: App, sender: TeamsSender, *, entra_tenant_id: str) -> None:
         self._app = app
@@ -44,7 +45,9 @@ class SdkDirectChats:
     async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
         conversations = self._app.api.from_service_url(SERVICE_URL).conversations
         try:
-            account = await conversations.get_member_by_id(conversation_id, aad_object_id)
+            account = await asyncio.wait_for(
+                conversations.get_member_by_id(conversation_id, aad_object_id), SEND_TIMEOUT_S
+            )
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (403, 404):
                 return None
@@ -58,7 +61,7 @@ class SdkDirectChats:
             channel_data={"tenant": {"id": self._entra_tenant_id}},
         )
         conversations = self._app.api.from_service_url(SERVICE_URL).conversations
-        return (await conversations.create(params)).id
+        return (await asyncio.wait_for(conversations.create(params), SEND_TIMEOUT_S)).id
 
     async def post(self, conversation_id: str, text: str) -> None:
         activity = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
