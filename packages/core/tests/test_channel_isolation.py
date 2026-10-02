@@ -15,8 +15,10 @@ from daimon.core.answering_map import (
 )
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_isolation import (
+    ChannelIsolationStatus,
     IsolationViewer,
     binding_refusal,
+    channel_isolation_status,
     clear_refusal,
     is_thread_turn_refused,
     keeps_routine_inside,
@@ -54,6 +56,17 @@ def test_own_agents_are_those_pinned_to_the_channel_alone() -> None:
     assert isolation_owner(POLICY, ("local", "roamer")) is None, "every name counts"
     sealed_only = POLICY.model_copy(update={"isolated_channel_ids": ()})
     assert isolation_owner(sealed_only, ("local",)) is None, "a pin alone is no isolation"
+
+
+def test_status_shows_the_seal_the_dedicated_pins_and_the_marker() -> None:
+    assert channel_isolation_status(POLICY, "c1") == ChannelIsolationStatus(
+        is_private=True, dedicated_agent_names=("local",), is_hidden=True
+    ), "roamer is pinned beyond c1, so it is not dedicated"
+    ended = channel_isolation_status(POLICY.model_copy(update={"isolated_channel_ids": ()}), "c1")
+    assert (ended.is_hidden, ended.is_liftable) == (False, True), (
+        "after ending, the seal and the pin are still there to lift"
+    )
+    assert not channel_isolation_status(POLICY, "c3").is_liftable, "c3 has no seal of its own"
 
 
 def test_isolated_location_counts_threads_under_the_channel() -> None:

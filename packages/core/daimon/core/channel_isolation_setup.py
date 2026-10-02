@@ -8,7 +8,8 @@ is refused with a reason, unless the caller asks for a copy: then the
 `fork_from` agent (default: whoever answers in C now) is copied
 (`daimon.core.agent_fork`) under a name taken from the channel, set as C's
 default and pinned instead. Ending isolation drops the marker and leaves the
-seal and the pin, unless asked to drop them too.
+seal and the pins, unless asked to lift them too (`drop_seal_and_pins`): then
+the channel is unsealed and every agent pinned to it alone is unpinned.
 """
 
 from __future__ import annotations
@@ -44,8 +45,14 @@ IsolationRefusal = Literal[
 ]
 
 END_ISOLATION_WARNING = (
-    "The channel stays sealed and its agents stay pinned to it until an admin lifts those "
-    "too. An agent unpinned later can answer elsewhere and bring what it remembered here."
+    "The channel stays private and its dedicated agents stay pinned to it, so they still "
+    "answer only here, but they show elsewhere again and their memory turns read-only, as "
+    "in any private channel. Lifting the seal and pins too lets them answer elsewhere, "
+    "bringing what they remembered here."
+)
+LIFT_ISOLATION_WARNING = (
+    "The channel is no longer private and its dedicated agents are no longer pinned, so "
+    "they can answer elsewhere, bringing what they remembered here."
 )
 
 
@@ -115,6 +122,13 @@ class IsolationChange:
     changed: bool
     dropped_skills: tuple[str, ...] = ()
     """Skills scoped to one agent, left off the copy."""
+    lifted_seal_and_pins: bool = False
+    """Isolation ended along with the channel's seal and its dedicated agents' pins."""
+
+    @property
+    def end_warning(self) -> str:
+        """What ending isolation leaves in place, for the person who ended it."""
+        return LIFT_ISOLATION_WARNING if self.lifted_seal_and_pins else END_ISOLATION_WARNING
 
     @property
     def dropped_skills_note(self) -> str | None:
@@ -153,7 +167,7 @@ def end_isolation(
     if drop_seal_and_pins:
         data["sealed_channel_ids"] = tuple(c for c in policy.sealed_channel_ids if c != channel_id)
         data["agent_channel_pins"] = {
-            name: pin for name, pin in policy.agent_channel_pins.items() if pin != (channel_id,)
+            name: pin for name, pin in policy.agent_channel_pins.items() if set(pin) != {channel_id}
         }
     return TenantAccessPolicy.model_validate(data)
 
@@ -304,7 +318,14 @@ async def set_channel_isolation(
             )
             if updated != policy:
                 await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-        return IsolationChange(channel_id, False, None, None, updated != policy)
+        return IsolationChange(
+            channel_id,
+            False,
+            None,
+            None,
+            updated != policy,
+            lifted_seal_and_pins=drop_seal_and_pins,
+        )
     async with sessionmaker.begin() as session:
         found, changed = await _write_isolation(
             anthropic,
@@ -362,6 +383,7 @@ async def set_channel_isolation(
 
 __all__ = [
     "END_ISOLATION_WARNING",
+    "LIFT_ISOLATION_WARNING",
     "ChannelIsolationRefused",
     "IsolationChange",
     "IsolationRefusal",

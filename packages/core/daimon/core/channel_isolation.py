@@ -118,6 +118,36 @@ def is_memory_hidden(
 
 
 @dataclass(frozen=True)
+class ChannelIsolationStatus:
+    """The three controls an isolated channel is made of, as the panels show them."""
+
+    is_private: bool
+    """Sealed: its messages read only from inside it."""
+    dedicated_agent_names: tuple[str, ...]
+    """Pinned to this channel alone, so they answer nowhere else."""
+    is_hidden: bool
+    """Isolated: its own agents are hidden elsewhere, and only they show and answer here."""
+
+    @property
+    def is_liftable(self) -> bool:
+        """Whether a seal or a dedicated pin is left to lift."""
+        return self.is_private or bool(self.dedicated_agent_names)
+
+
+def channel_isolation_status(policy: TenantAccessPolicy, channel_id: str) -> ChannelIsolationStatus:
+    """What of isolation `channel_id` has now. Pure."""
+    return ChannelIsolationStatus(
+        is_private=channel_id in policy.sealed_channel_ids,
+        dedicated_agent_names=tuple(
+            sorted(
+                name for name, pin in policy.agent_channel_pins.items() if set(pin) == {channel_id}
+            )
+        ),
+        is_hidden=channel_id in policy.isolated_channel_ids,
+    )
+
+
+@dataclass(frozen=True)
 class IsolationViewer:
     """What one reader, standing at a place, may see of an isolated tenant.
 
@@ -230,8 +260,10 @@ async def is_thread_turn_refused(
 
 __all__ = [
     "BindingRefusal",
+    "ChannelIsolationStatus",
     "IsolationViewer",
     "binding_refusal",
+    "channel_isolation_status",
     "clear_refusal",
     "is_memory_hidden",
     "is_thread_turn_refused",

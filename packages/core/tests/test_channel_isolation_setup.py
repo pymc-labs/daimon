@@ -15,6 +15,8 @@ from daimon.core.agent_fork import AgentCopy, fork_agent
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.authz import Subject
 from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    LIFT_ISOLATION_WARNING,
     ChannelIsolationRefused,
     IsolationChange,
     isolated_agent_name,
@@ -142,15 +144,17 @@ async def test_isolating_seals_and_pins_the_channels_own_agent(
     assert (again.changed, again.agent_name) == (False, "local"), "repeating is a no-op"
     ended = await _isolate(client, db_session_factory, tenant.id, "c1", isolated=False)
     assert ended.changed, "ending isolation reports the change"
+    assert ended.end_warning == END_ISOLATION_WARNING, "ending warns what stays in place"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == (), "ending isolation drops the marker"
     assert policy.sealed_channel_ids == ("c1",) and "local" in policy.agent_channel_pins, (
         "the seal and the pin stay unless asked"
     )
     await _isolate(client, db_session_factory, tenant.id, "c1")
-    await _isolate(
+    lifted = await _isolate(
         client, db_session_factory, tenant.id, "c1", isolated=False, drop_seal_and_pins=True
     )
+    assert lifted.end_warning == LIFT_ISOLATION_WARNING, "lifting warns the agents may roam"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.sealed_channel_ids == () and policy.agent_channel_pins == {
         "roamer": ("c6", "c7")
