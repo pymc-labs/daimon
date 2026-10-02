@@ -16,6 +16,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -94,7 +95,10 @@ async def _set_channel_isolation_impl(
         raise ToolError("Channel isolation exists only on Discord and Slack.")
     try:
         channel, _, _ = normalize_channel_admin_ids(
-            auth.platform, channel_id=channel_id, role_ids=(), user_ids=()
+            auth.platform,
+            channel_id=parse_channel_target(auth.platform, channel_id).channel_id,
+            role_ids=(),
+            user_ids=(),
         )
     except InvalidChannelAdminIds as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc

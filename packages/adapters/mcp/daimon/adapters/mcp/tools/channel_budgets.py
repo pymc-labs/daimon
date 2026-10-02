@@ -10,29 +10,20 @@ Operator tokens read them with ``tenant:read`` and change them with
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.adapters.mcp.tools.slack._client import (
-    _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
-    _require_team_id,  # pyright: ignore[reportPrivateUsage]
-    slack_web_client,
-)
-from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client, split_thread
 from daimon.core.channel_budget import (
     ChannelBudgetError,
     ChannelBudgetStatus,
@@ -47,7 +38,6 @@ from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack", "teams")
@@ -123,42 +113,10 @@ def _require_channel_id(channel_id: str | None) -> str:
     return channel_id.strip()
 
 
-async def _resolve_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
-    """A Slack channel the caller can see; a `<channel>:<thread ts>` id resolves to the channel."""
-    channel_id = channel_id.partition(":")[0]
-    client = await slack_web_client(runtime, team_id=_require_team_id(auth))
-    try:
-        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-    except SlackApiError as err:
-        raise ToolError(f"Slack could not find {channel_id} in this workspace") from err
-    channel = cast("dict[str, object]", info["channel"])
-    await check_channel_access(client, channel=channel, user_id=_require_slack_identity(auth))
-    return channel_id
-
-
-async def _resolve_teams_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
-    """A Teams channel the caller is in; a thread id resolves to its channel."""
-    client, caller = require_client(runtime, auth)
-    ref = await locate_channel(runtime, auth, client, split_thread(channel_id)[0])
-    try:
-        is_member = await client.is_member(ref.channel_id, caller)
-    except (httpx.HTTPError, ValueError) as err:
-        raise ToolError("could not confirm you are in that channel") from err
-    if not is_member:
-        raise ToolError("you are not a member of that channel")
-    return ref.channel_id
-
-
 async def _budget_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
     """The channel id a budget is stored under, after confirming the caller can see it."""
-    platform = _require_platform(auth)
-    if platform == "discord":
-        if not channel_id.isdigit():
-            raise ToolError(f"{channel_id!r} is not a Discord channel id")
-        return await resolve_visible_channel(runtime, auth, channel_id)
-    if platform == "teams":
-        return await _resolve_teams_channel(runtime, auth, channel_id)
-    return await _resolve_slack_channel(runtime, auth, channel_id)
+    _require_platform(auth)
+    return (await resolve_channel(runtime, auth, channel_id)).channel_id
 
 
 def _is_dm_scope(thread_id: str) -> bool:
@@ -315,11 +273,9 @@ async def _clear_channel_budget_impl(
     require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
-    target = _require_channel_id(channel_id)
-    target = split_thread(target)[0] if platform == "teams" else target.partition(":")[0]
-    if platform == "discord" and target.isdigit():
-        with contextlib.suppress(ToolError):
-            target = await _budget_channel(runtime, auth, target)
+    target = (
+        await resolve_channel(runtime, auth, _require_channel_id(channel_id), lenient=True)
+    ).channel_id
     async with runtime.session_factory.begin() as session:
         cleared = await store.delete_channel_budget(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target

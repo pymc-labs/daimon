@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -101,7 +102,10 @@ async def _set_channel_admins_impl(
     platform = _platform(auth)
     try:
         channel, roles, users = normalize_channel_admin_ids(
-            platform, channel_id=channel_id, role_ids=role_ids, user_ids=user_ids
+            platform,
+            channel_id=parse_channel_target(platform, channel_id).channel_id,
+            role_ids=role_ids,
+            user_ids=user_ids,
         )
     except InvalidChannelAdminIds as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc
@@ -132,12 +136,13 @@ async def _clear_channel_admins_impl(
     require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _platform(auth)
+    channel = parse_channel_target(platform, channel_id).channel_id
     async with runtime.session_factory.begin() as session:
         removed = await delete_channel_admins(
-            session, tenant_id=auth.tenant_id, platform=platform, channel_id=channel_id.strip()
+            session, tenant_id=auth.tenant_id, platform=platform, channel_id=channel
         )
     return SetChannelAdminsResult(
-        channel=ChannelAdmins(channel_id=channel_id.strip(), role_ids=[], user_ids=[]),
+        channel=ChannelAdmins(channel_id=channel, role_ids=[], user_ids=[]),
         changed=removed,
         note="Only server admins administer this channel now.",
     )
@@ -172,7 +177,8 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
         Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
+        empty). ``channel_id`` MUST be the parent channel's id; a Slack or Teams thread
+        id names its channel.
         """
         return await _set_channel_admins_impl(
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids

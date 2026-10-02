@@ -225,8 +225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
-- **Channel environments.** Admins can pick the environment a Discord or
-  Slack channel's turns run in, or the workspace default, with
+- **Channel environments.** Admins can pick the environment a Discord,
+  Slack or Teams channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
   the workspace's, also under an operator token's `channels:write`); an admin
   of a channel can pick that channel's. In a sealed channel, or one holding a
@@ -243,7 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an environment clears the picks that named it. The missing-environment
   notice now points at the panel instead of the operator. With no channel or
   workspace environment set, nothing changes; see the upgrade notes for
-  routines where one already is.
+  routines where one already is. A thread id names its channel on every
+  platform, and the caller must be able to see the channel.
 - **Skill uploads.** Add one skill to one agent from a pasted SKILL.md, a
   `.md` or `.zip` attached on Discord or Slack, or a GitHub folder, with
   `add_skill` or Add skill on the setup panel's agent details (Slack takes a
