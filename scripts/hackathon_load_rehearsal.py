@@ -804,7 +804,6 @@ async def _discord_phase(
                     "Create and attach a tiny text file named rehearsal.txt containing OK. "
                     "Reply briefly."
                 )
-            started = datetime.now(UTC)
             posted = await rest.request(
                 "POST",
                 f"/channels/{channel_id}/messages",
@@ -814,6 +813,9 @@ async def _discord_phase(
                 },
             )
             assert isinstance(posted, dict)
+            # Measure user-visible latency from Discord's accepted mention,
+            # excluding the QA bot's own POST wait and rate-limit delay.
+            started = datetime.fromisoformat(str(posted["timestamp"]))
             return await _discord_watch(
                 rest,
                 sm,
