@@ -33,6 +33,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
@@ -368,16 +369,19 @@ async def _replace_dead_session(
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
 ) -> _Replacement:
-    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
-        return await _replace_dead_session_locked(
-            deps,
-            prepared,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            dead_session_id=dead_session_id,
-            dead_mapping_id=dead_mapping_id,
-        )
+    async def attempt():
+        async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
+            return await _replace_dead_session_locked(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                dead_session_id=dead_session_id,
+                dead_mapping_id=dead_mapping_id,
+            )
+
+    return await retry_fences(attempt)
 
 
 async def _replace_dead_session_locked(

@@ -8,7 +8,7 @@ module closes that: at every bind it compares what the session runs against
 what the caller's configuration now wants, applies what can be applied in
 place, and replaces the session when it cannot.
 
-Four results, never an exception for an expected outcome:
+Preparation outcomes:
 
 - `PreparedTurn` — run the turn. `continuity` says what happened to the session.
 - `PreparationDeferred` — a turn is already running, or MA refused a mid-turn
@@ -20,11 +20,12 @@ Four results, never an exception for an expected outcome:
   untouched and still live, so nothing the caller saved is lost; the turn is
   simply not run.
 
-Changes hold a blocking Postgres advisory lock on the caller's
-(tenant, platform, thread, account) tuple, so two mentions racing the same
-change decide once and create one successor, not two. A compatible reused
-session releases that transaction before vault network I/O and verifies that
-the mapping is still current afterward.
+Changes acquire a transaction-scoped Postgres advisory lock on the caller's
+(tenant, platform, thread, account) tuple, so racing mentions create one
+successor. Contenders use try-locks and release transactions and permits before
+retrying for at most five seconds; timeout raises retryable SessionBusyError.
+A compatible reused session releases that transaction before vault network I/O
+and verifies that the mapping is still current afterward.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from daimon.core.session_compat import (
     UpdateOp,
     decide_session_compatibility,
 )
+from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import lock_session_mutation
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import (
@@ -503,22 +505,26 @@ async def prepare_session_for_turn(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
-    async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
-        return await _prepare_session_for_turn_locked(
-            deps,
-            admission,
-            ops=ops,
-            tenant_id=tenant_id,
-            platform=platform,
-            external_user_id=external_user_id,
-            thread_id=thread_id,
-            session_account_id=session_account_id,
-            reuse_existing=reuse_existing,
-            capabilities=capabilities,
-            transfer=transfer,
-            deadline=deadline,
-            now=now,
-        )
+
+    async def attempt():
+        async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
+            return await _prepare_session_for_turn_locked(
+                deps,
+                admission,
+                ops=ops,
+                tenant_id=tenant_id,
+                platform=platform,
+                external_user_id=external_user_id,
+                thread_id=thread_id,
+                session_account_id=session_account_id,
+                reuse_existing=reuse_existing,
+                capabilities=capabilities,
+                transfer=transfer,
+                deadline=deadline,
+                now=now,
+            )
+
+    return await retry_fences(attempt)
 
 
 async def _prepare_session_for_turn_locked(

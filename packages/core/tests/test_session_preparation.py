@@ -2569,6 +2569,20 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
 async def test_handoff_waits_for_an_inflight_handle_send(
     db_session, db_nullpool_engine, monkeypatch
 ):
+    from daimon.core import session_preparation
+    from daimon.core.session_fence_retry import FenceUnavailable
+
+    contended = asyncio.Event()
+    original_lock = session_preparation.lock_session_mutation
+
+    async def observed_lock(*args, **kwargs):
+        try:
+            return await original_lock(*args, **kwargs)
+        except FenceUnavailable:
+            contended.set()
+            raise
+
+    monkeypatch.setattr(session_preparation, "lock_session_mutation", observed_lock)
     factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, factory
@@ -2613,22 +2627,8 @@ async def test_handoff_waits_for_an_inflight_handle_send(
                 deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
             )
         )
-        # Verify a real Postgres lock wait, rather than assuming a sleep establishes it.
-        async with asyncio.timeout(5):
-            while True:
-                async with factory() as db:
-                    waiting = (
-                        await db.execute(
-                            text(
-                                "SELECT 1 FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0 "
-                                "AND query LIKE '%pg_advisory_xact_lock%' "
-                                "AND application_name = current_setting('application_name')"
-                            )
-                        )
-                    ).first()
-                if waiting is not None:
-                    break
-                await asyncio.sleep(0.01)
+        # Observe an actual failed PostgreSQL try-lock, not an assumed delay.
+        await asyncio.wait_for(contended.wait(), 3)
         assert transport.state.sessions[first.ma_session_id].archived_at is None
         release.set()
         await asyncio.wait_for(sending, 5)
@@ -2715,7 +2715,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     controlled; ownership, authorization, retirement and PostgreSQL locks are
     real. Shorten the pool timeout so the original cycle fails quickly.
     """
-    from daimon.core import session_preparation_gate
+    from daimon.core import session_mutation
     from daimon.core.session_mutation import SessionRetired
     from daimon.core.turn import run as turn_run
     from daimon.testing.db import build_test_engine
@@ -2820,32 +2820,25 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
             assert error.pending_reasons == ("session_changed",)
             return await _prepare(deps, first.admission, tenant=tenant, account=account)
 
+    attempted = set()
+    peers_entered = asyncio.Event()
+    original_lock = session_mutation.lock_session_mutation
+
+    async def observed_lock(*args, **kwargs):
+        attempted.add(asyncio.current_task())
+        if len(attempted) == 15:
+            peers_entered.set()
+        return await original_lock(*args, **kwargs)
+
+    monkeypatch.setattr(session_mutation, "lock_session_mutation", observed_lock)
     tasks = []
     try:
         tasks.append(asyncio.create_task(send(0)))
         await asyncio.wait_for(entered.wait(), 5)
         tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
-        # Wait until ALL peers reach the fence: either PostgreSQL wait edges
-        # (unfixed code) or in-memory gate waiters plus PostgreSQL wait edges.
-        async with asyncio.timeout(5):
-            while True:
-                async with seed_factory() as db:
-                    waits = (
-                        await db.execute(
-                            text(
-                                "SELECT count(*) FROM pg_stat_activity "
-                                "WHERE cardinality(pg_blocking_pids(pid)) > 0 "
-                                "AND query LIKE '%pg_advisory_xact_lock%' "
-                                "AND application_name = :schema"
-                            ),
-                            {"schema": db_schema},
-                        )
-                    ).scalar_one()
-                gate = getattr(session_preparation_gate, "_pool_gates", {}).get(engine.pool)
-                queued = len(gate._waiters or ()) if gate is not None else 0
-                if waits + queued == 14:
-                    break
-                await asyncio.sleep(0.01)
+        # All peers must attempt the real PostgreSQL fence before releasing
+        # the holder. Try-lock contenders now back off outside the pool/gate.
+        await asyncio.wait_for(peers_entered.wait(), 3)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
@@ -3012,6 +3005,224 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await deps.anthropic.close()
+        await admission_deps.anthropic.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("entry", ["handle", "prepared"])
+@pytest.mark.parametrize("contended", [False, True])
+@pytest.mark.parametrize("blocked_phase", ["checkpoint", "create"])
+async def test_independent_sends_during_replacements_with_old_session_waiters(
+    db_session, db_nullpool_engine, db_schema, monkeypatch, entry, contended, blocked_phase
+):
+    """Two checkpoints, then two MA creates, must leave sends usable at 5+10."""
+    from daimon.core import session_mutation
+    from daimon.core.session_preparation_gate import PreparationGate
+    from daimon.core.turn import run as turn_run
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.turn_fakes import RecordingLifecycle
+
+    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, seed_factory
+    )
+    account = await _account_of(seed_factory, first.admission.account_id)
+    send_turns = []
+    replacement_turns = [first]
+    for thread in ("replacement-2", "send-1", "send-2"):
+        result = await _prepare(
+            deps, first.admission, tenant=tenant, account=account, thread_id=thread
+        )
+        assert isinstance(result, PreparedTurn)
+        if thread.startswith("send-"):
+            send_turns.append(result)
+        else:
+            replacement_turns.append(result)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"],
+        db_schema,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=2,
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    deps = replace(deps, sessionmaker=factory, preparation_gate=PreparationGate(2))
+    changed_agent = first.admission.agent.model_copy(
+        update={"model": _agent(model_id="claude-opus-5").model}
+    )
+    _register(transport.state, changed_agent)
+    changed = replace(first.admission, agent=changed_agent)
+    checkpoint_entered, create_entered = asyncio.Event(), asyncio.Event()
+    checkpoint_release, create_release = asyncio.Event(), asyncio.Event()
+    checkpoints = creates = 0
+    original_create = deps.anthropic.beta.sessions.create
+
+    async def blocked_create(*args, **kwargs):
+        nonlocal creates
+        creates += 1
+        if creates == 2:
+            create_entered.set()
+        await create_release.wait()
+        return await original_create(*args, **kwargs)
+
+    monkeypatch.setattr(deps.anthropic.beta.sessions, "create", blocked_create)
+
+    async def checkpoint(**kwargs):
+        nonlocal checkpoints
+        await kwargs["before_send"]()
+        checkpoints += 1
+        if checkpoints == 2:
+            checkpoint_entered.set()
+        await checkpoint_release.wait()
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
+        )
+
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="user-1",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
+    )
+    runtime = SimpleNamespace(client=deps.anthropic, session_factory=factory)
+    recheck = _admission_recheck(
+        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+    )
+
+    async def send(index, phase, retired=False):
+        prepared = replacement_turns[index % 2] if retired else send_turns[index]
+        message = f"send during {phase} {index}"
+        if entry == "handle":
+            return await _continue_turn_impl(
+                runtime, auth, prepared.ma_session_id, message, recheck=recheck
+            )
+
+        async def reseed():
+            return message
+
+        return await turn_run.run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=("thread-1" if index % 2 == 0 else "replacement-2")
+            if retired
+            else f"send-{index + 1}",
+            external_user_id="user-1",
+            user_message=message,
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            render_interval_s=0.001,
+        )
+
+    attempted = set()
+    five_attempts = asyncio.Event()
+    original_lock = session_mutation.lock_session_mutation
+
+    async def observed_lock(*args, **kwargs):
+        attempted.add(asyncio.current_task())
+        if len(attempted) >= 5:
+            five_attempts.set()
+        return await original_lock(*args, **kwargs)
+
+    monkeypatch.setattr(session_mutation, "lock_session_mutation", observed_lock)
+    waiters = []
+    predecessor_waiters = []
+    tasks = [
+        asyncio.create_task(
+            _prepare(
+                deps, changed, tenant=tenant, account=account, thread_id=thread, transfer=checkpoint
+            )
+        )
+        for thread in ("thread-1", "replacement-2")
+    ]
+    try:
+        for phase, entered, release in (
+            ("checkpoint", checkpoint_entered, checkpoint_release),
+            ("create", create_entered, create_release),
+        ):
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+            except TimeoutError:
+                assert not any(task.done() for task in tasks), [
+                    task.result() for task in tasks if task.done()
+                ]
+                raise
+            assert all(not task.done() for task in tasks)
+            if contended and phase == blocked_phase:
+                predecessor_waiters.extend(
+                    asyncio.create_task(send(i, phase, retired=True)) for i in range(5)
+                )
+                waiters.extend(predecessor_waiters)
+                await asyncio.wait_for(five_attempts.wait(), 5)
+                # Let every observed acquisition reach PostgreSQL. On the old
+                # implementation all five now block holding mutation permits.
+                await asyncio.sleep(0.1)
+            independent = [asyncio.create_task(send(i, phase)) for i in range(2)]
+            waiters.extend(independent)
+            completed, pending = await asyncio.wait(
+                independent, timeout=3 if contended and phase == blocked_phase else 1
+            )
+            print(
+                f"entry={entry} contended={contended} phase={phase}: independent completed={len(completed)}, pending={len(pending)}, checkedout={engine.pool.checkedout()}, replacements still blocked={all(not t.done() for t in tasks)}",
+                flush=True,
+            )
+            if pending:
+                from daimon.core.session_mutation import SessionRetired
+
+                print(
+                    f"Unrelated sends still blocked beyond pool_timeout=2s with {15 - engine.pool.checkedout()} unused total connections",
+                    flush=True,
+                )
+                checkpoint_release.set()
+                create_release.set()
+                replacement_results = await asyncio.wait_for(asyncio.gather(*tasks), 8)
+                waiter_results = await asyncio.wait_for(
+                    asyncio.gather(*waiters, return_exceptions=True), 8
+                )
+                assert all(isinstance(r, PreparedTurn) for r in replacement_results)
+                assert all(not isinstance(r, BaseException) for r in waiter_results[-2:]), (
+                    waiter_results
+                )
+                assert all(isinstance(r, SessionRetired) for r in waiter_results[-7:-2]), (
+                    waiter_results
+                )
+                print(
+                    f"entry={entry} phase={phase}: after MA release both independent sends complete; all five predecessor sends refused SessionRetired",
+                    flush=True,
+                )
+            assert not pending, (
+                "unrelated sends starve behind predecessor waiters occupying all mutation slots"
+            )
+            await asyncio.gather(*independent)
+            for prepared in send_turns:
+                assert any(
+                    e["type"] == "user.message" and phase in json.dumps(e["content"])
+                    for e in transport.state.events[prepared.ma_session_id]
+                )
+            assert all(not task.done() for task in tasks)
+            release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        assert all(isinstance(result, PreparedTurn) for result in results)
+        retired = await asyncio.wait_for(
+            asyncio.gather(*predecessor_waiters, return_exceptions=True), 2
+        )
+        from daimon.core.session_mutation import SessionRetired
+
+        assert all(isinstance(result, SessionRetired) for result in retired), retired
+    finally:
+        checkpoint_release.set()
+        create_release.set()
+        for task in tasks + waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, *waiters, return_exceptions=True)
         await deps.anthropic.close()
         await admission_deps.anthropic.close()
         await engine.dispose()

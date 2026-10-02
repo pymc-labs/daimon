@@ -7,6 +7,7 @@ import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from daimon.core.session_fence_retry import fence_acquisition
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import Pool, QueuePool
 
@@ -30,6 +31,9 @@ async def pool_headroom(
     At the default 5+10 this admits two preparations and five mutations:
     2 * (2 + 5) = 14 connections. Pools smaller than four connections can
     support only one holder, so must share a gate to preserve nested headroom.
+    Production build_engine rejects total capacity below four at startup:
+    a long preparation must leave a separate mutation slot and nested headroom.
+    The shared fallback supports externally constructed test engines only.
 
     Key by pool because runtimes and factories can share an engine. Unbounded
     overflow conservatively uses the persistent size for the budget. NullPool,
@@ -62,8 +66,12 @@ async def pool_headroom(
         _preparation_pool_gates[pool] = preparation_gate
     if preparation:
         gate = _preparation_pool_gates[pool]
-    async with gate:
+    async with fence_acquisition():
+        await gate.acquire()
+    try:
         yield
+    finally:
+        gate.release()
 
 
 def preparation_counts() -> dict[str, int]:
@@ -80,7 +88,8 @@ class PreparationGate:
         global _waiting, _active
         _waiting += 1
         try:
-            await self._semaphore.acquire()
+            async with fence_acquisition():
+                await self._semaphore.acquire()
         finally:
             _waiting -= 1
         _active += 1

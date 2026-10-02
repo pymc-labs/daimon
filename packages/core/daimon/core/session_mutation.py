@@ -7,12 +7,12 @@ acquire this fence. Replacement publishes the successor before archiving.
 """
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from daimon.core.errors import SessionRetired as SessionRetired
+from daimon.core.session_fence_retry import retry_fences, try_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.stores.thread_sessions import require_writable_session
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -22,10 +22,7 @@ async def lock_session_mutation(db: AsyncSession, session_id: str, *, check: boo
     Preparations already hold a connection for their advisory lock. Reuse it
     so the preparation gate reserves room for short database transactions.
     """
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"session_mutation:{session_id}"},
-    )
+    await try_fence(db, f"session_mutation:{session_id}")
     if check:
         await require_writable_session(db, session_id)
 
@@ -34,6 +31,19 @@ async def lock_session_mutation(db: AsyncSession, session_id: str, *, check: boo
 async def session_mutation_fence(
     factory: async_sessionmaker[AsyncSession], session_id: str, *, check: bool = True
 ) -> AsyncIterator[None]:
-    async with pool_headroom(factory), factory.begin() as db:
-        await lock_session_mutation(db, session_id, check=check)
+    async def acquire() -> AsyncExitStack:
+        stack = AsyncExitStack()
+        db: AsyncSession | None = None
+        try:
+            await stack.enter_async_context(pool_headroom(factory))
+            db = await stack.enter_async_context(factory.begin())
+            await lock_session_mutation(db, session_id, check=check)
+        except BaseException:
+            if db is not None:
+                await db.rollback()
+            await stack.aclose()
+            raise
+        return stack
+
+    async with await retry_fences(acquire):
         yield
