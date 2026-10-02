@@ -629,6 +629,40 @@ class TeamsSettings(BaseModel):
             ) from None
 
 
+def decode_github_app_private_key(value: object) -> object:
+    """Accept raw PEM or base64-encoded PEM for both App settings groups."""
+    if value is None:
+        return value
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if not isinstance(raw, str) or "-----BEGIN" in raw:
+        return value
+    try:
+        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return value
+    return decoded if "-----BEGIN" in decoded else value
+
+
+def validate_github_app_slug(value: str | None) -> str | None:
+    """Require GitHub's URL slug shape before building an installation link."""
+    if value is None:
+        return value
+    if (
+        not value
+        or not all(char.isascii() and (char.isalnum() or char == "-") for char in value)
+        or value.startswith("-")
+        or value.endswith("-")
+        or len(value) > 100
+    ):
+        shown = value if len(value) <= 40 else f"{value[:40]}...(truncated)"
+        raise ValueError(
+            f"app_slug must be a non-empty string of ASCII letters, digits and "
+            f"hyphens, with no leading or trailing hyphen and at most 100 "
+            f"characters; got shape of: {shown!r}"
+        )
+    return value
+
+
 class GithubSettings(BaseModel):
     """GitHub repository access config (App-or-PAT; no OAuth flow). All fields are
     optional so deployments without GitHub App or PAT config keep working.
@@ -707,54 +741,12 @@ class GithubSettings(BaseModel):
     @field_validator("app_private_key", mode="before")
     @classmethod
     def _decode_base64_private_key(cls, value: object) -> object:
-        """Accept the RSA private key as raw PEM or base64-encoded PEM.
-
-        Multi-line PEM survives env delivery on Fly and Cloud Run, but the GCP
-        worker VM loads secrets through docker-compose ``env_file``, whose
-        format cannot represent multi-line values. base64 is single-line (its
-        alphabet has no dashes), so a ``-----BEGIN`` check distinguishes raw
-        PEM from a base64-encoded PEM. A value that is neither is passed through
-        untouched to fail loudly downstream rather than be silently mangled.
-        """
-        if value is None:
-            return value
-        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
-        if not isinstance(raw, str) or "-----BEGIN" in raw:
-            return value
-        try:
-            decoded = base64.b64decode(raw, validate=True).decode("utf-8")
-        except (binascii.Error, ValueError, UnicodeDecodeError):
-            return value
-        return decoded if "-----BEGIN" in decoded else value
+        return decode_github_app_private_key(value)
 
     @field_validator("app_slug")
     @classmethod
     def _validate_app_slug(cls, value: str | None) -> str | None:
-        """Reject anything outside a GitHub App slug's real shape.
-
-        The slug is interpolated into a URL that is shown to users and
-        clicked, so a typo or a pasted URL fragment must fail at settings
-        load rather than produce a link that goes somewhere unintended.
-        This is the mitigation for this deployment's phishing-shaped
-        threat: the URL is built from configuration only, and the
-        configuration is validated here.
-        """
-        if value is None:
-            return value
-        if (
-            not value
-            or not all(char.isascii() and (char.isalnum() or char == "-") for char in value)
-            or value.startswith("-")
-            or value.endswith("-")
-            or len(value) > 100
-        ):
-            shown = value if len(value) <= 40 else f"{value[:40]}...(truncated)"
-            raise ValueError(
-                f"app_slug must be a non-empty string of ASCII letters, digits and "
-                f"hyphens, with no leading or trailing hyphen and at most 100 "
-                f"characters; got shape of: {shown!r}"
-            )
-        return value
+        return validate_github_app_slug(value)
 
 
 class GithubAppSettings(BaseModel):
@@ -780,12 +772,12 @@ class GithubAppSettings(BaseModel):
     @field_validator("private_key", mode="before")
     @classmethod
     def _decode_private_key(cls, value: object) -> object:
-        return GithubSettings._decode_base64_private_key(value)  # pyright: ignore[reportPrivateUsage]
+        return decode_github_app_private_key(value)
 
     @field_validator("app_slug")
     @classmethod
     def _validate_slug(cls, value: str | None) -> str | None:
-        return GithubSettings._validate_app_slug(value)  # pyright: ignore[reportPrivateUsage]
+        return validate_github_app_slug(value)
 
 
 class CryptoSettings(BaseModel):

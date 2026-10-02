@@ -59,13 +59,22 @@ def group_repository_access(
     grants: list[tuple[int, int, PermissionProfile]],
 ) -> list[tuple[int, PermissionProfile, tuple[int, ...]]]:
     """Group effective repository access into GitHub's 500-repository token limit."""
-    groups: dict[tuple[int, PermissionProfile], list[int]] = {}
+    effective: dict[tuple[int, int], PermissionProfile] = {}
     for installation_id, repo_id, profile in grants:
         if installation_id <= 0 or repo_id <= 0:
             raise ValueError("installation and repository IDs must be positive")
-        group = groups.setdefault((installation_id, profile), [])
-        if repo_id not in group:
-            group.append(repo_id)
+        key = (installation_id, repo_id)
+        if key not in effective or profile == "write":
+            effective[key] = profile
+    groups: dict[tuple[int, PermissionProfile], list[int]] = {}
+    seen: dict[tuple[int, PermissionProfile], set[int]] = {}
+    for (installation_id, repo_id), profile in effective.items():
+        group_key = (installation_id, profile)
+        if repo_id in seen.setdefault(group_key, set()):
+            continue
+        seen[group_key].add(repo_id)
+        group = groups.setdefault(group_key, [])
+        group.append(repo_id)
     return [
         (installation_id, profile, tuple(ids[start : start + 500]))
         for (installation_id, profile), ids in groups.items()
@@ -140,6 +149,7 @@ async def mint_installation_token(
     installation_id: int,
     repository: str | None = None,
     repository_ids: list[int] | None = None,
+    profile: PermissionProfile | None = None,
     permissions: Mapping[str, str] | None = None,
 ) -> str:
     """Exchange an App JWT for an installation access token (1h TTL).
@@ -158,8 +168,10 @@ async def mint_installation_token(
         installation_id: Numeric GitHub installation ID.
         repository: Legacy repository name (no owner prefix) the token is scoped to.
         repository_ids: One to 500 repository IDs for agent-scoped access.
+        profile: Required permission profile when repository IDs are used.
         permissions: Optional permission subset (e.g. ``{"contents": "read"}``);
-            None keeps the installation's granted permissions.
+            applies only to legacy name-based calls. None keeps that
+            installation's granted permissions.
 
     Returns:
         The installation access token string from the JSON response.
@@ -175,11 +187,16 @@ async def mint_installation_token(
             or not repository_ids
             or len(repository_ids) > 500
             or any(repo_id <= 0 for repo_id in repository_ids)
+            or profile is None
+            or permissions is not None
         ):
-            raise ValueError("installation tokens require 1..500 repository IDs")
-        request_body: dict[str, object] = {"repository_ids": repository_ids}
+            raise ValueError("ID-scoped installation tokens require 1..500 IDs and a profile")
+        request_body: dict[str, object] = {
+            "repository_ids": repository_ids,
+            "permissions": dict(PERMISSION_PROFILES[profile]),
+        }
     else:
-        if not repository or "/" in repository:
+        if not repository or "/" in repository or profile is not None:
             raise ValueError(
                 f"installation tokens must be scoped to one repository name, got {repository!r}"
             )

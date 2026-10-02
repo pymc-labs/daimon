@@ -105,6 +105,7 @@ from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -139,6 +140,7 @@ class PurgeReport(BaseModel):
     accounts: int = 0
     user_skills: int = 0
     github_credentials: int = 0
+    github_user_links: int = 0
     github_oauth_states: int = 0
     mcp_tokens: int = 0
     agent_github_binding: int = 0
@@ -161,6 +163,7 @@ class PurgeReport(BaseModel):
             accounts=self.accounts + other.accounts,
             user_skills=self.user_skills + other.user_skills,
             github_credentials=self.github_credentials + other.github_credentials,
+            github_user_links=self.github_user_links + other.github_user_links,
             github_oauth_states=self.github_oauth_states + other.github_oauth_states,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
             agent_github_binding=self.agent_github_binding + other.agent_github_binding,
@@ -458,6 +461,9 @@ async def purge_account(
         tenant_ids: set[uuid.UUID] = {principal.tenant_id for principal in (*cli_list, *pp_list)}
 
         report = PurgeReport()
+        github_account_link = await github_links_store.get_account_link(
+            session, account_id=account_id
+        )
         for principal in (*cli_list, *pp_list):
             sub = await _purge_principal_in_session(session, principal=principal)
             report = report.merge(sub)
@@ -503,6 +509,13 @@ async def purge_account(
             session, account_id=account_id
         )
         account_count = await accounts_store.delete_account(session, account_id=account_id)
+        github_user_links_count = (
+            await github_links_store.delete_unlinked_user(
+                session, github_user_id=github_account_link.github_user_id
+            )
+            if github_account_link is not None and account_count
+            else 0
+        )
         db_report = report.merge(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
@@ -510,6 +523,7 @@ async def purge_account(
                 support_escalations=support_escalations_count,
                 user_configs=user_cfg_count,
                 accounts=account_count,
+                github_user_links=github_user_links_count,
                 slack_turn_contexts=slack_turn_contexts_count,
                 direct_message_conversations=direct_message_count,
             )

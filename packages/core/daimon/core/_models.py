@@ -2413,9 +2413,7 @@ class TenantGitHubRepo(Base):
     )
     repo_id: Mapped[int] = mapped_column(BigInteger)
     owner_id: Mapped[int] = mapped_column(BigInteger)
-    installation_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("github_app_installations.installation_id")
-    )
+    installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_full_name: Mapped[str] = mapped_column(Text)
     max_access: Mapped[str] = mapped_column(Text)
     authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
@@ -2445,6 +2443,8 @@ class AgentGitHubGrant(Base):
             "baseline_access = 'none' OR baseline_access = 'read' OR ceiling_access = 'write'"
         ),
     )
+    # max_access belongs to tenant_github_repos, so the grant-writing store
+    # must enforce ceiling_access <= max_access in the same transaction.
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     repo_id: Mapped[int] = mapped_column(BigInteger)
@@ -2516,9 +2516,7 @@ class GitHubIssuedToken(Base):
     )
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     session_id: Mapped[str] = mapped_column(Text)
-    installation_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("github_app_installations.installation_id")
-    )
+    installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
     permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
     grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
@@ -2569,6 +2567,12 @@ class SecurityAuditEvent(Base):
     token_kind: Mapped[str | None] = mapped_column(Text)
     token_jti: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     scope: Mapped[str | None] = mapped_column(Text)
+    github_token_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    github_session_id: Mapped[str | None] = mapped_column(Text)
+    github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    github_repo_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
+    github_permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    github_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set only by the channel tidy tools: which message an edit or delete
     # touched, a keyed HMAC of the text it replaced, and the turn it ran in.
     target_channel_id: Mapped[str | None] = mapped_column(Text)

@@ -7,17 +7,10 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import (
-    AccountGitHubLink,
-    AgentGitHubGrant,
-    GitHubAppInstallation,
-    GitHubIssuedToken,
-    GitHubUserLink,
-    TenantGitHubRepo,
-)
+from daimon.core._models import GitHubIssuedToken
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -107,11 +100,12 @@ async def mark_delivered(session: AsyncSession, *, token_id: uuid.UUID) -> Issue
 
 async def mark_revoked(session: AsyncSession, *, token_id: uuid.UUID) -> IssuedToken:
     row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
-    if row is None or row.status == "pending":
-        raise ValueError("token cannot be revoked")
+    if row is None:
+        raise ValueError("unknown token")
+    if row.status == "revoked":
+        return IssuedToken.model_validate(row)
     row.status = "revoked"
     row.revoked_at = datetime.now(UTC)
-    row.revoke_attempts += 1
     await session.flush()
     return IssuedToken.model_validate(row)
 
@@ -131,47 +125,59 @@ def decrypt_issued_token(row: IssuedToken, *, fernet: MultiFernet) -> str | None
 async def select_stale_tokens(
     session: AsyncSession, *, now: datetime | None = None
 ) -> list[IssuedToken]:
-    """Find live issued tokens whose grant, authorization or requester link changed."""
+    """Find live tokens with changed grant, authorization or requester link state."""
     current = now or datetime.now(UTC)
-    rows = await session.scalars(
-        select(GitHubIssuedToken).where(
-            GitHubIssuedToken.status.in_(("stored", "delivered")),
-            GitHubIssuedToken.expires_at > current,
-        )
-    )
-    stale: list[IssuedToken] = []
-    for row in rows:
-        installation = await session.get(GitHubAppInstallation, row.installation_id)
-        outdated = installation is None or installation.suspended_at is not None
-        for repo_id in row.repo_ids:
-            grant = await session.get(AgentGitHubGrant, (row.tenant_id, row.agent_id, repo_id))
-            authorization = await session.get(TenantGitHubRepo, (row.tenant_id, repo_id))
-            if (
-                grant is None
-                or grant.staged
-                or authorization is None
-                or authorization.status != "active"
-                or authorization.installation_id != row.installation_id
-                or row.grant_versions.get(f"grant:{repo_id}") != grant.version
-                or row.grant_versions.get(f"authorization:{repo_id}") != authorization.version
-            ):
-                outdated = True
-                break
-        if row.link_generation is not None:
-            link = await session.scalar(
-                select(GitHubUserLink)
-                .join(
-                    AccountGitHubLink,
-                    GitHubUserLink.github_user_id == AccountGitHubLink.github_user_id,
+    statement = (
+        select(GitHubIssuedToken)
+        .from_statement(
+            text(
+                """
+            SELECT token.*
+            FROM github_issued_tokens AS token
+            LEFT JOIN github_app_installations AS installation
+              ON installation.installation_id = token.installation_id
+            LEFT JOIN account_github_links AS account_link
+              ON account_link.account_id = token.requester_account_id
+            LEFT JOIN github_user_links AS user_link
+              ON user_link.github_user_id = account_link.github_user_id
+            WHERE token.status IN ('stored', 'delivered')
+              AND token.expires_at > :now
+              AND (
+                installation.installation_id IS NULL
+                OR installation.suspended_at IS NOT NULL
+                OR (
+                  token.link_generation IS NOT NULL
+                  AND (
+                    user_link.github_user_id IS NULL
+                    OR user_link.status <> 'active'
+                    OR user_link.link_generation IS DISTINCT FROM token.link_generation
+                  )
                 )
-                .where(AccountGitHubLink.account_id == row.requester_account_id)
+                OR EXISTS (
+                  SELECT 1
+                  FROM unnest(token.repo_ids) AS repo(repo_id)
+                  LEFT JOIN agent_github_grants AS grant_row
+                    ON grant_row.tenant_id = token.tenant_id
+                   AND grant_row.agent_id = token.agent_id
+                   AND grant_row.repo_id = repo.repo_id
+                  LEFT JOIN tenant_github_repos AS auth_row
+                    ON auth_row.tenant_id = token.tenant_id
+                   AND auth_row.repo_id = repo.repo_id
+                  WHERE grant_row.repo_id IS NULL
+                     OR grant_row.staged
+                     OR auth_row.repo_id IS NULL
+                     OR auth_row.status <> 'active'
+                     OR auth_row.installation_id <> token.installation_id
+                     OR token.grant_versions ->> ('grant:' || repo.repo_id::text)
+                        IS DISTINCT FROM grant_row.version::text
+                     OR token.grant_versions ->> ('authorization:' || repo.repo_id::text)
+                        IS DISTINCT FROM auth_row.version::text
+                )
+              )
+            """
             )
-            if (
-                link is None
-                or link.link_generation != row.link_generation
-                or link.status != "active"
-            ):
-                outdated = True
-        if outdated:
-            stale.append(IssuedToken.model_validate(row))
-    return stale
+        )
+        .execution_options(populate_existing=True)
+    )
+    rows = await session.scalars(statement, {"now": current})
+    return [IssuedToken.model_validate(row) for row in rows]
