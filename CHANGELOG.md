@@ -170,9 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change it from outside them, and from the hub may list and read the sealed
   conversations of the channels they run, as a server admin may of any, when
   every seal on one lies in those channels; DMs stay private. No chat
-  tool or panel can make a pinned agent the default of a channel outside its
-  pin; the operator CLI still can. Nothing changes until a channel admin is
-  named.
+  tool, panel or CLI `config` write can make a pinned agent the default of a
+  channel outside its pin. Nothing changes until a channel admin is named.
 - **Channel-bound coding-tool tokens.** "Use from your coding tools" pressed
   in a sealed channel, or in a channel the agent is pinned to (a thread counts
   as its parent), now mints a token bound to that channel, and the reply says
@@ -184,19 +183,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants. A channel admin of every channel an agent is pinned to may now mint
   one from inside those channels, always bound. Tokens minted elsewhere, and
   existing ones, are unchanged. Run migration `0037_mcp_token_channels`.
-- **Channel isolation.** Server admins can isolate a channel whose default
-  agent answers only there, with `set_channel_isolation`, from Who answers
-  where in the setup panel, or with `--isolated-channel`; `fork_from` or the
-  panel's copy option makes that agent from the one answering now (with no
-  credentials; a pinned agent isn't copied). Its agents
-  then can't be bound or handed tasks elsewhere and are hidden outside it in
-  agent, skill, session, routine and hub listings, the setup panel (for
-  members) and `/memory`; inside it only they show. Its messages are readable
-  only from inside it, posts and routines don't cross its line, and a turn
-  there answers only with its own agent. `/dm` there is refused. Ending
-  isolation warns that its agents keep the memory they built there. Nothing changes
-  until a channel is isolated. Clear isolation before rolling back: an older
-  release rejects the new policy field.
+- **Channel isolation.** A server admin can isolate a channel from Who
+  answers where in the setup panel, with `set_channel_isolation` (also under
+  an operator token's `channels:write`) or with `--isolated-channel`. That
+  seals it and pins its default agent to it alone in one write; a default
+  that is built in or answers elsewhere is refused with the reason, unless
+  the admin asks for a copy, made without credentials. Inside, only the
+  channel's own agents run, post, read and take routines or bindings, with
+  writable memory; they are hidden elsewhere, post nowhere else, send no DMs,
+  and `/dm` there is refused. The panel shows the channel as private,
+  dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
+  and warns that the agents keep what they remembered there. No migration;
+  clear isolation before rolling back, as older releases reject the field.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
