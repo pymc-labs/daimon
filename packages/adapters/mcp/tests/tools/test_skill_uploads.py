@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import anthropic
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import skill_uploads
@@ -29,6 +29,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.slack_file_token import mint_file_token
 from daimon.core.stores.access_policy import set_access_policy
@@ -156,7 +157,12 @@ def _daimon_toolset(*, gated: bool) -> dict[str, Any]:
 
 
 async def _live_session(
-    world: _World, *, thread_id: str, responder: str, gated: bool = True
+    world: _World,
+    *,
+    thread_id: str,
+    responder: str,
+    gated: bool = True,
+    recorded: SessionSnapshot | None = None,
 ) -> None:
     """The chat thread's live session, as MA reports its frozen tools."""
     session_id = f"sesn_{thread_id}"
@@ -169,6 +175,7 @@ async def _live_session(
             account_id=world.account_id,
             ma_session_id=session_id,
             ma_agent_id=responder,
+            effective_config=recorded,
         )
     frozen = ma_session_agent(id=responder, tools=[_daimon_toolset(gated=gated)])
     world.sessions[session_id] = ma_session(id=session_id, agent=frozen).model_dump(mode="json")
@@ -313,6 +320,53 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
     with pytest.raises(ToolError, match="this conversation can't show one"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "nothing was uploaded"
+
+
+@pytest.mark.parametrize("recorded_policy", ["gated", "open"])
+async def test_a_session_reported_without_its_overrides_confirms_from_the_recorded_tools(
+    db_session_factory: async_sessionmaker[AsyncSession], recorded_policy: str
+) -> None:
+    """When MA reports the agent's own always_allow tools, the bind's record decides:
+    the gated tools it sent confirm, the agent's ungated ones do not."""
+    world = await _world(db_session_factory)
+    world.state.agents["agent_helper"]["tools"] = [_daimon_toolset(gated=False)]
+    agent = BetaManagedAgentsAgent.model_validate(world.state.agents["agent_helper"])
+    policy = ToolSafetyPolicy(enabled=recorded_policy == "gated")
+    recorded = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_1",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=policy,
+    )
+    auth, origin = await _chat_turn(world, live=False)
+    await _live_session(
+        world, thread_id=CHAT_THREAD, responder="agent_helper", gated=False, recorded=recorded
+    )
+
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+            origin_context_id=origin,
+            **extra,
+        )
+
+    preview = await add()
+    if recorded_policy == "open":
+        with pytest.raises(ToolError, match="this conversation can't show one"):
+            await add(content_hash=preview.preview.content_hash)
+        assert world.created == [], "a session recorded without the gate never confirms"
+        return
+    result = await add(content_hash=preview.preview.content_hash)
+    assert result.status == "added", "the recorded gated tools are the server's own evidence"
 
 
 async def test_a_session_that_cannot_be_read_previews_but_never_confirms(
