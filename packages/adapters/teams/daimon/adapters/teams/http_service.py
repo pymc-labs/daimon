@@ -27,6 +27,7 @@ from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.help import send_help
+from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
@@ -38,6 +39,7 @@ from daimon.adapters.teams.sharepoint import SharePoint
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.config import TeamsSettings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
@@ -234,6 +236,13 @@ def create_teams_http_service(
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
+    installs = TeamInstalls(
+        runtime.sessionmaker,
+        groups,
+        tenant_id=derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id),
+        entra_tenant_id=settings.tenant_id,
+        alert_url=runtime.settings.ops.alert_webhook_url,
+    )
     files = ChannelFiles(SharePoint(graph, runtime.http_client), groups, channel_names)
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
@@ -260,6 +269,7 @@ def create_teams_http_service(
         bot_token=bot_token,
         reader=reader,
         channel_files=files,
+        installs=installs,
     )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
@@ -271,6 +281,8 @@ def create_teams_http_service(
             log.exception("teams.feedback.failed")
 
     teams_app.on_message(turns.handle_message)
+    teams_app.on_install_add(installs.on_install)
+    teams_app.on_install_remove(installs.on_uninstall)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)

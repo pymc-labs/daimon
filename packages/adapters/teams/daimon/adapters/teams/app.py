@@ -44,6 +44,7 @@ from daimon.adapters.teams.identity import (
     live_tenant_id,
     parse_inbound,
 )
+from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import (
     SEND_TIMEOUT_S,
     TEAMS_SEND_ERRORS,
@@ -228,6 +229,7 @@ class TeamsApp:
         bot_token: BotToken,
         reader: ThreadReader | None = None,
         channel_files: ChannelFiles | None = None,
+        installs: TeamInstalls | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -243,6 +245,8 @@ class TeamsApp:
         self._reader = reader
         # Channel files through SharePoint; None leaves channels without files.
         self._channel_files = channel_files
+        # Records each team for the MCP server's channel reads; None records nothing.
+        self._installs = installs
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
         )
@@ -396,6 +400,9 @@ class TeamsApp:
         activity = ctx.activity
         if self.draining or not self._first_delivery(activity.conversation.id, activity.id):
             return
+        if self._installs is not None:
+            # Inline: a no-op once the team is recorded in this process.
+            await self._installs.observe(activity)
         parsed = parse_inbound(
             activity,
             configured_tenant=self._teams.tenant_id,
