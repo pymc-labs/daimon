@@ -19,10 +19,10 @@ from datetime import datetime
 from typing import Final
 
 import structlog
+from daimon.core.channel_admins import channel_admin_user_ids
 from daimon.core.channel_budget import describe_budget, get_channel_budget_status
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores.accounts import list_platform_user_ids
-from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.channel_budgets import claim_exhausted_notice
 from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.core.stores.tenants import get_tenant
@@ -71,22 +71,11 @@ def notice_key(budget: ChannelBudgetRow, *, now: datetime) -> str:
 async def _recipients(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
 ) -> list[str]:
-    admins = await get_channel_admins(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    listed = await channel_admin_user_ids(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, limit=MAX_RECIPIENTS
     )
-    if admins is not None and (admins.user_ids or admins.role_ids):
-        found = await list_platform_user_ids(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            limit=MAX_RECIPIENTS,
-            user_ids=admins.user_ids,
-            role_ids=admins.role_ids,
-        )
-        # A granted user who never spoke to the bot has no account yet.
-        listed = sorted({*found, *admins.user_ids})[:MAX_RECIPIENTS]
-        if listed:
-            return listed
+    if listed:
+        return listed
     return await list_platform_user_ids(
         session, tenant_id=tenant_id, platform=platform, limit=MAX_RECIPIENTS, admins=True
     )

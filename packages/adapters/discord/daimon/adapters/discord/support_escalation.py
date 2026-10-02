@@ -27,6 +27,10 @@ survives one person's DMs being closed, leaves a shared record anyone on the
 rota can pick up, and does not silently make whoever is first in a config list
 the only person who ever hears anything.
 
+A channel with its own admins is the exception: its requests go to those
+admins by DM first, then to the server admins, and to the channel only when
+no DM landed (`daimon.core.support_routing`).
+
 Delivery ordering is the load-bearing part of this module. The row is
 committed BEFORE the post is attempted, and `delivered_at` is stamped only
 once it actually lands. A support request from a paying trial client that
@@ -44,6 +48,7 @@ from typing import Any, Self, cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -60,6 +65,7 @@ from daimon.core.support_escalation import (
     build_custom_id,
     received_text,
 )
+from daimon.core.support_routing import support_recipient_tiers
 
 import discord
 from discord.ext import commands
@@ -154,7 +160,9 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         # The row is committed. Everything below is best-effort delivery, and
         # a total failure downgrades the confirmation wording rather than the
         # outcome -- the request is already durable.
-        delivered = await self._post_to_channel(
+        delivered = await self._dm_admins(
+            interaction=interaction, note=note, tenant_id=tenant_id
+        ) or await self._post_to_channel(
             interaction=interaction,
             note=note,
             guild_id=guild_id,
@@ -186,6 +194,64 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
                 session, tenant_id=tenant_id, platform_user_id=user_id
             )
 
+    def _body(self, interaction: discord.Interaction, note: str) -> str:
+        link = (
+            f"https://discord.com/channels/{self._guild_id}/{self._channel_id}/{self._message_id}"
+        )
+        return (
+            f"**Human support requested** by {interaction.user.mention} "
+            f"({interaction.user})\n{link}\n\n{note}"
+        )
+
+    async def _origin_channel_id(self, bot: commands.Bot) -> str:
+        """The answer's channel, or a thread's parent, which is what a grant names."""
+        try:
+            channel = bot.get_channel(int(self._channel_id)) or await bot.fetch_channel(
+                int(self._channel_id)
+            )
+        except (discord.HTTPException, ValueError):
+            return self._channel_id
+        if isinstance(channel, discord.Thread) and channel.parent_id:
+            return str(channel.parent_id)
+        return self._channel_id
+
+    async def _dm_admins(
+        self, *, interaction: discord.Interaction, note: str, tenant_id: uuid.UUID
+    ) -> bool:
+        """DM the origin channel's admins, else the server admins. True once a tier got it.
+
+        False at once for a channel with no admins of its own, so it keeps the
+        escalation channel. Each DM is held to the tenant's DM policy and goes
+        only to a current human member of the guild.
+        """
+        bot = cast(DaimonBot, interaction.client)
+        async with self._runtime.sessionmaker() as session:
+            tiers = await support_recipient_tiers(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=await self._origin_channel_id(bot),
+                requester_id=str(interaction.user.id),
+            )
+        if not tiers:
+            return False
+        policies = self._runtime.settings.direct_message_policies
+        policy = policies.get(tenant_id, DirectMessagePolicy())
+        body = self._body(interaction, note)
+        for tier in tiers:
+            landed = 0
+            for user_id in (uid for uid in tier if policy.allows(uid)):
+                try:
+                    dm = await bot.open_member_dm(int(self._guild_id), int(user_id))
+                    await dm.send(body, allowed_mentions=discord.AllowedMentions.none())
+                    landed += 1
+                except (discord.HTTPException, LookupError, ValueError) as exc:
+                    _log.info("support.admin_dm_undelivered", err_type=type(exc).__name__)
+            if landed:
+                _log.info("support.sent_to_admins", recipients=landed)
+                return True
+        return False
+
     async def _post_to_channel(
         self,
         *,
@@ -204,11 +270,7 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         -- so the caller leaves `delivered_at` NULL and tells the requester the
         honest thing.
         """
-        link = f"https://discord.com/channels/{guild_id}/{self._channel_id}/{self._message_id}"
-        body = (
-            f"**Human support requested** by {interaction.user.mention} "
-            f"({interaction.user})\n{link}\n\n{note}"
-        )
+        body = self._body(interaction, note)
         bot = cast(commands.Bot, interaction.client)
         try:
             channel = bot.get_channel(int(channel_id))

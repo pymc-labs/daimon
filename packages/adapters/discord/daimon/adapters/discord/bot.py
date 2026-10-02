@@ -459,7 +459,7 @@ class DaimonBot(commands.Bot):
 
     def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
-        self.runtime = with_budget_notifier(runtime, self._open_member_dm)
+        self.runtime = with_budget_notifier(runtime, self.open_member_dm)
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
@@ -607,7 +607,7 @@ class DaimonBot(commands.Bot):
                     post=make_discord_routine_poster(
                         self.runtime.sessionmaker,
                         fetch_channel=self._channel_by_id,
-                        open_dm=self._open_member_dm,
+                        open_dm=self.open_member_dm,
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
                             row.tenant_id, DirectMessagePolicy()
                         ),
@@ -1891,7 +1891,7 @@ class DaimonBot(commands.Bot):
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
-    async def _open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
+    async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
 
         Same membership rule as the direct-message tool: the recipient must be
