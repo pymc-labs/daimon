@@ -1264,10 +1264,14 @@ row), it writes a `denied` row under the token's own tenant with tool name
 verifier establishes a tenant cannot be safely attributed and are outside this trail.
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
-The policy remains synchronous and does no I/O outside an MCP audit scope;
-Discord/Slack setup-panel actions and the separate hub OAuth applications
-(`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
-audited in this version. This trail is not a complete record of hub tool activity.
+Admin-tier setup and billing panel writes on Discord, Slack and Teams (channel
+isolation, channel admins, a channel's environment, coding-tool and operator token
+mint and revoke, promo redeem) each write their own row through
+`core/panel_audit.py`, allowed or refused, with tool name `panel:<op>`; the clicker
+is named only when they have an account, so privacy erasure can reach the row.
+The policy remains synchronous and does no I/O outside an MCP audit scope; the
+separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use
+`HubIdentityMiddleware`) are not audited in this version. This trail is not a complete record of hub tool activity.
 
 Operators can read records using `daimon audit list TENANT_UUID --since
 2026-09-28T00:00:00Z --json`. Use `--account ACCOUNT_UUID` to include that person's

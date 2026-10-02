@@ -22,6 +22,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -183,13 +184,25 @@ async def test_modal_saves_then_clears_this_channels_admins(
         )
 
 
-async def test_modal_refuses_a_member_and_stores_nothing(account_id: uuid.UUID) -> None:
-    sessionmaker = MagicMock()
+async def test_modal_refuses_a_member_and_stores_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
     view = ChannelAdminsView(
-        _state(account_id=account_id), runtime=_runtime(sessionmaker), allowed_user_id=42, grants=[]
+        _state(account_id=account.id),
+        runtime=_runtime(db_session_factory),
+        allowed_user_id=42,
+        grants=[],
     )
     modal = ChannelAdminsModal(view)
     member = _interaction(admin=False)
     await modal.on_submit(member)
     member.response.send_message.assert_awaited_once()
-    sessionmaker.begin.assert_not_called()
+    async with db_session_factory() as session:
+        assert await list_channel_admins(session, tenant_id=tenant.id, platform="discord") == []
+        (event,) = await list_events(session, tenant_id=tenant.id)
+    assert (event.tool_name, event.outcome) == ("panel:channel_admins", "denied"), (
+        "the refusal is audited"
+    )

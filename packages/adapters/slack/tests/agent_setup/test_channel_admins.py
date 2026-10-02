@@ -16,6 +16,7 @@ from daimon.adapters.slack.agent_setup.panel_views import CHANNEL_ADMINS_INPUT_I
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.channel_admins import list_channel_admins
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -95,10 +96,19 @@ async def test_admin_saves_then_clears_and_the_routing_view_refreshes(
 
 
 async def test_member_submission_is_refused_and_stores_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sessionmaker = MagicMock()
-    client = await _run(sessionmaker, monkeypatch, admin=False, users=("U0LEAD",))
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=TEAM)
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="slack", workspace_id=TEAM)
+    client = await _run(db_session_factory, monkeypatch, admin=False, users=("U0LEAD",))
     client.chat_postEphemeral.assert_awaited_once()
-    sessionmaker.begin.assert_not_called()
     client.views_update.assert_not_awaited()
+    async with db_session_factory() as session:
+        assert await list_channel_admins(session, tenant_id=tenant_id, platform="slack") == []
+        (event,) = await list_events(session, tenant_id=tenant_id)
+    assert (event.tool_name, event.outcome, event.reason) == (
+        "panel:channel_admins",
+        "denied",
+        "needs_admin",
+    ), "the refusal is audited"

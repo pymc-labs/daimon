@@ -9,6 +9,7 @@ members only.
 from __future__ import annotations
 
 import dataclasses
+import functools
 from typing import Any
 
 import structlog
@@ -23,6 +24,7 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
@@ -60,11 +62,21 @@ async def run_channel_admins_submission(
 ) -> None:
     """Save or clear the channel's admins, then refresh Who answers where."""
     meta = submission.meta
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    audit = functools.partial(
+        record_panel_write,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op="channel_admins",
+    )
 
     async def refuse(text: str) -> None:
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=text)
 
     if not await resolve_is_admin(client, user_id=user_id):
+        await audit(outcome="denied", reason="needs_admin")
         await refuse(CHANNEL_ADMINS_NEED_ADMIN_MESSAGE)
         return
     try:
@@ -72,9 +84,9 @@ async def run_channel_admins_submission(
             "slack", channel_id=meta.channel_id, role_ids=[], user_ids=submission.user_ids
         )
     except InvalidChannelAdminIds as exc:
+        await audit(outcome="error", reason="invalid_ids")
         await refuse(f"{exc}. Nothing changed.")
         return
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     async with runtime.sessionmaker.begin() as session:
         if users:
             actor = await get_or_create_platform_principal(
@@ -93,6 +105,7 @@ async def run_channel_admins_submission(
             await delete_channel_admins(
                 session, tenant_id=tenant_id, platform="slack", channel_id=channel_id
             )
+    await audit(outcome="allowed", reason="completed")
     log.info("slack.agent_setup.channel_admins.saved", users=len(users))
     if meta.root_view_id:
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]

@@ -10,6 +10,7 @@ Every click re-checks Manage Server live; the rules live in
 
 from __future__ import annotations
 
+import functools
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Final
@@ -22,9 +23,14 @@ from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.authz import build_subject
 from daimon.core.channel_isolation import ChannelIsolationStatus, channel_isolation_status
-from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING, set_channel_isolation
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    ChannelIsolationRefused,
+    set_channel_isolation,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.access_policy import load_access_policy
 
 import discord
@@ -138,10 +144,19 @@ class IsolationView(PanelViewBase):
         copy: bool = False,
         lift: bool = False,
     ) -> None:
+        state, tenant_id = self.state, _tenant_id(self.state)
+        audit = functools.partial(
+            record_panel_write,
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=str(interaction.user.id),
+            op="isolation",
+        )
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            await audit(outcome="denied", reason="needs_admin")
             return
         await interaction.response.defer()
-        state, tenant_id = self.state, _tenant_id(self.state)
         public_url = self.runtime.settings.mcp.public_url
         try:
             change = await set_channel_isolation(
@@ -160,9 +175,14 @@ class IsolationView(PanelViewBase):
                 # `refuse_if_not_admin` above checked the live role.
                 subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
             )
-        except DaimonError as exc:  # a refusal, or a copy that can't be made
+        except ChannelIsolationRefused as exc:
+            await audit(outcome="denied", reason=f"isolation:{exc.reason}")
+            notice = f"-# {exc} Nothing was changed."
+        except DaimonError as exc:  # a copy that can't be made
+            await audit(outcome="error", reason="failed")
             notice = f"-# {exc} Nothing was changed."
         else:
+            await audit(outcome="allowed", reason="completed")
             log.info(
                 "agent_setup.isolation.saved",
                 isolated=change.isolated,

@@ -28,6 +28,7 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
 from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.ma import FakeMAState, make_fake_ma_handler
@@ -256,6 +257,16 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=uuid.UUID(jti))
     assert row is not None and row.revoked_at is not None
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=TENANT)
+    assert [(e.tool_name, e.outcome, e.reason) for e in events] == [
+        ("panel:coding_token_mint", "denied", "authz:admin_required"),
+        ("panel:coding_token_mint", "allowed", "completed"),
+        ("panel:coding_token_revoke", "denied", "not_minter"),
+        ("panel:coding_token_revoke", "allowed", "completed"),
+        ("panel:coding_token_revoke", "error", "already_revoked"),
+    ], "every mint and revoke, allowed or not, is audited"
+    assert {e.token_jti for e in events[1:]} == {uuid.UUID(jti)}
 
 
 PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"

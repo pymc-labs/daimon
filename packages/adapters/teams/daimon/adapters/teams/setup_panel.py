@@ -64,6 +64,7 @@ from daimon.core.mcp_auth import (
     token_jti,
 )
 from daimon.core.models_catalog import ModelChoice, list_model_choices
+from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.roster import Roster, load_roster, paginate
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
@@ -382,6 +383,9 @@ class SetupPanel:
         )
         if not decision:
             log.info("teams.coding_tools.refused", agent_name=name, reason=decision.reason)
+            await self._audit(
+                actor, "coding_token_mint", outcome="denied", reason=f"authz:{decision.reason}"
+            )
             return dialog_message(NEEDS_ADMIN.format(name=name))
         if target is None:
             return dialog_message(GONE)
@@ -407,11 +411,35 @@ class SetupPanel:
             jti=str(jti),
             bound_channel_id=bound_channel_id,
         )
+        await self._audit(
+            actor, "coding_token_mint", outcome="allowed", reason="completed", jti=jti
+        )
         cli, mcp_json = coding_tool_config(agent_name=name, public_url=str(public_url), jwt=token)
         card = cards.token_card(
             agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti), channel_id=bound_channel_id
         )
         return dialog("Use from your coding tools", card)
+
+    async def _audit(
+        self,
+        actor: Actor,
+        op: PanelOp,
+        *,
+        outcome: PanelOutcome,
+        reason: str,
+        jti: uuid.UUID | None = None,
+    ) -> None:
+        await record_panel_write(
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            platform="teams",
+            platform_user_id=actor.user_id,
+            op=op,
+            outcome=outcome,
+            reason=reason,
+            token_kind="agent",
+            token_jti=jti,
+        )
 
     async def _revoke(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
@@ -424,11 +452,26 @@ class SetupPanel:
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
             row = await get_mcp_token(session, jti=jti)
-            if row is None or row.tenant_id != actor.tenant_id or row.account_id != account_id:
-                log.info("teams.coding_tools.revoke_refused", jti=str(jti))
-                return dialog_message(NOT_MINTER)
-            revoked = await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC))
+            mine = row is not None and (row.tenant_id, row.account_id) == (
+                actor.tenant_id,
+                account_id,
+            )
+            revoked = (
+                await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC)) if mine else None
+            )
+        if not mine:
+            log.info("teams.coding_tools.revoke_refused", jti=str(jti))
+            await self._audit(
+                actor, "coding_token_revoke", outcome="denied", reason="not_minter", jti=jti
+            )
+            return dialog_message(NOT_MINTER)
         if revoked is None:
+            await self._audit(
+                actor, "coding_token_revoke", outcome="error", reason="already_revoked", jti=jti
+            )
             return dialog_message("That token was already revoked.")
         log.info("teams.coding_tools.revoked", jti=str(jti))
+        await self._audit(
+            actor, "coding_token_revoke", outcome="allowed", reason="completed", jti=jti
+        )
         return dialog_message("Token revoked.")

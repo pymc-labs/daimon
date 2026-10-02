@@ -38,6 +38,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
@@ -199,6 +200,9 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
     assert len(posted) == 1, "a refused click is explained, never silent"
     assert "workspace admin" in posted[0]["text"], "the refusal names who can do it"
     assert "Bearer" not in json.dumps(posted[0]), "a refused click mints nothing"
+    assert await _audited(db_session_factory, tenant.id) == [
+        ("panel:coding_token_mint", "denied")
+    ], "the refusal is audited"
 
 
 async def test_coding_tools_click_when_unconfigured_posts_a_note(
@@ -228,6 +232,14 @@ async def test_coding_tools_click_when_unconfigured_posts_a_note(
     assert [entry["text"] for entry in posted] == [NOT_CONFIGURED_MESSAGE], (
         "an unconfigured deployment says so, once"
     )
+
+
+async def _audited(
+    db_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> list[tuple[str, str]]:
+    async with db_factory() as session:
+        rows = await list_events(session, tenant_id=tenant_id)
+    return [(row.tool_name, row.outcome) for row in rows]
 
 
 async def _mint_for(
@@ -281,6 +293,9 @@ async def test_revoke_replaces_the_original_message_and_kills_the_token(
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is not None, "the registry row is revoked"
+    assert await _audited(db_session_factory, tenant.id) == [
+        ("panel:coding_token_revoke", "allowed")
+    ], "the revoke is audited"
 
 
 async def test_revoke_by_someone_other_than_the_minter_is_refused(
@@ -310,6 +325,9 @@ async def test_revoke_by_someone_other_than_the_minter_is_refused(
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is None, "the token is still live"
+    assert await _audited(db_session_factory, tenant.id) == [
+        ("panel:coding_token_revoke", "denied")
+    ], "the refused revoke is audited"
 
 
 @pytest.mark.parametrize(

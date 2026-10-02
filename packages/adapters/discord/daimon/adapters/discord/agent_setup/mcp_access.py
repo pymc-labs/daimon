@@ -42,6 +42,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import authorize_coding_token, mint_agent_mcp_token
+from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -162,6 +163,14 @@ async def send_coding_tools_access(
             "agent_setup.coding_tools.refused", agent_name=selected.name, reason=decision.reason
         )
         await interaction.response.send_message(coding_tools_refusal(selected.name), ephemeral=True)
+        await _audit(
+            runtime,
+            tenant_id=tenant_id,
+            user_id=interaction.user.id,
+            op="coding_token_mint",
+            outcome="denied",
+            reason=f"authz:{decision.reason}",
+        )
         return
 
     async with runtime.sessionmaker.begin() as session:
@@ -208,6 +217,7 @@ async def send_coding_tools_access(
     # it can never be superseded on its own message anyway.
     mcp_view = _McpAccessView(
         jti=jti,
+        tenant_id=tenant_id,
         runtime=runtime,
         allowed_user_id=allowed_user_id,
     )
@@ -216,6 +226,38 @@ async def send_coding_tools_access(
         view=mcp_view.bind_render_interaction(interaction, panel=None),
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
+    )
+    await _audit(
+        runtime,
+        tenant_id=tenant_id,
+        user_id=interaction.user.id,
+        op="coding_token_mint",
+        outcome="allowed",
+        reason="completed",
+        jti=jti,
+    )
+
+
+async def _audit(
+    runtime: DiscordRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: int,
+    op: PanelOp,
+    outcome: PanelOutcome,
+    reason: str,
+    jti: uuid.UUID | None = None,
+) -> None:
+    await record_panel_write(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="discord",
+        platform_user_id=str(user_id),
+        op=op,
+        outcome=outcome,
+        reason=reason,
+        token_kind="agent",
+        token_jti=jti,
     )
 
 
@@ -285,11 +327,13 @@ class _McpAccessView(ExpiringView, discord.ui.View):
         self,
         *,
         jti: uuid.UUID,
+        tenant_id: uuid.UUID,
         runtime: DiscordRuntime,
         allowed_user_id: int,
     ) -> None:
         super().__init__(timeout=300)
         self._jti = jti
+        self._tenant_id = tenant_id
         self._runtime = runtime
         self._allowed_user_id = allowed_user_id
 
@@ -305,6 +349,7 @@ class _McpAccessView(ExpiringView, discord.ui.View):
             await interaction.response.send_message(
                 "Only the command invoker can use these buttons.", ephemeral=True
             )
+            await self._audit_revoke(interaction, outcome="denied", reason="not_minter")
             return False
         return True
 
@@ -312,6 +357,19 @@ class _McpAccessView(ExpiringView, discord.ui.View):
         self._revoke_btn.disabled = True
         self._revoke_btn.label = EXPIRED_BUTTON_LABEL
         await edit_expired_message(self, interaction=self._render_interaction)
+
+    async def _audit_revoke(
+        self, interaction: discord.Interaction, *, outcome: PanelOutcome, reason: str
+    ) -> None:
+        await _audit(
+            self._runtime,
+            tenant_id=self._tenant_id,
+            user_id=interaction.user.id,
+            op="coding_token_revoke",
+            outcome=outcome,
+            reason=reason,
+            jti=self._jti,
+        )
 
     async def _on_revoke(self, interaction: discord.Interaction) -> None:
         log.info("agent_setup.mcp_access.revoke.click", jti=str(self._jti))
@@ -326,8 +384,10 @@ class _McpAccessView(ExpiringView, discord.ui.View):
             await interaction.response.send_message(
                 "Token was already revoked (or not found).", ephemeral=True
             )
+            await self._audit_revoke(interaction, outcome="error", reason="already_revoked")
             return
         log.info("agent_setup.mcp_access.revoke.done", jti=str(self._jti))
+        await self._audit_revoke(interaction, outcome="allowed", reason="completed")
         await interaction.response.edit_message(
             content="Token revoked. Agents using this token will get 401 on next request.",
             view=None,

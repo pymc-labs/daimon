@@ -118,6 +118,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
@@ -742,6 +743,15 @@ async def _dispatch_panel_action(
                 user_id=user_id,
                 text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
             )
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="environment",
+                outcome="denied",
+                reason="needs_admin",
+            )
             return
         note = await save_environment_choice(
             runtime,
@@ -763,6 +773,15 @@ async def _dispatch_panel_action(
     if action_id in _ISOLATION_ACTIONS:
         if not is_admin or not meta.channel_id:
             text = ISOLATION_NEED_ADMIN_MESSAGE
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="isolation",
+                outcome="denied",
+                reason="needs_admin",
+            )
         else:
             text = await change_isolation(
                 runtime,

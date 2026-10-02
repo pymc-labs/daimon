@@ -29,6 +29,7 @@ from daimon.adapters.discord.agent_setup.channel_admins_view import (
 )
 from daimon.adapters.discord.agent_setup.channel_environment import (
     REFUSED_MESSAGE,
+    audit_environment_pick,
     build_environment_select,
     load_environment_picker,
     load_picker_subject,
@@ -468,8 +469,16 @@ class RoutingView(PanelViewBase):
         subject = await load_picker_subject(
             interaction, runtime=self.runtime, state=self.state, live=True
         )
+        user_id = str(interaction.user.id)
         if not await may_pick_environment(subject, runtime=self.runtime, state=self.state):
             await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+            await audit_environment_pick(
+                runtime=self.runtime,
+                state=self.state,
+                user_id=user_id,
+                outcome="denied",
+                reason="needs_admin",
+            )
             return
         await interaction.response.defer()
         # Lazy import: hydrate imports the view modules to type its own returns.
@@ -477,7 +486,11 @@ class RoutingView(PanelViewBase):
 
         try:
             note = await save_environment_choice(
-                runtime=self.runtime, state=self.state, subject=subject, value=select.values[0]
+                runtime=self.runtime,
+                state=self.state,
+                subject=subject,
+                user_id=user_id,
+                value=select.values[0],
             )
             self.state.answering_map = await load_answering_map_for(self.runtime, state=self.state)
             routing = await build_routing_view(
