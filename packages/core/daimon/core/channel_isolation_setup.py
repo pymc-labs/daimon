@@ -490,6 +490,7 @@ async def set_channel_isolation(
                 agent_name=new_name,
                 mode="agent",
                 actor_account_id=actor_account_id,
+                set_by_admin=subject.is_admin and not subject.via_agent_key,
             )
             found, _ = await _write_isolation(
                 anthropic,
