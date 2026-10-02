@@ -20,7 +20,7 @@ import pytest_asyncio
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, SessionFacts, Subject, Surface, authorize
 from daimon.core.channel_admins import ChannelAdminCaller
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_SEALED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -41,6 +41,7 @@ from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -643,3 +644,48 @@ async def test_channel_admin_switch_refuses_unread_session_without_persisting_se
         unchanged = await get_thread_session_by_id(session, id=row.id)
     assert unchanged is not None
     assert unchanged.seal_ids == (None if seal_ids is None else tuple(sorted(seal_ids)))
+
+
+async def test_channel_admin_switch_refuses_legacy_seal_without_a_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A legacy bare "true" seal with no channel reads as a seal nobody is
+    # inside. It is not stored (JSONB rejects the sentinel) and still refuses.
+    tenant = await _seed(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    await _grant_c1(db_session_factory, tenant.id)
+    async with db_session_factory.begin() as session:
+        row = await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C1",
+            thread_id="T1",
+            account_id=account.id,
+            ma_session_id="sess_legacy",
+            ma_agent_id="agt_daimon",
+            seal_ids=None,
+        )
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    router.add_session(ma_session(id="sess_legacy", metadata={MA_METADATA_KEY_SEALED: "true"}))
+    outcome = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=ChannelAdminCaller(platform_user_id="U1"),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+    )
+    assert not outcome.switched
+    assert "sealed" in outcome.text
+    async with db_session_factory() as session:
+        unchanged = await get_thread_session_by_id(session, id=row.id)
+    assert unchanged is not None and unchanged.seal_ids is None

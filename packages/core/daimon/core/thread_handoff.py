@@ -177,6 +177,11 @@ async def recorded_thread_sessions(
             facts = SessionFacts(seal_ids=frozenset({_UNREAD_SEAL}))
         else:
             facts = session_facts(ma_session.metadata, owned=True)
+            if any(seal.startswith("\x00") for seal in facts.seal_ids):
+                # A sentinel (a legacy seal with no channel) can't be stored in
+                # JSONB; leaving the row unread keeps the locked read sealed.
+                recorded.append(RecordedSession(account_id=row.account_id, facts=facts))
+                continue
             async with sessionmaker.begin() as db:
                 await record_session_seals(
                     db,
