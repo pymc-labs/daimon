@@ -47,6 +47,7 @@ def _make_bot(
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 3
+    discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
     runtime = DiscordRuntime(
         settings=settings,

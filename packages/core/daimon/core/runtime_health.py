@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from typing import cast
+from typing import TypedDict, cast
 
 import httpx
 import structlog
@@ -19,6 +20,51 @@ _responses: Counter[tuple[str, str]] = Counter()
 _remaining: dict[str, int] = {}
 _turns_by_tenant: Counter[uuid.UUID] = Counter()
 _turns_global = 0
+
+
+class DiscordRateLimitCount(TypedDict):
+    count: int
+    max_retry_s: float
+
+
+_discord_ratelimits: dict[str, DiscordRateLimitCount] = {}
+
+
+def _discord_route(method: str, url: str) -> str:
+    path = url.split("?", 1)[0].split("/api/", 1)[-1]
+    if method == "POST" and "/messages/" in path and path.endswith("/threads"):
+        return "thread_create"
+    if method == "POST" and path.endswith("/messages"):
+        return "message_send"
+    if method == "PATCH" and "/messages/" in path:
+        return "message_edit"
+    return "other"
+
+
+class DiscordRateLimitFilter(logging.Filter):
+    """Observe discord.py's retry warning without changing its log delivery."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "discord.http"
+            and record.msg.startswith("We are being rate limited.")
+            and "Retrying in" in record.msg
+            and isinstance(record.args, tuple)
+            and len(record.args) >= 3
+        ):
+            method, url, delay = record.args[:3]
+            if isinstance(method, str) and isinstance(url, str) and isinstance(delay, (int, float)):
+                route = _discord_route(method, url)
+                entry = _discord_ratelimits.setdefault(route, {"count": 0, "max_retry_s": 0.0})
+                entry["count"] += 1
+                entry["max_retry_s"] = max(entry["max_retry_s"], delay)
+        return True
+
+
+def take_discord_ratelimit_window() -> dict[str, DiscordRateLimitCount]:
+    counts = dict(_discord_ratelimits)
+    _discord_ratelimits.clear()
+    return counts
 
 
 @contextmanager
@@ -111,8 +157,7 @@ async def log_health_once(
     counts, remaining = take_anthropic_window()
     global_turns, per_tenant_max = turns()
     pool = cast(QueuePool, engine.sync_engine.pool)
-    structlog.get_logger().info(
-        "runtime.health",
+    fields: dict[str, object] = dict(
         process=process,
         interval_s=interval_s,
         anthropic_responses=counts,
@@ -124,6 +169,9 @@ async def log_health_once(
         },
         turns_in_flight={"global": global_turns, "per_tenant_max": per_tenant_max},
     )
+    if process == "discord":
+        fields["discord_ratelimits"] = take_discord_ratelimit_window()
+    structlog.get_logger().info("runtime.health", **fields)
 
 
 async def _run_health(
@@ -158,6 +206,10 @@ async def runtime_health(
     turns: Callable[[], tuple[int, int | None]] | None = None,
 ) -> AsyncIterator[None]:
     """Start the process health heartbeat; interval zero disables it."""
+    discord_logger = logging.getLogger("discord.http") if process == "discord" else None
+    rate_limit_filter = DiscordRateLimitFilter() if discord_logger is not None else None
+    if discord_logger is not None and rate_limit_filter is not None:
+        discord_logger.addFilter(rate_limit_filter)
     task = (
         asyncio.create_task(_run_health(process, engine, interval_s, turns or (lambda: (0, None))))
         if interval_s > 0
@@ -166,6 +218,8 @@ async def runtime_health(
     try:
         yield
     finally:
+        if discord_logger is not None and rate_limit_filter is not None:
+            discord_logger.removeFilter(rate_limit_filter)
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):

@@ -62,6 +62,7 @@ def _make_runtime(
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = cap
+    discord_settings.thread_open_notice_after_s = 3.0
     discord_settings.qa_bot_user_ids = ()
     discord_settings.bot_display_name = "daimon"
     settings.discord = discord_settings

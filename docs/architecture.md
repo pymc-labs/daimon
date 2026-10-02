@@ -14,6 +14,10 @@ setting; [self-hosting.md](self-hosting.md) has the deployment.
 
 Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
 Anthropic response attempts, database pool use, event loop lag and active turns.
+The Discord process also reports Discord 429 retries by route and longest retry wait.
+When an opening Discord mention takes over three seconds to name or create its
+thread, the bot replies in the parent channel with an opening notice, then edits
+it with the thread link or retry guidance. The conversation stays in the thread.
 
 ## The shape
 
