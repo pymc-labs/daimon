@@ -254,9 +254,12 @@ class MintOperatorTokenModal(discord.ui.Modal):
             jti=minted.jti,
         )
         log.info("agent_setup.operator_token.minted", jti=str(minted.jti))  # never the token
-        await view.swap_to(interaction, await view.rebuilt())
+        # Show the token before the panel swap: a swap that fails (an expired
+        # interaction, an HTTP error) must not leave a live token nobody saw.
+        await interaction.response.defer()
         await interaction.followup.send(
             f"```\n{minted.token}\n```\nScopes: {', '.join(sorted(minted.scopes))}. Expires "
             f"{minted.expires_at.date().isoformat()}. This is the one time it is shown.",
             ephemeral=True,
         )
+        await view.swap_to(interaction, await view.rebuilt())

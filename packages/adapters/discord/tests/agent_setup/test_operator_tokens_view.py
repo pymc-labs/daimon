@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.agent_setup.operator_tokens_view import (
     MINT_LABEL,
     MintOperatorTokenModal,
@@ -52,10 +53,16 @@ def _interaction(*, admin: bool) -> MagicMock:
     interaction.user.guild_permissions.administrator = admin
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
-    interaction.response.is_done = MagicMock(return_value=False)
+    acked: list[str] = []
+    interaction.response.is_done = MagicMock(side_effect=lambda: bool(acked))
     for name in ("send_message", "send_modal", "edit_message", "defer"):
-        setattr(interaction.response, name, AsyncMock())
+        setattr(
+            interaction.response,
+            name,
+            AsyncMock(side_effect=lambda *_, n=name, **__: acked.append(n)),
+        )
     interaction.followup.send = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     return interaction
 
 
@@ -104,7 +111,7 @@ async def test_an_admin_mints_a_tenant_token_shown_once_then_revokes_it(
     )
     shown = admin.followup.send.call_args
     assert shown.kwargs == {"ephemeral": True} and "one time" in shown.args[0]
-    screen = admin.response.edit_message.call_args.kwargs["view"]
+    screen = admin.edit_original_response.call_args.kwargs["view"]
     assert str(row.jti)[:8] in "".join(
         str(n.content) for n in _walk(screen) if isinstance(n, discord.ui.TextDisplay)
     ), "the listing shows the new token's short id, never the token"
@@ -118,6 +125,20 @@ async def test_an_admin_mints_a_tenant_token_shown_once_then_revokes_it(
         ("panel:operator_token_mint", "allowed"),
         ("panel:operator_token_revoke", "allowed"),
     ]
+
+
+async def test_the_token_is_shown_even_when_the_panel_swap_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    view = await _view(db_session_factory)
+    admin = _interaction(admin=True)
+    admin.edit_original_response.side_effect = discord.NotFound(MagicMock(status=404), "gone")
+    with pytest.raises(discord.NotFound):
+        await _modal(view, ["tenant:read"]).on_submit(admin)
+    shown = admin.followup.send.call_args
+    assert shown is not None and "one time" in shown.args[0], (
+        "the minted token reaches the admin before the swap that failed"
+    )
 
 
 async def test_a_member_cannot_mint_or_open_the_mint_form(
