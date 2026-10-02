@@ -47,6 +47,7 @@ class DiscordRateLimitFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if (
             record.name == "discord.http"
+            and isinstance(record.msg, str)
             and record.msg.startswith("We are being rate limited.")
             and "Retrying in" in record.msg
             and isinstance(record.args, tuple)

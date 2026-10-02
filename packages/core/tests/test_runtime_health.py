@@ -95,6 +95,7 @@ async def test_discord_429_routes_and_window_reset(monkeypatch: pytest.MonkeyPat
     warning = "We are being rate limited. %s %s responded with 429. Retrying in %.2f seconds."
     try:
         async with runtime_health("discord", engine, 0):
+            http_logger.warning(42)  # Non-string log messages must not break the request path.
             http_logger.warning(
                 warning, "POST", "https://discord.com/api/v10/channels/1/messages/2/threads", 4.0
             )
