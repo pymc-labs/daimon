@@ -19,6 +19,7 @@ counts for nothing. Recorded in tests/parity/test_channel_admin_groups.py.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -53,6 +54,9 @@ _ROLE_ID = {"discord": r"[0-9]{15,21}", "slack": r"S[A-Z0-9]+", "teams": _UUID}
 
 GROUP_MEMBERS_TTL_S: Final = 60.0
 """How long a Slack user group's or a Teams team's looked-up members are trusted."""
+
+GROUP_LOOKUP_FAILURE_TTL_S: Final = 15.0
+"""How long a failed group lookup is remembered before the platform is asked again."""
 
 LOOKED_UP_GROUP_PLATFORMS: Final = frozenset({"slack", "teams"})
 """Platforms whose groups are looked up, not sent: stored ones are re-checked live."""
@@ -167,21 +171,28 @@ GroupMembersFor = Callable[[str, str], GroupMembers | None]
 class GroupMembersCache:
     """Group members by key, kept `ttl_s` seconds, so a busy channel costs one lookup a minute.
 
-    A failed lookup is not kept: the next caller asks again. ``clock`` is
-    injected for tests.
+    A failed lookup is kept `failure_ttl_s` seconds and callers asking for one
+    key at once share a single lookup, so a group the platform refuses (a
+    missing scope, a rate limit) is not asked again by every request, and a
+    burst of requests can't spend the app's rate limit for every other group
+    admin. ``clock`` is injected for tests.
     """
 
     def __init__(
         self,
         *,
         ttl_s: float = GROUP_MEMBERS_TTL_S,
+        failure_ttl_s: float = GROUP_LOOKUP_FAILURE_TTL_S,
         max_entries: int = 1_024,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl_s = ttl_s
+        self._failure_ttl_s = failure_ttl_s
         self._max_entries = max_entries
         self._clock = clock
         self._entries: dict[tuple[str, ...], tuple[float, frozenset[str]]] = {}
+        self._failures: dict[tuple[str, ...], tuple[float, str]] = {}
+        self._in_flight: dict[tuple[str, ...], asyncio.Task[frozenset[str]]] = {}
 
     async def members(
         self, key: tuple[str, ...], fetch: Callable[[], Awaitable[frozenset[str]]]
@@ -190,13 +201,50 @@ class GroupMembersCache:
         cached = self._entries.get(key)
         if cached is not None and now - cached[0] < self._ttl_s:
             return cached[1]
-        members = await fetch()
-        if len(self._entries) >= self._max_entries:
-            self._entries = {k: v for k, v in self._entries.items() if now - v[0] < self._ttl_s}
-            if len(self._entries) >= self._max_entries:
-                self._entries.clear()
-        self._entries[key] = (now, members)
+        failed = self._failures.get(key)
+        if failed is not None and now - failed[0] < self._failure_ttl_s:
+            raise GroupLookupFailed(f"{failed[1]} (recent failure)")
+        task = self._in_flight.get(key)
+        if task is None or task.get_loop() is not asyncio.get_running_loop():
+            task = asyncio.create_task(self._fetch(key, fetch), name="channel_admins.group_lookup")
+            self._in_flight[key] = task
+            task.add_done_callback(lambda done: self._forget(key, done))
+        # Shielded: one caller giving up must not cancel the lookup the others await.
+        return await asyncio.shield(task)
+
+    async def _fetch(
+        self, key: tuple[str, ...], fetch: Callable[[], Awaitable[frozenset[str]]]
+    ) -> frozenset[str]:
+        try:
+            members = await fetch()
+        except GroupLookupFailed as exc:
+            self._put(self._failures, key, str(exc), ttl_s=self._failure_ttl_s)
+            raise
+        self._failures.pop(key, None)
+        self._put(self._entries, key, members, ttl_s=self._ttl_s)
         return members
+
+    def _put[V](
+        self,
+        store: dict[tuple[str, ...], tuple[float, V]],
+        key: tuple[str, ...],
+        value: V,
+        *,
+        ttl_s: float,
+    ) -> None:
+        now = self._clock()
+        if len(store) >= self._max_entries:
+            live = {k: v for k, v in store.items() if now - v[0] < ttl_s}
+            store.clear()
+            if len(live) < self._max_entries:
+                store.update(live)
+        store[key] = (now, value)
+
+    def _forget(self, key: tuple[str, ...], done: asyncio.Task[frozenset[str]]) -> None:
+        if self._in_flight.get(key) is done:
+            del self._in_flight[key]
+        if not done.cancelled():
+            done.exception()  # retrieved, so a lookup nobody awaits any more logs nothing
 
 
 async def member_group_ids(
@@ -376,6 +424,7 @@ async def channel_admin_user_ids(
 
 __all__ = [
     "CHANNEL_ADMIN_PLATFORMS",
+    "GROUP_LOOKUP_FAILURE_TTL_S",
     "GROUP_MEMBERS_TTL_S",
     "LOOKED_UP_GROUP_PLATFORMS",
     "MAX_CHANNEL_ADMIN_IDS",

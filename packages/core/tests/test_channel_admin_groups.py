@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -46,9 +47,9 @@ async def test_member_group_ids_keeps_the_groups_that_admit_the_user_and_fails_c
     assert asked == ["S1", "S2", "S_GONE"], "each group asked once"
 
 
-async def test_the_cache_keeps_members_for_its_ttl_and_never_keeps_a_failure() -> None:
+async def test_the_cache_keeps_members_for_its_ttl_and_a_failure_briefly() -> None:
     now = [0.0]
-    cache = GroupMembersCache(ttl_s=60, clock=lambda: now[0])
+    cache = GroupMembersCache(ttl_s=60, failure_ttl_s=15, clock=lambda: now[0])
     calls: list[str] = []
     fail = [True]
 
@@ -61,13 +62,38 @@ async def test_the_cache_keeps_members_for_its_ttl_and_never_keeps_a_failure() -
     with pytest.raises(GroupLookupFailed):
         await cache.members(("slack", "S1"), fetch)
     fail[0] = False
+    now[0] = 14
+    with pytest.raises(GroupLookupFailed):
+        await cache.members(("slack", "S1"), fetch)
+    assert len(calls) == 1, "a recent failure is not asked again: it still grants nothing"
+    now[0] = 16
     assert await cache.members(("slack", "S1"), fetch) == frozenset({"U1"}), "asked again"
-    now[0] = 59
+    now[0] = 75
     assert await cache.members(("slack", "S1"), fetch) == frozenset({"U1"})
-    assert len(calls) == 2, "a failure is not kept; a success is, inside the ttl"
-    now[0] = 61
+    assert len(calls) == 2, "a success is kept inside the ttl"
+    now[0] = 77
     await cache.members(("slack", "S1"), fetch)
     assert len(calls) == 3, "an expired entry is looked up again"
+
+
+async def test_concurrent_callers_of_one_group_share_a_single_lookup() -> None:
+    """A burst of parallel requests must not spend the app's per-workspace rate limit."""
+    cache = GroupMembersCache()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def fetch() -> frozenset[str]:
+        calls.append("fetch")
+        await release.wait()
+        raise GroupLookupFailed("rate limited")
+
+    waiting = [asyncio.create_task(cache.members(("slack", "T1", "S1"), fetch)) for _ in range(5)]
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(*waiting, return_exceptions=True)
+
+    assert len(calls) == 1, "one lookup for all five callers"
+    assert all(isinstance(r, GroupLookupFailed) for r in results), "and it fails closed for each"
 
 
 async def test_the_cache_stays_bounded() -> None:
