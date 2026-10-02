@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Agents that only routines or threads run count as shared.** Editing an
+  agent's prompt or setup, or binding a repo to it, now reads sharing as
+  widely as a key change: a bound thread, someone's personal default, or
+  another member's routine or live session makes the agent shared, not only
+  a channel or workspace default. A member can no longer change the prompt
+  an admin's routine runs; the routine's creator and admins still can.
 - MCP calls refused by an access decision (an agent pin, channel isolation or protection, the invoker allowlist, a routine destination, a channel default binding or an environment pick) are now recorded in `security_audit_events` as denials, with the action as the operation and `authz:<reason>` as the reason. Before, they were recorded as tool errors with no operation.
 - A Teams routine posting into an isolated channel no longer falls back to its creator's 1:1 chat when the post fails, matching Discord and Slack: the result is skipped and stays inside the channel.
 - A chat turn's credential can now act only on its own responder's turn origin in the tools that require one (credential requests, publishing, repo binding, task continuity, timers, channel budgets and setup targets), as agent keys already could. Before, it could name another responder's origin on the same account.

@@ -65,17 +65,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
     {
+        "agent_spec_edit",
         "key_replace",
         "key_remove",
         "mcp_replace",
         "mcp_remove",
+        "repo_bind",
         "skill_repo_connect",
         "skill_add",
         "skill_remove",
     }
 )
-"""Read as shared by `is_agent_shared_for_key_changes`: the keys, servers and skills
-also reach routines and live sessions. Spec edits and repo binds read the cascade only."""
+"""Read as shared by `is_agent_shared_for_key_changes`: every one of these writes also
+reaches routines, bound threads and live sessions, so an agent only those point at is
+still someone else's (an admin's routine would run a member's edited prompt)."""
 
 
 class UnattendedRights(BaseModel):

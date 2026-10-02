@@ -579,7 +579,10 @@ where the person's own submit is the approval. The `skill_add` and
 admins on any other, channel admins on agents local to their channels, anyone
 on agents nobody else uses. Sharing is read as widely as a key change
 (`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
-default, or another member's routine or live session. A pinned agent takes a
+default, or another member's routine or live session. Prompt and setup edits
+(`agent_spec_edit`) and repo binds read sharing the same way, so an agent that
+only an admin's routine or a bound thread runs is not a member's to change. A
+pinned agent takes a
 chat add only from a verified origin in its channels (`require_pin_write_access`
 with the card's origin), and a panel add only from its channels' panels
 (`pin_refusal` with the panel's channel and thread) at the button, the submit
