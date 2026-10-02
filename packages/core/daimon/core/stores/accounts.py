@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from daimon.core._models import Account, PlatformPrincipal, Tenant, UserConfig
 from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Role
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import ARRAY, Text, any_, bindparam, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -172,10 +172,13 @@ async def list_platform_user_ids(
     admins: bool = False,
     user_ids: Collection[str] = (),
     role_ids: Collection[str] = (),
+    among: Collection[str] | None = None,
+    fold_case: bool = False,
 ) -> list[str]:
     """Platform user ids of the tenant's stored admins (`admins`), or of the listed
     users plus anyone whose stored roles overlap `role_ids`; sorted, at most `limit`
-    (None: all)."""
+    (None: all). `among`, if given, keeps only those ids, compared lower-cased with
+    `fold_case`; it binds as one array, so a large group fits in one query."""
     if admins:
         match = Account.role == Role.ADMIN.value
     else:
@@ -191,4 +194,9 @@ async def list_platform_user_ids(
         .order_by(PlatformPrincipal.external_id)
         .limit(limit)
     )
+    if among is not None:
+        external_id = PlatformPrincipal.external_id
+        column = func.lower(external_id) if fold_case else external_id
+        wanted = [uid.lower() if fold_case else uid for uid in among]
+        stmt = stmt.where(column == any_(bindparam("among", wanted, type_=ARRAY(Text))))
     return list((await session.scalars(stmt)).all())

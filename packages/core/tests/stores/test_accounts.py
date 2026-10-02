@@ -13,6 +13,8 @@ from daimon.core.stores.accounts import (
     delete_user_config_for_account,
     get_account,
     get_account_with_tenant,
+    list_platform_user_ids,
+    set_platform_role_ids,
 )
 from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Platform
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -224,3 +226,35 @@ async def test_get_account_with_tenant_returns_none_for_missing_account(
 ) -> None:
     row = await get_account_with_tenant(db_session, account_id=uuid.uuid4())
     assert row is None, "must return None when account does not exist"
+
+
+async def test_list_platform_user_ids_keeps_only_among_and_folds_case_on_request(
+    db_session: AsyncSession,
+) -> None:
+    """`among` bounds a group grant's recipients to its live members, inside the limit."""
+    tenant = await make_tenant(db_session, platform="teams", workspace_id="entra-among")
+    for external_id in ("0-left1", "0-left2", "C-STAYED"):
+        account = await make_account(db_session, tenant=tenant)
+        await make_platform_principal(
+            db_session, platform="teams", external_id=external_id, tenant=tenant, account=account
+        )
+        await set_platform_role_ids(db_session, account.id, ["team"])
+
+    async def listed(among: set[str] | None, *, fold_case: bool, limit: int | None) -> list[str]:
+        return await list_platform_user_ids(
+            db_session,
+            tenant_id=tenant.id,
+            platform="teams",
+            limit=limit,
+            role_ids=["team"],
+            among=among,
+            fold_case=fold_case,
+        )
+
+    live = {"c-stayed"}
+    assert await listed(None, fold_case=False, limit=1) == ["0-left1"], "unbounded, left first"
+    assert await listed(live, fold_case=False, limit=None) == [], "exact unless folded"
+    assert await listed(live, fold_case=True, limit=1) == ["C-STAYED"], (
+        "case folded, and members who left do not fill the limit"
+    )
+    assert await listed(set(), fold_case=True, limit=None) == [], "no live member, nobody"

@@ -466,28 +466,32 @@ async def channel_admin_user_ids(
     granted one, as of their last chat turn; a Slack group or Teams team match
     must still hold by `members` now. Sorted, at most `limit`, counted after
     that re-check: capped before it, members who left could fill the cap.
-    Reads in a session of its own, closed before the lookup, so a slow
+    Reads in sessions of their own, closed before the lookup, so a slow
     platform never holds a pooled connection.
     """
-    looked_up = platform in LOOKED_UP_GROUP_PLATFORMS
     async with sessionmaker() as session:
         grant = await get_channel_admins(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
         )
-        if grant is None or not (grant.user_ids or grant.role_ids):
-            return None
+    if grant is None or not (grant.user_ids or grant.role_ids):
+        return None
+    among: set[str] | None = None
+    if platform in LOOKED_UP_GROUP_PLATFORMS:
+        # Only the granted users and the groups' current members are read, so
+        # the cap applies in SQL and a large group costs no scan of every
+        # account that once held it.
+        among = {*grant.user_ids, *await live_group_member_ids(grant.role_ids, members)}
+    async with sessionmaker() as session:
         found = await list_platform_user_ids(
             session,
             tenant_id=tenant_id,
             platform=platform,
-            limit=None if looked_up else limit,
+            limit=limit,
             user_ids=grant.user_ids,
             role_ids=grant.role_ids,
+            among=among,
+            fold_case=platform == "teams",
         )
-    if looked_up:
-        live = await live_group_member_ids(grant.role_ids, members)
-        fold = str.lower if platform == "teams" else str
-        found = [uid for uid in found if uid in grant.user_ids or fold(uid) in live]
     # A granted user who never spoke to the bot has no account yet.
     return sorted({*found, *grant.user_ids})[:limit]
 
