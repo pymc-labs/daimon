@@ -17,7 +17,7 @@ import structlog
 from daimon.adapters.teams import setup_card, setup_panel
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.setup_card import ENDED
-from daimon.core._models import ThreadSession
+from daimon.core._models import AgentCreationChannel, ThreadSession
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -256,6 +256,41 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     assert "Scout leads" in str(created["system"])
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel lands on Details"
+
+
+@pytest.mark.parametrize(
+    ("user", "admins", "theirs"),
+    [
+        (AAD_OBJECT_ID, (), True),
+        (OTHER_AAD_OBJECT_ID, (), False),
+        (AAD_OBJECT_ID, (AAD_OBJECT_ID,), False),
+    ],
+)
+async def test_a_channel_admins_new_agent_is_their_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    user: str,
+    admins: tuple[str, ...],
+    theirs: bool,
+) -> None:
+    """Only a channel admin, not a member or a server admin, makes it the channel's."""
+    async with db_session_factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=CONVERSATION_ID,
+            role_ids=[],
+            user_ids=[AAD_OBJECT_ID],
+            actor_account_id=None,
+        )
+    form = {"action": "agent_create", "name": "room", "model": DEFAULT_AGENT_MODEL}
+    async with _running(db_session_factory, teams_api_fake, admins) as (service, _):
+        await post_activity(service, _dialog("submit", form, user=user))
+
+    async with db_session_factory() as session:
+        channels = (await session.scalars(select(AgentCreationChannel.channel_id))).all()
+    assert channels == ([CONVERSATION_ID] if theirs else [])
 
 
 async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(

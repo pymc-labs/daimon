@@ -36,6 +36,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
+from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -47,6 +48,7 @@ from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref
 from daimon.core.channel_admins import (
@@ -433,7 +435,7 @@ class SetupPanel:
         data = submitted_fields(ctx.activity.value.data)
         values = {key: str(data.get(key) or "").strip() for key in ("name", "purpose", "model")}
         name = values["name"]
-        error = None
+        error, created_id = None, None
         if not _NAME.match(name):
             error = "Name must be 1-64 characters: letters, digits, hyphens, underscores."
         elif values["model"] not in ALLOWED_MODEL_IDS:
@@ -450,13 +452,26 @@ class SetupPanel:
                     account_id=derive_guild_account_uuid(actor.tenant_id),
                     public_url=str(mcp_url) if mcp_url is not None else None,
                 )
-                if outcome.anthropic_id is None:
+                created_id = outcome.anthropic_id
+                if created_id is None:
                     error = "Agent creation did not return an identity. Reopen setup and retry."
             except DaimonError as exc:
                 error = str(exc)
-        if error is not None:
+        if error is not None or created_id is None:
             return dialog("New agent", cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
+        caller = await channel_admin_caller(
+            self._runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
+        )
+        async with self._runtime.sessionmaker.begin() as session:
+            await record_created_for_channel(  # One a channel admin makes here is the channel's.
+                session,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                ma_agent_id=created_id,
+                channel_id=actor.conversation_id.split(";", 1)[0],
+                caller=caller,
+            )
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
             await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
