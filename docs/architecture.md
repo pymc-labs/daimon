@@ -473,7 +473,9 @@ post nowhere outside C, not even the requester's DM, and send no direct
 messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
-its classifier runs. Memory stays writable for C's own agents in C and is
+its classifier runs. Report and notebook publishing also refuses C's own
+agents through `PUBLISH_EXTERNAL`, before minting a reader or upload URL.
+Memory stays writable for C's own agents in C and is
 read-only for any other agent there, as in a sealed channel. A session
 whose seal ids lie in C is read and continued only by C's own agents
 (`READ_SESSION`, `CONTINUE_SESSION`). A verified turn origin in C holds the
@@ -511,8 +513,11 @@ change its pin first. Ending warns that the dedicated agents keep what they
 remembered in C and may carry it elsewhere once unpinned. Limits: tools on
 other MCP servers don't see the policy; an agent created inside C isn't C's
 own until it is pinned there; `/dm` from C is refused; a call is held to C
-only where its tool takes a verified origin (not the send, DM, self-edit or
-routine edit tools), and a call that names none is judged from outside.
+only where its tool takes a verified origin (report publishing and routine
+creation do; send, DM, self-edit and routine edit tools do not). C's own
+agent remains confined by its identity when no origin is named. Other agents'
+calls that name none are judged from outside. File uploads are staged by a
+tenant-scoped handle; delivery still passes the channel send check.
 
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
@@ -751,6 +756,7 @@ but them:
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
 | An isolated channel's own agent | runs, posts and reads only in its channel; sends no DMs | also runs in their own DM and hub (so does a channel admin of that channel), but still posts nowhere outside it |
+| Report and notebook publishing by an isolated channel's own agent | refused before a reader or upload URL is created | refused for that agent too |
 
 The pin, seal, isolation, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,

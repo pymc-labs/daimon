@@ -23,6 +23,10 @@ import httpx
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import (
+    require_external_publish_allowed,
+    turn_origin_place,
+)
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -98,6 +102,15 @@ async def _publish_report_impl(
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
+    if auth is not None:
+        origin = (
+            await require_turn_origin(runtime, auth, origin_context_id)
+            if origin_context_id
+            else None
+        )
+        await require_external_publish_allowed(
+            runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
+        )
     authorize_source = (
         await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
     )

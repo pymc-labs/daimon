@@ -1032,6 +1032,30 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("channel_isolated"),
     ),
     (
+        "isolation own agent cannot publish outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": ACME},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation turn origin cannot publish outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": SHARED, "origin": INSIDE},
+        _deny("channel_isolated"),
+    ),
+    (
+        "ordinary agent may publish outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": SHARED},
+        ALLOW,
+    ),
+    (
+        "unresolved agent cannot publish while isolation is active",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": AgentRef.unresolved()},
+        _deny("agent_unresolved"),
+    ),
+    (
         "isolation shared agent reads nothing inside",
         ISOLATED,
         {

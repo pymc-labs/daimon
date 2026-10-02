@@ -152,6 +152,9 @@ class Action(StrEnum):
     ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
     DIRECT_MESSAGE = "direct_message"
+    # Publish content to a separate host whose links can be read outside the
+    # channel (reports and notebooks).
+    PUBLISH_EXTERNAL = "publish_external"
     # Change what a possibly shared agent runs or reaches: a spec edit, an
     # attachment replace/remove, or a posted-token contribution
     # (`daimon.core.operation_policy`). Decided per `Request.operation_family`
@@ -369,7 +372,7 @@ class Request:
     recipient_id: str | None = None
     origin_channel_ids: frozenset[str] = frozenset()
     # Where the calling turn runs, from a verified turn origin (POST,
-    # DIRECT_MESSAGE, SAVE_ROUTINE); None when the call named none.
+    # DIRECT_MESSAGE, SAVE_ROUTINE, PUBLISH_EXTERNAL); None when the call named none.
     origin: Place | None = None
     session: SessionFacts | None = None
     operation_family: OperationFamily | None = None
@@ -721,6 +724,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if req.recipient_id != subject.platform_user_id:
             return _deny("dm_recipient_not_requester")
+        return ALLOW
+
+    if req.action is Action.PUBLISH_EXTERNAL:
+        if agent.present and not agent.resolved and policy.isolated_channel_ids:
+            return _deny("agent_unresolved")
+        if _held_to(agent, req.origin) is not None:
+            return _deny("channel_isolated")
         return ALLOW
 
     if req.action is Action.CHANGE_SHARED_AGENT:

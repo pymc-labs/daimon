@@ -30,15 +30,26 @@ from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.adapters.mcp.tools.notebook import (
+    _create_attachment_upload_impl,  # pyright: ignore[reportPrivateUsage]
+    _create_notebook_upload_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.propagation import (
     _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
     _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
     _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.publish import (
+    _publish_report_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
     _list_routines_impl,  # pyright: ignore[reportPrivateUsage]
     _update_routine_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.self_edit import (
+    _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
@@ -67,6 +78,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
 )
 from fastmcp.exceptions import ToolError
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -333,6 +345,53 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
         )
 
 
+async def test_an_isolated_agent_cannot_mint_external_publish_uploads(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    inside = world.auth(admin=False, executing="agent_local")
+    runtime.settings.mcp.jwt_secret = SecretStr("a" * 32)
+
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _create_notebook_upload_impl(
+            runtime, auth=inside, slug="notes", permanent=False, principal_key="account"
+        )
+
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _create_attachment_upload_impl(
+            runtime, auth=inside, slug="notes", name="data.csv", principal_key="account"
+        )
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _publish_report_impl(
+            runtime,
+            auth=inside,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            slug="notes",
+            title="Notes",
+            recipients=[],
+            cap_usd="1",
+            agent="local",
+        )
+
+
+async def test_an_isolated_agents_self_edit_writes_are_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    agent_key = replace(
+        world.auth(admin=False),
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
+    )
+
+    with pytest.raises(ToolError, match="pinned"):
+        await _self_write_file_impl(runtime, agent_key, key="NOTES_TOKEN", content="notes")
+    with pytest.raises(ToolError, match="pinned"):
+        await _set_repo_binding_impl(
+            runtime, agent_key, repo_url="owner/repo", default_branch="main"
+        )
+
+
 async def test_set_channel_isolation_refuses_or_forks_and_ends(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -434,6 +493,28 @@ async def _setup_thread_origin(
             is_setup=True,
         )
     return str(origin.id)
+
+
+async def test_report_publishing_refuses_a_verified_origin_inside_isolation(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    runtime.settings.mcp.jwt_secret = SecretStr("a" * 32)
+    origin = await _setup_thread_origin(committing_sessionmaker, world)
+
+    with pytest.raises(ToolError, match="cannot publish outside"):
+        await _publish_report_impl(
+            runtime,
+            auth=world.auth(admin=False, executing="agent_shared"),
+            origin_context_id=origin,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            slug="notes",
+            title="Notes",
+            recipients=[],
+            cap_usd="1",
+            agent="shared",
+        )
 
 
 async def test_the_setup_thread_configures_its_channels_own_agent(

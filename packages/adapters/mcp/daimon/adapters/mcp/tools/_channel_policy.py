@@ -199,6 +199,25 @@ async def require_dm_recipient_allowed(
         )
 
 
+async def require_external_publish_allowed(
+    runtime: McpRuntime, auth: AuthIdentity, *, origin: Place | None = None
+) -> None:
+    """Keep an isolated agent's content off report and notebook hosts."""
+    policy = await load_channel_policy(runtime, auth)
+    decision = authorize(
+        policy,
+        subject=mcp_subject(auth),
+        action=Action.PUBLISH_EXTERNAL,
+        agent=await _executing_agent(runtime, auth, policy),
+        origin=origin,
+    )
+    if not decision:
+        raise ToolError(
+            "this agent belongs to an isolated channel, so it cannot publish outside it. "
+            "Nothing was published."
+        )
+
+
 class SealedChannelError(ToolError):
     """A read of a sealed channel from outside it. Not an access problem the
     caller can fix by connecting an account, so no connect hint follows it."""

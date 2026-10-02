@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_external_publish_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.notebooks.attach import InvalidAttachmentError
 from daimon.core.notebooks.host_client import NotebookHostError
@@ -27,12 +29,15 @@ from fastmcp.exceptions import ToolError
 async def _create_notebook_upload_impl(
     runtime: McpRuntime,
     *,
+    auth: AuthIdentity | None = None,
     slug: str | None,
     permanent: bool,
     principal_key: str,
     editable: bool = False,
     tenant: str | None = None,
 ) -> dict[str, str]:
+    if auth is not None:
+        await require_external_publish_allowed(runtime, auth)
     if permanent and editable:
         raise ToolError("editable=True is for scratch notebooks only; a blog is always read-only")
     try:
@@ -57,11 +62,14 @@ async def _create_notebook_upload_impl(
 async def _create_attachment_upload_impl(
     runtime: McpRuntime,
     *,
+    auth: AuthIdentity | None = None,
     slug: str,
     name: str,
     principal_key: str,
     tenant: str | None = None,
 ) -> dict[str, str]:
+    if auth is not None:
+        await require_external_publish_allowed(runtime, auth)
     try:
         return create_attachment_upload(
             slug=slug,
@@ -171,6 +179,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         return await _create_notebook_upload_impl(
             runtime,
+            auth=auth,
             slug=slug,
             permanent=permanent,
             editable=editable,
@@ -196,6 +205,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         return await _create_attachment_upload_impl(
             runtime,
+            auth=auth,
             slug=slug,
             name=name,
             principal_key=str(auth.account_id),
