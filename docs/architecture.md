@@ -215,7 +215,7 @@ conversation ids):
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; the session transcript tools (`list_sessions`, `get_session`, `list_session_events`, agent chat's `list_my_sessions`, `get_my_session`, `list_events`, `continue_turn` and the rest, and the hub's) via `tools/_session_access.py`; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
-| `isolated_channel_ids` | nothing is isolated | admission, the scheduler and both routine posters; the agent, skill, session, routine, routing, handoff, channel write, DM and hub MCP tools via `tools/_isolation.py`; the channel read tools via `ChannelReadPolicy`; the setup panel for members; `/memory` on both platforms; the CLI's `config` writes; `start_dm` refuses to move the conversation. See Channel isolation below |
+| `isolated_channel_ids` | nothing is isolated | `authorize()` (`channel_isolated`), asked by admission and `reauthorize`, the routine save and fire checks, the channel write, read and DM tools and every channel default bind (tools, panels, the CLI's `config` writes); visibility in the agent, skill, routine, routing and handoff MCP tools (`tools/_isolation.py`), the hub, the setup panel for members and `/memory`. See Channel isolation below |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 | `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
@@ -417,10 +417,10 @@ administer every channel of every pin on it (a pin to no channel stays with
 server admins), and so is minting it a coding-tools token bound to one of
 those channels (never an unbound one). A channel admin binds only a shared agent
 (managed or tenant-wide), one answering nowhere yet, or one already local
-to them, never another channel's own agent. No chat tool or panel binds a
-pinned agent as the default of a channel outside its pin, for server admins
-too (`authorize(BIND_CHANNEL_DEFAULT)`); the operator CLI
-(`daimon config set`, `daimon config propagate`) still can. Managed agents
+to them, never another channel's own agent. No chat tool, panel or CLI
+write (`daimon config set`, `daimon config propagate`) binds a pinned agent
+as the default of a channel outside its pin, for server admins too
+(`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
 and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
@@ -443,53 +443,59 @@ daimon channels admins clear discord GUILD_ID CHANNEL_ID
 ```
 
 **Channel isolation — `packages/core/daimon/core/channel_isolation.py`.** An
-isolated channel C keeps its own agents to itself. C's own agents are those
-local to it in the agent-reach sense (`build_agent_reach`: a live DM counts
-as its source channel, outside C without one, and a superseded DM scope counts
-nowhere; `start_dm` retires it): C's default, or a handoff responder in a thread under C, answering nowhere else,
-never built in. Isolating needs one, so
-`set_channel_isolation` (`channel_isolation_setup.py`) refuses a channel
-without it unless given a fork: it copies `fork_from`, or whoever answers in C,
-under a name from the channel and makes the copy C's default in the same step.
-The copy is made by `agent_fork.copy_agent`, like the chat `fork_agent`: no
-credentials, no agent-scoped skills (the reply names them), and a pinned agent
-is not copied. Isolating is also refused, naming each item to clear, while a
-thread under C is handed to another agent or a routine would cross the line;
-the check reruns under the policy lock before the write, and a copy it then
-refuses is archived.
-A call runs inside C when the agent executing it is one of C's, when that
-agent is running the caller's turn under C (so a setup thread there, run by
-the built-in agent, sees C's agents and posts only inside C), or when a
-handoff runs from a thread under C; the hub runs outside. A caller with turns
-running in two isolated channels at once is refused until one ends. From outside, C's
-agents are missing from `list_agents` and every by-name lookup (get, update,
-fork, archive, keys, skills, `set_setup_target`), from handoff destinations,
-sessions, `explain_agent_resolution` and the hub's `list_daimons` and `ask`; so
-are their agent-scoped skills (owner from the skill's upload record, else its
-title; a shortened title counts for every agent it could name), their routines
-and routines posting into C or created there, and `/memory`. From inside C only C's agents show. For members
-the setup panel's roster, details and Who answers where are filtered the same
-way at the panel's location; server admins see everything. C's messages read
-like a sealed channel's, also open to C's own agents; memory stays writable.
-Posts don't cross the line: the channel write tools refuse C's agents outside C
-and other agents in C, and C's agents send no direct messages. Routing that
-would break this is refused: C's agent bound anywhere else or as the tenant
-default, another agent bound in C, C's default cleared. At run time admission
-refuses a turn in C unless the resolved agent is C's own (`channel_isolated`),
-so an archived default doesn't fall through to the tenant default and a thread
-handed out earlier doesn't answer; setup threads under C still run, as the
-built-in agent with memory read-only. Thread participation skips such a turn
-before its classifier runs. The scheduler skips a routine that would cross the
-line, and a routine of C's never falls back to a DM: the routine tools refuse
-one with no destination or a destination outside C. Memory stays per
-agent, so ending isolation lets C's agents answer elsewhere with what they
-remembered in C; the panel, the tool reply and the CLI warn. Server admins toggle it from Who answers where in the setup
-panel, with `set_channel_isolation`, or with `--isolated-channel`; in chat they
-see what the conversation's agent sees. Limits: tools on other MCP servers
-don't see the policy; coding-tool tokens minted before an agent became C's own
-keep working (channel-bound tokens are a later change); an agent created inside
-C isn't C's own, or listed there for members, until it is bound in C; `/dm`
-from C is refused.
+isolated channel C keeps its own agents to itself. The marker
+(`isolated_channel_ids`) sits on two existing controls: C must be sealed, and
+C's own agents are those pinned to C alone (`access_policy.isolation_owner`,
+by every name the agent carries). `set_channel_isolation`
+(`channel_isolation_setup.py`) does all three in one write under the policy
+lock: it seals C, pins C's default agent to C and adds the marker. The default
+must not be built in, pinned elsewhere or answering anywhere else
+(`agent_reach`, checked at write time only); otherwise the call is refused
+with the reason, unless asked for a copy. Then `fork_from`, or whoever answers
+in C, is copied by `agent_fork.copy_agent` (`authorize(FORK)`: an admin's call,
+never a pinned agent; no credentials, no agent-scoped skills, which the reply
+names) under a name from the channel, made C's default and pinned; a copy the
+locked re-check refuses is archived. Ending isolation drops the marker and
+keeps the seal and pins, unless `drop_seal_and_pins` lifts them too.
+
+Enforcement is `authorize()`'s: it fills `AgentRef.confined_to` and
+`Place.isolated_channel` from the policy, so every check and re-check is
+fresh. In C only C's own agents run, post, read, get routines or become the
+default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
+`SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
+(`Place.setup_thread`) still answers as the built-in agent. C's own agents
+post nowhere outside C, not even the requester's DM, and send no direct
+messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
+fire check (the resolved agent, by every name, at the routine's destination)
+decide through `RUN_AGENT`; thread participation skips a refused turn before
+its classifier runs. Memory stays writable for C's own agents in C and is
+read-only for any other agent there, as in a sealed channel. Isolation
+constrains agents: a caller with no executing agent (an operator token, the
+CLI) may still post into C, which is input, not a leak; the seal keeps reads
+inside.
+
+What callers see follows from where they stand. An MCP call is inside C when
+its verified turn origin is in C, when it carries a channel-bound coding-tool
+token for C, or when its chat turn's agent is one of C's; an agent key is
+never inside by its agent alone. From outside, C's agents are missing from
+`list_agents` and every by-name lookup, from handoff destinations,
+`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines and
+routines posting into C; inside C only C's agents show. For members the
+setup panel's roster, details and Who answers where are filtered the same way
+at the panel's location, and `/memory` hides an agent wherever it may not
+run; server admins see everything. Server admins are exempt in their own DM
+and hub, and a channel admin of C there too, but C's agents still never post
+outside C. `get_tenant_summary` lists each channel with `isolated`.
+
+Server admins toggle isolation from Who answers where in the setup panel,
+which shows the channel as Private (sealed), Dedicated agent (pinned to it
+alone) and Hidden (isolated), and offers to end isolation or lift the seal
+and pins too; with `set_channel_isolation` (also under `channels:write`); or
+with `--isolated-channel`, which must seal C and pin its default to it alone
+in the same command. Ending warns that the dedicated agents keep what they
+remembered in C and may carry it elsewhere once unpinned. Limits: tools on
+other MCP servers don't see the policy; an agent created inside C isn't C's
+own until it is pinned there; `/dm` from C is refused.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
@@ -650,8 +656,9 @@ but them:
 | "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
+| An isolated channel's own agent | runs, posts and reads only in its channel; sends no DMs | also runs in their own DM and hub (so does a channel admin of that channel), but still posts nowhere outside it |
 
-The pin, seal, protection, invoker and fork rules are decided by one pure
+The pin, seal, isolation, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
 where the result lands, which agent, which channel); the turn pipeline, the
 MCP gates, the channel tools, the routine and handoff tools and the fork
@@ -690,13 +697,23 @@ threads and posts, files and cards on Discord, Slack and Teams) reach only:
 its pinned channels and threads under them; the requester's own 1:1 DM with
 daimon (a Slack IM whose user is the requester, or a Teams personal chat the
 requester is in); and direct messages to the requester. Its context never
-lands in another channel or another person's DM. A session that ran in a DM
+lands in another channel or another person's DM. An isolated channel's own
+agent is stricter: it posts only into its channel and the threads under it,
+never the requester's DM, and sends no direct messages.
+
+Isolation constrains agents, not callers. Inside an isolated channel C only
+C's own agents run, post and read; a caller with no executing agent, such as
+an operator token or the CLI, may still post into C. That is input, not a
+leak: the seal keeps C's messages readable only from inside it. A session that ran in a DM
 (a Slack IM, a Teams personal chat, or a `/dm` conversation) is private:
 admins never read it from the hub.
 
 A channel admin has a server admin's rights limited to the channels they
-administer, so only those two rows' exemptions apply to them, and only there.
-Hub turns, DMs and forks treat them as members.
+administer, so only those rows' exemptions apply to them, and only there:
+pinned-agent configuration, coding-tool tokens, hub reads of their channels'
+sealed conversations, and isolation, where a channel admin of C is exempt in
+their own DM and hub for C's agents only. That grant is the person's, never
+an agent key's. Other hub turns, DMs and forks treat them as members.
 
 Continuing a sealed channel conversation from the hub stays refused for admins
 because a follow-up would join the channel's own conversation, which the
@@ -730,8 +747,8 @@ skip billing, not admission.
 
 The pin decisions (turn admission, MCP and hub turns, routine save and fire,
 handoff, configuration writes and form submits), pinned sends and direct
-messages, channel and session seal reads, fork, channel admins'
-configuration rights and channel default binds are decided by one pure
+messages, channel and session seal reads, channel isolation, fork, channel
+admins' configuration rights and channel default binds are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
 where the result lands, which agent, which channel); each caller keeps only
 its own I/O and refusal copy. The live protection and invoker checks in the
@@ -1183,9 +1200,15 @@ registered and expire too, while older jti-less ones keep working.
 | Scope | Tools |
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
+
+`get_tenant_summary` lists every channel with a default, a budget, admins or
+isolation, and `channels[].isolated` says whether it is isolated.
+`set_channel_isolation` with an operator token acts as that admin: the copy
+it may make is an admin's fork, and its seal and pin writes are the same as
+the panel's.
 
 Each request, `DaimonJWTVerifier` reads the token's `mcp_tokens` row: it must
 be unrevoked and unexpired, its account still a server admin by stored role

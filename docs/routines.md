@@ -324,12 +324,16 @@ are talking to or the one the destination channel answers with.
 
 Channel isolation narrows the MCP tools. A routine of an isolated channel's own
 agent, or one whose `channel_id` is that channel, is visible (list, read,
-update, delete) only from inside it, and a routine is created or moved only
-where its agent may answer: an isolated channel's agent posts only into its
-channel, and other agents never post there. Routing can change after a routine
-is saved, so a run that would cross the line is skipped (`channel_isolated`),
-and a routine of an isolated channel never falls back to a DM. The admin panels
-are unchanged. See [architecture.md](architecture.md) (Channel isolation).
+update, delete) only from inside it, and `authorize(SAVE_ROUTINE)` creates or
+moves a routine only where its agent may answer: an isolated channel's agent
+posts only into its channel, and other agents never post there. Routing can
+change after a routine is saved, so each fire asks again: after the agent is
+resolved (self-healing may pick a replacement), the scheduler runs
+`authorize(RUN_AGENT)` on that agent by every name it carries (the saved
+routine name, its MA name and its config name) at the routine's destination,
+and skips a run that would cross the line (`channel_isolated`). A routine of
+an isolated channel never falls back to a DM. See
+[architecture.md](architecture.md) (Channel isolation).
 
 ## When a run fails
 
