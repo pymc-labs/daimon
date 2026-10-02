@@ -588,6 +588,7 @@ class TeamsApp:
         command = parse_command(inbound.text, self._commands)
         if command is not None:
             name, args = command
+            asked_in = None
             if inbound.kind != "dm" and name == "new":
                 await self._say(inbound, NEW_IN_CHANNEL)
                 return
@@ -599,7 +600,7 @@ class TeamsApp:
                 )
                 if chat is None:
                     return
-                inbound = chat
+                asked_in, inbound = inbound, chat
             inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
             await self._commands[name](
                 CommandContext(
@@ -611,6 +612,7 @@ class TeamsApp:
                     send=functools.partial(
                         self._sender.send, inbound.conversation_id, service_url=inbound.service_url
                     ),
+                    asked_in=asked_in,
                 )
             )
             return

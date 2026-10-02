@@ -17,6 +17,7 @@ COMMAND_HELP = {
     "memory": "List what the agent remembers; add a path to read one memory",
     "privacy": "See, export or delete what {bot} stores about you",
     "billing": "Your usage this month (admins see a per-member breakdown and top-ups)",
+    "support": "Ask a person for help: support <your question>",
     "help": "This list",
 }
 

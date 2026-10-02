@@ -27,7 +27,7 @@ NEW_IN_CHANNEL = "Each post is its own conversation: start a new post to begin a
 
 @dataclass(frozen=True)
 class CommandContext:
-    """One command invocation. `send` replies into the chat it came from."""
+    """One command invocation. `send` replies into the chat it answers in."""
 
     inbound: TeamsInbound
     tenant_id: uuid.UUID
@@ -35,6 +35,8 @@ class CommandContext:
     is_admin: bool
     runtime: TeamsRuntime
     send: Callable[[MessageActivityInput], Awaitable[SentActivity]]
+    # Where the command was typed, when it is answered elsewhere (the 1:1 chat).
+    asked_in: TeamsInbound | None = None
 
     async def send_card(self, card: AdaptiveCard) -> None:
         await self.send(MessageActivityInput().add_card(card))

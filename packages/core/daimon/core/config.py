@@ -923,7 +923,9 @@ class SupportSettings(BaseModel):
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Channel id where human-support requests are posted. Unset (the "
+            "Channel id where human-support requests are posted: a Discord channel id, "
+            "or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests "
+            "reach a Discord channel only when the Discord bot token is also set. Unset (the "
             "default) disables the escalate affordance entirely — a request "
             "that reaches nobody is worse than no button at all. A channel "
             "rather than operator DMs: it survives one person's DMs being "

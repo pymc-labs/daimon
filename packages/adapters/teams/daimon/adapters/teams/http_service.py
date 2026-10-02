@@ -39,6 +39,8 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
+from daimon.adapters.teams.support import SupportCommand
+from daimon.adapters.teams.support import enabled as support_enabled
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
@@ -265,8 +267,10 @@ def create_teams_http_service(
         "privacy": privacy.command,
         "billing": billing.command,
     }
-    commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
+    if support_enabled(runtime.settings):
+        commands["support"] = SupportCommand(direct).command
+    commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
         sender=teams_app,

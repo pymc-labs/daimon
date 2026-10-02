@@ -838,10 +838,12 @@ they have asked for help.
 
 `str | None` · optional · default unset
 
-Channel id where human-support requests are posted. Unset (the default) disables the
-escalate affordance entirely — a request that reaches nobody is worse than no button at
-all. A channel rather than operator DMs: it survives one person's DMs being closed, and
-it leaves a shared record anyone on the rota can pick up. The bot must be able to post
+Channel id where human-support requests are posted: a Discord channel id, or a Teams
+channel id (`19:…`) that the Teams bot posts in. Teams requests reach a Discord channel
+only when the Discord bot token is also set. Unset (the default) disables the escalate
+affordance entirely — a request that reaches nobody is worse than no button at all. A
+channel rather than operator DMs: it survives one person's DMs being closed, and it
+leaves a shared record anyone on the rota can pick up. The bot must be able to post
 there.
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
