@@ -21,6 +21,7 @@ async def discover_tenant(
     session: AsyncSession,
     *,
     override: uuid.UUID | None = None,
+    workspace_id: str = "local",
 ) -> uuid.UUID:
     if override is not None:
         if await get_tenant(session, override) is None:
@@ -31,7 +32,7 @@ async def discover_tenant(
             )
         return override
 
-    tenant_id = derive_tenant_uuid(platform="cli", workspace_id="local")
+    tenant_id = derive_tenant_uuid(platform="cli", workspace_id=workspace_id)
     row = await get_tenant(session, tenant_id)
     if row is None:
         raise SessionBootstrapError(

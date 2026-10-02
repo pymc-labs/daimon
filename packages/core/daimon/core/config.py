@@ -103,6 +103,14 @@ class AnthropicSettings(BaseModel):
 
 
 class CLISettings(BaseModel):
+    workspace_id: str = Field(
+        default="local",
+        min_length=1,
+        description=(
+            "CLI tenant identifier. Use a distinct value for an isolated local "
+            "deployment that shares an Anthropic workspace with another deployment."
+        ),
+    )
     local_user: str = Field(
         default_factory=lambda: os.environ.get("USER", "daimon"),
         description=(

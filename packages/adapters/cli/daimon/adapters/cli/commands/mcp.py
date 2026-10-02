@@ -90,7 +90,7 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None, ttl_days: int = 90)
         rt.sessionmaker() as session,
         session.begin(),
     ):
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=resolved_user
         )
@@ -162,7 +162,9 @@ async def mint_agent_token(
 
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, TenantSelector(tenant_id=tenant))
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )

@@ -30,15 +30,16 @@ async def apply_defaults(
     dry_run: bool = False,
     public_url: str | None = None,
     run_preflight: bool = True,
+    workspace_id: str = "local",
 ) -> ApplyReport:
     # 1. Provision cli:local deterministically (idempotent; signup_credit=0 → no ledger row).
     # Inline import breaks the apply ↔ provisioning circular dependency.
     from daimon.core.defaults.provisioning import provision_tenant
 
     await provision_tenant(
-        session_factory, platform="cli", workspace_id="local", signup_credit=Decimal("0")
+        session_factory, platform="cli", workspace_id=workspace_id, signup_credit=Decimal("0")
     )
-    tenant_id = derive_tenant_uuid(platform="cli", workspace_id="local")
+    tenant_id = derive_tenant_uuid(platform="cli", workspace_id=workspace_id)
 
     # 2-7. Delegate the shared reconcile spine.
     return await _reconcile_core(

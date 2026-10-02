@@ -120,13 +120,14 @@ async def test_apply_does_not_write_tenant_config(
         )
 
 
-async def test_apply_defaults_provisions_cli_local_deterministically(
+@pytest.mark.parametrize("workspace_id", ["local", "agent-setup-probe"])
+async def test_apply_defaults_provisions_cli_workspace_deterministically(
     tmp_path: Path,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
 ) -> None:
-    """Req 4: fresh DB + apply_defaults yields exactly one tenant with
-    id == derive_tenant_uuid('cli','local'), zero orphans, no tenant_ledger row."""
+    """A fresh DB gets exactly the selected CLI tenant and no ledger row."""
     from daimon.core._models import Tenant, TenantLedger
     from daimon.core.ma_identity import derive_tenant_uuid
 
@@ -155,9 +156,16 @@ async def test_apply_defaults_provisions_cli_local_deterministically(
     )
     client = build_fake_anthropic_http(router.dispatch)
 
-    await apply_defaults(db_session_factory, client, tmp_path, dry_run=False, run_preflight=False)
+    await apply_defaults(
+        db_session_factory,
+        client,
+        tmp_path,
+        dry_run=False,
+        run_preflight=False,
+        workspace_id=workspace_id,
+    )
 
-    expected_id = derive_tenant_uuid(platform="cli", workspace_id="local")
+    expected_id = derive_tenant_uuid(platform="cli", workspace_id=workspace_id)
 
     # Req 4: exactly one tenant row with the derived deterministic id
     tenant_count = (await db_session.execute(select(func.count()).select_from(Tenant))).scalar_one()
@@ -167,10 +175,10 @@ async def test_apply_defaults_provisions_cli_local_deterministically(
         await db_session.execute(select(Tenant).where(Tenant.id == expected_id))
     ).scalar_one_or_none()
     assert tenant_row is not None, (
-        f"tenant row with id == derive_tenant_uuid('cli','local') ({expected_id}) must exist"
+        f"tenant row with id == derive_tenant_uuid('cli',{workspace_id!r}) ({expected_id}) must exist"
     )
-    assert tenant_row.platform == "cli", "cli:local tenant must have platform='cli'"
-    assert tenant_row.external_id == "local", "cli:local tenant must have external_id='local'"
+    assert tenant_row.platform == "cli", "CLI tenant must have platform='cli'"
+    assert tenant_row.external_id == workspace_id, "CLI tenant must keep the selected workspace ID"
 
     # no tenant_ledger row (cli:local is billing-exempt, signup_credit=0)
     ledger_count = (

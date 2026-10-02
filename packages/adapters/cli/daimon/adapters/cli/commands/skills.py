@@ -101,7 +101,9 @@ async def sync_skills(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -216,7 +218,9 @@ async def sync_agent(
     """
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -313,7 +317,9 @@ async def list_skills(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -370,7 +376,9 @@ async def get_skill(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -420,7 +428,9 @@ async def delete_skill(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         tenant_label = await resolve_tenant_display(session, tenant_id)
         confirm_or_abort(console, f"delete skill {name!r} in {tenant_label}?", yes=yes)
         await get_or_create_cli_principal(

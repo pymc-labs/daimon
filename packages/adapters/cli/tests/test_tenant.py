@@ -20,6 +20,14 @@ async def test_discover_tenant_returns_cli_local_when_present(db_session: AsyncS
 
 
 @pytest.mark.asyncio
+async def test_discover_tenant_uses_selected_cli_workspace(db_session: AsyncSession) -> None:
+    await make_tenant(db_session, platform="cli", workspace_id="local")
+    selected = await make_tenant(db_session, platform="cli", workspace_id="agent-setup-probe")
+    tenant_id = await discover_tenant(db_session, workspace_id="agent-setup-probe")
+    assert tenant_id == selected.id, "selected CLI workspace must stay separate from cli:local"
+
+
+@pytest.mark.asyncio
 async def test_discover_tenant_raises_when_no_tenants(db_session: AsyncSession) -> None:
     with pytest.raises(SessionBootstrapError, match="no tenant"):
         await discover_tenant(db_session)

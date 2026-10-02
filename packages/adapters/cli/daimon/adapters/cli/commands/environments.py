@@ -49,7 +49,7 @@ def environments_list_command(
 
 async def environments_list(*, rt: CliRuntime, console: Console, as_json: bool) -> None:
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -80,7 +80,7 @@ def environments_get_command(
 
 async def environments_get(*, rt: CliRuntime, console: Console, name: str, as_json: bool) -> None:
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -113,7 +113,7 @@ def environments_create_command(
 async def environments_create(*, rt: CliRuntime, console: Console, path: Path) -> None:
     spec = load_environment_spec(path)
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -153,7 +153,7 @@ def environments_update_command(
 async def environments_update(*, rt: CliRuntime, console: Console, name: str, path: Path) -> None:
     spec = load_environment_spec(path)
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -192,7 +192,7 @@ def environments_archive_command(
 async def environments_archive(*, rt: CliRuntime, console: Console, name: str, yes: bool) -> None:
     confirm_or_abort(console, f"archive environment {name!r}?", yes=yes)
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -236,7 +236,7 @@ def environments_delete_command(
 async def environments_delete(*, rt: CliRuntime, console: Console, name: str, yes: bool) -> None:
     confirm_or_abort(console, f"delete environment {name!r}?", yes=yes)
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -297,7 +297,7 @@ async def environments_fork(
             f"fork target name {dst!r} conflicts with source; provide a different name."
         )
     async with rt.sessionmaker() as session, session.begin():
-        tenant_id = await discover_tenant(session)
+        tenant_id = await discover_tenant(session, workspace_id=rt.settings.cli.workspace_id)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )

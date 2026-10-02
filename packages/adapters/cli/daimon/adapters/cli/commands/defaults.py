@@ -96,6 +96,7 @@ async def defaults_apply(
         defaults_root,
         dry_run=dry_run,
         public_url=public_url,
+        workspace_id=rt.settings.cli.workspace_id,
     )
     if as_json:
         _format_report_json(console, report)

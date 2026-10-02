@@ -192,7 +192,9 @@ async def _config_get_command_entry(
     console = Console(highlight=False)
     async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -346,7 +348,9 @@ async def _config_set_command_entry(
     console = Console(highlight=False)
     async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -438,7 +442,9 @@ async def _config_unset_command_entry(
     console = Console(highlight=False)
     async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -514,7 +520,9 @@ async def _config_propagate_command_entry(
     console = Console(highlight=False)
     async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
