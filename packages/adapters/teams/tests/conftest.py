@@ -237,6 +237,8 @@ class TeamsApiFake:
 
     requests: list[SentRequest] = dataclasses.field(default_factory=list[SentRequest])
     posted: int = 0
+    channels: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """Every team's standard channels, by id, as its conversation listing names them."""
 
     async def send(
         self,
@@ -258,6 +260,10 @@ class TeamsApiFake:
             r"/v3/conversations/[^/]+/activities/([^/]+)$", httpx.URL(context.url).path
         )
         team = re.search(r"/v3/teams/([^/]+)$", httpx.URL(context.url).path)
+        if context.method == "GET" and httpx.URL(context.url).path.endswith("/conversations"):
+            listed = [{"id": c, "name": n, "type": "standard"} for c, n in self.channels.items()]
+            if "/v3/teams/" in context.url:
+                return httpx.Response(200, json={"conversations": listed}, request=request)
         if context.method == "GET" and team:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)

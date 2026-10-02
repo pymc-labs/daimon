@@ -1,14 +1,15 @@
 """The `setup` command: Agents, Details, Who answers where, and the panel's dialogs.
 
-Mirrors Slack's `/agent-setup` and its rules. The panel is read-only and open to
-every member; changes happen in a setup conversation, where the chat tools own
-authorization. New agent is open to everyone (a fresh agent is unrouted, so it
-puts nothing at risk). Minting a coding-tool token is `authorize_coding_token`'s
-call, as on Discord and Slack: panels live in the 1:1 chat, so a channel admin
-picks one of their channels in the dialog and the token is bound there (an
-unbound token stays with server admins). Only its minter may revoke it; token
-values are never logged. Every click re-verifies the
-clicker and re-reads state, so a stale card grants nothing.
+Mirrors Slack's `/agent-setup` and its rules. The panel is open to every
+member; agent changes happen in a setup conversation, where the chat tools own
+authorization, and a channel's environment, isolation and admins in the
+Channel settings dialog (`channel_settings`). New agent is open to everyone (a
+fresh agent is unrouted, so it puts nothing at risk). Minting a coding-tool
+token is `authorize_coding_token`'s call, as on Discord and Slack: panels live
+in the 1:1 chat, so a channel admin picks one of their channels in the dialog
+and the token is bound there (an unbound token stays with server admins). Only
+its minter may revoke it; token values are never logged. Every click
+re-verifies the clicker and re-reads state, so a stale card grants nothing.
 """
 
 from __future__ import annotations
@@ -327,8 +328,21 @@ class SetupPanel:
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)
         window = paginate(answering_map.channel_overrides, page=page, page_size=cards.PAGE_SIZE)
+        administered: frozenset[str] = frozenset()
+        if not actor.is_admin:
+            async with self._runtime.sessionmaker() as session:
+                administered = await load_administered_channel_ids(
+                    session,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    caller=ChannelAdminCaller(platform_user_id=actor.user_id),
+                )
         return cards.routing_card(
-            answering_map, window, is_admin=actor.is_admin, request_agent=request_agent
+            answering_map,
+            window,
+            is_admin=actor.is_admin,
+            request_agent=request_agent,
+            changes_channels=actor.is_admin or bool(administered),
         )
 
     async def _details(

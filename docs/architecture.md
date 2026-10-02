@@ -510,7 +510,8 @@ run; server admins see everything. Server admins are exempt in their own DM
 and hub, and a channel admin of C there too, but C's agents still never post
 outside C. `get_tenant_summary` lists each channel with `isolated`.
 
-Server admins toggle isolation from Who answers where in the setup panel,
+Server admins toggle isolation from Who answers where in the setup panel
+(Teams: its Channel settings dialog, `adapters/teams/channel_settings.py`),
 which shows the channel as Private (sealed), Dedicated agent (pinned to it
 alone) and Hidden (isolated), and offers to end isolation or lift the seal
 and pins too; with `set_channel_isolation` (also under `channels:write`) or
@@ -533,8 +534,9 @@ it with the packages one team needs; routines follow the channel they post to.
 Server admins set any channel's environment, or the tenant default by omitting
 the channel, with `set_channel_environment` and `clear_channel_environment`; a
 channel admin sets the channels they run, and a thread id resolves to its
-parent. Who answers where in both setup panels lists each channel's
+parent. Who answers where in the setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
+(on Teams, in the Channel settings dialog, for a channel picked there)
 (`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
 drops the rows across an isolation line, and inside an isolated channel the
 workspace and deployment environments too. The name must match an existing

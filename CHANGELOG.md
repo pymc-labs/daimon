@@ -103,6 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channels the token runs in, and binds it there under the same rule as
   Discord and Slack: the agent must be pinned to channels they administer,
   and an unbound token stays with server admins, who keep that choice.
+- **Teams channel settings.** Who answers where in the Teams setup panel
+  opens a Channel settings dialog for a channel picked there: its
+  environment, for server admins and that channel's admins, and its
+  isolation and channel admins, for server admins only, as on Discord and
+  Slack. Every save is re-checked and audited.
 
 - **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
   skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a

@@ -88,8 +88,11 @@ MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
 here), channel budgets (`set_channel_budget`) and channel environments
-(`set_channel_environment`) work as on Discord and Slack; Who answers where
-lists each channel's environment, with no select, so pick one in chat.
+(`set_channel_environment`) work as on Discord and Slack. Who answers where
+lists each channel's environment, and its **Channel settings** dialog changes
+one channel picked there, since the panel lives in the 1:1 chat: its
+environment (server admins, or that channel's admins), and its isolation and
+admins by Entra object ID (server admins only).
 Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
 `daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
 counts as its channel, and the isolated agents send nothing to 1:1 chats. The

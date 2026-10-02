@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from daimon.adapters.teams.card_actions import button, clip, heading
+from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -232,9 +233,17 @@ def details_card(
 
 
 def routing_card(
-    answering_map: AnsweringMap, page: Page[Any], *, is_admin: bool, request_agent: str | None
+    answering_map: AnsweringMap,
+    page: Page[Any],
+    *,
+    is_admin: bool,
+    request_agent: str | None,
+    changes_channels: bool = False,
 ) -> AdaptiveCard:
-    """The whole cascade, so the precedence is visible rather than inferred."""
+    """The whole cascade, so the precedence is visible rather than inferred.
+
+    `changes_channels` adds Channel settings, for a server admin or a channel's admin.
+    """
     body: list[CardElement] = [
         _text(f"Channel `{answer.channel_id}`: **{answer.agent_name}**") for answer in page.items
     ] or [_text("No channel has its own setting.", subtle=True)]
@@ -259,6 +268,9 @@ def routing_card(
     )
     body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
     actions: list[Action] = [*_pager(page, "routing"), _button("Back", "agents")]
+    if changes_channels:
+        settings = OpenDialogData(CHANNEL_DIALOG)
+        actions.append(SubmitAction(title="⚙ Channel settings", data=settings))
     if is_admin:
         tokens = SubmitAction(title="🔑 Operator tokens", data=OpenDialogData(OPERATOR_DIALOG))
         actions.append(tokens)
