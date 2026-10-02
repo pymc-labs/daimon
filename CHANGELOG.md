@@ -238,7 +238,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. Sealing or isolating a channel whose own pick has such a network warns
   that a server admin should confirm or change it. Who answers where in the
   setup panel lists each channel's environment on the reader's side of an
-  isolation and offers a select for it, and `explain_agent_resolution` names
+  isolation and offers a select for it (Teams lists them only), and
+  `explain_agent_resolution` names
   the environment and the tier that chose it.
   A conversation switches from its next message and keeps its files and its
   seal, and a routine runs in its channel's environment. Archiving or deleting
