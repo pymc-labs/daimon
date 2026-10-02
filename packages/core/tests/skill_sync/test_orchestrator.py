@@ -3609,7 +3609,8 @@ async def test_sync_never_reattaches_a_detached_upload(
         await upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
-            principal_id=cli.id,
+            # The sync keys its ledger on the agent's derived identity, as an add does.
+            principal_id=derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_target"),
             agent_name="agent",
             name="notes",
             source_repo_url="",

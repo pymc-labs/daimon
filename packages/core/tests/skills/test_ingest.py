@@ -157,6 +157,20 @@ def test_a_zip_that_expands_past_the_cap_stops_there() -> None:
         bundle_from_upload(buffer.getvalue(), filename="s.zip")
 
 
+def test_a_zip_entry_is_read_no_further_than_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each member is read with a bound, so an understated header can't expand it unchecked."""
+    sizes: list[int] = []
+    read = zipfile.ZipExtFile.read
+
+    def spy(self: zipfile.ZipExtFile, n: int | None = -1) -> bytes:
+        sizes.append(-1 if n is None else n)
+        return read(self, n)
+
+    monkeypatch.setattr(zipfile.ZipExtFile, "read", spy)
+    bundle_from_upload(_zip({"SKILL.md": _MD.encode(), "a.txt": b"x"}), filename="s.zip")
+    assert sizes and all(0 < n <= MAX_UNCOMPRESSED_BYTES + 1 for n in sizes), sizes
+
+
 @pytest.mark.parametrize(
     "error",
     [zipfile.BadZipFile("crc"), NotImplementedError("method"), zlib.error("bad"), EOFError()],
