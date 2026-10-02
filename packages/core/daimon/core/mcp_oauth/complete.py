@@ -21,7 +21,11 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.channel_admins import (
+    ChannelAdminCaller,
+    GroupMembersFor,
+    confirm_stored_group_ids,
+)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -88,6 +92,7 @@ async def complete_mcp_oauth_flow(
     session_factory: async_sessionmaker[AsyncSession],
     default: DeploymentDefault,
     may_write: Callable[[], Awaitable[bool]] | None = None,
+    group_members: GroupMembersFor | None = None,
 ) -> McpOAuthCompletion:
     """Exchange, store in the requester's vault, attach the server to the agent.
 
@@ -104,7 +109,8 @@ async def complete_mcp_oauth_flow(
     agent already declares at another URL redirects every caller. That is
     re-decided here as `mcp_replace` against the requester as stored (the
     browser callback carries no live platform identity): role, platform id and
-    role ids, so a channel admin passes or fails here as at the request. A
+    role ids, so a channel admin passes or fails here as at the request (a
+    stored Slack group or Teams team only as `group_members` confirms it). A
     refused replacement raises `McpServerReplaceRefusedError` with the agent
     unchanged.
     """
@@ -170,7 +176,12 @@ async def complete_mcp_oauth_flow(
         if requester is None
         else ChannelAdminCaller(
             platform_user_id=requester.platform_user_id,
-            role_ids=frozenset(requester.platform_role_ids),
+            role_ids=await confirm_stored_group_ids(
+                requester.platform,
+                requester.platform_user_id,
+                requester.platform_role_ids,
+                group_members(requester.platform, requester.external_id) if group_members else None,
+            ),
             is_server_admin=requester.role is Role.ADMIN,
         )
     )

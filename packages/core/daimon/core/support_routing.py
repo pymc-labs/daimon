@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
-from daimon.core.channel_admins import channel_admin_user_ids
+from daimon.core.channel_admins import GroupMembers, channel_admin_user_ids
 from daimon.core.stores.accounts import list_platform_user_ids
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,13 +29,20 @@ async def support_recipient_tiers(
     platform: str,
     channel_id: str,
     requester_id: str,
+    members: GroupMembers | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     """The DM tiers to try in order (channel admins, then server admins); () for no grant.
 
     The requester is left out of both: asking for a human must reach someone else.
+    `members` re-checks a channel admin matched by a stored Slack group or Teams team.
     """
     channel_admins = await channel_admin_user_ids(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, limit=MAX_RECIPIENTS
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        limit=MAX_RECIPIENTS,
+        members=members,
     )
     if channel_admins is None:
         return ()

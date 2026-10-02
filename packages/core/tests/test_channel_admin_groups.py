@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 
 import pytest
 from daimon.core.channel_admins import (
     GroupLookupFailed,
     GroupMembersCache,
+    channel_admin_user_ids,
     load_member_group_ids,
+    load_stored_subject,
     member_group_ids,
 )
+from daimon.core.stores.accounts import set_platform_role_ids
 from daimon.core.stores.channel_admins import set_channel_admins
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.domain import TenantRow
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -98,3 +103,98 @@ async def test_only_groups_a_grant_names_are_looked_up(db_session: AsyncSession)
         db_session, tenant_id=tenant.id, platform="slack", platform_user_id="U1", members=fetch
     )
     assert (matched, asked) == (frozenset({"S1"}), ["S1"]), "S9 is in no grant, so never asked"
+
+
+async def _stored_member(
+    session: AsyncSession, tenant: TenantRow, user_id: str, groups: list[str]
+) -> uuid.UUID:
+    account = await make_account(session, tenant=tenant)
+    await make_platform_principal(
+        session, platform=tenant.platform, external_id=user_id, tenant=tenant, account=account
+    )
+    await set_platform_role_ids(session, account.id, groups)
+    return account.id
+
+
+async def _grant(session: AsyncSession, tenant: TenantRow, group: str, users: list[str]) -> None:
+    await set_channel_admins(
+        session,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="C1",
+        role_ids=[group],
+        user_ids=users,
+        actor_account_id=None,
+    )
+
+
+async def test_a_stored_slack_group_grants_only_while_a_live_lookup_admits_the_person(
+    db_session: AsyncSession,
+) -> None:
+    """Any member may edit a Slack user group by default: outside a turn, look again."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0STORED")
+    account_id = await _stored_member(db_session, tenant, "U1", ["S1"])
+    await _grant(db_session, tenant, "S1", [])
+
+    async def administered(members: Callable[[str], Awaitable[frozenset[str]]] | None) -> set[str]:
+        subject = await load_stored_subject(
+            db_session,
+            tenant_id=tenant.id,
+            platform="slack",
+            account_id=account_id,
+            platform_user_id="U1",
+            members=members,
+        )
+        return set(subject.administered_channel_ids)
+
+    _, still_in = _fetcher({"S1": frozenset({"U1"})})
+    _, left = _fetcher({"S1": frozenset({"U2"})})
+    _, failing = _fetcher({})
+    assert await administered(still_in) == {"C1"}, "still in the group: still the channel's admin"
+    assert await administered(left) == set(), "left the group: no longer, before their next turn"
+    assert await administered(failing) == set(), "a failed lookup grants nothing"
+    assert await administered(None) == set(), "no lookup at all grants nothing"
+
+
+async def test_stored_discord_roles_stand_without_a_lookup(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111111111111111")
+    account_id = await _stored_member(db_session, tenant, "222222222222222", ["r1"])
+    await _grant(db_session, tenant, "r1", [])
+
+    subject = await load_stored_subject(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        account_id=account_id,
+        platform_user_id="222222222222222",
+    )
+    assert subject.administered_channel_ids == frozenset({"C1"}), (
+        "Discord sends roles with every event and guards them with Manage Roles"
+    )
+
+
+async def test_channel_admin_dms_reach_a_stored_slack_group_member_only_while_still_in_it(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0DMS")
+    await _stored_member(db_session, tenant, "U_STAYED", ["S1"])
+    await _stored_member(db_session, tenant, "U_LEFT", ["S1"])
+    await _grant(db_session, tenant, "S1", ["U_GRANTED"])
+
+    async def recipients(members: Callable[[str], Awaitable[frozenset[str]]] | None) -> list[str]:
+        found = await channel_admin_user_ids(
+            db_session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C1",
+            limit=10,
+            members=members,
+        )
+        assert found is not None, "the channel has a grant"
+        return found
+
+    _, live = _fetcher({"S1": frozenset({"U_STAYED"})})
+    assert await recipients(live) == ["U_GRANTED", "U_STAYED"], (
+        "a member who left the group no longer hears the channel's requests"
+    )
+    assert await recipients(None) == ["U_GRANTED"], "without a lookup only granted users"

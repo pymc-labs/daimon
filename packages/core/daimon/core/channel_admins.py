@@ -11,7 +11,10 @@ adapters look up only the groups some grant names (`load_member_group_ids`),
 each through a short cache (`GroupMembersCache`); a lookup that fails grants
 nothing. Either way the ids a chat turn matched are kept
 (`accounts.platform_role_ids`) for callers with no live platform view, such as
-an MCP call. Recorded in tests/parity/test_channel_admin_groups.py.
+an MCP call. Slack lets any member edit a user group by default, so outside a
+turn a stored Slack group, and likewise a Teams team, counts only while a live
+lookup still admits the person (`confirm_stored_group_ids`); with no lookup it
+counts for nothing. Recorded in tests/parity/test_channel_admin_groups.py.
 """
 
 from __future__ import annotations
@@ -50,6 +53,9 @@ _ROLE_ID = {"discord": r"[0-9]{15,21}", "slack": r"S[A-Z0-9]+", "teams": _UUID}
 
 GROUP_MEMBERS_TTL_S: Final = 60.0
 """How long a Slack user group's or a Teams team's looked-up members are trusted."""
+
+LOOKED_UP_GROUP_PLATFORMS: Final = frozenset({"slack", "teams"})
+"""Platforms whose groups are looked up, not sent: stored ones are re-checked live."""
 
 _log = structlog.get_logger(__name__)
 
@@ -154,6 +160,9 @@ class GroupLookupFailed(DaimonError):
 GroupMembers = Callable[[str], Awaitable[frozenset[str]]]
 """A group id to the user ids it admits; raises `GroupLookupFailed`."""
 
+GroupMembersFor = Callable[[str, str], GroupMembers | None]
+"""A platform and workspace id to that workspace's group lookup, or None without one."""
+
 
 class GroupMembersCache:
     """Group members by key, kept `ttl_s` seconds, so a busy channel costs one lookup a minute.
@@ -202,6 +211,27 @@ async def member_group_ids(
         except GroupLookupFailed as exc:
             _log.warning("channel_admins.group_lookup_failed", group_id=group_id, reason=str(exc))
     return frozenset(matched)
+
+
+async def confirm_stored_group_ids(
+    platform: str | None,
+    platform_user_id: str | None,
+    stored_ids: Iterable[str],
+    members: GroupMembers | None,
+) -> frozenset[str]:
+    """The stored group ids that still admit the person, for a caller outside a chat turn.
+
+    Discord sends roles with every event and guards them with Manage Roles, so
+    its stored roles stand. A Slack user group or Teams team is looked up again
+    (`members`, cached), so someone who left it, or added themselves where
+    members may edit groups, counts as they are now. No lookup grants nothing.
+    """
+    if platform not in LOOKED_UP_GROUP_PLATFORMS:
+        return frozenset(stored_ids)
+    if members is None or platform_user_id is None:
+        return frozenset()
+    user_id = platform_user_id.lower() if platform == "teams" else platform_user_id
+    return await member_group_ids(user_id, stored_ids, members)
 
 
 async def load_member_group_ids(
@@ -262,15 +292,20 @@ async def load_stored_subject(
     platform: str | None,
     account_id: uuid.UUID,
     platform_user_id: str | None,
+    members: GroupMembers | None = None,
 ) -> Subject:
     """The caller as their stored role and grants describe them, as of their last chat turn.
 
     For callers with no live platform role: a private form's submit and a hub
-    login. A server admin's grants are not read; they need none.
+    login. A server admin's grants are not read; they need none. Stored Slack
+    groups and Teams teams count only as `members` confirms them now.
     """
     account = await get_account(session, account_id)
     if account is None or account.role is Role.ADMIN:
         return build_subject(is_admin=account is not None, platform_user_id=platform_user_id)
+    role_ids = await confirm_stored_group_ids(
+        platform, platform_user_id, account.platform_role_ids, members
+    )
     return build_subject(
         is_admin=False,
         platform_user_id=platform_user_id,
@@ -278,20 +313,40 @@ async def load_stored_subject(
             session,
             tenant_id=tenant_id,
             platform=platform or "",
-            caller=ChannelAdminCaller(
-                platform_user_id=platform_user_id, role_ids=frozenset(account.platform_role_ids)
-            ),
+            caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
         ),
     )
 
 
+async def live_group_member_ids(
+    group_ids: Iterable[str], members: GroupMembers | None
+) -> frozenset[str]:
+    """Everyone the groups admit now; a failed lookup, or none at all, adds nobody."""
+    found: set[str] = set()
+    if members is None:
+        return frozenset()
+    for group_id in sorted(set(group_ids)):
+        try:
+            found |= await members(group_id)
+        except GroupLookupFailed as exc:
+            _log.warning("channel_admins.group_lookup_failed", group_id=group_id, reason=str(exc))
+    return frozenset(found)
+
+
 async def channel_admin_user_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str, limit: int
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    limit: int,
+    members: GroupMembers | None = None,
 ) -> list[str] | None:
     """Who a message to `channel_id`'s admins reaches, or None when it has no grant.
 
     The grant's users, plus members whose stored roles or groups match a
-    granted one, as of their last chat turn; sorted, at most `limit`.
+    granted one, as of their last chat turn; a Slack group or Teams team match
+    must still hold by `members` now. Sorted, at most `limit`.
     """
     grant = await get_channel_admins(
         session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
@@ -306,6 +361,10 @@ async def channel_admin_user_ids(
         user_ids=grant.user_ids,
         role_ids=grant.role_ids,
     )
+    if platform in LOOKED_UP_GROUP_PLATFORMS:
+        live = await live_group_member_ids(grant.role_ids, members)
+        fold = str.lower if platform == "teams" else str
+        found = [uid for uid in found if uid in grant.user_ids or fold(uid) in live]
     # A granted user who never spoke to the bot has no account yet.
     return sorted({*found, *grant.user_ids})[:limit]
 
@@ -313,18 +372,22 @@ async def channel_admin_user_ids(
 __all__ = [
     "CHANNEL_ADMIN_PLATFORMS",
     "GROUP_MEMBERS_TTL_S",
+    "LOOKED_UP_GROUP_PLATFORMS",
     "MAX_CHANNEL_ADMIN_IDS",
     "MAX_LISTED_MENTIONS",
     "ChannelAdminCaller",
     "GroupLookupFailed",
     "GroupMembers",
     "GroupMembersCache",
+    "GroupMembersFor",
     "InvalidChannelAdminIds",
     "administered_channel_ids",
     "channel_admin_user_ids",
+    "confirm_stored_group_ids",
     "fit_lines",
     "fold_mentions",
     "is_channel_admin",
+    "live_group_member_ids",
     "load_administered_channel_ids",
     "load_live_subject",
     "load_member_group_ids",

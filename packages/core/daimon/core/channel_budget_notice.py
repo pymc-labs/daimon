@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Final
 
 import structlog
-from daimon.core.channel_admins import channel_admin_user_ids
+from daimon.core.channel_admins import GroupMembers, GroupMembersFor, channel_admin_user_ids
 from daimon.core.channel_budget import describe_budget, get_channel_budget_status
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores.accounts import list_platform_user_ids
@@ -69,10 +69,20 @@ def notice_key(budget: ChannelBudgetRow, *, now: datetime) -> str:
 
 
 async def _recipients(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    members: GroupMembers | None,
 ) -> list[str]:
     listed = await channel_admin_user_ids(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, limit=MAX_RECIPIENTS
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        limit=MAX_RECIPIENTS,
+        members=members,
     )
     if listed:
         return listed
@@ -82,9 +92,19 @@ async def _recipients(
 
 
 async def claim_budget_notice(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str, now: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    now: datetime,
+    group_members: GroupMembersFor | None = None,
 ) -> BudgetNotice | None:
-    """The notice to send, or None when the budget is not exhausted or this window's went out."""
+    """The notice to send, or None when the budget is not exhausted or this window's went out.
+
+    `group_members` re-checks a recipient matched by a stored Slack group or
+    Teams team; without it such a match reaches nobody.
+    """
     status = await get_channel_budget_status(
         session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
     )
@@ -99,7 +119,11 @@ async def claim_budget_notice(
     if tenant is None:
         return None
     recipients = await _recipients(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        members=group_members(platform, tenant.external_id) if group_members else None,
     )
     return BudgetNotice(
         tenant_id=tenant_id,
@@ -120,6 +144,7 @@ async def notify_budget_exhausted(
     platform: str,
     channel_id: str | None,
     now: datetime,
+    group_members: GroupMembersFor | None = None,
 ) -> None:
     """Claim and send this window's notice; every failure is logged, never raised."""
     if notifier is None or channel_id is None:
@@ -128,7 +153,12 @@ async def notify_budget_exhausted(
         async with asyncio.timeout(NOTICE_TIMEOUT_S):
             async with sessionmaker() as session, session.begin():
                 notice = await claim_budget_notice(
-                    session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    channel_id=channel_id,
+                    now=now,
+                    group_members=group_members,
                 )
             if notice is not None and notice.recipient_ids:
                 await notifier(notice)
