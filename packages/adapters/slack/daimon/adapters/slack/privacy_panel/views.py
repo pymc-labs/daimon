@@ -59,6 +59,10 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         ex = escape_mrkdwn(preview.github_credentials.example or "—")
         n = preview.github_credentials.count
         will_happen_lines.append(f"• 🔑 Delete *{n}* stored GitHub token(s) (`{ex}`)")
+    if preview.github_user_links.count > 0:
+        will_happen_lines.append(
+            f"• 🔗 Remove *{preview.github_user_links.count}* GitHub user link(s)"
+        )
     if preview.github_oauth_states.count > 0:
         will_happen_lines.append(
             f"• 🤝 Remove *{preview.github_oauth_states.count}* GitHub OAuth handshake record(s)"
@@ -331,6 +335,8 @@ def build_post_delete_view(
         rows.append(f"• ✓ {result.db.user_skills} synced skill ledger row(s) removed")
     if result.db.github_credentials > 0:
         rows.append(f"• ✓ {result.db.github_credentials} stored GitHub token(s) deleted")
+    if result.db.github_user_links > 0:
+        rows.append(f"• ✓ {result.db.github_user_links} GitHub user link(s) removed")
     if result.db.github_oauth_states > 0:
         rows.append(f"• ✓ {result.db.github_oauth_states} OAuth handshake record(s) removed")
     if result.db.accounts > 0:
