@@ -24,8 +24,10 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Literal
 
+import structlog
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     TenantAccessPolicy,
@@ -76,6 +78,8 @@ __all__ = [
     "admit",
     "reauthorize",
 ]
+
+_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -209,6 +213,15 @@ async def admit_impl(
     category_unresolved: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
+    started = last_stage = perf_counter()
+    stage_ms: dict[str, float] = {}
+
+    def mark(stage: str) -> None:
+        nonlocal last_stage
+        current = perf_counter()
+        stage_ms[stage] = round((current - last_stage) * 1000, 1)
+        last_stage = current
+
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
         principal = await get_or_create_platform_principal(
@@ -223,6 +236,7 @@ async def admit_impl(
         if platform_role_ids is not None:
             await set_platform_role_ids(session, principal.account_id, platform_role_ids)
         await session.commit()
+        mark("identity")
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         # Matched against the live role ids; a server admin needs no grant.
@@ -239,6 +253,7 @@ async def admit_impl(
                 ),
             )
         )
+    mark("policy_and_admins")
 
     # --- Channel protection, first of the policy gates: the turn's reply
     # would land in its thread or channel, so a protected target refuses the
@@ -264,6 +279,7 @@ async def admit_impl(
         category_unresolved=category_unresolved,
     )
     _require_turn_start(policy, subject, turn_place)
+    mark("start_policy")
 
     if (observation := current_outcome.get()) is not None:
         observation.account_id = principal.account_id
@@ -278,6 +294,7 @@ async def admit_impl(
     )
     async with deps.sessionmaker() as session:
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+    mark("config")
 
     # --- Missing config check (before any MA call) ---
     if config.agent_name is None or config.environment_name is None:
@@ -342,6 +359,7 @@ async def admit_impl(
     if (observation := current_outcome.get()) is not None:
         observation.agent_id = agent.id
     environment = await deps.anthropic.beta.environments.retrieve(env_id)
+    mark("agent_environment")
 
     # --- Liveness check on the already-retrieved agent: it was archived out of
     # band since the resolver cached/looked up its id. Self-heal the scope
@@ -379,10 +397,12 @@ async def admit_impl(
         is_dm=is_dm,
     )
     _require_run_agent(policy, grant)
+    mark("agent_policy")
 
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
         raise AdmissionDenied(reason="balance_depleted")
+    mark("balance")
 
     # --- Admission gate: monthly usage cap ---
     if await is_over_cap(
@@ -393,6 +413,7 @@ async def admit_impl(
         now=now,
     ):
         raise AdmissionDenied(reason="cap_exceeded")
+    mark("user_cap")
 
     # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
     budget_channel_id = dm_source_channel_id if is_dm else channel_id
@@ -404,6 +425,7 @@ async def admit_impl(
         now=now,
     ):
         raise AdmissionDenied(reason="channel_budget_exceeded")
+    mark("channel_budget")
 
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
@@ -414,7 +436,7 @@ async def admit_impl(
         is_dm and policy.dm_memory_read_only
     )
 
-    return Admission(
+    result = Admission(
         memory_read_only=memory_read_only,
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
@@ -431,6 +453,17 @@ async def admit_impl(
         budget_channel_id=budget_channel_id,
         grant=grant,
     )
+    mark("result")
+    _log.info(
+        "turn.admission_timing",
+        tenant_id=str(tenant_id),
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        total_ms=round((perf_counter() - started) * 1000, 1),
+        stage_ms=stage_ms,
+    )
+    return result
 
 
 def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Place) -> None:
