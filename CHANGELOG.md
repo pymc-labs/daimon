@@ -49,9 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_admins`, `daimon channels admins set --role` and, on Slack, a
   user group select in the channel admins form; listings show the groups
   before the members. Slack and Teams look up only the groups some grant
-  names, each cached for a minute, and a failed lookup grants nothing. Slack
-  needs the new `usergroups:read` bot scope and Teams the `TeamMember.Read.Group`
-  consent, so existing installs reinstall or upload the updated app package.
+  names, each cached for a minute, and outside a chat turn a stored group counts
+  only while a fresh lookup still lists the person. A failed lookup grants
+  nothing. Any Slack member can edit user groups by default, so limit that to
+  admins before naming one. Slack needs the new `usergroups:read` bot scope and
+  Teams the `TeamMember.Read.Group` consent, so existing installs reinstall or
+  upload the updated app package.
 - **Ask a human reaches a channel's own admins.** On Discord and Slack, a
   request from a channel with channel admins is sent to them by DM, then to the
   server admins if none could be reached, and to the escalation channel only

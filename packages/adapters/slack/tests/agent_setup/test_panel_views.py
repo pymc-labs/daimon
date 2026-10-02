@@ -1295,6 +1295,9 @@ def test_channel_admins_form_offers_user_groups_and_keeps_a_stored_one_slack_no_
     assert [o["value"] for o in groups["element"]["initial_options"]] == ["S0GONE", "S0LEADS"], (
         "the stored groups start selected, so saving keeps them"
     )
+    assert any("limit user group management to admins" in text for text in _texts(form)), (
+        "the form warns that a group admits whoever can join or edit it"
+    )
 
 
 def test_channel_admins_form_without_a_group_listing_says_so_and_offers_no_groups() -> None:

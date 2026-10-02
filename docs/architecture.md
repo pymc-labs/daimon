@@ -420,7 +420,13 @@ Slack and Teams look up only the groups some grant names
 `TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
 grants nothing. `admit()` stores the member's matched group ids on the account
 (`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
-without asking the platform. A channel admin may do what a server admin may for
+without asking the platform for Discord roles. Every Slack member can edit
+user groups by default, so a group grant admits whoever can join it and the
+workspace should limit group management to admins; outside a turn (the MCP
+verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack
+group or Teams team counts only while a live lookup still admits the person
+(`confirm_stored_group_ids`), and a private form's submit, which runs under
+the policy lock, ignores them. A channel admin may do what a server admin may for
 an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions

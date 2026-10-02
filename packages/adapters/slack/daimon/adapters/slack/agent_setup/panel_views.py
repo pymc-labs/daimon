@@ -929,6 +929,11 @@ def build_operator_token_form(*, meta: PanelMetadata) -> dict[str, Any]:
     )
 
 
+GROUP_GRANT_WARNING: Final = (
+    "Anyone who can join or edit a user group picked here becomes this channel's admin. "
+    "Slack lets every member edit user groups by default, so limit user group management "
+    "to admins in the workspace settings first."
+)
 GROUPS_UNLISTED_NOTE: Final = (
     "User groups couldn't be listed (the app needs the usergroups:read scope), so saving "
     "keeps this channel's groups as they are."
@@ -969,7 +974,7 @@ def build_channel_admins_form(
     if groups is None:
         blocks.append(_context(GROUPS_UNLISTED_NOTE))
     elif group_input := _groups_input(groups, group_ids):
-        blocks.append(group_input)
+        blocks += [group_input, _context(GROUP_GRANT_WARNING)]
     blocks.append(_context(f"Empty the lists to clear it. {CHANNEL_ADMINS_NOTE}"))
     return finish_modal(
         title=CHANNEL_ADMINS_LABEL,

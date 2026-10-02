@@ -21,7 +21,12 @@ lose thread previews and the upload buffers the whole payload in memory), and
 `files:write` bot scope; adding a scope to an existing install requires
 re-running the install flow. Channel admin grants that name a user group need
 the `usergroups:read` bot scope; without it the form can't list groups and a
-group grant admits nobody. A workspace that has hit its Slack file-storage
+group grant admits nobody. A user group grant makes anyone who can join or edit
+that group a channel admin, and by default every Slack member can edit user
+groups, so limit user group management to admins in the workspace settings
+before naming one. Outside a chat turn (MCP calls, the hub, channel admin
+DMs) a group counts only while a fresh lookup, cached for a minute, still lists
+the person. A workspace that has hit its Slack file-storage
 limit gets one in-thread notice and no deliveries until space is freed.
 
 ### Skill files
