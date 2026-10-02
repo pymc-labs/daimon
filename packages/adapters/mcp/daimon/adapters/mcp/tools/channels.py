@@ -103,14 +103,16 @@ async def _read_policy(
 
 
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, recipient_id: str, content: str
     ) -> DirectMessageResult:
         """Privately message one human member of the current server/workspace.
 
         Pass a platform user ID, not a channel or mention. Both sender and
-        recipient must still belong to this tenant. Tenant policy may disable
+        recipient must still belong to this tenant. Teams: the recipient's
+        Entra object id; both of you must be in a team daimon is in, and the
+        message arrives in their 1:1 chat with daimon. Tenant policy may disable
         delivery or restrict recipients to an allowlist. Plain text only, up to
         19000 characters, split into bounded messages. Returns all delivery IDs;
         a partial failure states how many messages were already sent, so do not
