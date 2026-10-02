@@ -44,7 +44,13 @@ from daimon.core.stores.support_escalation import (
     record_escalation,
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import remaining_credits
+from daimon.core.support_escalation import (
+    OUT_OF_CREDITS,
+    RECEIVED,
+    RECORDED_UNDELIVERED,
+    received_text,
+    remaining_credits,
+)
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -53,7 +59,14 @@ from microsoft_teams.api import (
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ActionSet, AdaptiveCard, TextInput
 
-__all__ = ["VERB", "SupportCommand", "enabled"]
+__all__ = [
+    "OUT_OF_CREDITS",
+    "RECEIVED",
+    "RECORDED_UNDELIVERED",
+    "VERB",
+    "SupportCommand",
+    "enabled",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -69,14 +82,8 @@ FORM_TEXT = (
     "You have {remaining} requests left."
 )
 USAGE = "Write what you need help with first."
-OUT_OF_CREDITS = (
-    "You've used all your human-support requests. "
-    "Contact us if you'd like more added to your account."
-)
-RECEIVED = (
-    "Thanks, your request has been recorded and someone will follow up. You have {remaining} left."
-)
-RECORDED_UNDELIVERED = "Thanks, your request has been recorded and someone will follow up."
+# OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
+# (`daimon.core.support_escalation`), re-exported for this module's callers.
 
 
 def _teams_channel(channel_id: str) -> bool:
@@ -225,7 +232,7 @@ class SupportCommand:
         log.info("support.escalation_recorded", escalation_id=str(row.id), delivered=delivered)
         if not delivered:
             return RECORDED_UNDELIVERED
-        return RECEIVED.format(remaining=await self._remaining(tenant_id, asked.user_id))
+        return received_text(remaining=await self._remaining(tenant_id, asked.user_id))
 
     async def _post(self, body: str) -> bool:
         """Post `body` to the escalation channel; False when it did not land."""

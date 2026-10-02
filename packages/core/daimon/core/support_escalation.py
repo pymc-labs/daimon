@@ -111,3 +111,50 @@ def remaining_credits(*, allowance: int, used: int) -> int:
 def has_credit(*, allowance: int, used: int) -> bool:
     """Whether one more escalation is permitted."""
     return remaining_credits(allowance=allowance, used=used) > 0
+
+
+def is_enabled(*, channel_id: str | None, allowance: int) -> bool:
+    """Whether a platform offers the escalate affordance at all.
+
+    Each platform passes its OWN escalation channel: an unset channel disables
+    that platform's affordance rather than recording requests nobody reads,
+    and an allowance of 0 disables it everywhere.
+    """
+    return bool(channel_id) and allowance > 0
+
+
+# Person-facing copy, shared so Discord and Slack say the same thing. Each
+# adapter renders its own markup around it; none of these carry markup.
+
+OUT_OF_CREDITS: Final[str] = (
+    "You've used all your human-support requests. "
+    "Contact us if you'd like more added to your account."
+)
+UNAVAILABLE: Final[str] = "This support request is no longer available."
+EMPTY_NOTE: Final[str] = "Please describe what you need help with."
+ALREADY_REQUESTED: Final[str] = (
+    "You've already asked for a human on this answer -- someone will follow up. "
+    "That request didn't use another credit."
+)
+RECORDED_UNDELIVERED: Final[str] = (
+    "Thanks -- your request has been recorded and someone will follow up."
+)
+RECEIVED: Final[str] = (
+    "Thanks -- your request has been recorded and someone will follow up. "
+    "You have {remaining} left."
+)
+_OFFER: Final[str] = (
+    "You asked for a human on that answer. "
+    "You have {remaining} support request(s) left -- "
+    "tell us what you need and we'll pick it up."
+)
+
+
+def received_text(*, remaining: int) -> str:
+    """The confirmation once a request has landed in the escalation channel."""
+    return RECEIVED.format(remaining=remaining)
+
+
+def offer_text(*, remaining: int) -> str:
+    """The prompt shown before the note form: how many requests are left."""
+    return _OFFER.format(remaining=remaining)

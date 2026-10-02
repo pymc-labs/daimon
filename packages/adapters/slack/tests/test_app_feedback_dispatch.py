@@ -20,6 +20,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.feedback import FEEDBACK_TEXT_CALLBACK_ID, FEEDBACK_VOTE_UP
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.support_escalation import ASK_HUMAN_ACTION_ID, SUPPORT_CALLBACK_ID
 from pydantic import SecretStr
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -157,3 +158,92 @@ async def test_feedback_text_submission_whitespace_acks_errors_and_spawns_nothin
         "whitespace-only text must ack with a field error"
     )
     assert ran == [], "a rejected submission must not spawn the background write"
+
+
+def _ask_human_request() -> SocketModeRequest:
+    return SocketModeRequest(
+        type="interactive",
+        envelope_id="env_support_click_001",
+        payload={
+            "type": "block_actions",
+            "team": {"id": "T_TEST"},
+            "user": {"id": "U_TEST", "team_id": "T_TEST"},
+            "channel": {"id": "C_TEST"},
+            "container": {"message_ts": "1700000001.000100"},
+            "trigger_id": "trig_support_001",
+            "actions": [{"action_id": ASK_HUMAN_ACTION_ID}],
+        },
+    )
+
+
+def _support_submission_request(note: str, *, user_team: str = "T_TEST") -> SocketModeRequest:
+    return SocketModeRequest(
+        type="interactive",
+        envelope_id="env_support_submit_001",
+        payload={
+            "type": "view_submission",
+            "team": {"id": "T_TEST"},
+            "user": {"id": "U_TEST", "team_id": user_team},
+            "view": {
+                "callback_id": SUPPORT_CALLBACK_ID,
+                "id": "V_TEST",
+                "private_metadata": json.dumps(
+                    {"channel_id": "C_TEST", "message_ts": "1700000001.000100"}
+                ),
+                "state": {
+                    "values": {"support_note_block": {"support_note_input": {"value": note}}}
+                },
+            },
+        },
+    )
+
+
+async def test_ask_human_click_acks_then_spawns_handler() -> None:
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    spawned: list[str] = []
+
+    async def _fake_handle(runtime: Any, payload: Any) -> None:
+        spawned.append(str(payload["actions"][0]["action_id"]))
+
+    with patch("daimon.adapters.slack.app.handle_ask_human_click", new=_fake_handle):
+        await app.on_request(fake_client, _ask_human_request())  # type: ignore[arg-type]
+        await _drain(app)
+
+    assert fake_client.call_log[0] == "send_socket_mode_response"
+    assert spawned == [ASK_HUMAN_ACTION_ID]
+
+
+async def test_support_submission_acks_empty_and_spawns_run() -> None:
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    ran: list[str] = []
+
+    async def _fake_run(runtime: Any, submission: Any) -> None:
+        ran.append(str(submission.note))
+
+    with patch("daimon.adapters.slack.app.run_support_submission", new=_fake_run):
+        await app.on_request(fake_client, _support_submission_request("help"))  # type: ignore[arg-type]
+        await _drain(app)
+
+    assert fake_client.sent_responses[0].payload is None
+    assert ran == ["help"]
+
+
+async def test_external_support_submission_closes_and_spawns_nothing() -> None:
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    ran: list[str] = []
+
+    async def _fake_run(runtime: Any, submission: Any) -> None:
+        ran.append(str(submission.note))
+
+    with patch("daimon.adapters.slack.app.run_support_submission", new=_fake_run):
+        await app.on_request(
+            fake_client,
+            _support_submission_request("help", user_team="T_ELSEWHERE"),  # type: ignore[arg-type]
+        )
+        await _drain(app)
+
+    assert fake_client.sent_responses[0].payload is None
+    assert ran == [], "an external Slack Connect member's note must go nowhere"

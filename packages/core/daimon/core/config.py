@@ -947,27 +947,50 @@ class SupportSettings(BaseModel):
     let a support request eat the tenant's ability to run turns, and would give
     a paid-up tenant unlimited support. Different unit, different table.
 
-    An unset `escalation_channel_id` disables the escalate affordance entirely
+    Discord and Teams requests go to `escalation_channel_id` (a Teams `19:…`
+    channel is posted by the Teams bot, any other id is a Discord channel);
+    Slack requests go only to `slack_escalation_channel_id`, never to that
+    channel. An unset channel disables the affordance it serves entirely
     rather than recording requests nobody will ever see. Failing closed is the
     honest behaviour: an escalate button that reaches no one is worse than no
-    button, because the person believes they have asked for help.
+    button, because the person believes they have asked for help. Every
+    platform spends the same per-user, per-tenant allowance from one ledger.
     """
 
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Channel id where human-support requests are posted: a Discord channel id, "
-            "or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests "
-            "reach a Discord channel only when the Discord bot token is also set. Unset (the "
-            "default) disables the escalate affordance entirely — a request "
-            "that reaches nobody is worse than no button at all. A channel "
-            "rather than operator DMs: it survives one person's DMs being "
-            "closed, and it leaves a shared record anyone on the rota can pick "
-            "up. The bot must be able to post there."
+            "Channel id where human-support requests from Discord and Teams are "
+            "posted: a Discord channel id, or a Teams channel id (`19:…`) that the "
+            "Teams bot posts in. Teams requests reach a Discord channel only when "
+            "the Discord bot token is also set. Unset (the default) disables the "
+            "escalate affordance on Discord and Teams — a request that reaches "
+            "nobody is worse than no button at all. A channel rather than operator "
+            "DMs: it survives one person's DMs being closed, and it leaves a shared "
+            "record anyone on the rota can pick up. The bot must be able to post there."
+        ),
+    )
+    slack_escalation_channel_id: str | None = Field(
+        default=None,
+        description=(
+            "Slack channel id where human-support requests from Slack are "
+            "posted. Unset (the default) disables the Ask a human button on "
+            "Slack. Slack requests never go to the Discord channel, nor Discord "
+            "requests here. The bot must be a member of the channel."
+        ),
+    )
+    slack_escalation_team_id: str | None = Field(
+        default=None,
+        description=(
+            "Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID, "
+            "for a deployment installed in several workspaces: every workspace's "
+            "requests are posted with that workspace's bot token. Unset posts with "
+            "the requesting workspace's own token, which suits a single-workspace "
+            "install. daimon must be installed in the named workspace."
         ),
     )
     credits_per_user: int = Field(
-        default=3,
+        default=20,
         ge=0,
         description=(
             "How many human-support requests each user gets within a tenant. "

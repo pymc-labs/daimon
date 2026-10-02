@@ -7,21 +7,29 @@ session.flush()`.
 The credit gate lives in `record_escalation` rather than in the caller, and it
 counts inside the caller's transaction, because a check performed before the
 transaction is a TOCTOU: two fast clicks both read `used=2` against an
-allowance of 3, both decide they are permitted, and both insert. Counting on
-the same connection that inserts makes the check and the write atomic under
-`REPEATABLE READ` or better, and under `READ COMMITTED` narrows the window to
-the statement pair rather than to a round trip through Discord.
+allowance of 3, both decide they are permitted, and both insert. Before it
+counts, `record_escalation` takes a transaction-scoped advisory lock on the
+(tenant, user) pair, so a second request for the same person waits until the
+first commits or rolls back and then counts its row: the count and the insert
+are atomic under `READ COMMITTED` too, not just narrowed to a statement pair.
+
+`record_escalation_once` adds the double-submit guard: under the same lock it
+refuses a second request from the same person on the same message, so a
+double click or a platform retry neither spends a second credit nor posts
+twice.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
-from typing import Any, cast
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, cast
 
 from daimon.core._models import SupportEscalation
+from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import SupportEscalationRow
-from daimon.core.support_escalation import has_credit
+from daimon.core.support_escalation import has_credit, remaining_credits
 from sqlalchemy import (
     ColumnElement,
     CursorResult,
@@ -29,10 +37,29 @@ from sqlalchemy import (
     func,
     or_,
     select,
+    text,
     tuple_,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Namespace prefix for the pg_advisory_xact_lock key, so this ledger's keys
+# never collide with another advisory-lock user in the same database.
+_LOCK_NAMESPACE = "daimon:support_escalation:"
+
+
+async def _lock_user_ledger(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform_user_id: str
+) -> None:
+    """Serialize every escalation write for one (tenant, user) until the transaction ends.
+
+    Blocking and transaction-scoped: a concurrent request for the same person
+    waits, then counts (and sees) the row the first one committed.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"{_LOCK_NAMESPACE}{tenant_id}:{platform_user_id}"},
+    )
 
 
 async def count_escalations_for_user(
@@ -82,6 +109,7 @@ async def record_escalation(
     Committing the row first is deliberate and is the reason this function does
     not take a delivery callback.
     """
+    await _lock_user_ledger(session, tenant_id=tenant_id, platform_user_id=platform_user_id)
     used = await count_escalations_for_user(
         session, tenant_id=tenant_id, platform_user_id=platform_user_id
     )
@@ -102,6 +130,129 @@ async def record_escalation(
     await session.flush()
     await session.refresh(orm)
     return SupportEscalationRow.model_validate(orm)
+
+
+EscalationStatus = Literal["recorded", "duplicate", "out_of_credits", "refused"]
+
+
+@dataclass(frozen=True)
+class EscalationOutcome:
+    """What `record_escalation_once` did, and how many credits are left after it.
+
+    `row` is the new row for "recorded" and None otherwise. `remaining` is
+    counted inside the same transaction, so the confirmation shows the count
+    the write actually left rather than a later re-read. "refused" means the
+    caller's `source_allowed` check said no; nothing was written or counted
+    (`remaining` is then -1, meaning "not read").
+    """
+
+    status: EscalationStatus
+    row: SupportEscalationRow | None
+    remaining: int
+
+
+async def find_escalation_for_message(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    channel_id: str,
+    message_id: str,
+) -> SupportEscalationRow | None:
+    """This person's existing request on one message, if any."""
+    stmt = (
+        select(SupportEscalation)
+        .where(
+            SupportEscalation.tenant_id == tenant_id,
+            SupportEscalation.platform == platform,
+            SupportEscalation.platform_user_id == platform_user_id,
+            SupportEscalation.channel_id == channel_id,
+            SupportEscalation.message_id == message_id,
+        )
+        .limit(1)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else SupportEscalationRow.model_validate(orm)
+
+
+async def record_escalation_once(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    platform: str,
+    platform_user_id: str,
+    channel_id: str,
+    message_id: str,
+    ma_session_id: str | None,
+    note: str,
+    allowance: int,
+    source_allowed: Callable[[AsyncSession], Awaitable[bool]] | None = None,
+) -> EscalationOutcome:
+    """`record_escalation`, refusing a second request from one person on one message.
+
+    `source_allowed` is the caller's authoritative access decision for the
+    place the request comes from. It runs inside this transaction AFTER both
+    locks are held, so it must read the policy itself (fresh): lock order is
+    the per-person ledger lock, then the tenant policy lock
+    (`lock_access_policy`, FOR NO KEY UPDATE on the tenant row), each held to
+    the end of the caller's transaction. A policy edit committed while this
+    waited for the ledger lock is therefore read and refuses, with nothing
+    spent; an edit arriving once the policy lock is held waits for the commit.
+    No holder of the tenant lock (the policy writers, a private form's consume)
+    ever takes a ledger lock, and the insert's foreign-key check takes only KEY
+    SHARE, which NO KEY UPDATE does not block, so the order cannot deadlock.
+
+    The duplicate check, the credit count and the insert all run under the
+    (tenant, user) lock in the caller's transaction, so two submissions racing
+    on one message record one row and spend one credit; the loser reads the
+    winner's committed row and reports "duplicate". A duplicate is checked
+    before credits so someone who spent their last credit on this very
+    message hears that it is in hand, not that they are out.
+    """
+    await _lock_user_ledger(session, tenant_id=tenant_id, platform_user_id=platform_user_id)
+    if source_allowed is not None:
+        await lock_access_policy(session, tenant_id=tenant_id)
+        if not await source_allowed(session):
+            return EscalationOutcome(status="refused", row=None, remaining=-1)
+    existing = await find_escalation_for_message(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        channel_id=channel_id,
+        message_id=message_id,
+    )
+    if existing is not None:
+        used = await count_escalations_for_user(
+            session, tenant_id=tenant_id, platform_user_id=platform_user_id
+        )
+        return EscalationOutcome(
+            status="duplicate",
+            row=None,
+            remaining=remaining_credits(allowance=allowance, used=used),
+        )
+    row = await record_escalation(
+        session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        channel_id=channel_id,
+        message_id=message_id,
+        ma_session_id=ma_session_id,
+        note=note,
+        allowance=allowance,
+    )
+    used = await count_escalations_for_user(
+        session, tenant_id=tenant_id, platform_user_id=platform_user_id
+    )
+    return EscalationOutcome(
+        status="out_of_credits" if row is None else "recorded",
+        row=row,
+        remaining=remaining_credits(allowance=allowance, used=used),
+    )
 
 
 async def mark_delivered(

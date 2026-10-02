@@ -82,6 +82,39 @@ With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown table
 text. Surrounding prose and multiple tables are delivered in order.
 
 
+### Ask a human
+
+Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a human** button
+next to the 👍/👎 buttons on every final answer. It opens a short form; sending it
+spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
+default 20, counted per person per workspace and shared with Discord's ledger) and
+posts the request to that channel. Opening the form spends nothing, and asking twice
+on the same answer (a double click, two open forms, a Slack retry) records and posts
+once.
+
+- **Slack-only deployments** set the Slack channel. Leaving it unset hides the
+  button: a request nobody reads is worse than none.
+- **Discord + Slack deployments** set both channels. Discord (and Teams) requests go
+  to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel; a
+  Slack request is never posted to another platform, and setting only the Discord
+  channel leaves Slack off. (Teams is the one cross-platform case: its `support`
+  command may post to a Discord channel, see [Teams](teams.md).)
+- **Several workspaces**: requests are posted with the requesting workspace's bot
+  token unless `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that
+  owns the channel; then every workspace's requests are posted with that one's token.
+  The bot must be a member of the channel.
+
+Who may ask: anyone who could start a turn in that thread (the invoker allowlist and
+channel protection, checked on click and again on send). External Slack Connect
+members are refused. A protected escalation channel refuses the post; the request
+stays recorded as undelivered.
+
+What is posted: the requester (mention, username, user and workspace id), a link to
+the answer, and their note. No answer text or conversation content, the same as
+Discord, and link previews are off, so the link shows nothing to anyone who can't
+already open the channel. When the answer is in a sealed channel or thread, the form
+tells the person their note leaves the channel, and the post says to answer there.
+
 ### Private conversations
 
 Workspace admins opt in with `/dm enable` (and disable with `/dm disable`). Then use
