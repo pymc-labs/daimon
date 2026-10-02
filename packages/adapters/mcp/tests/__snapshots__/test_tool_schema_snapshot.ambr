@@ -557,8 +557,8 @@
         
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
-        channel may clear that channel's environment. A thread id resolves to its
-        parent channel.
+        channel may clear that channel's environment, unless it is sealed and the
+        default has unrestricted networking. A thread id resolves to its parent channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4444,7 +4444,8 @@
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
-        may set that channel's environment.
+        may set that channel's environment, except one with unrestricted networking in
+        a sealed channel, which needs a server admin.
         
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack

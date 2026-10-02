@@ -24,7 +24,6 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
-from daimon.adapters.mcp.tools._ctx import _require_admin  # pyright: ignore[reportPrivateUsage]
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.authz import Action, AgentRef, Place, authorize
@@ -98,16 +97,6 @@ async def require_channel_admin(
             "and the caller is neither. Tell them who can make it and give them a sentence "
             "that admin can say, preserving the requested action and channel. Do not retry."
         )
-
-
-async def require_scope_admin(
-    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str | None
-) -> None:
-    """The workspace scope needs a server admin; a channel's also admits its channel admins."""
-    if channel_id is None:
-        _require_admin(auth)
-    else:
-        await require_channel_admin(runtime, auth, channel_id=channel_id)
 
 
 def _target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tuple[str | None, ...]:

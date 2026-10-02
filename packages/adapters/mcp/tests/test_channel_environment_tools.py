@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from unittest.mock import MagicMock
 
 import pytest
+from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import channel_environments as tool_module
@@ -19,11 +21,14 @@ from daimon.adapters.mcp.tools.channel_environments import (
 from daimon.adapters.mcp.tools.propagation import (
     _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import list_administered_channel_ids
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.testing import ma_environment
+from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from fastmcp.exceptions import ToolError
@@ -58,12 +63,30 @@ async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[uuid.UU
         return tenant.id, (await make_account(session, tenant=tenant)).id
 
 
+LIMITED = BetaCloudConfig(
+    type="cloud",
+    networking=BetaLimitedNetwork(
+        type="limited", allowed_hosts=[], allow_mcp_servers=False, allow_package_managers=False
+    ),
+    packages=EMPTY_CLOUD_CONFIG.packages,
+)
+"""A cloud environment that reaches no host but its own."""
+
+
 def _runtime(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *names: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *names: str,
+    limited: tuple[str, ...] = (),
 ) -> McpRuntime:
+    """Environments `names` (unrestricted networking) and `limited`, in that tenant."""
     router = MARouter()
     router.add_environment_list(
-        *(ma_environment(id=f"env_{name}", name=name, tenant_id=tenant_id) for name in names)
+        *(ma_environment(id=f"env_{name}", name=name, tenant_id=tenant_id) for name in names),
+        *(
+            ma_environment(id=f"env_{name}", name=name, tenant_id=tenant_id, config=LIMITED)
+            for name in limited
+        ),
     )
     return McpRuntime(
         session_factory=sessionmaker,
@@ -92,6 +115,21 @@ def _auth(
         platform_role_ids=role_ids,
         agent_id=agent_id,
     )
+
+
+async def _verified(runtime: McpRuntime, auth: AuthIdentity) -> AuthIdentity:
+    """`auth` with the channel admin grants the token verifier reads on each request."""
+    if auth.agent_id is not None or auth.is_admin:
+        return auth
+    async with runtime.session_factory() as session:
+        administered = await list_administered_channel_ids(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform or "",
+            platform_user_id=USER,
+            role_ids=auth.platform_role_ids,
+        )
+    return dataclasses.replace(auth, administered_channel_ids=frozenset(administered))
 
 
 async def _grant(
@@ -200,6 +238,7 @@ async def test_members_are_refused_and_channel_admins_act_on_their_channel_only(
         role_ids=[],
         user_ids=[USER],
     )
+    member = await _verified(runtime, member)
 
     result = await _set_channel_environment_impl(
         runtime, member, environment_name="science", channel_id=CHANNEL
@@ -263,7 +302,7 @@ async def test_a_channel_admin_in_a_thread_picks_its_parent_channel(
     tenant_id, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, tenant_id, "science")
     await _grant(runtime, tenant_id, account_id, user_ids=[USER])
-    member = _auth(tenant_id, account_id)
+    member = await _verified(runtime, _auth(tenant_id, account_id))
 
     result = await _set_channel_environment_impl(
         runtime, member, environment_name="science", channel_id=THREAD
@@ -330,7 +369,7 @@ async def test_a_role_grant_admits_holders_of_that_role_only(
 
     result = await _set_channel_environment_impl(
         runtime,
-        _auth(tenant_id, account_id, role_ids=(ROLE,)),
+        await _verified(runtime, _auth(tenant_id, account_id, role_ids=(ROLE,))),
         environment_name="science",
         channel_id=CHANNEL,
     )
@@ -338,7 +377,7 @@ async def test_a_role_grant_admits_holders_of_that_role_only(
     with pytest.raises(ToolError, match="admin of that channel"):
         await _set_channel_environment_impl(
             runtime,
-            _auth(tenant_id, account_id, role_ids=(OTHER_ROLE,)),
+            await _verified(runtime, _auth(tenant_id, account_id, role_ids=(OTHER_ROLE,))),
             environment_name="science",
             channel_id=CHANNEL,
         )
@@ -350,7 +389,10 @@ async def test_an_agent_credential_is_never_a_channel_admin(
     tenant_id, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, tenant_id, "science")
     await _grant(runtime, tenant_id, account_id, user_ids=[USER])
-    agent = _auth(tenant_id, account_id, agent_id=uuid.uuid4())
+    agent = dataclasses.replace(
+        _auth(tenant_id, account_id, agent_id=uuid.uuid4()),
+        administered_channel_ids=frozenset({CHANNEL}),
+    )
 
     with pytest.raises(ToolError, match="admin of that channel"):
         await _set_channel_environment_impl(
@@ -388,3 +430,103 @@ async def test_a_pick_on_a_channel_the_lookup_refuses_is_refused_but_can_be_clea
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=HIDDEN))
         is None
     ), "the cleared row is gone"
+
+
+async def _seal(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, channel_id: str
+) -> None:
+    async with sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(sealed_channel_ids=(channel_id,)),
+        )
+
+
+async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """In a sealed channel an unrestricted network is a server admin's call; a limited one isn't."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open", limited=("closed",))
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+    member = await _verified(runtime, _auth(tenant_id, account_id))
+
+    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="open", channel_id=CHANNEL
+        )
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "the refused pick writes nothing"
+    closed = await _set_channel_environment_impl(
+        runtime, member, environment_name="closed", channel_id=CHANNEL
+    )
+    assert closed.changed, "a limited network stays the channel admin's pick"
+    opened = await _set_channel_environment_impl(
+        runtime,
+        _auth(tenant_id, account_id, admin=True),
+        environment_name="open",
+        channel_id=CHANNEL,
+    )
+    assert opened.changed, "a server admin may pick an unrestricted network there"
+    with pytest.raises(ToolError, match="sealed"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="open", channel_id=THREAD
+        )
+
+
+async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Clearing falls back to the workspace default, so its network decides the clear."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open", limited=("closed",))
+    admin = _auth(tenant_id, account_id, admin=True)
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+    member = await _verified(runtime, _auth(tenant_id, account_id))
+    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
+    await _set_channel_environment_impl(
+        runtime, admin, environment_name="closed", channel_id=CHANNEL
+    )
+
+    with pytest.raises(ToolError, match="sealed.*the default it would fall back to"):
+        await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
+    await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
+    cleared = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
+    assert cleared.changed, "onto a limited workspace default the channel admin may clear"
+
+
+async def test_an_operator_token_needs_channels_write_and_a_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """`channels:write` opens a channel's environment to an operator, never the workspace's."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+
+    def operator(*scopes: str) -> AuthIdentity:
+        return dataclasses.replace(
+            _auth(tenant_id, account_id, admin=True),
+            token_kind="operator",
+            token_jti=uuid.uuid4(),
+            scopes=frozenset(scopes),
+        )
+
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _set_channel_environment_impl(
+            runtime, operator("tenant:read"), environment_name="science", channel_id=CHANNEL
+        )
+    with pytest.raises(ToolError, match="only a channel's environment"):
+        await _set_channel_environment_impl(
+            runtime, operator("channels:write"), environment_name="science", channel_id=None
+        )
+    result = await _set_channel_environment_impl(
+        runtime, operator("channels:write"), environment_name="science", channel_id=CHANNEL
+    )
+    cleared = await _clear_channel_environment_impl(
+        runtime, operator("channels:write"), channel_id=CHANNEL
+    )
+    assert result.changed and cleared.changed, "with the scope it sets and clears a channel's"

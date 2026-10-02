@@ -2,9 +2,12 @@
 
 ``register_channel_environment_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closures; each delegates to a module-private ``_*_impl`` that tests call
-without a FastMCP Context. The workspace default needs a server admin; a
-channel's environment also admits that channel's admins, as its default agent
-does.
+without a FastMCP Context. `authorize` decides who may pick
+(SET_CHANNEL_ENVIRONMENT): the workspace default needs a server admin; a
+channel's also admits that channel's admins, as its default agent does, except
+an environment with unrestricted networking in a sealed channel. An operator
+token with ``channels:write`` sets channels' environments, never the workspace
+default.
 """
 
 from __future__ import annotations
@@ -14,15 +17,23 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._ctx import (
+    _auth,  # pyright: ignore[reportPrivateUsage]
+    _require_admin,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
-from daimon.adapters.mcp.tools.reachability import require_scope_admin
+from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.channel_environments import (
+    authorize_environment_pick,
     build_clear_environment_note,
+    build_sealed_network_refusal,
     build_set_environment_note,
     save_scope_environment,
 )
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
+from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -78,6 +89,47 @@ async def _environment_channel(
     return await resolve_visible_channel(runtime, auth, target)
 
 
+_NEEDS_ADMIN: str = (
+    "This change needs a workspace or server admin, or an admin of that channel, "
+    "and the caller is neither. Tell them who can make it and give them a sentence "
+    "that admin can say, preserving the requested action and channel. Do not retry."
+)
+
+
+async def _require_pick_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str | None,
+    environment_name: str | None,
+) -> None:
+    """Raise ``ToolError`` unless the caller may leave the scope on `environment_name`."""
+    require_scope(auth, "channels:write")
+    if channel_id is None and auth.is_operator:
+        raise ToolError("An operator token changes only a channel's environment; pass channel_id.")
+    async with runtime.session_factory() as session:
+        try:
+            decision = await authorize_environment_pick(
+                session,
+                runtime.client,
+                tenant_id=auth.tenant_id,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                channel_id=channel_id,
+                environment_name=environment_name,
+                default=runtime.deployment_default,
+            )
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+    if decision.reason == "sealed":
+        raise ToolError(
+            build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."
+        )
+    if not decision:
+        if channel_id is None:
+            _require_admin(auth)  # the workspace default's own copy
+        raise ToolError(_NEEDS_ADMIN)
+
+
 async def _set_channel_environment_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -86,8 +138,8 @@ async def _set_channel_environment_impl(
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
     channel_id = await _environment_channel(runtime, auth, channel_id)
-    await require_scope_admin(runtime, auth, channel_id=channel_id)
     name = environment_name.strip()
+    await _require_pick_allowed(runtime, auth, channel_id=channel_id, environment_name=name)
     environment = await find_environment_by_daimon_tag(
         runtime.client, tenant_id=auth.tenant_id, name=name
     )
@@ -120,7 +172,7 @@ async def _clear_channel_environment_impl(
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
     channel_id = await _environment_channel(runtime, auth, channel_id, lenient=True)
-    await require_scope_admin(runtime, auth, channel_id=channel_id)
+    await _require_pick_allowed(runtime, auth, channel_id=channel_id, environment_name=None)
     async with runtime.session_factory.begin() as session:
         previous = await save_scope_environment(
             session,
@@ -139,7 +191,7 @@ async def _clear_channel_environment_impl(
 
 
 def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def set_channel_environment(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         environment_name: str,
@@ -153,7 +205,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
-        may set that channel's environment.
+        may set that channel's environment, except one with unrestricted networking in
+        a sealed channel, which needs a server admin.
 
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
@@ -163,7 +216,7 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
             runtime, await _auth(ctx), environment_name=environment_name, channel_id=channel_id
         )
 
-    @mcp.tool(tags={"admin", "channel-admin"})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def clear_channel_environment(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,
@@ -174,8 +227,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
 
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
-        channel may clear that channel's environment. A thread id resolves to its
-        parent channel.
+        channel may clear that channel's environment, unless it is sealed and the
+        default has unrestricted networking. A thread id resolves to its parent channel.
         """
         return await _clear_channel_environment_impl(
             runtime, await _auth(ctx), channel_id=channel_id
