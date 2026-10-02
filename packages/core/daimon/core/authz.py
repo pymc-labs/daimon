@@ -71,6 +71,13 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
+- **Handoff** (`HAND_OFF`): handing a thread to another agent is starting a
+  turn there as that agent, so protection, the invoker allowlist, the pin and
+  isolation all apply, with no admin exemption. A member may bring in an agent
+  scoped to the channel (the one it answers with, one pinned to it, or one of
+  its own agents when isolated); any other needs a server admin, or a channel
+  admin of the parent channel when neither the place nor any live session in
+  it was sealed.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 - **Isolation** (`channel_isolated`): an isolated channel C is sealed and
@@ -168,6 +175,13 @@ class Action(StrEnum):
     # the workspace default). `open_network` says the environment it leaves
     # the channel in has unrestricted networking.
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
+    # Hand a thread's conversation to another agent (`Place` is the thread).
+    # Protection and the invoker allowlist as START_TURN, then RUN_AGENT on
+    # the handoff surface, then who may bring that agent here: anyone when it
+    # is scoped to this channel (`Request.answers_here`, a pin naming it, or
+    # one of this isolated channel's own agents); otherwise a server admin, or
+    # a channel admin of the parent channel unless the place is sealed.
+    HAND_OFF = "hand_off"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
     # Read or continue a recorded session's transcript.
@@ -375,6 +389,12 @@ class Request:
     operation_family: OperationFamily | None = None
     reach: AgentReach | None = None
     open_network: bool = False
+    # HAND_OFF: the channel/workspace cascade already sends this place's
+    # parent channel to the agent.
+    answers_here: bool = False
+    # HAND_OFF: every id that sealed a live session in the thread, as the
+    # sessions recorded it. A seal lifted since still counts.
+    recorded_seal_ids: frozenset[str] = frozenset()
 
 
 def _names_pinned(policy: TenantAccessPolicy, names: tuple[str | None, ...]) -> bool:
@@ -459,6 +479,62 @@ def _holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None)
         for at in places
         if at is not None and at.parent_channel_id == channel and at.channel_id is not None
     )
+
+
+def _place_sealed(policy: TenantAccessPolicy, place: Place) -> bool:
+    """The place, its parent channel, or (Slack) its ``channel:ts`` thread is sealed."""
+    ids = {place.channel_id, place.parent_channel_id}
+    if place.parent_channel_id is not None and place.channel_id is not None:
+        ids.add(f"{place.parent_channel_id}:{place.channel_id}")
+    return any(i is not None and i in policy.sealed_channel_ids for i in ids)
+
+
+def _scoped_here(policy: TenantAccessPolicy, req: Request) -> bool:
+    """The agent belongs in this place without anyone's say-so.
+
+    The channel answers with it, a pin names this channel for it, or it is
+    one of this isolated channel's own agents.
+    """
+    agent, place = req.agent, req.place
+    if req.answers_here:
+        return True
+    if (
+        place.channel_id is not None
+        and _names_pinned(policy, agent.names)
+        and not _outside_pin(policy, agent, place)
+    ):
+        return True
+    return place.isolated_channel is not None and agent.confined_to == place.isolated_channel
+
+
+def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
+    subject, place = req.subject, req.place
+    started = _decide(policy, replace(req, action=Action.START_TURN))
+    if not started:
+        return started
+    if not req.agent.present:
+        return _deny("agent_unresolved")
+    # The handoff surface is shared, so no admin exemption from the pin.
+    ran = _decide(policy, replace(req, action=Action.RUN_AGENT, surface=Surface.HANDOFF))
+    if not ran:
+        return ran
+    if _scoped_here(policy, req):
+        return ALLOW
+    if subject.is_admin and not subject.via_agent_key:
+        return ALLOW
+    parent = place.parent_channel_id or place.channel_id
+    if (
+        parent is not None
+        and subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and parent in subject.administered_channel_ids
+    ):
+        # Sealed content would reach an agent with its own keys and
+        # connectors: a server admin's call, as for an open network. A
+        # session sealed before an unseal still holds sealed content.
+        sealed = _place_sealed(policy, place) or bool(req.recorded_seal_ids)
+        return _deny("sealed") if sealed else ALLOW
+    return _deny("admin_required")
 
 
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
@@ -726,6 +802,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.CHANGE_SHARED_AGENT:
         return _decide_shared_agent_change(req)
 
+    if req.action is Action.HAND_OFF:
+        return _decide_hand_off(policy, req)
+
     if req.action is Action.FORK:
         if not subject.is_admin or subject.via_agent_key:
             return _deny("admin_required")
@@ -870,6 +949,8 @@ def authorize(
     operation_family: OperationFamily | None = None,
     reach: AgentReach | None = None,
     open_network: bool = False,
+    answers_here: bool = False,
+    recorded_seal_ids: frozenset[str] = frozenset(),
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -895,6 +976,8 @@ def authorize(
             operation_family=operation_family,
             reach=reach,
             open_network=open_network,
+            answers_here=answers_here,
+            recorded_seal_ids=recorded_seal_ids,
         ),
     )
 

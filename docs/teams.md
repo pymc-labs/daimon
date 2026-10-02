@@ -241,7 +241,10 @@ registration:
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
   `cancel_timer`), routines that post to a channel or thread (below),
-  `bind_public_repo` and the GitHub App install link.
+  `bind_public_repo` and the GitHub App install link. A handoff is asked of
+  the agent; the Hand over button that Discord and Slack show when a channel's
+  agent changed under a thread is not on Teams, where the notice says to start
+  a new conversation.
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can

@@ -92,6 +92,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_MET
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -598,8 +599,6 @@ async def _continue_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
-    if recheck is not None:
-        await recheck()
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
     if auth.platform_user_id is not None and await is_over_channel_budget(
@@ -624,15 +623,23 @@ async def _continue_turn_impl(
         )
         raise ToolError(_CHANNEL_BUDGET_SPENT_MSG)
     turn_started_at = now()
-    sent = await runtime.client.beta.sessions.events.send(
-        handle,
-        events=[
-            {
-                "type": "user.message",
-                "content": [{"type": "text", "text": message}],
-            }
-        ],
-    )
+    async with session_mutation_fence(runtime.session_factory, handle):
+        # The fence may have waited behind a transfer or another send.
+        if recheck is not None:
+            await recheck()
+        if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
+            raise ToolError(_SEALED_SINCE_START_MSG)
+        if session.archived_at is not None:
+            raise ToolError("This session is archived.")
+        sent = await runtime.client.beta.sessions.events.send(
+            handle,
+            events=[
+                {
+                    "type": "user.message",
+                    "content": [{"type": "text", "text": message}],
+                }
+            ],
+        )
     turn_event_id = _turn_boundary(sent)
     return {
         "handle": handle,
@@ -688,7 +695,8 @@ async def _archive_my_session_impl(
     cross-agent handles (WR-03).
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.archive(handle)
+    async with session_mutation_fence(runtime.session_factory, handle):
+        await runtime.client.beta.sessions.archive(handle)
     return {"handle": handle, "archived": "true"}
 
 
@@ -718,7 +726,8 @@ async def _cancel_turn_impl(
     cross-agent handles (WR-03) before any send.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
+    async with session_mutation_fence(runtime.session_factory, handle):
+        await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
     session = await runtime.client.beta.sessions.retrieve(handle)
     return {"handle": handle, "status": session.status}
 

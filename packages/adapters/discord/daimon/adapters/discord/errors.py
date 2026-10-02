@@ -43,6 +43,7 @@ def render_error(
     new_responder: str | None = None,
     owner: str | None = None,
     channel: str | None = None,
+    offer_button: bool = False,
 ) -> str:
     """Map known exceptions to structured markdown with emoji, label, and rid.
 
@@ -51,6 +52,7 @@ def render_error(
     conversation belongs to, where). Resolving them (an async agent-name
     lookup) is the caller's job -- this function stays synchronous -- so
     every other caller omits them and gets a generic fallback phrasing.
+    `offer_button` says the notice carries the Hand over button.
     """
     if isinstance(exc, SessionAgentMismatch):
         return (
@@ -58,6 +60,7 @@ def render_error(
                 new_responder=new_responder or "the current responder",
                 owner=owner or "the previous agent",
                 channel=channel or "this channel",
+                offer_button=offer_button,
             )
             + f"\n`rid: {request_id}`"
         )

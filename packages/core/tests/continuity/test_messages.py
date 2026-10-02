@@ -370,13 +370,21 @@ def test_render_current_work_must_finish_for_a_handoff() -> None:
 
 def test_render_responder_changed_without_handoff() -> None:
     assert render_responder_changed_without_handoff(
-        new_responder="Nova", owner="Ada", channel="#data"
+        new_responder="Nova", owner="Ada", channel="#data", offer_button=True
     ) == (
         "Nova now answers in #data, but this conversation's work belongs to Ada.\n"
-        'Say "have Nova take over this task" and I\'ll move the conversation and '
-        "working files across.\n"
+        "Press Hand over to move this conversation and its working files to Nova.\n"
         "Or start a new conversation to begin fresh with Nova."
-    ), "the quoted trigger phrase must name the new responder verbatim"
+    ), "the notice points at its button, the one way on in this thread"
+
+
+def test_render_responder_changed_without_a_button_offers_only_a_new_conversation() -> None:
+    """No turn runs here until the work is handed over, so asking an agent can't work."""
+    text = render_responder_changed_without_handoff(
+        new_responder="Nova", owner="Ada", channel="#data"
+    )
+    assert "take over" not in text
+    assert text.endswith("Start a new conversation to talk to Nova.")
 
 
 # --- M. planned replacement summary --------------------------------------------------

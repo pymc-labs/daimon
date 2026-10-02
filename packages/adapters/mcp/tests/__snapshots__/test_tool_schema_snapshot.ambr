@@ -2655,8 +2655,9 @@
         
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
-        already answer in this workspace. Only an admin may hand to an agent other
-        than the one this channel answers with.
+        already answer in this workspace. A member may hand only to an agent of
+        this channel (the one it answers with, or one pinned to it); any other
+        needs a server admin or a channel admin of this channel.
         
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the

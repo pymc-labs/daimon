@@ -82,6 +82,7 @@ def _build_router(tenant_id_str: str, *, sent_event_bodies: list[dict[str, Any]]
     router = build_turn_router(
         tenant_id_str,
         session_id=_NEW_SESSION_ID,
+        replacement_session_ids=(_OLD_SESSION_ID,),
         usage_event_id=None,
         sent_event_bodies=sent_event_bodies,
     )

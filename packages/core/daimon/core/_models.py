@@ -441,6 +441,7 @@ class ThreadSession(Base):
     # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
     # when unknown; agent reach then counts the session as possibly anywhere.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seal_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:

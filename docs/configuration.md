@@ -135,7 +135,11 @@ processes and the database connection limit.
 `int` · optional · default `10`
 
 Temporary Postgres connections above pool_size per process. Default 10; include these in
-the database connection budget.
+the database connection budget. pool_size + max_overflow must be at least 4; smaller
+pools are rejected at engine startup to reserve independent preparation and mutation
+capacity with nested query headroom. Fence contenders release connections and permits
+between nonblocking attempts, retrying with 25-75 ms jitter for at most 5 seconds before
+retryable session busy.
 
 ### `DAIMON_DATABASE__POOL_TIMEOUT`
 

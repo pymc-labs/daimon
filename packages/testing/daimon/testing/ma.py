@@ -96,10 +96,18 @@ class MARouter:
             lambda _r, _m: _json_200(body),
         )
 
-    def add_session(self, session: BetaManagedAgentsSession) -> None:
-        """Serve `GET /v1/sessions/{session.id}` (the exact id only)."""
+    def add_session(self, session: BetaManagedAgentsSession, *, with_archive: bool = False) -> None:
+        """Serve the exact session's retrieve and, optionally, archive endpoints."""
         body = session.model_dump(mode="json")
         self.add("GET", rf"/v1/sessions/{re.escape(session.id)}", lambda _r, _m: _json_200(body))
+        if with_archive:
+
+            def archive(_request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+                now = datetime.now(UTC).isoformat()
+                body.update(archived_at=now, updated_at=now)
+                return _json_200(body)
+
+            self.add("POST", rf"/v1/sessions/{re.escape(session.id)}/archive", archive)
 
     def add_agent_list(self, *agents: BetaManagedAgentsAgent) -> None:
         """Serve `GET /v1/agents` with exactly these agents (the resolver's tag lookup)."""

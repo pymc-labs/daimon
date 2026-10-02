@@ -83,6 +83,8 @@ async def _setup(
             vault_ids=body.get("vault_ids", []),
             metadata=body.get("metadata", {}),
         )
+        if session_state is None:
+            router.add_session(session, with_archive=True)
         if session_state is not None:
             session_state[session.id] = session.model_dump(mode="json")
         return httpx.Response(200, json=session.model_dump(mode="json"))

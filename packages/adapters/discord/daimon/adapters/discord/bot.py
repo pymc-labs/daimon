@@ -669,6 +669,12 @@ class DaimonBot(commands.Bot):
         self.add_dynamic_items(FeedbackButton)
         self.add_dynamic_items(SupportEscalateButton)
 
+        # The Hand over button rides a notice posted by an earlier process
+        # too, so it is a class-level registration as well.
+        from daimon.adapters.discord.thread_handoff import HandOverButton
+
+        self.add_dynamic_items(HandOverButton)
+
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
         channel = _pick_post_channel(guild)
@@ -2669,13 +2675,18 @@ class DaimonBot(commands.Bot):
                 new_responder=agent.name,
                 owner=owner_name,
                 channel=f"<#{parent_channel_id}>",
+                offer_button=True,
             )
+            # Local import: thread_handoff imports this module.
+            from daimon.adapters.discord.thread_handoff import hand_over_view
+
+            view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
             if lifecycle.message_ref is not None:
                 await _edit_message(
-                    lifecycle.message_ref, content=error_text, embed=None, view=None
+                    lifecycle.message_ref, content=error_text, embed=None, view=view
                 )
             else:
-                await thread.send(error_text)
+                await thread.send(error_text, view=view)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,

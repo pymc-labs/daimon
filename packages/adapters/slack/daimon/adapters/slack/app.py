@@ -134,6 +134,11 @@ from daimon.adapters.slack.support_escalation import (
     run_support_submission,
     slack_support_enabled,
 )
+from daimon.adapters.slack.thread_handoff import (
+    HAND_OVER_ACTION_ID,
+    build_hand_over_blocks,
+    handle_hand_over_click,
+)
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     SlackConfirmationCards,
@@ -995,6 +1000,8 @@ class SlackApp:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
+                elif action_id == HAND_OVER_ACTION_ID:
+                    self._spawn(handle_hand_over_click(self.runtime, payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).
@@ -2072,13 +2079,19 @@ class SlackApp:
                     new_responder=admission.agent.name,
                     owner=owner_name,
                     channel=f"<#{channel}>",
+                    offer_button=True,
+                )
+                hand_over = build_hand_over_blocks(
+                    text=explanation,
+                    agent_id=admission.agent.id,
+                    agent_name=admission.agent.name,
                 )
                 if lifecycle.status_ts is not None:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
                         text=explanation,
-                        blocks=[],
+                        blocks=hand_over,
                     )
                     intent_terminal = True
                 else:
@@ -2086,6 +2099,7 @@ class SlackApp:
                         channel=channel,
                         thread_ts=thread_id,
                         text=explanation,
+                        blocks=hand_over,
                     )
                 return
             ma_session_id = prepared.ma_session_id

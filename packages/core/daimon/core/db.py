@@ -28,6 +28,8 @@ def build_engine(
     """Build an `AsyncEngine` for the given DSN.
 
     The caller owns lifecycle and must `await engine.dispose()` on shutdown.
+    Bounded pools require pool_size + max_overflow >= 4 at startup, reserving
+    independent preparation and mutation slots and their nested-query headroom.
 
     Adapters hold one engine for the whole process lifetime, so pooled
     connections outlive any single turn and go idle for hours between them. A
@@ -40,6 +42,11 @@ def build_engine(
     Pre-ping only covers checkout, so a connection that dies mid-statement
     (a failover, say) still raises — that needs retry at the adapter boundary.
     """
+    if pool_size > 0 and max_overflow >= 0 and pool_size + max_overflow < 4:
+        raise ValueError(
+            "Session fences require pool_size + max_overflow >= 4 "
+            "to reserve independent preparation and mutation capacity"
+        )
     # hide_parameters keeps bound values (agent keys, tokens) out of the
     # SQL text that database errors carry into logs and error reports.
     return create_async_engine(

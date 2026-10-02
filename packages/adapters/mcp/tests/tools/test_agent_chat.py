@@ -125,6 +125,25 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
             return OPEN_READ_POLICY
         return await real(runtime, auth, **kwargs)
 
+    # Headless API-only fixtures have no mapped sessions. Real DB fixtures
+    # keep the production mutation fence (mapped retirement is covered by
+    # the Postgres handoff regressions).
+    from contextlib import asynccontextmanager
+
+    from daimon.adapters.mcp.tools import agent_chat
+
+    real_fence = agent_chat.session_mutation_fence
+
+    @asynccontextmanager
+    async def fence(factory, session_id):
+        if isinstance(factory, MagicMock):
+            yield
+        else:
+            async with real_fence(factory, session_id):
+                yield
+
+    monkeypatch.setattr(agent_chat, "session_mutation_fence", fence)
+
     monkeypatch.setattr(_session_access, "load_read_policy", load)
 
 
