@@ -139,7 +139,7 @@ ALREADY_REQUESTED: Final[str] = (
 RECORDED_UNDELIVERED: Final[str] = (
     "Thanks -- your request has been recorded and someone will follow up."
 )
-_RECEIVED: Final[str] = (
+RECEIVED: Final[str] = (
     "Thanks -- your request has been recorded and someone will follow up. "
     "You have {remaining} left."
 )
@@ -152,7 +152,7 @@ _OFFER: Final[str] = (
 
 def received_text(*, remaining: int) -> str:
     """The confirmation once a request has landed in the escalation channel."""
-    return _RECEIVED.format(remaining=remaining)
+    return RECEIVED.format(remaining=remaining)
 
 
 def offer_text(*, remaining: int) -> str:

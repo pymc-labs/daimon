@@ -84,10 +84,11 @@ once.
 
 - **Slack-only deployments** set the Slack channel. Leaving it unset hides the
   button: a request nobody reads is worse than none.
-- **Discord + Slack deployments** set both channels. Discord requests go to
-  `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel; a
-  request is never posted to the other platform, and setting only the Discord
-  channel leaves Slack off.
+- **Discord + Slack deployments** set both channels. Discord (and Teams) requests go
+  to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel; a
+  Slack request is never posted to another platform, and setting only the Discord
+  channel leaves Slack off. (Teams is the one cross-platform case: its `support`
+  command may post to a Discord channel, see [Teams](teams.md).)
 - **Several workspaces**: requests are posted with the requesting workspace's bot
   token unless `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that
   owns the channel; then every workspace's requests are posted with that one's token.
