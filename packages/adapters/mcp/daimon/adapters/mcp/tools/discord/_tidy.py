@@ -1,13 +1,7 @@
-"""Discord tidy tools: edit or delete the agent's own messages, archive or
-delete its own threads.
+"""Discord cleanup removes owned messages and preserves whole threads.
 
-Provides: _edit_message_impl, _delete_message_impl, _archive_thread_impl,
-_delete_thread_impl. The ownership, limit and audit rules live in
-``tools/_tidy.py``. Order per call: resolve the turn, resolve the caller and
-the target, the caller's own post permission, the escalation-channel guard,
-the tenant write guard (`authorize(POST)`), the seal, the ledger, the bot
-authorship check, then the committed audit row, then the write guard and the
-seal again on a fresh policy, and only then the Discord call.
+Policy and ledger locks are held through each bounded platform write.
+Shared ownership, limits and audit rules live in tools/_tidy.py.
 """
 
 from __future__ import annotations
@@ -22,8 +16,6 @@ from daimon.adapters.mcp.tools._tidy import (
     Check,
     TidyContext,
     TidyResult,
-    finish_delete,
-    finish_edit,
     policy_recheck,
     refuse,
     require_not_escalation_channel,
@@ -65,11 +57,11 @@ class _Target:
 def _recheck(runtime: McpRuntime, ctx: TidyContext, auth: AuthIdentity, target: _Target) -> Check:
     channel = target.channel
 
-    async def writable() -> None:
-        await _require_discord_channel_writable(runtime, auth, channel, origin=ctx.origin)
-
     return policy_recheck(
-        runtime, ctx, writable=writable, sealed=[(str(channel.id), target.parent_id)]
+        channel_id=str(channel.id),
+        parent_channel_id=target.parent_id,
+        category_id=str(channel.category_id) if channel.category_id else None,
+        sealed=[(str(channel.id), target.parent_id)],
     )
 
 
@@ -189,8 +181,9 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
             checks=[_recheck(runtime, ctx, auth, target)],
             act=act,
             describe_error=_describe("edit"),
+            post=post,
+            content=content,
         )
-    await finish_edit(runtime, post=post, content=content)
     return TidyResult(
         platform=_PLATFORM, channel_id=resolved_channel_id, message_id=message_id, action="edited"
     )
@@ -242,8 +235,8 @@ async def _delete_message_impl(  # pyright: ignore[reportUnusedFunction]
             checks=[_recheck(runtime, ctx, auth, target)],
             act=act,
             describe_error=_describe("delete"),
+            post=post,
         )
-    await finish_delete(runtime, post_ids=[post.id])
     return TidyResult(
         platform=_PLATFORM,
         channel_id=resolved_channel_id,
@@ -304,7 +297,7 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
     tool: str = "archive_thread"
     operation: TidyOperation = "thread.archive"
     async with rest_client(token) as c:
-        target, thread, _ = await _resolve_own_thread(
+        target, thread, thread_post = await _resolve_own_thread(
             c, runtime, ctx, auth, thread_id=thread_id, tool_name=tool, operation=operation
         )
 
@@ -320,6 +313,7 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             checks=[_recheck(runtime, ctx, auth, target)],
             act=act,
             describe_error=_describe("archive"),
+            post=thread_post,
         )
     return TidyResult(
         platform=_PLATFORM,
@@ -329,16 +323,6 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
     )
 
 
-_NOT_ALL_OWN_MSG = (
-    "this thread has messages that are not yours, so it cannot be deleted. Use "
-    "archive_thread instead, or delete_message on your own messages."
-)
-
-
-def _is_own_or_notice(m: discord.Message, own_ids: set[str], bot_user_id: int) -> bool:
-    return str(m.id) in own_ids or (m.author.id == bot_user_id and m.is_system())
-
-
 async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -346,31 +330,24 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
     thread_id: str,
     origin_context_id: str | None,
 ) -> TidyResult:
-    """Delete a thread this agent opened, only while every message in it is
-    this agent's own post (or a Discord system notice daimon's own actions
-    produced). A thread anyone else wrote in is archived instead.
-
-    The newest message is read again after the audit row is committed: a
-    message posted since the first read refuses the delete. Discord has no
-    conditional delete, so a message landing between that read and the
-    delete call itself is still lost; the window is one round trip.
-    """
+    """Delete only recorded own messages. Keep the thread and all other posts."""
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
-    token = _require_bot_token(runtime)
-    tool: str = "delete_thread"
-    operation: TidyOperation = "thread.delete"
-    async with rest_client(token) as c:
-        target, thread, thread_post = await _resolve_own_thread(
-            c, runtime, ctx, auth, thread_id=thread_id, tool_name=tool, operation=operation
+    deleted = 0
+    async with rest_client(_require_bot_token(runtime)) as c:
+        target, thread, _ = await _resolve_own_thread(
+            c,
+            runtime,
+            ctx,
+            auth,
+            thread_id=thread_id,
+            tool_name="delete_thread",
+            operation="thread.delete",
         )
         messages = [m async for m in thread.history(limit=_MAX_THREAD_MESSAGES + 1)]
         if len(messages) > _MAX_THREAD_MESSAGES:
-            raise ToolError(
-                f"this thread has more than {_MAX_THREAD_MESSAGES} messages; "
-                "archive_thread it instead"
-            )
+            raise ToolError("this thread has more than 50 messages; archive_thread it instead")
         async with runtime.session_factory() as session:
             own = await list_posts_in(
                 session,
@@ -379,38 +356,30 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 channel_id=str(thread.id),
                 message_ids=[str(m.id) for m in messages],
             )
-        own = [p for p in own if p.agent_id == ctx.actor.agent_id]
-        own_ids = {p.message_id for p in own}
-        if not all(_is_own_or_notice(m, own_ids, target.bot_user_id) for m in messages):
-            raise ToolError(_NOT_ALL_OWN_MSG)
-        seen = {m.id for m in messages}
-
-        async def unchanged() -> None:
-            newest = [m async for m in thread.history(limit=1)]
-            if newest and newest[0].id not in seen:
-                raise ToolError(
-                    "someone posted in this thread just now, so it was not deleted. "
-                    "Use archive_thread instead."
+        owned = {p.message_id: p for p in own if p.agent_id == ctx.actor.agent_id}
+        for message in messages:
+            post = owned.get(str(message.id))
+            if post is None or message.author.id != target.bot_user_id or message.webhook_id:
+                continue
+            try:
+                await run_action(
+                    runtime,
+                    ctx,
+                    tool_name="delete_thread",
+                    operation="thread.delete",
+                    target=TidyTarget(str(thread.id), str(message.id), post.content_hmac),
+                    checks=[_recheck(runtime, ctx, auth, target)],
+                    act=message.delete,
+                    describe_error=_describe("delete"),
+                    post=post,
                 )
-
-        async def act() -> None:
-            await thread.delete()
-
-        await run_action(
-            runtime,
-            ctx,
-            tool_name=tool,
-            operation=operation,
-            target=TidyTarget(channel_id=target.parent_id or "", message_id=str(thread.id)),
-            checks=[("thread_changed", unchanged), _recheck(runtime, ctx, auth, target)],
-            act=act,
-            describe_error=_describe("delete"),
-        )
-    await finish_delete(runtime, post_ids=[thread_post.id, *(p.id for p in own)])
+            except ToolError as exc:
+                raise ToolError(f"{deleted} messages deleted; stopped: {exc}") from exc
+            deleted += 1
     return TidyResult(
         platform=_PLATFORM,
         channel_id=target.parent_id or "",
-        message_id=str(thread.id),
+        message_id=thread_id,
         action="deleted",
-        messages_deleted=len([m for m in messages if str(m.id) in own_ids]),
+        messages_deleted=deleted,
     )

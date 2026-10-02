@@ -36,9 +36,10 @@ from daimon.adapters.mcp.tools._channel_policy import (
     ChannelReadPolicy,
     get_verified_origin,
     load_read_policy,
+    require_channel_writable,
     turn_origin_place,
 )
-from daimon.core.authz import Place
+from daimon.core.authz import AgentRef, Place, build_agent_ref
 from daimon.core.channel_tidy import (
     PER_HOUR_LIMIT,
     PER_TURN_LIMIT,
@@ -48,11 +49,19 @@ from daimon.core.channel_tidy import (
     TidyTarget,
     content_hash,
     derive_content_key,
+    lock_tidy_agent,
     record_tidy_actions,
     record_tidy_outcome,
     require_refusals_under_cap,
 )
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.security_audit import record_denial
+from daimon.core.session_preparation_gate import pool_headroom
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_access_policy,
+)
 from daimon.core.stores.agent_posts import (
     AgentPostRow,
     PostKind,
@@ -288,21 +297,19 @@ async def begin_action(
     tool_name: str,
     operation: TidyOperation,
     target: TidyTarget,
+    locked: bool = False,
 ) -> None:
     """Check the limits and commit the `allowed` audit row before the platform call."""
-    try:
-        async with runtime.session_factory.begin() as session:
-            await record_tidy_actions(
-                session,
-                actor=ctx.actor,
-                tool_name=tool_name,
-                operation=operation,
-                targets=[target],
-                now=datetime.now(UTC),
-            )
-    except TidyLimitReached as exc:
-        record_denial("tidy_limit")
-        raise ToolError(_LIMIT_MSG[exc.scope]) from exc
+    async with runtime.session_factory.begin() as session:
+        await record_tidy_actions(
+            session,
+            actor=ctx.actor,
+            tool_name=tool_name,
+            operation=operation,
+            targets=[target],
+            locked=locked,
+            now=datetime.now(UTC),
+        )
 
 
 async def _record_after_begin(
@@ -329,28 +336,25 @@ async def _record_after_begin(
         )
 
 
-Check = tuple[str, Callable[[], Awaitable[None]]]
+@dataclass(frozen=True)
+class Check:
+    channel_id: str
+    parent_channel_id: str | None
+    category_id: str | None
+    sealed: list[tuple[str, str | None]]
 
 
 def policy_recheck(
-    runtime: McpRuntime,
-    ctx: TidyContext,
     *,
-    writable: Callable[[], Awaitable[None]],
+    channel_id: str,
+    parent_channel_id: str | None = None,
+    category_id: str | None = None,
     sealed: list[tuple[str, str | None]],
 ) -> Check:
-    """The last check before the platform call, on a freshly loaded policy: the
-    seal for each ``(channel, parent)`` and then the tenant write guard."""
+    return Check(channel_id, parent_channel_id, category_id, sealed)
 
-    async def check() -> None:
-        read_policy = await load_read_policy(
-            runtime, ctx.auth, origin_context_id=ctx.origin_context_id
-        )
-        for channel_id, parent_id in sealed:
-            read_policy.require(channel_id, parent_id)
-        await writable()
 
-    return ("policy_changed", check)
+PLATFORM_WRITE_TIMEOUT = 15.0
 
 
 async def run_action(
@@ -363,34 +367,114 @@ async def run_action(
     checks: list[Check],
     act: Callable[[], Awaitable[None]],
     describe_error: Callable[[Exception], ToolError | None],
+    post: AgentPostRow | None = None,
+    content: str | None = None,
 ) -> None:
-    """Commit the `allowed` row, run `checks` in order, then `act`.
+    """Lock order: tidy agent advisory -> tenant policy -> target row.
 
-    The last check is `policy_recheck`, so the access decision is made on the
-    policy as it stands after every other await, and nothing else is awaited
-    between it and the platform call. A failed check writes a `denied` row
-    and makes no platform call. Any failure of the call itself, Discord or
-    Slack, a timeout or a dropped connection, writes an `error` row.
+    No tenant-lock holder acquires the tidy advisory lock. The audit writer
+    uses a separate transaction without reacquiring it; the owning transaction
+    keeps all locks through the bounded platform call and ledger completion.
+    MA/origin I/O precedes the tenant lock. An uncertain write clears the hash
+    and retires the target, refusing retries rather than claiming known content.
     """
-    await begin_action(runtime, ctx, tool_name=tool_name, operation=operation, target=target)
-    for reason, check in checks:
-        try:
-            await check()
-        except ToolError:
-            await _record_after_begin(
-                runtime,
-                ctx,
-                tool_name=tool_name,
-                operation=operation,
-                target=target,
-                outcome="denied",
-                reason=reason,
-            )
-            record_denial(reason)
-            raise
+    reason = "preparation_error"
+    outcome: Literal["denied", "error"] = "error"
     try:
-        await act()
-    except asyncio.CancelledError:
+        async with (
+            pool_headroom(runtime.session_factory),
+            runtime.session_factory.begin() as session,
+        ):
+            await lock_tidy_agent(session, ctx.actor)
+            agent_data = await find_agent_by_derived_uuid(
+                runtime.client, tenant_id=ctx.auth.tenant_id, agent_id=ctx.actor.agent_id
+            )
+            agent = (
+                build_agent_ref(agent_data.name, agent_data.metadata)
+                if agent_data is not None
+                else AgentRef.unresolved()
+            )
+            read = await load_read_policy(
+                runtime,
+                ctx.auth,
+                origin_context_id=ctx.origin_context_id,
+                resolve_without_seals=True,
+            )
+            outcome = "denied"
+            reason = "policy_changed"
+            await lock_access_policy(session, tenant_id=ctx.actor.tenant_id)
+            if post is not None:
+                current = await get_post(
+                    session,
+                    tenant_id=ctx.actor.tenant_id,
+                    platform=ctx.actor.platform,
+                    channel_id=post.channel_id,
+                    message_id=post.message_id,
+                    for_update=True,
+                )
+                if current is None or current.agent_id != ctx.actor.agent_id:
+                    reason = "not_posted_by_agent"
+                    raise ToolError(_NOT_POSTED_MSG)
+                post = current
+                target = TidyTarget(target.channel_id, target.message_id, post.content_hmac)
+            outcome = "error"
+            reason = "audit_error"
+            await begin_action(
+                runtime, ctx, tool_name=tool_name, operation=operation, target=target, locked=True
+            )
+            outcome = "denied"
+            reason = "policy_changed"
+            try:
+                policy = await load_access_policy(session, tenant_id=ctx.actor.tenant_id)
+            except AccessPolicyUnreadable as exc:
+                raise ToolError("this workspace's access policy could not be read") from exc
+            for check in checks:
+                fresh_read = ChannelReadPolicy(policy, read.origin_channel_ids, agent, read.origin)
+                for channel, parent in check.sealed:
+                    fresh_read.require(channel, parent)
+                await require_channel_writable(
+                    runtime,
+                    ctx.auth,
+                    channel_id=check.channel_id,
+                    parent_channel_id=check.parent_channel_id,
+                    category_id=check.category_id,
+                    origin=ctx.origin,
+                    policy=policy,
+                    agent=agent,
+                )
+            outcome = "error"
+            reason = "platform_error"
+            try:
+                async with asyncio.timeout(PLATFORM_WRITE_TIMEOUT):
+                    await act()
+            except BaseException as exc:
+                uncertain = not isinstance(exc, Exception) or describe_error(exc) is None
+                if post is not None and uncertain:
+                    await set_post_hash(session, post_id=post.id, content_hmac=None)
+                    await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
+                    await session.commit()
+                raise
+            if post is not None:
+                if content is not None:
+                    await set_post_hash(
+                        session, post_id=post.id, content_hmac=hash_content(runtime, content)
+                    )
+                elif operation in ("message.delete", "thread.delete"):
+                    await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
+    except TidyLimitReached as exc:
+        await _record_after_begin(
+            runtime,
+            ctx,
+            tool_name=tool_name,
+            operation=operation,
+            target=target,
+            outcome="denied",
+            reason="tidy_limit",
+        )
+        record_denial("tidy_limit")
+        raise ToolError(_LIMIT_MSG[exc.scope]) from exc
+    except (Exception, asyncio.CancelledError) as exc:
+        mapped = describe_error(exc) if isinstance(exc, Exception) else None
         await asyncio.shield(
             _record_after_begin(
                 runtime,
@@ -398,35 +482,15 @@ async def run_action(
                 tool_name=tool_name,
                 operation=operation,
                 target=target,
-                outcome="error",
-                reason="cancelled",
+                outcome=outcome,
+                reason="platform_refused" if mapped else reason,
             )
         )
-        raise
-    except Exception as exc:
-        mapped = describe_error(exc)
-        await _record_after_begin(
-            runtime,
-            ctx,
-            tool_name=tool_name,
-            operation=operation,
-            target=target,
-            outcome="error",
-            reason="platform_refused" if mapped is not None else "platform_error",
-        )
+        if outcome == "denied":
+            record_denial(reason)
         if mapped is not None:
             raise mapped from exc
         raise
-
-
-async def finish_edit(runtime: McpRuntime, *, post: AgentPostRow, content: str) -> None:
-    async with runtime.session_factory.begin() as session:
-        await set_post_hash(session, post_id=post.id, content_hmac=hash_content(runtime, content))
-
-
-async def finish_delete(runtime: McpRuntime, *, post_ids: list[uuid.UUID]) -> None:
-    async with runtime.session_factory.begin() as session:
-        await mark_deleted(session, post_ids=post_ids, now=datetime.now(UTC))
 
 
 @dataclass(frozen=True)

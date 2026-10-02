@@ -1287,15 +1287,26 @@ verifier establishes a tenant cannot be safely attributed and are outside this t
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
 The channel tidy tools (`edit_message`, `delete_message`, `archive_thread`,
-`delete_thread`) also write their own row per action, committed before the
+`delete_thread`) also write their own row per message mutation, committed before the
 platform call: `target_channel_id`, `target_message_id`, an HMAC-SHA256 of the
 text replaced (`content_hmac`, keyed from the first `DAIMON_CRYPTO__KEYS` key,
 else the MCP JWT secret, under its own label) and the turn (`turn_ref`), never
 the text. Those `allowed` rows are what the tidy limits count; `denied` rows
-count toward a separate hourly cap. After the row is committed the write
-guard and the seal are decided again on a fresh policy, and a refusal there
-adds a `denied` row with no platform call; a failed platform call adds an
-`error` row. An agent may tidy only messages recorded in
+count toward a separate hourly cap. MA identity and origin I/O finishes before
+locking. Each write takes the tidy per-agent advisory lock, the tenant policy
+lock (`FOR NO KEY UPDATE`), then the target post row (`FOR UPDATE`). The
+separate audit transaction skips the advisory lock already held by its caller.
+Policy and seals are loaded and checked under the tenant lock, which stays
+held through the platform call (15-second timeout) and ledger completion.
+Policy writers, form consume, support (user lock first), handoff and preparation
+never acquire the tidy advisory lock or a post row before the tenant lock, so
+there is no reverse lock edge. Pool headroom is reserved before checkout.
+A refusal adds a `denied` row; a failed write adds an `error` row. An uncertain
+result retires the target and clears its hash, refusing retries; a definite
+platform refusal leaves the ledger intact. Discord `delete_thread` deletes
+only individually recorded own messages and keeps the thread, including human
+replies arriving mid-call. Slack also checks, audits and counts each deletion,
+and stops with partial progress on refusal. An agent may tidy only posts in
 `agent_posted_messages` under its own agent id, which `send_message` and
 `create_thread` write at send time. `daimon audit prune` also removes those
 records past the retention, and account erasure clears `content_hmac`.

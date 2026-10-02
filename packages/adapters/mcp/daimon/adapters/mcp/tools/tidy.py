@@ -127,14 +127,14 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str,
         origin_context_id: str | None = None,
     ) -> TidyResult:
-        """Delete a thread you opened with create_thread, while every message
-        in it is still your own (at most 50).
+        """Remove your own messages from a thread you opened with create_thread.
 
-        A thread anyone else wrote in is refused: archive it instead
-        (Discord), or delete only your own messages. Discord: thread_id is
-        the thread's id. Slack: thread_id is channel_id:thread_ts. Pass
-        origin_context_id. Counts as one action against the same limits as
-        edit_message.
+        Discord keeps the thread and everyone else's messages. Slack refuses
+        a thread with other people's replies. Reads at most 50 messages.
+        Each deletion is checked, audited and counted against the 10 per turn
+        and 40 per hour limits. A refusal stops with the number deleted.
+        Discord: thread_id is the thread id. Slack: channel_id:thread_ts.
+        Pass this turn's origin_context_id.
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":

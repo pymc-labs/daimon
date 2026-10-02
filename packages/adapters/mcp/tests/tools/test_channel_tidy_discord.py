@@ -736,13 +736,13 @@ async def test_an_agent_archives_and_deletes_its_own_thread(
     deleted = await _delete_thread_impl(
         world.runtime, auth, thread_id=_THREAD, origin_context_id=origin
     )
-    assert deleted.action == "deleted" and fake.thread_deleted, "the thread is deleted"
+    assert deleted.action == "deleted" and not fake.thread_deleted, "the thread survives"
     assert deleted.messages_deleted == 1, "the starter was the agent's one message in it"
     rows = [r for r in await world.audit() if r.tool_name in {"archive_thread", "delete_thread"}]
     assert [(r.tool_name, r.target_message_id) for r in rows] == [
         ("archive_thread", _THREAD),
-        ("delete_thread", _THREAD),
-    ], "each thread action is audited with the thread id"
+        ("delete_thread", "1400000000000000001"),
+    ], "archive targets the thread; deletions target each message"
 
 
 async def test_a_thread_someone_else_wrote_in_is_not_deleted(
@@ -755,8 +755,7 @@ async def test_a_thread_someone_else_wrote_in_is_not_deleted(
     )
     fake.add(_THREAD, author_id=_CALLER, bot=False, content="a reply")
 
-    with pytest.raises(ToolError, match="archive_thread instead"):
-        await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
+    await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
     assert not fake.thread_deleted, "a thread with a person's message survives"
 
 
@@ -787,22 +786,23 @@ _POLICY_CHANGES = {
 }
 
 
-def _commit_during_audit(
+def _commit_during_identity_io(
     monkeypatch: pytest.MonkeyPatch, world: _World, policy: TenantAccessPolicy
 ) -> None:
-    """A policy change that commits while the action's audit row is being written."""
-    original = tidy_module.record_tidy_actions
+    """A policy change that commits during the final identity lookup."""
+    original = tidy_module.find_agent_by_derived_uuid
 
-    async def wrapped(*args: Any, **kwargs: Any) -> None:
-        await original(*args, **kwargs)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
         await world.set_policy(policy)
+        return result
 
-    monkeypatch.setattr(tidy_module, "record_tidy_actions", wrapped)
+    monkeypatch.setattr(tidy_module, "find_agent_by_derived_uuid", wrapped)
 
 
 @pytest.mark.parametrize("change", sorted(_POLICY_CHANGES))
 @pytest.mark.parametrize("action", ["edit", "delete", "delete_thread"])
-async def test_a_policy_change_during_the_audit_commit_stops_the_platform_call(
+async def test_a_policy_change_during_final_identity_io_stops_the_platform_call(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     fake: _FakeDiscord,
     monkeypatch: pytest.MonkeyPatch,
@@ -816,7 +816,7 @@ async def test_a_policy_change_during_the_audit_commit_stops_the_platform_call(
             world.runtime, auth, channel_id=_CHANNEL, name="tidy", content="starter"
         )
     message_id = await _post(world, auth)
-    _commit_during_audit(monkeypatch, world, _POLICY_CHANGES[change])
+    _commit_during_identity_io(monkeypatch, world, _POLICY_CHANGES[change])
 
     with pytest.raises(ToolError, match="protected|pinned"):
         if action == "edit":
@@ -874,7 +874,7 @@ async def test_a_policy_change_during_the_ownership_fetch_stops_the_delete(
     assert message_id in fake.messages, "the message survives a policy change mid-call"
 
 
-async def test_a_message_posted_after_the_thread_was_read_stops_its_delete(
+async def test_a_message_posted_after_the_thread_was_read_survives_cleanup(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     fake: _FakeDiscord,
     monkeypatch: pytest.MonkeyPatch,
@@ -884,18 +884,18 @@ async def test_a_message_posted_after_the_thread_was_read_stops_its_delete(
     await _create_thread_impl(
         world.runtime, auth, channel_id=_CHANNEL, name="tidy", content="starter"
     )
-    original = tidy_module.record_tidy_actions
+    original = tidy_module.find_agent_by_derived_uuid
 
-    async def person_replies(*args: Any, **kwargs: Any) -> None:
-        await original(*args, **kwargs)
+    async def person_replies(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
         fake.add(_THREAD, author_id=_CALLER, bot=False, content="wait, one more thing")
+        return result
 
-    monkeypatch.setattr(tidy_module, "record_tidy_actions", person_replies)
-    with pytest.raises(ToolError, match="someone posted in this thread"):
-        await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
+    monkeypatch.setattr(tidy_module, "find_agent_by_derived_uuid", person_replies)
+    await _delete_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
     assert not fake.thread_deleted, "the person's late message is not deleted with the thread"
     reasons = [r.reason for r in await world.audit() if r.outcome == "denied"]
-    assert reasons == ["thread_changed"], "the refusal closes the begun action"
+    assert reasons == [], "only owned messages are deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -949,7 +949,10 @@ async def test_a_failed_platform_call_writes_an_error_row(
             channel_id=_CHANNEL,
             message_id=message_id,
         )
-    assert post is not None, "a failed delete leaves the post the agent's to retry"
+    if reason == "platform_refused":
+        assert post is not None, "a definite refusal can be retried"
+    else:
+        assert post is None, "an uncertain result refuses another mutation"
 
 
 async def test_a_send_still_succeeds_when_its_record_cannot_be_written(

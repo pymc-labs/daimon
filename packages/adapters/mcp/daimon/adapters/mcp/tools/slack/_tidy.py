@@ -1,12 +1,7 @@
-"""Slack tidy tools: edit or delete the agent's own messages and threads.
+"""Slack cleanup checks and audits every individual mutation.
 
-Provides: _slack_edit_message_impl, _slack_delete_message_impl,
-_slack_delete_thread_impl. The ownership, limit and audit rules live in
-``tools/_tidy.py``. After the audit row is committed the write guard and the
-seal are checked again on a fresh policy, right before the Slack call. Bot
-token only: Slack itself lets a bot token change
-only the bot's own messages, on top of the ledger check. Slack threads have
-no archive state, so there is no archive_thread here.
+Policy and ledger locks are held through each bounded platform write.
+Shared ownership, limits and audit rules live in tools/_tidy.py.
 """
 
 from __future__ import annotations
@@ -21,8 +16,6 @@ from daimon.adapters.mcp.tools._tidy import (
     Check,
     TidyContext,
     TidyResult,
-    finish_delete,
-    finish_edit,
     policy_recheck,
     require_not_escalation_channel,
     require_own_post,
@@ -92,13 +85,8 @@ def _recheck(
     channel_id: str,
     post: AgentPostRow,
 ) -> Check:
-    async def writable() -> None:
-        await require_channel_writable(runtime, auth, channel_id=channel_id, origin=ctx.origin)
-
     return policy_recheck(
-        runtime,
-        ctx,
-        writable=writable,
+        channel_id=channel_id,
         sealed=[
             (channel_id, None),
             (f"{channel_id}:{post.thread_ts or post.message_id}", channel_id),
@@ -176,8 +164,9 @@ async def _slack_edit_message_impl(  # pyright: ignore[reportUnusedFunction]
         checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=post)],
         act=act,
         describe_error=_describe("edit"),
+        post=post,
+        content=content,
     )
-    await finish_edit(runtime, post=post, content=content)
     return TidyResult(
         platform=_PLATFORM, channel_id=channel_id, message_id=message_id, action="edited"
     )
@@ -222,8 +211,8 @@ async def _slack_delete_message_impl(  # pyright: ignore[reportUnusedFunction]
         checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=post)],
         act=act,
         describe_error=_describe("delete"),
+        post=post,
     )
-    await finish_delete(runtime, post_ids=[post.id])
     return TidyResult(
         platform=_PLATFORM,
         channel_id=channel_id,
@@ -308,32 +297,29 @@ async def _slack_delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
     replies = [ts for ts in ts_list if ts != thread_ts]
     deleted: list[str] = []
 
-    async def act() -> None:
-        for ts in [*replies, thread_ts]:
-            await client.chat_delete(channel=channel_id, ts=ts)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            deleted.append(ts)
+    for ts in [*replies, thread_ts]:
+        post = own_by_ts[ts]
 
-    def describe(exc: Exception) -> ToolError | None:
-        if not isinstance(exc, SlackApiError):
-            return None
-        return ToolError(
-            f"slack refused part-way: {len(deleted)} of {len(ts_list)} messages were deleted "
-            f"({_slack_error_code(exc) or 'unknown error'})"
-        )
+        async def act(message_ts: str = ts) -> None:
+            await client.chat_delete(channel=channel_id, ts=message_ts)  # pyright: ignore[reportUnknownMemberType]
 
-    try:
-        await run_action(
-            runtime,
-            ctx,
-            tool_name=tool,
-            operation=operation,
-            target=TidyTarget(channel_id=channel_id, message_id=thread_ts),
-            checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=root)],
-            act=act,
-            describe_error=describe,
-        )
-    finally:
-        await finish_delete(runtime, post_ids=[own_by_ts[ts].id for ts in deleted])
+        try:
+            await run_action(
+                runtime,
+                ctx,
+                tool_name=tool,
+                operation=operation,
+                target=TidyTarget(channel_id, ts, post.content_hmac),
+                checks=[_recheck(runtime, ctx, auth, channel_id=channel_id, post=post)],
+                act=act,
+                describe_error=_describe("delete"),
+                post=post,
+            )
+        except ToolError as exc:
+            raise ToolError(
+                f"{len(deleted)} of {len(ts_list)} messages deleted; stopped: {exc}"
+            ) from exc
+        deleted.append(ts)
     return TidyResult(
         platform=_PLATFORM,
         channel_id=channel_id,

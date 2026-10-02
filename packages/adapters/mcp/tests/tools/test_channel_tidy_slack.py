@@ -365,9 +365,10 @@ async def test_delete_thread_needs_every_message_to_be_the_agents_own(
     assert deleted == [reply, root], "replies go first, then the root"
     assert result.messages_deleted == 2, "the result counts what was deleted"
     rows = [r for r in await world.audit() if r.tool_name == "delete_thread"]
-    assert [(r.outcome, r.target_message_id) for r in rows] == [("allowed", root)], (
-        "a thread delete is one audited action"
-    )
+    assert [(r.outcome, r.target_message_id) for r in rows] == [
+        ("allowed", reply),
+        ("allowed", root),
+    ], "each message delete is audited"
 
 
 _POLICY_CHANGES = {
@@ -378,7 +379,7 @@ _POLICY_CHANGES = {
 
 @pytest.mark.parametrize("change", sorted(_POLICY_CHANGES))
 @pytest.mark.parametrize("action", ["edit", "delete", "delete_thread"])
-async def test_a_policy_change_during_the_audit_commit_stops_the_slack_call(
+async def test_a_policy_change_during_final_identity_io_stops_the_slack_call(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     action: str,
@@ -386,11 +387,12 @@ async def test_a_policy_change_during_the_audit_commit_stops_the_slack_call(
 ) -> None:
     world = await _world(committing_sessionmaker)
     auth, origin = await world.turn()
-    original = tidy_module.record_tidy_actions
+    original = tidy_module.find_agent_by_derived_uuid
 
-    async def wrapped(*args: Any, **kwargs: Any) -> None:
-        await original(*args, **kwargs)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
         await world.set_policy(_POLICY_CHANGES[change])
+        return result
 
     with aioresponses() as m:
         _channel_access(m)
@@ -398,7 +400,7 @@ async def test_a_policy_change_during_the_audit_commit_stops_the_slack_call(
         m.get(  # pyright: ignore[reportUnknownMemberType]
             _CONVERSATIONS_REPLIES, payload={"ok": True, "messages": [{"ts": ts}]}
         )
-        monkeypatch.setattr(tidy_module, "record_tidy_actions", wrapped)
+        monkeypatch.setattr(tidy_module, "find_agent_by_derived_uuid", wrapped)
         with pytest.raises(ToolError, match="protected|pinned"):
             if action == "edit":
                 await _slack_edit_message_impl(

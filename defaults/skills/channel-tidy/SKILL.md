@@ -17,7 +17,9 @@ them.
 - A failed attempt, a duplicate or a post in the wrong place: delete it with
   `delete_message`, then post once in the right place.
 - A thread you opened that is done: `archive_thread` on Discord. Use
-  `delete_thread` only for a thread of yours that nobody else wrote in.
+  `delete_thread` to remove your own posts. Discord keeps the thread and
+  other people's messages; Slack refuses threads with other people's replies.
+  Each deleted message counts against the limits; a refusal stops the batch.
 
 Pass this turn's `origin_context_id` to every call. Each turn allows 10 edits
 or deletes and each hour 40, so tidy what you just made, not old history.

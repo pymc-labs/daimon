@@ -80,7 +80,7 @@ def content_hash(content: str, key: bytes) -> str:
     return hmac.new(key, content.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-async def _lock_agent(session: AsyncSession, actor: TidyActor) -> None:
+async def lock_tidy_agent(session: AsyncSession, actor: TidyActor) -> None:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"{_LOCK_NAMESPACE}{actor.tenant_id}:{actor.agent_id}"},
@@ -95,13 +95,17 @@ async def record_tidy_actions(
     operation: TidyOperation,
     targets: list[TidyTarget],
     now: datetime,
+    locked: bool = False,
 ) -> None:
     """Check both limits and write one `allowed` audit row per target.
 
     Raises `TidyLimitReached` and writes nothing when the targets would take
-    the agent over either limit. The caller commits before acting.
+    the agent over either limit. The caller commits before acting. With
+    ``locked=True``, the caller must already hold ``lock_tidy_agent`` in a
+    transaction kept open until this audit transaction and the effect finish.
     """
-    await _lock_agent(session, actor)
+    if not locked:
+        await lock_tidy_agent(session, actor)
     in_turn = await count_tidy_events(
         session,
         tenant_id=actor.tenant_id,
