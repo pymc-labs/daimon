@@ -15,6 +15,8 @@ import pytest
 import typer
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
+from daimon.adapters.cli import main as main_mod
+from daimon.adapters.cli.commands import channels as channels_mod
 from daimon.adapters.cli.commands.channels import (
     budget_clear,
     budget_list,
@@ -47,6 +49,7 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from typer.testing import CliRunner
 
 from ..harness import FakeCliSettings, build_cli_runtime
 
@@ -693,3 +696,21 @@ async def test_list_json_carries_each_channels_seal_and_protection(
     channels = {c["channel_id"]: c for c in json.loads(_out(console))["channels"]}
     assert (channels["C1"]["sealed"], channels["C1"]["protected"]) == (True, False)
     assert (channels["C2"]["sealed"], channels["C2"]["protected"]) == (False, True)
+
+
+def test_isolation_set_and_lift_run_the_isolate_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    monkeypatch.setattr(channels_mod, "_run_isolate", lambda *a, **kw: calls.append((a, kw)))
+    where = ["discord", GUILD, CHANNEL]
+    runner = CliRunner()
+
+    set_run = runner.invoke(
+        main_mod.app, ["channels", "isolation", "set", *where, "--fork-from", "shared"]
+    )
+    lift_run = runner.invoke(main_mod.app, ["channels", "isolation", "lift", *where])
+
+    assert set_run.exit_code == 0 and lift_run.exit_code == 0, set_run.output + lift_run.output
+    assert calls == [
+        (tuple(where), {"fork_from": "shared"}),
+        (tuple(where), {"end": True, "lift_seal_and_pins": True}),
+    ], "set isolates, lift ends isolation and its seal and pins"
