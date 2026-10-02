@@ -50,6 +50,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
@@ -561,8 +562,9 @@ class DaimonBot(commands.Bot):
 
         Flips draining=True so on_message rejects new mentions, then polls the
         existing _processing set until it empties or the grace window elapses.
-        Any cut turn surfaces as a retryable error (acceptable). Calls
-        bot.close() unconditionally so the gateway disconnects cleanly.
+        Any cut turn surfaces as a retryable error (acceptable). Waits for
+        pending budget notices, then calls bot.close() unconditionally so the
+        gateway disconnects cleanly.
         """
         self.draining = True
         # Pending auto batches are unasked-for turns that have not started;
@@ -577,6 +579,8 @@ class DaimonBot(commands.Bot):
         ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
         log.info("discord.drain_complete", remaining=len(self._processing))
+        # Before close(): it closes the HTTP session a notice still DMs through.
+        await drain_budget_notices()
         await self.close()
 
     async def setup_hook(self) -> None:
