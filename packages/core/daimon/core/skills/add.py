@@ -21,13 +21,14 @@ agent, which the caller's isolation may hide.
 from __future__ import annotations
 
 import asyncio
+import email.message
 import io
 import re
 import shutil
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import httpx
@@ -53,9 +54,11 @@ from daimon.core.skills.ingest import (
     SkillIngestError,
     bundle_from_files,
     bundle_from_upload,
+    require_upload_suffix,
 )
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
+from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,6 +68,8 @@ __all__ = [
     "add_agent_skill",
     "fetch_attachment",
     "fetch_repo_skill",
+    "fetch_teams_attachment",
+    "is_teams_download_url",
     "read_local_skill",
     "repo_origin",
 ]
@@ -89,12 +94,61 @@ async def fetch_attachment(http_client: httpx.AsyncClient, url: str) -> bytes:
     """Download a chat attachment the caller already allowlisted, capped, no redirects."""
     async with http_client.stream("GET", url, follow_redirects=False) as response:
         response.raise_for_status()
-        body = io.BytesIO()
-        async for chunk in response.aiter_bytes():
-            if body.tell() + len(chunk) > MAX_UNCOMPRESSED_BYTES:
-                raise SkillIngestError(f"A skill may hold at most {MAX_UNCOMPRESSED_BYTES} bytes.")
-            body.write(chunk)
+        return await _read_capped(response)
+
+
+async def _read_capped(response: httpx.Response) -> bytes:
+    body = io.BytesIO()
+    async for chunk in response.aiter_bytes():
+        if body.tell() + len(chunk) > MAX_UNCOMPRESSED_BYTES:
+            raise SkillIngestError(f"A skill may hold at most {MAX_UNCOMPRESSED_BYTES} bytes.")
+        body.write(chunk)
     return body.getvalue()
+
+
+_MAX_TEAMS_REDIRECTS = 3
+
+
+def is_teams_download_url(url: httpx.URL) -> bool:
+    """https on Graph or a SharePoint/OneDrive host: where a Teams file downloads from."""
+    return is_graph_url(url) or is_sharepoint_host(url)
+
+
+def _download_name(url: httpx.URL, disposition: str | None) -> str:
+    """The response's Content-Disposition filename, else the URL path's last segment."""
+    if disposition:
+        header = email.message.Message()
+        header["content-disposition"] = disposition
+        if name := header.get_filename():
+            return PurePosixPath(name.replace("\\", "/")).name
+    return PurePosixPath(url.path).name
+
+
+async def fetch_teams_attachment(http_client: httpx.AsyncClient, url: str) -> tuple[bytes, str]:
+    """Bytes and filename of a file shared in Teams, from its pre-authorised download URL.
+
+    No credential is sent: the link authorises itself. Every hop, redirects
+    included, must pass `is_teams_download_url`; the filename's kind is
+    checked from the response headers before the capped body is read.
+    """
+    try:
+        target = httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        raise SkillIngestError("That is not a valid download link.") from exc
+    for _ in range(_MAX_TEAMS_REDIRECTS + 1):
+        if not is_teams_download_url(target):
+            raise SkillIngestError(
+                f"{target.host or 'That host'} is not a Teams file host (SharePoint or Graph)."
+            )
+        async with http_client.stream("GET", target, follow_redirects=False) as response:
+            if response.next_request is not None:
+                target = response.next_request.url
+                continue
+            response.raise_for_status()
+            filename = _download_name(target, response.headers.get("content-disposition"))
+            require_upload_suffix(filename)
+            return await _read_capped(response), filename
+    raise SkillIngestError("The download link redirected too many times.")
 
 
 async def fetch_repo_skill(

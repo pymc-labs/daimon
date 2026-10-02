@@ -60,6 +60,8 @@ from daimon.core.skills.add import (
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    fetch_teams_attachment,
+    is_teams_download_url,
     repo_origin,
 )
 from daimon.core.skills.fetch import GitHubFetchError
@@ -302,7 +304,9 @@ async def _fetch_platform_attachment(
     """Bytes and filename of a file attached in the caller's own chat platform.
 
     Discord: its CDN over https. Slack: this server's signed file link, for the
-    caller's own workspace, read with that workspace's bot token. Nothing else.
+    caller's own workspace, read with that workspace's bot token. Teams: the
+    file's pre-authorised SharePoint, OneDrive or Graph download link, with no
+    credential and no redirect off those hosts. Nothing else.
     """
     parsed = urlparse(url)
     if auth.platform == "discord":
@@ -318,8 +322,19 @@ async def _fetch_platform_attachment(
         return data, filename
     if auth.platform == "slack":
         return await _fetch_slack_attachment(runtime, auth, http, url)
+    if auth.platform == "teams":
+        try:
+            allowed = is_teams_download_url(httpx.URL(url))
+        except httpx.InvalidURL:
+            allowed = False
+        if not allowed:
+            raise ToolError("attachment_url must be a Teams file's SharePoint or OneDrive link.")
+        try:
+            return await fetch_teams_attachment(http, url)
+        except httpx.HTTPError as exc:
+            raise ToolError(f"Could not download the attachment: {exc}") from exc
     raise ToolError(
-        "Attachments come only from Discord or Slack. Pass skill_md or repo_url instead."
+        "Attachments come only from Discord, Slack or Teams. Pass skill_md or repo_url instead."
     )
 
 

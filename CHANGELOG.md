@@ -108,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment, for server admins and that channel's admins, and its
   isolation and channel admins, for server admins only, as on Discord and
   Slack. Every save is re-checked and audited.
+- **Skills from Teams files.** `add_skill(attachment_url=…)` takes a `.md`
+  or `.zip` shared in a Teams 1:1 chat by its download link: https on a
+  SharePoint, OneDrive or Graph host only, sent without a token, with no
+  redirect off those hosts and Discord's and Slack's caps and preview.
 
 - **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
   skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a

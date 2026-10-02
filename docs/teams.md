@@ -178,6 +178,12 @@ The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
 every redirect hop is re-checked (Graph reads follow none).
 
+A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
+takes its download link only over https from a SharePoint, OneDrive or Graph
+host, sends no token, refuses a redirect off those hosts, and checks the
+file's name before reading its capped body, with the usual preview and
+confirmation card.
+
 ### Channel files (optional)
 
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
