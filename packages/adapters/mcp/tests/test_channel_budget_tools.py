@@ -359,6 +359,10 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     assert await channel(dataclasses.replace(member, agent_id=responder), here) == _PARENT
     other_agent = dataclasses.replace(member, agent_id=uuid.uuid4())
     assert await channel(other_agent, here) is None, "another agent's origin is not attributed"
+    chat = dataclasses.replace(member, chat_agent_id=responder)
+    assert await channel(chat, here) == _PARENT, "a chat turn's credential names its responder"
+    other_chat = dataclasses.replace(member, chat_agent_id=uuid.uuid4())
+    assert await channel(other_chat, here) is None, "nor another responder's, by chat credential"
     assert await channel(member, moved) == _PARENT, "a moved DM counts toward its source"
     assert await channel(member, dm) is None, "an older DM belongs to no channel"
     assert await channel(member, foreign) is None, "another tenant's DM is not consulted"
