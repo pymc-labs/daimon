@@ -3,20 +3,21 @@
 A channel is listed when it has its own agent or environment setting, a
 budget, channel admins or isolation. The private channels DM conversations
 run in are left out. The MCP `get_tenant_summary` tool and `daimon channels
-list` both read it. Each channel's `sealed` and `protected` flags are filled
-only for a caller that can already read the access policy (the CLI); for
-everyone else they are omitted, never sent as false.
+list` both read it, as a server admin sees each channel
+(`daimon.core.channel_overview`): its `sealed` and `protected` flags are
+filled only for a caller that can already read the access policy (the CLI);
+for everyone else they are omitted, never sent as false.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
+from daimon.core.channel_overview import ChannelAdminSet, ChannelViewer, build_channel_overview
 from daimon.core.errors import StoreError
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
@@ -24,7 +25,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.channel_budgets import list_channel_budgets
 from daimon.core.stores.direct_messages import list_dm_channel_ids
-from daimon.core.stores.domain import FundingMode
+from daimon.core.stores.domain import ChannelAdminsRow, FundingMode
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.tenants import get_tenant
@@ -105,34 +106,43 @@ def build_channel_summaries(
     tenant_row: TenantConfigRow | None,
     default: DeploymentDefault,
     budgets: dict[str, ChannelBudgetStatus],
-    admins: dict[str, ChannelAdmins],
+    admins: dict[str, ChannelAdminsRow],
     dm_channel_ids: set[str],
-    isolated_channel_ids: Collection[str] = (),
-    access: TenantAccessPolicy | None = None,
+    policy: TenantAccessPolicy,
+    viewer: ChannelViewer,
 ) -> list[ChannelSummary]:
     """One entry per channel with a setting, a budget, admins or isolation, by channel id.
 
     A DM's channel gets a config row when the DM starts; it is not a channel
-    of the workspace, so ``dm_channel_ids`` are skipped. With ``access`` each
-    entry carries its seal and protection.
+    of the workspace, so ``dm_channel_ids`` are skipped. Each entry carries
+    what `viewer`, a server admin, sees of it (`daimon.core.channel_overview`).
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    isolated = set(isolated_channel_ids)
-    listed = configs.keys() | budgets.keys() | admins.keys() | isolated
+    listed = configs.keys() | budgets.keys() | admins.keys() | set(policy.isolated_channel_ids)
     for channel_id in sorted(listed - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
-        status = budgets.get(channel_id)
+        overview = build_channel_overview(
+            channel_id,
+            viewer=viewer,
+            policy=policy,
+            environment_name=resolved.environment_name,
+            budget=budgets.get(channel_id),
+            admins=admins.get(channel_id),
+        )
+        granted = overview.admins or ChannelAdminSet()
         summaries.append(
             ChannelSummary(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
-                environment_name=resolved.environment_name,
-                isolated=channel_id in isolated,
-                admins=admins.get(channel_id, ChannelAdmins(role_ids=[], user_ids=[])),
-                budget=_budget_summary(status) if status is not None else None,
-                sealed=None if access is None else channel_id in access.sealed_channel_ids,
-                protected=None if access is None else channel_id in access.protected_channel_ids,
+                environment_name=overview.environment_name,
+                isolated=overview.isolated is True,
+                admins=ChannelAdmins(
+                    role_ids=list(granted.role_ids), user_ids=list(granted.user_ids)
+                ),
+                budget=_budget_summary(overview.budget) if overview.budget is not None else None,
+                sealed=overview.sealed,
+                protected=overview.protected,
             )
         )
     return summaries
@@ -162,7 +172,7 @@ async def load_tenant_summary(
         if budget.platform == tenant.platform
     }
     admins = {
-        row.channel_id: ChannelAdmins(role_ids=list(row.role_ids), user_ids=list(row.user_ids))
+        row.channel_id: row
         for row in await list_channel_admins(session, tenant_id=tenant_id, platform=tenant.platform)
     }
     dm_channel_ids = await list_dm_channel_ids(session, tenant_id=tenant_id)
@@ -179,8 +189,8 @@ async def load_tenant_summary(
             budgets=budgets,
             admins=admins,
             dm_channel_ids=dm_channel_ids,
-            isolated_channel_ids=policy.isolated_channel_ids,
-            access=policy if with_access else None,
+            policy=policy,
+            viewer=ChannelViewer(is_server_admin=True, reads_access_policy=with_access),
         ),
         timed_credit=[
             TimedCreditSummary(
