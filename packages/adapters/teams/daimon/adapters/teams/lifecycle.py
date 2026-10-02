@@ -261,9 +261,8 @@ class TeamsTurnLifecycle:
                 answer = f"{answer}\n\n{degraded}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             last = len(chunks) - 1
+            # A ping posts the answer fresh, so Teams notifies; the card is retired after.
             fresh = self._ping and self._message_id is not None
-            if fresh:
-                await self._close(card.ANSWERED_BELOW)
             current = self._message_id
             for index, chunk in enumerate(chunks):
                 is_last = index == last
@@ -278,6 +277,8 @@ class TeamsTurnLifecycle:
                     self._answer_id, replaced = current, True
                 self._shown[current] = (chunk, is_last)
             self.final_message_id = current
+            if fresh:
+                await self._retire_card()
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -300,6 +301,15 @@ class TeamsTurnLifecycle:
                 failed = card.notice_card(_DELIVERY_FAILED if answer else _FINISH_FAILED)
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
+
+    async def _retire_card(self) -> None:
+        """Point the card at the answer posted below it; best effort, the answer landed."""
+        try:
+            await self._edit(card.notice_card(card.ANSWERED_BELOW), self._message_id)
+        except TEAMS_SEND_ERRORS:
+            log.warning("teams.turn.card_retire_failed", exc_info=True)
+        # Closed either way: the boot sweep must not mark an answered turn interrupted.
+        self.card_closed = True
 
     async def prepend_revealed_answer(self, notice: str) -> bool:
         """Edit `notice` in above the answer on screen; False if it cannot go there.
