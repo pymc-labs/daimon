@@ -134,6 +134,7 @@ async def load_roster_state(
             default=runtime.deployment_default,
             viewer=await load_isolation_viewer(
                 session,
+                runtime.anthropic,
                 tenant_id=tenant_id,
                 channel_id=channel_id,
                 is_admin=is_admin,
@@ -236,6 +237,7 @@ async def panel_viewer(
     """What this panel's reader sees of isolated channels; None for admins."""
     return await load_isolation_viewer(
         session,
+        runtime.anthropic,
         tenant_id=_tenant_id(state),
         channel_id=str(state.channel_id) if state.channel_id else None,
         is_admin=state.is_admin,

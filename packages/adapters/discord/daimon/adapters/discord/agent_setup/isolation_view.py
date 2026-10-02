@@ -19,6 +19,7 @@ from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import is_isolated
+from daimon.core.authz import build_subject
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
     set_channel_isolation,
@@ -129,6 +130,8 @@ class IsolationView(PanelViewBase):
                 channel_label=state.channel_name,
                 fork=copy,
                 public_url=str(public_url) if public_url is not None else None,
+                # `refuse_if_not_admin` above checked the live role.
+                subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
             )
         except DaimonError as exc:  # a refusal, or a copy that can't be made
             notice = f"-# {exc} Nothing was changed."
