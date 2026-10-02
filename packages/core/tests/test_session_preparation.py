@@ -1008,8 +1008,8 @@ async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_ses
 
 @pytest.mark.parametrize(
     ("pool_size", "gate_limit"),
-    [(20, 6), (2, 1)],
-    ids=["pre-fix-unbounded-reference", "bounded-burst"],
+    [(20, 6), (20, 1), (2, 1)],
+    ids=["pre-fix-unbounded-reference", "bounded-same-pool", "bounded-burst"],
 )
 async def test_fresh_burst_waits_before_pool_checkout(
     db_session: AsyncSession,
@@ -1086,7 +1086,7 @@ async def test_fresh_burst_waits_before_pool_checkout(
         logging.getLogger(__name__).info(
             "fresh_burst_measurement mode=%s connection_seconds=%.3f "
             "per_session=%.3f peak_checked_out=%d",
-            "bounded" if gate_limit == 1 else "unbounded_reference",
+            f"bounded_pool_{pool_size}" if gate_limit == 1 else "unbounded_reference",
             held_s,
             held_s / 6,
             peak_checked_out,
