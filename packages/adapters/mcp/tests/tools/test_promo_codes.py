@@ -17,7 +17,6 @@ from daimon.adapters.mcp.tools.promo_codes import (
 )
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.scope import DeploymentDefault
-from daimon.core.security_audit import capture_decision
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import Role
@@ -126,42 +125,53 @@ async def test_non_admin_is_refused_before_redeeming(
     )
 
 
-async def test_a_channel_admin_raises_their_channels_budget_and_nothing_else(
+async def test_a_channel_admin_redeems_no_code_and_a_server_admin_raises_the_budget(
     db_session: AsyncSession, db_session_factory: Factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Every code kind is a server admin's, even one raising the channel admin's own channel."""
+
     async def visible(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
         return channel_id
 
     monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
-    member = await _setup(db_session, is_admin=False)
-    tenant = await get_tenant(db_session, member.tenant_id)
+    admin = await _setup(db_session)
+    tenant = await get_tenant(db_session, admin.tenant_id)
     assert tenant is not None
+    admin = dataclasses.replace(admin, platform=tenant.platform)
     await make_channel_budget(db_session, tenant=tenant, channel_id="111", limit_usd=Decimal("5"))
+    start = datetime.now(UTC).replace(microsecond=0)
     await _code(db_session, "CHANNEL-RAISE-26", timed=False, channel_budget=True)
     await _code(db_session, "WELCOME-2026", timed=False)
+    await _code(
+        db_session,
+        "TIMED-2026",
+        timed=True,
+        credit_starts_at=start,
+        credit_ends_at=start + timedelta(days=2),
+    )
     await db_session.commit()
     channel_admin = dataclasses.replace(
-        member,
-        platform=tenant.platform,
+        admin,
+        role=Role.USER,
+        is_admin=False,
         platform_user_id="u-ca",
         administered_channel_ids=frozenset({"111"}),
     )
     runtime = _runtime(db_session_factory)
 
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
-        await _redeem_promo_code_impl(runtime, member, "CHANNEL-RAISE-26", "111")
-    with capture_decision() as denied:
-        credit = await _redeem_promo_code_impl(runtime, channel_admin, "WELCOME-2026", "111")
-    assert (credit.redeemed, credit.refusal) == (False, "not_allowed"), "credit is a server's"
-    assert denied.reason == "authz:admin_required", "the refusal is audited"
-    missing = await _redeem_promo_code_impl(runtime, channel_admin, "CHANNEL-RAISE-26")
-    assert missing.refusal == "needs_channel", "a channel code needs its channel"
+    for code in ("CHANNEL-RAISE-26", "WELCOME-2026", "TIMED-2026"):
+        with pytest.raises(ToolError, match="requires a workspace or server admin"):
+            await _redeem_promo_code_impl(runtime, channel_admin, code, "111")
+    async with db_session_factory() as session:
+        assert await tenant_ledger.get_balance(session, tenant_id=admin.tenant_id) == 0, (
+            "a refused channel admin adds no credit"
+        )
 
-    raised = await _redeem_promo_code_impl(runtime, channel_admin, "CHANNEL-RAISE-26", "111")
+    raised = await _redeem_promo_code_impl(runtime, admin, "CHANNEL-RAISE-26", "111")
 
     assert (raised.kind, raised.channel_id, raised.channel_limit_usd) == (
         "channel_budget",
         "111",
         "17.50",
-    ), "the channel's limit rose by the code's amount"
+    ), "the code was still unredeemed, and a server admin raised the channel's limit"
     assert raised.message == "Raised channel 111's budget by $12.50, to $17.50."

@@ -49,7 +49,11 @@ class BudgetNotice:
         return tuple(r for r in self.recipient_ids if policy.allows(r))
 
     def text(self, channel_ref: str) -> str:
-        until = "the month ends or an admin raises it" if self.monthly else "an admin raises it"
+        until = (
+            "the month ends or a server admin raises it"
+            if self.monthly
+            else "a server admin raises it"
+        )
         return (
             f"{channel_ref}'s budget is used up: {self.budget_line}. "
             f"New turns there are refused until {until}."

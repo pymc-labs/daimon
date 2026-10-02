@@ -630,7 +630,7 @@ async def test_a_channel_budget_code_raises_one_channels_limit_and_leaves_the_ba
     code = await _channel_code(db_session)
     await db_session.commit()
     here = BudgetChannel(platform=tenant.platform, channel_id="C1")
-    channel_admin = Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"}))
+    server_admin = Subject(is_admin=True, platform_user_id="U1")
 
     result = await redeem_promo_code(
         db_session_factory,
@@ -639,7 +639,7 @@ async def test_a_channel_budget_code_raises_one_channels_limit_and_leaves_the_ba
         code="CHANNEL-RAISE-26",
         now=T0,
         channel=here,
-        redeemer=channel_admin,
+        redeemer=server_admin,
     )
 
     assert isinstance(result, PromoRedeemed), result
@@ -680,11 +680,24 @@ async def test_a_channel_budget_code_raises_one_channels_limit_and_leaves_the_ba
         (
             "C1",
             Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"})),
+            False,
+            "not_allowed",
+        ),
+        (
+            "C1",
+            Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"})),
             True,
             "not_allowed",
         ),
     ],
-    ids=["no-channel", "no-budget", "other-channels-admin", "member", "channel-admin-credit-code"],
+    ids=[
+        "no-channel",
+        "no-budget",
+        "other-channels-admin",
+        "member",
+        "own-channels-admin",
+        "channel-admin-credit-code",
+    ],
 )
 async def test_channel_budget_and_credit_codes_refuse_the_wrong_redeemer(
     db_session: AsyncSession,

@@ -3,8 +3,8 @@
 ``register_promo_code_tools(mcp, runtime)`` wires the ``@mcp.tool`` closure; it
 delegates to ``_redeem_promo_code_impl`` so the logic is testable without a
 FastMCP Context. Redemption itself lives in ``daimon.core.promo_credit``.
-A credit or timed code needs a server admin; a channel budget code also
-whoever may set that channel's budget (`authorize`, SET_CHANNEL_BUDGET).
+Every code needs a server admin; a channel budget code is also held to
+`authorize` (SET_CHANNEL_BUDGET), which never allows a channel admin.
 """
 
 from __future__ import annotations
@@ -64,8 +64,7 @@ async def _redeem_promo_code_impl(
     runtime: McpRuntime, auth: AuthIdentity, code: str, channel_id: str | None = None
 ) -> RedeemPromoCodeResult:
     require_scope(auth, "promo:redeem")
-    if not auth.is_channel_admin:
-        _require_admin(auth)
+    _require_admin(auth)
     channel = None
     if channel_id is not None and channel_id.strip() and auth.platform in _PLATFORMS:
         target = await resolve_channel(runtime, auth, channel_id.strip())
@@ -128,7 +127,7 @@ async def _redeem_promo_code_impl(
 
 
 def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("promo:redeem")})
+    @mcp.tool(tags={"admin", *scope_tags("promo:redeem")})
     async def redeem_promo_code(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         code: str,
@@ -143,7 +142,6 @@ def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         end. Repeated wrong codes pause redemption for a few minutes. Requires
         Manage Server (Discord) or workspace admin (Slack). A channel budget
         code raises one channel's budget limit instead: pass that channel's
-        ``channel_id`` (the id from <channel role="parent_channel">); that
-        channel's admins may redeem it too.
+        ``channel_id`` (the id from <channel role="parent_channel">).
         """
         return await _redeem_promo_code_impl(runtime, await _auth(ctx), code, channel_id)

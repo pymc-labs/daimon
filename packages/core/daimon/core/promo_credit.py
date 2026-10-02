@@ -113,10 +113,10 @@ async def redeem_promo_code(
 ) -> PromoRedeemResult:
     """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
 
-    ``redeemer`` is who redeems, as `authorize` sees them: a credit or timed
-    code needs a server admin, a channel_budget code whoever may set
-    ``channel``'s budget (SET_CHANNEL_BUDGET). None means the caller already
-    checked for a server admin.
+    ``redeemer`` is who redeems, as `authorize` sees them: every code needs a
+    server admin, a channel_budget code through SET_CHANNEL_BUDGET, which never
+    allows a channel admin. None means the caller already checked for a server
+    admin.
 
     The tenant's attempts are serialized first, so concurrent guesses cannot
     all pass the throttle on the same count. The code row is then locked, so

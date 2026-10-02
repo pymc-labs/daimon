@@ -205,7 +205,7 @@ Two boundaries of the design worth stating plainly:
 
 ## Channel budgets
 
-An admin, or that channel's admin, can cap what one channel may spend with `set_channel_budget` (MCP)
+An admin can cap what one channel may spend with `set_channel_budget` (MCP)
 or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
 budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
 with no row there is no limit, and nothing is created by default. It works
@@ -239,10 +239,9 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   to `false` in `DAIMON_BUDGET_NOTICES`. Refusals of MCP turns, media calls
   and routines send none.
 
-Members can read a channel's budget with `get_channel_budget`; listing is
-admin-only. Setting and clearing are for server admins and, for the channels
-they administer, channel admins (`daimon.core.authz`, `SET_CHANNEL_BUDGET`);
-each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
+Members can read a channel's budget with `get_channel_budget`; listing,
+setting and clearing are for server admins only, never a channel's own admins
+(`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
 shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
 lists the five most used budgets on that platform (active ones first, by
 share of the limit spent) with a count of the rest.
@@ -382,10 +381,9 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   the balance, and write no ledger row. The raise is permanent: on a
   monthly budget it raises every month's limit. They are redeemed in the
   channel they raise (`/billing` there, or `redeem_promo_code` with
-  `channel_id`), which must have a budget; server admins and that channel's
-  admins may redeem them, and the redemption records the channel
-  (`promo_redemptions.channel_id`). Credit and timed codes stay with server
-  admins.
+  `channel_id`), which must have a budget; only server admins redeem them,
+  like every code, and the redemption records the channel
+  (`promo_redemptions.channel_id`).
 - **Late spend.** Every turn debit stores `occurred_at`, the model call's own
   time, so a call the [sweep](#the-tables) records after the window closed
   still counts as spend inside it. Fifteen minutes after the close a

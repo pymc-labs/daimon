@@ -2,10 +2,9 @@
 
 A budget caps what one channel may spend (see ``daimon.core.channel_budget``
 for how spend and windows are counted). Reading one is a member action for a
-channel the caller can see. Listing acts on the whole server or workspace, so
-it is admin-only. Setting and clearing are decided by `authorize`
-(SET_CHANNEL_BUDGET): a server admin for any channel, a channel admin for the
-channels they administer. Operator tokens read them with ``tenant:read`` and
+channel the caller can see. Listing, setting and clearing are admin-only:
+`authorize` (SET_CHANNEL_BUDGET) allows a server admin and never a channel
+admin, since money stays with server admins. Operator tokens read them with ``tenant:read`` and
 change them with ``channels:write``. Money crosses this boundary as decimal
 strings, both ways.
 """
@@ -90,9 +89,10 @@ class ClearChannelBudgetResult:
 
 
 _NEEDS_BUDGET_ADMIN = (
-    "Changing this channel's budget needs a workspace or server admin, or an admin of "
-    "that channel, and the caller is neither. Tell them who can make it and give them a "
-    "sentence that admin can say, preserving the requested action and channel. Do not retry."
+    "Changing a channel's budget needs a workspace or server admin, and the caller is not "
+    "one; a channel's own admins can't change it either. Tell them who can make it and give "
+    "them a sentence that admin can say, preserving the requested action and channel. "
+    "Do not retry."
 )
 
 
@@ -330,7 +330,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List every channel budget in this server or workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -339,7 +339,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         starts_at: str | None = None,
         ends_at: str | None = None,
     ) -> ChannelBudgetResult:
-        """Set or replace a channel's spending budget. Admins, and that channel's admins.
+        """Set or replace a channel's spending budget. Admin-only.
 
         Once the channel's spend in the window reaches ``limit_usd`` (a
         decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
@@ -362,13 +362,11 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ends_at=ends_at,
         )
 
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str
     ) -> ClearChannelBudgetResult:
-        """Remove a channel's spending budget, so only the balance and caps apply.
-
-        Admins, and that channel's admins, may.
+        """Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
 
         A thread id clears its parent channel's budget.
         """

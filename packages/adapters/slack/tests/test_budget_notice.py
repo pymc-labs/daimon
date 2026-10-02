@@ -60,7 +60,7 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     assert kwargs["channel"] == "D-U2"
     assert kwargs["text"] == (
         "<#C1>'s budget is used up: $2.00 of $2.00 (total). "
-        "New turns there are refused until an admin raises it."
+        "New turns there are refused until a server admin raises it."
     )
 
 

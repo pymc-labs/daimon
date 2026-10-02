@@ -652,9 +652,7 @@
     }),
     'clear_channel_budget': dict({
       'description': '''
-        Remove a channel's spending budget, so only the balance and caps apply.
-        
-        Admins, and that channel's admins, may.
+        Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
         
         A thread id clears its parent channel's budget.
       ''',
@@ -3678,8 +3676,7 @@
         end. Repeated wrong codes pause redemption for a few minutes. Requires
         Manage Server (Discord) or workspace admin (Slack). A channel budget
         code raises one channel's budget limit instead: pass that channel's
-        ``channel_id`` (the id from <channel role="parent_channel">); that
-        channel's admins may redeem it too.
+        ``channel_id`` (the id from <channel role="parent_channel">).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4630,7 +4627,7 @@
     }),
     'set_channel_budget': dict({
       'description': '''
-        Set or replace a channel's spending budget. Admins, and that channel's admins.
+        Set or replace a channel's spending budget. Admin-only.
         
         Once the channel's spend in the window reaches ``limit_usd`` (a
         decimal string such as ``"25.00"``; ``"0"`` stops the channel), new

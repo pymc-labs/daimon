@@ -331,8 +331,8 @@ STILL_ADMIN_TOOL_NAMES = (
 )
 """Tools a plain member never sees.
 
-Most are tenant-wide and admin-only. The agent default, channel environment
-and channel budget tools also admit channel admins, but only for channels they run.
+Most are tenant-wide and admin-only. The agent default and channel environment
+tools also admit channel admins, but only for channels they run.
 `create_environment` is deliberately absent: a new environment is inert until an
 admin or a channel's admin picks it, so its blast radius is nothing until a gated
 call widens it. Mutating an environment others already resolve to is a different
@@ -581,12 +581,15 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_channel_environment" not in await _search(
         app, member, "set channel environment"
     ), "a member without a grant may not"
-    assert "### set_channel_budget" in await _search(app, channel_admin, "set channel budget"), (
-        "a channel admin may set their channel's budget"
-    )
-    assert "### list_channel_budgets" not in await _search(
-        app, channel_admin, "list channel budgets"
-    ), "listing every budget stays with server admins"
+    for tool, query in (
+        ("set_channel_budget", "set channel budget"),
+        ("clear_channel_budget", "clear channel budget"),
+        ("list_channel_budgets", "list channel budgets"),
+        ("redeem_promo_code", "redeem promo code"),
+    ):
+        assert f"### {tool}" not in await _search(app, channel_admin, query), (
+            f"{tool} stays with server admins"
+        )
     assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins"), (
         "naming channel admins stays with server admins"
     )

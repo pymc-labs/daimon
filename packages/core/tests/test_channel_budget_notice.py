@@ -85,7 +85,7 @@ async def test_the_notice_goes_to_the_channel_admins_once_per_window(
     assert notice.workspace_id == tenant.external_id
     assert notice.text("<#chan-1>") == (
         "<#chan-1>'s budget is used up: $1.00 of $0.00 (monthly). "
-        "New turns there are refused until the month ends or an admin raises it."
+        "New turns there are refused until the month ends or a server admin raises it."
     )
     assert await _claim(db_session, tenant) is None, "one notice per window"
     assert await _claim(db_session, tenant, now=datetime(2026, 8, 1, tzinfo=UTC)) is not None, (
@@ -154,4 +154,4 @@ def test_the_dm_policy_filters_recipients() -> None:
     allow_b = DirectMessagePolicy(mode="allowlist", recipient_ids=["b"])
     assert notice.allowed_recipients(allow_b) == ("b",)
     assert notice.allowed_recipients(DirectMessagePolicy(mode="disabled")) == ()
-    assert "until an admin raises it." in notice.text("c")
+    assert "until a server admin raises it." in notice.text("c")

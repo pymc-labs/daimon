@@ -415,8 +415,8 @@ run (channel-scope rows, thread bindings, and other people's live sessions
 and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent and budget (`SET_CHANNEL_BUDGET`; never the tenant
-balance, and not with an agent key). A `/dm` conversation counts as the channel it was
+channels' default agent (never a budget or the tenant balance, which stay
+with server admins: `SET_CHANNEL_BUDGET`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
@@ -1044,8 +1044,8 @@ button, shown only while a code is redeemable, and a modal), the Teams
 `billing` card (a code field and button, shown the same way) or with the MCP
 tool `redeem_promo_code`; each surface calls
 `daimon.core.promo_credit.redeem_promo_code`. A channel budget code raises
-the invoking channel's budget limit, and a channel admin may redeem one for
-a channel they administer (`SET_CHANNEL_BUDGET`) through the MCP tool. Scheduler housekeeping settles
+the invoking channel's budget limit; only server admins redeem one
+(`SET_CHANNEL_BUDGET`), never a channel admin. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
 

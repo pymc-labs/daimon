@@ -29,8 +29,9 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT,
-SET_CHANNEL_BUDGET and READ_SESSION.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
+and READ_SESSION. SET_CHANNEL_BUDGET is the counter-example: money stays with
+server admins, so a grant never counts there.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -68,8 +69,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   or the workspace default; a channel admin picks the channels they
   administer, except an environment with unrestricted networking in a
   sealed channel, or one holding a sealed thread (`sealed`).
-- **Channel budgets**: a server admin sets or clears any channel's budget; a
-  channel admin those of the channels they administer, never with an agent key.
+- **Channel budgets**: only a server admin sets, clears or raises a channel's
+  budget; a channel admin may not, even for the channels they administer.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -682,13 +683,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.SET_CHANNEL_BUDGET:
-        # An admin's own agent key keeps the budget rights it always had.
-        if subject.is_admin:
-            return ALLOW
-        channel = place.parent_channel_id or place.channel_id
-        if subject.via_agent_key or channel not in subject.administered_channel_ids:
-            return _deny("admin_required")
-        return ALLOW
+        # Money stays with server admins; an admin's own agent key keeps the
+        # budget rights it always had.
+        return ALLOW if subject.is_admin else _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:
         if subject.is_admin and not subject.via_agent_key:

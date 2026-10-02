@@ -1352,7 +1352,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         },
         _deny("admin_required"),
     ),
-    # --- channel budgets: a channel admin sets their own channels' ---
+    # --- channel budgets: server admins only, never a channel's own admins ---
     *(
         (
             name,
@@ -1363,16 +1363,16 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         for name, subject, place, expected in [
             ("server admin sets any channel's budget", ADMIN, Place(channel_id="C_X"), ALLOW),
             (
-                "channel admin sets their channel's budget",
+                "channel admin can't set their own channel's budget",
                 ACME_CHANNEL_ADMIN,
                 Place(channel_id="C_ACME"),
-                ALLOW,
+                _deny("admin_required"),
             ),
             (
-                "a thread counts as its channel",
+                "nor through one of its threads",
                 ACME_CHANNEL_ADMIN,
                 Place(channel_id="T1", parent_channel_id="C_ACME"),
-                ALLOW,
+                _deny("admin_required"),
             ),
             (
                 "channel admin can't set another channel's budget",
