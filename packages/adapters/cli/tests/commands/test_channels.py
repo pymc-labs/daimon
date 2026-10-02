@@ -24,6 +24,7 @@ from daimon.adapters.cli.commands.channels import (
     channels_admins_set,
     channels_isolate,
     channels_list,
+    channels_protect,
     channels_skills_add,
     channels_skills_list,
     channels_skills_remove,
@@ -538,17 +539,89 @@ async def test_isolate_end_lifts_the_seal_and_pins_when_asked(
     assert policy.agent_channel_pins == {}, "and the copy unpinned"
 
 
-async def test_isolate_refuses_teams_and_bad_flag_mixes(
+async def test_isolate_takes_a_teams_thread_as_its_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Teams isolates as Discord and Slack do; the copy is named from the channel id."""
+    other = "19:other@thread.tacv2"
+    tenant_id = await _isolatable(db_session_factory, "teams", "tid", (TEAMS_CHANNEL, other))
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    console = _console()
+
+    await channels_isolate(
+        rt=rt,
+        console=console,
+        platform="teams",
+        workspace_id="tid",
+        channel_id=f"{TEAMS_CHANNEL};messageid=1700000000000",
+        fork_from="shared",
+    )
+
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == (TEAMS_CHANNEL,), "the thread's channel is isolated"
+    assert policy.agent_channel_pins == {"channel-growth": (TEAMS_CHANNEL,)}, (
+        "the copy, named from the id, is pinned to the channel alone"
+    )
+    assert "its own agent is channel-growth, copied from shared" in _out(console)
+
+
+async def test_isolate_refuses_bad_flag_mixes(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     rt = build_cli_runtime(db_session_factory)
     base = {"rt": rt, "console": _console(), "workspace_id": "w", "channel_id": CHANNEL}
-    with pytest.raises(typer.BadParameter, match="only on Discord and Slack"):
-        await channels_isolate(**base, platform="teams")
+    with pytest.raises(typer.BadParameter, match="unsupported platform"):
+        await channels_isolate(**base, platform="cli")
     with pytest.raises(typer.BadParameter, match="only applies when isolating"):
         await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
     with pytest.raises(typer.BadParameter, match="only applies with --end"):
         await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)
+
+
+async def test_protect_toggles_a_teams_channel_and_keeps_an_isolated_seal(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _isolatable(db_session_factory, "teams", "tid", (TEAMS_CHANNEL, CHANNEL))
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    args = {"rt": rt, "platform": "teams", "workspace_id": "tid"}
+    with pytest.raises(typer.BadParameter, match="pass --protect"):
+        await channels_protect(
+            **args, console=_console(), channel_id=TEAMS_CHANNEL, protect=None, seal=None
+        )
+    console = _console()
+    await channels_protect(
+        **args,
+        console=console,
+        channel_id=f"{TEAMS_CHANNEL};messageid=1700000000000",
+        protect=True,
+        seal=True,
+    )
+    assert "now protected, sealed" in _out(console), _out(console)
+    await channels_isolate(
+        rt=rt,
+        console=_console(),
+        platform="teams",
+        workspace_id="tid",
+        channel_id=TEAMS_CHANNEL,
+        fork_from="shared",
+    )
+    console = _console()
+    with pytest.raises(typer.Exit):
+        await channels_protect(
+            **args, console=console, channel_id=TEAMS_CHANNEL, protect=False, seal=False
+        )
+    assert "end its isolation first" in _out(console), _out(console)
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert (policy.protected_channel_ids, policy.sealed_channel_ids) == (
+        (TEAMS_CHANNEL,),
+        (TEAMS_CHANNEL,),
+    ), "a refusal writes nothing, the protection included"
 
 
 async def test_list_shows_the_balance_and_each_configured_channel(

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An isolated channel's content no longer leaves through new agents or timers.**
+  An isolated channel's own agent, wherever it runs and through any of its
+  coding-tool tokens, could call `create_agent`, and the new agent answered
+  outside the channel with whatever prompt was written into it. Such calls are
+  now refused (`channel_isolated`), admins included. `list_timers` also showed
+  the notes of timers set in an isolated channel from anywhere; they now list
+  only inside that channel, as its routines do.
 - A run of an isolated channel's own agent from the hub or a DM, which only admins and that channel's admins may make, is now gated by and charged to that channel's budget, so closing the channel with a $0 budget stops those runs too.
 - A Teams routine saved before its channel was recorded is placed in the channel its destination id names. Teams ids contain ":", which split the id at the wrong place, so such a routine was treated as outside its channel by the isolation and environment checks.
 - Fresh and replacement session preparations now queue before taking an advisory-lock connection, so a burst cannot exhaust the Discord worker's Postgres pool while Managed Agents creates sessions. `runtime.health` reports active and waiting preparations as `prep_gate`.
@@ -16,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Channel admins change only their channels' own agents.** A channel admin
+  could configure, rebind and edit any agent answering in their channels,
+  including one a member bound there. They now may only when the agent is
+  theirs: made by a channel admin from one of their channels (`create_agent`
+  with the turn's `origin_context_id`, or a setup panel's New agent form),
+  pinned by a server admin inside their channels, or set as one of their
+  channels' default by a server admin; the last does not let them bind it
+  elsewhere. Existing agents have no recorded creation channel, and defaults
+  a server admin set before this are recognised by the setter's stored role,
+  so a server admin re-sets any other default a channel admin should manage.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a
   Teams team's Entra group id (whose owners it admits), from
@@ -138,7 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Operator tokens from the setup panels.** Server admins on Discord, Slack
   and Teams mint, list and revoke operator tokens from Who answers where:
-  `tenant:read`, `channels:write` and `promo:redeem` only (`promo:create`
+  `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only (`promo:create`
   stays with `daimon mcp mint-operator-token`), for 30 days, shown once. The
   listing never shows a token, and every mint and revoke is audited.
 - **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
@@ -146,6 +163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channels the token runs in, and binds it there under the same rule as
   Discord and Slack: the agent must be pinned to channels they administer,
   and an unbound token stays with server admins, who keep that choice.
+- **Teams channel settings.** Who answers where in the Teams setup panel
+  opens a Channel settings dialog for a channel picked there: its
+  environment, for server admins and that channel's admins, and its
+  isolation and channel admins, for server admins only, as on Discord and
+  Slack. Every save is re-checked and audited.
+- **Skills from Teams files.** `add_skill(attachment_url=…)` takes a `.md`
+  or `.zip` shared in a Teams 1:1 chat by its download link: https on a
+  SharePoint, OneDrive or Graph host only, sent without a token, with no
+  redirect off those hosts and Discord's and Slack's caps and preview.
 
 - **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
   skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a
@@ -303,11 +329,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elsewhere, post nowhere else, send no DMs, and `/dm` there is refused. A
   conversation in the channel keeps its posts, cards and routines inside it,
   while its setup thread can still configure the channel's agent. The CLI
-  refuses a pin or seal change that would break an isolated channel, and
-  refuses isolation on Teams, as the tool does. The panel shows the channel as private,
+  refuses a pin or seal change that would break an isolated channel. Teams
+  channels isolate too, a thread counting as its channel. The panel shows the channel as private,
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
+- **Channel protection.** `set_channel_protection` (also under an operator
+  token's `channels:write`) and `daimon channels protect` protect or seal one
+  channel, or lift either, without restating the policy's lists. Only server
+  admins and operator tokens may, never a channel admin; an isolated channel
+  stays sealed until its isolation ends.
+- **Archiving an isolation copy.** `archive_isolation_copy` (also under a new
+  operator scope, `agents:archive`) archives the agent `set_channel_isolation`
+  copied for a channel once that channel closes, with its pin and default
+  there. Only server admins and operator tokens may; it never archives
+  another agent, a default, or a copy still pinned or a default elsewhere.
 - **Channel environments.** Admins can pick the environment a Discord,
   Slack or Teams channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not

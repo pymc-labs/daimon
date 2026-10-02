@@ -397,11 +397,18 @@ Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
 `C`, `G` or `D`, followed by uppercase letters or digits (a sealed Slack
-thread is `channel_id:thread_ts`; an isolated one is never a `D` DM). CLI ids must be
+thread is `channel_id:thread_ts`; an isolated one is never a `D` DM). A Teams pin or
+isolated channel is a whole `19:…@thread.tacv2` channel, never a thread. CLI ids must be
 non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
 `--clear` is also the way out of that state. There is no setup-panel editor.
+One channel's protection and seal toggle without restating the lists, with
+`set_channel_protection` or `daimon channels protect PLATFORM WORKSPACE_ID
+CHANNEL_ID [--protect/--unprotect] [--seal/--unseal]`
+(`packages/core/daimon/core/channel_protection.py`). Only server admins and
+operator tokens may, never a channel admin, and an isolated channel stays
+sealed until its isolation ends.
 
 **Channel admins.** A tenant can name, per channel, groups and members who run
 that channel on top of the server admins (`channel_admins`,
@@ -414,14 +421,20 @@ Slack and Teams look up only the groups some grant names
 grants nothing. `admit()` stores the member's matched group ids on the account
 (`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
 without asking the platform. A channel admin may do what a server admin may for
-an agent local to their channels -- not the tenant default or anyone's
+an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
 and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent (never a budget or the tenant balance, which stay
-with server admins: `SET_CHANNEL_BUDGET`). A `/dm` conversation counts as the channel it was
+with server admins: `SET_CHANNEL_BUDGET`). An agent is theirs when a channel
+admin made it from one of their channels (`agent_creation_channels`, written by
+`create_agent` from a verified turn origin and by each setup panel's New agent
+form), when a server admin pinned it inside their channels only, or when a
+server admin set it as one of their channels' default
+(`channel_config.agent_name_set_by_admin`); any other agent needs a server
+admin on every surface (`channel_admin_holds`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
@@ -433,8 +446,9 @@ is `Subject.administered_channel_ids`, filled from the stored grants and never
 administer every channel of every pin on it (a pin to no channel stays with
 server admins), and so is minting it a coding-tools token bound to one of
 those channels (never an unbound one). A channel admin binds only a shared agent
-(managed or tenant-wide), one answering nowhere yet, or one already local
-to them, never another channel's own agent. No chat tool, panel or CLI
+(managed or tenant-wide), or one a channel admin made from one of their
+channels or a server admin pinned inside them; a server admin's default does
+not make an agent theirs to move, and another channel's own agent never is. No chat tool, panel or CLI
 write (`daimon config set`, `daimon config propagate`) binds a pinned agent
 as the default of a channel outside its pin, for server admins too
 (`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
@@ -483,7 +497,8 @@ default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
 (`Place.setup_thread`) still answers as the built-in agent. C's own agents
 post nowhere outside C, not even the requester's DM, and send no direct
-messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
+messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`), whose prompts
+would answer outside C. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
@@ -506,15 +521,16 @@ token for C, or when its chat turn's agent is one of C's; an agent key is
 never inside by its agent alone. The roster, agent and key tools take the
 turn's `origin_context_id` for this. From outside, C's agents are missing from
 `list_agents` and every by-name lookup, from handoff destinations,
-`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines and
-routines posting into C; inside C only C's agents show. For members the
+`explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines,
+routines posting into C and timers set in C; inside C only C's agents show. For members the
 setup panel's roster, details and Who answers where are filtered the same way
 at the panel's location, and `/memory` hides an agent wherever it may not
 run; server admins see everything. Server admins are exempt in their own DM
 and hub, and a channel admin of C there too, but C's agents still never post
 outside C. `get_tenant_summary` lists each channel with `isolated`.
 
-Server admins toggle isolation from Who answers where in the setup panel,
+Server admins toggle isolation from Who answers where in the setup panel
+(Teams: its Channel settings dialog, `adapters/teams/channel_settings.py`),
 which shows the channel as Private (sealed), Dedicated agent (pinned to it
 alone) and Hidden (isolated), and offers to end isolation or lift the seal
 and pins too; with `set_channel_isolation` (also under `channels:write`) or
@@ -530,6 +546,13 @@ own until it is pinned there; `/dm` from C is refused; a call is held to C
 only where its tool takes a verified origin (not the send, DM, self-edit or
 routine edit tools), and a call that names none is judged from outside.
 
+When C closes, `archive_isolation_copy` (server admins, or the
+`agents:archive` operator scope; `core/isolation_copies.py`) archives the copy
+`set_channel_isolation` made for it, stamped `daimon_isolation_copy`, with its
+pin and default in C. It archives no other agent and no default, and refuses
+a copy pinned or a default anywhere but the channel named as closing. C stays
+sealed and isolated, so nothing answers there after.
+
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
 `packages/core/daimon/core/scope.py`), so a channel can keep its agent and run
@@ -537,8 +560,9 @@ it with the packages one team needs; routines follow the channel they post to.
 Server admins set any channel's environment, or the tenant default by omitting
 the channel, with `set_channel_environment` and `clear_channel_environment`; a
 channel admin sets the channels they run, and a thread id resolves to its
-parent. Who answers where in both setup panels lists each channel's
+parent. Who answers where in the setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
+(on Teams, in the Channel settings dialog, for a channel picked there)
 (`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
 drops the rows across an isolation line, and inside an isolated channel the
 workspace and deployment environments too. The name must match an existing
@@ -620,7 +644,7 @@ the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
 (`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
-admins on any other, channel admins on agents local to their channels, anyone
+admins on any other, channel admins on agents of theirs local to their channels, anyone
 on agents nobody else uses. Sharing is read as widely as a key change
 (`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
 default, or another member's routine or live session. Prompt and setup edits
@@ -1367,7 +1391,8 @@ registered and expire too, while older jti-less ones keep working.
 | Scope | Tools |
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_protection`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `agents:archive` | `archive_isolation_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 

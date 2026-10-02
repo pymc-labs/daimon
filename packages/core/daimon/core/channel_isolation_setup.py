@@ -31,7 +31,11 @@ from daimon.core.authz import Subject
 from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ISOLATION_COPY,
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
@@ -160,7 +164,10 @@ def isolated_agent_name(
 ) -> str:
     """A new agent name from the channel's name, unique among `taken`. Pure."""
     slug = re.sub(r"[^a-z0-9]+", "-", (channel_label or "").lower()).strip("-")[:40].strip("-")
-    base = slug or f"channel-{channel_id[-6:].lower()}"
+    # A Teams id (`19:<id>@thread.tacv2`) ends in its domain and holds ":", so
+    # the tail comes from its id part, letters and digits only.
+    tail = re.sub(r"[^a-z0-9]", "", channel_id.partition("@")[0].lower())[-6:]
+    base = slug or f"channel-{tail}"
     name, suffix = base, 2
     while name in taken:
         name, suffix = f"{base}-{suffix}", suffix + 1
@@ -471,6 +478,7 @@ async def set_channel_isolation(
         new_name=new_name,
         public_url=public_url,
         subject=subject,
+        extra_metadata={MA_METADATA_KEY_ISOLATION_COPY: channel_id},
     )
     try:
         async with sessionmaker.begin() as session:
@@ -482,6 +490,7 @@ async def set_channel_isolation(
                 agent_name=new_name,
                 mode="agent",
                 actor_account_id=actor_account_id,
+                set_by_admin=subject.is_admin and not subject.via_agent_key,
             )
             found, _ = await _write_isolation(
                 anthropic,

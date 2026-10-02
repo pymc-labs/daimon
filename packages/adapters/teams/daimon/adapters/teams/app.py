@@ -168,7 +168,6 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "agent_pinned_elsewhere": "turn.skipped.agent_pinned_elsewhere",
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
     "channel_protected": "turn.skipped.channel_protected",
-    # Teams isolates no channels, so this is unreachable; the map stays total.
     "channel_isolated": "turn.skipped.channel_isolated",
 }
 

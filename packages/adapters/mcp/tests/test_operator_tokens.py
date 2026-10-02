@@ -130,6 +130,14 @@ async def test_tenant_read_token_lists_only_its_tenants_environments(
     assert "Unknown tool" in refused, f"promo:redeem alone cannot list them: {refused}"
 
 
+async def test_agents_archive_token_lists_exactly_its_tool(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant_id, _jti, token = await _operator_token(sessionmaker, "agents:archive")
+    names = await _tool_names(_make_app(sessionmaker), token)
+    assert names == {"archive_isolation_copy"}, "agents:archive opens only the copy archive"
+
+
 async def test_channels_write_token_lists_exactly_its_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -143,13 +151,14 @@ async def test_channels_write_token_lists_exactly_its_tools(
         "set_channel_admins",
         "clear_channel_admins",
         "set_channel_isolation",
+        "set_channel_protection",
         "set_channel_environment",
         "clear_channel_environment",
         "add_channel_skill",
         "remove_channel_skill",
     }, (
-        "channels:write covers the channel budget, agent, admin, isolation, environment and "
-        "skill tools"
+        "channels:write covers the channel budget, agent, admin, isolation, protection, "
+        "environment and skill tools"
     )
 
 

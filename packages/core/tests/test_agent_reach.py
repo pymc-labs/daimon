@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_reach import (
     _caller_locality,  # pyright: ignore[reportPrivateUsage]
     load_agent_reach,
@@ -16,6 +17,8 @@ from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores import accounts
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.direct_messages import (
@@ -180,35 +183,49 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
     assert not admin.is_reachable_in_tenant, "an admin's decision needs no read"
 
 
-async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
+async def test_channel_admin_binds_only_shared_agents_or_their_own(
     db_session: AsyncSession,
 ) -> None:
+    """Shared by design, created for one of their channels, or pinned inside them."""
     tenant = await make_tenant(db_session)
-    for scope, name in (
-        (TenantScopeRef(tenant_id=tenant.id), "shared"),
-        (ChannelScopeRef(tenant_id=tenant.id, channel_id="b"), "b-agent"),
+    for scope, name, by_admin in (
+        (TenantScopeRef(tenant_id=tenant.id), "shared", False),
+        (ChannelScopeRef(tenant_id=tenant.id, channel_id="b"), "b-agent", False),
+        (ChannelScopeRef(tenant_id=tenant.id, channel_id="a"), "assigned", True),
     ):
         await set_fields(
-            db_session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
+            db_session,
+            scope=scope,
+            tenant_id=tenant.id,
+            agent_name=name,
+            mode="agent",
+            set_by_admin=by_admin,
         )
-    await set_channel_admins(
+    await _grant(db_session, tenant.id, "a", "u1")
+    for agent_id, channel in (("ag_made", "a"), ("ag_elsewhere", "b")):
+        await record_creation_channel(
+            db_session,
+            tenant_id=tenant.id,
+            ma_agent_id=agent_id,
+            platform="discord",
+            channel_id=channel,
+        )
+    await set_access_policy(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        channel_id="a",
-        role_ids=[],
-        user_ids=["u1"],
-        actor_account_id=None,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a",)}),
     )
     caller = ChannelAdminCaller(platform_user_id="u1")
 
-    async def may_bind(name: str, *, managed: bool = False, who=caller) -> bool:
+    async def may_bind(
+        name: str, *, agent_id: str | None = None, managed: bool = False, who=caller
+    ) -> bool:
         return await may_bind_as_channel_default(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
             agent_names=(name,),
-            ma_agent_id=None,
+            ma_agent_id=agent_id,
             default=DEFAULT,
             caller=who,
             is_daimon_managed=managed,
@@ -217,9 +234,107 @@ async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
     assert not await may_bind("b-agent"), "another channel's own agent never moves in"
     assert await may_bind("b-agent", managed=True), "a managed agent is shared by design"
     assert await may_bind("shared"), "the tenant default is shared by design"
-    assert await may_bind("unrouted"), "an agent answering nowhere is free to bind"
+    assert not await may_bind("unrouted", agent_id="ag_other"), (
+        "an unpinned agent someone else made is a server admin's to bind"
+    )
+    assert await may_bind("made", agent_id="ag_made"), "one made for their channel binds"
+    assert not await may_bind("elsewhere", agent_id="ag_elsewhere"), (
+        "one made for a channel they do not administer does not"
+    )
+    assert await may_bind("pinned"), "one a server admin pinned inside their channels binds"
+    assert not await may_bind("assigned"), (
+        "a default a server admin set is not theirs to bind: binding is what sets it"
+    )
     assert await may_bind("b-agent", who=caller.model_copy(update={"is_server_admin": True})), (
         "a server admin binds anything"
+    )
+
+
+async def test_a_channel_admin_changes_only_a_local_agent_that_is_theirs(
+    db_session: AsyncSession,
+) -> None:
+    """Each way an agent becomes theirs, and what takes it away."""
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "a", "u1")
+
+    async def default_of_a(name: str, *, by_admin: bool) -> None:
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="a"),
+            tenant_id=tenant.id,
+            agent_name=name,
+            mode="agent",
+            set_by_admin=by_admin,
+        )
+
+    async def outcome(name: str, agent_id: str) -> str:
+        facts = await load_target_facts(
+            db_session,
+            "agent_spec_edit",
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=(name,),
+            ma_agent_id=agent_id,
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u1"),
+            is_daimon_managed=False,
+        )
+        return decide_operation("agent_spec_edit", is_admin=False, target=facts)
+
+    await default_of_a("bound", by_admin=False)
+    assert await outcome("bound", "ag_bound") == "needs_admin", (
+        "an unpinned agent someone else made stays a server admin's once a member binds it"
+    )
+    await default_of_a("bound", by_admin=True)
+    assert await outcome("bound", "ag_bound") == "allow", "a server admin's assignment counts"
+
+    await default_of_a("made", by_admin=False)
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_made",
+        platform="discord",
+        channel_id="a",
+    )
+    assert await outcome("made", "ag_made") == "allow", "one made for their channel is theirs"
+    assert await outcome("made", "ag_slack") == "needs_admin", "the record is per agent id"
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_far",
+        platform="discord",
+        channel_id="b",
+    )
+    await default_of_a("far", by_admin=False)
+    assert await outcome("far", "ag_far") == "needs_admin", (
+        "made for a channel they do not administer"
+    )
+
+    await default_of_a("pinned", by_admin=False)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a",)}),
+    )
+    assert await outcome("pinned", "ag_pinned") == "allow", "pinned inside their channels"
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a", "b")}),
+    )
+    assert await outcome("pinned", "ag_pinned") == "needs_admin", "a pin reaching beyond them"
+
+    await default_of_a("made", by_admin=False)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="b"),
+        tenant_id=tenant.id,
+        agent_name="made",
+        mode="agent",
+        set_by_admin=True,
+    )
+    assert await outcome("made", "ag_made") == "needs_admin", (
+        "an agent made for their channel that also answers elsewhere lost its locality"
     )
 
 
@@ -758,7 +873,7 @@ async def test_other_peoples_routines_count_by_their_channel(db_session: AsyncSe
 async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
     db_session: AsyncSession,
 ) -> None:
-    """Locality never widens the sharing read; binding such an agent stays open."""
+    """Locality never widens the sharing read; binding such an agent needs it to be theirs."""
     tenant = await make_tenant(db_session)
     await _grant(db_session, tenant.id, "c9", "u9")
     facts = await _unrouted_key_facts(db_session, tenant.id, "u9")
@@ -773,16 +888,24 @@ async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u9"),
     ), "answering nowhere is not local"
-    assert await may_bind_as_channel_default(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        agent_names=("unrouted",),
-        ma_agent_id="agent_x",
-        default=DEFAULT,
-        caller=ChannelAdminCaller(platform_user_id="u9"),
-        is_daimon_managed=False,
-    ), "a channel admin still binds an agent answering nowhere yet"
+
+    async def may_bind() -> bool:
+        return await may_bind_as_channel_default(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=("unrouted",),
+            ma_agent_id="agent_x",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u9"),
+            is_daimon_managed=False,
+        )
+
+    assert not await may_bind(), "an agent answering nowhere is not theirs by that alone"
+    await record_creation_channel(
+        db_session, tenant_id=tenant.id, ma_agent_id="agent_x", platform="discord", channel_id="c9"
+    )
+    assert await may_bind(), "a channel admin binds one made for their channel, answering nowhere"
 
 
 async def test_a_key_change_without_a_stable_id_is_local_to_nobody(

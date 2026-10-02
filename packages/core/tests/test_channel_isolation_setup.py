@@ -65,6 +65,9 @@ def test_isolated_agent_name_slugs_the_channel_and_avoids_taken_names() -> None:
     assert isolated_agent_name(None, "C0ABCDEF12", taken=()) == "channel-cdef12", (
         "no label falls back to the channel id's tail"
     )
+    assert isolated_agent_name(None, "19:a1b2c3d4e5f6@thread.tacv2", taken=()) == (
+        "channel-d4e5f6"
+    ), "a Teams id's tail comes from its id part, never its domain or the colon"
 
 
 def _client(tenant_id: uuid.UUID, *agents: tuple[str, bool]) -> tuple[AsyncAnthropic, FakeMAState]:

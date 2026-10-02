@@ -60,6 +60,8 @@ from daimon.core.skills.add import (
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    fetch_teams_attachment,
+    is_teams_download_url,
     repo_origin,
 )
 from daimon.core.skills.fetch import GitHubFetchError
@@ -224,7 +226,8 @@ async def require_skill_change(
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
     A built-in agent is refused; a server admin may change any other; a
-    channel admin one that answers and runs only in their channels; anyone one
+    channel admin one of theirs that answers and runs only in their channels
+    (`daimon.core.authz.channel_admin_holds`); anyone one
     nobody else uses, read as widely as a key change
     (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
     """
@@ -245,6 +248,8 @@ async def require_skill_change(
         why = "runs unattended (a routine or queued wake) for someone with wider rights"
     elif facts.has_unplaced_run:
         why = reachability.UNPLACED_RUN_REASON
+    elif facts.is_local_to_caller_channels:
+        why = reachability.NOT_HELD_REASON
     else:
         why = (
             "is used beyond this caller (a default, a bound thread, or someone else's "
@@ -302,7 +307,9 @@ async def _fetch_platform_attachment(
     """Bytes and filename of a file attached in the caller's own chat platform.
 
     Discord: its CDN over https. Slack: this server's signed file link, for the
-    caller's own workspace, read with that workspace's bot token. Nothing else.
+    caller's own workspace, read with that workspace's bot token. Teams: the
+    file's pre-authorised SharePoint, OneDrive or Graph download link, with no
+    credential and no redirect off those hosts. Nothing else.
     """
     parsed = urlparse(url)
     if auth.platform == "discord":
@@ -318,8 +325,19 @@ async def _fetch_platform_attachment(
         return data, filename
     if auth.platform == "slack":
         return await _fetch_slack_attachment(runtime, auth, http, url)
+    if auth.platform == "teams":
+        try:
+            allowed = is_teams_download_url(httpx.URL(url))
+        except httpx.InvalidURL:
+            allowed = False
+        if not allowed:
+            raise ToolError("attachment_url must be a Teams file's SharePoint or OneDrive link.")
+        try:
+            return await fetch_teams_attachment(http, url)
+        except httpx.HTTPError as exc:
+            raise ToolError(f"Could not download the attachment: {exc}") from exc
     raise ToolError(
-        "Attachments come only from Discord or Slack. Pass skill_md or repo_url instead."
+        "Attachments come only from Discord, Slack or Teams. Pass skill_md or repo_url instead."
     )
 
 

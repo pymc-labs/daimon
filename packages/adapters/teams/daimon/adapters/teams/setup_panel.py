@@ -1,14 +1,15 @@
 """The `setup` command: Agents, Details, Who answers where, and the panel's dialogs.
 
-Mirrors Slack's `/agent-setup` and its rules. The panel is read-only and open to
-every member; changes happen in a setup conversation, where the chat tools own
-authorization. New agent is open to everyone (a fresh agent is unrouted, so it
-puts nothing at risk). Minting a coding-tool token is `authorize_coding_token`'s
-call, as on Discord and Slack: panels live in the 1:1 chat, so a channel admin
-picks one of their channels in the dialog and the token is bound there (an
-unbound token stays with server admins). Only its minter may revoke it; token
-values are never logged. Every click re-verifies the
-clicker and re-reads state, so a stale card grants nothing.
+Mirrors Slack's `/agent-setup` and its rules. The panel is open to every
+member; agent changes happen in a setup conversation, where the chat tools own
+authorization, and a channel's environment, isolation and admins in the
+Channel settings dialog (`channel_settings`). New agent is open to everyone (a
+fresh agent is unrouted, so it puts nothing at risk). Minting a coding-tool
+token is `authorize_coding_token`'s call, as on Discord and Slack: panels live
+in the 1:1 chat, so a channel admin picks one of their channels in the dialog
+and the token is bound there (an unbound token stays with server admins). Only
+its minter may revoke it; token values are never logged. Every click
+re-verifies the clicker and re-reads state, so a stale card grants nothing.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
+from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -46,6 +48,7 @@ from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
+from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref
 from daimon.core.channel_admins import (
@@ -123,7 +126,12 @@ class SetupPanel:
 
     async def command(self, context: CommandContext) -> None:
         await context.send_card(
-            await self._agents(context.tenant_id, chat=context.inbound.channel_id, page=0)
+            await self._agents(
+                context.tenant_id,
+                chat=context.inbound.channel_id,
+                page=0,
+                is_admin=context.is_admin,
+            )
         )
 
     async def on_action(
@@ -248,8 +256,26 @@ class SetupPanel:
         )
         return dialog("Operator token", card)
 
-    async def _roster(self, tenant_id: uuid.UUID, chat: str | None) -> Roster:
+    async def _roster(
+        self, tenant_id: uuid.UUID, chat: str | None, *, is_admin: bool | None
+    ) -> Roster:
+        """The agents as a viewer at `chat` sees them; `is_admin=None` lists every agent.
+
+        A non-admin sees only their side of every isolated channel, as on Discord
+        and Slack. None is for lookups that `authorize` gates afterwards.
+        """
         async with self._runtime.sessionmaker() as session:
+            viewer = (
+                None
+                if is_admin is None
+                else await load_isolation_viewer(
+                    session,
+                    self._runtime.anthropic,
+                    tenant_id=tenant_id,
+                    channel_id=chat,
+                    is_admin=is_admin,
+                )
+            )
             return await load_roster(
                 session,
                 self._runtime.anthropic,
@@ -258,12 +284,19 @@ class SetupPanel:
                 channel_id=chat,
                 thread_id=None,
                 default=self._runtime.deployment_default,
+                viewer=viewer,
             )
 
     async def _agents(
-        self, tenant_id: uuid.UUID, *, chat: str, page: int, notice: str | None = None
+        self,
+        tenant_id: uuid.UUID,
+        *,
+        chat: str,
+        page: int,
+        is_admin: bool,
+        notice: str | None = None,
     ) -> AdaptiveCard:
-        roster = await self._roster(tenant_id, chat)
+        roster = await self._roster(tenant_id, chat, is_admin=is_admin)
         routed = routed_agent_names(await self._answering_map(tenant_id))
         window = paginate(roster.rows, page=page, page_size=cards.PAGE_SIZE)
         return cards.roster_card(roster, window, routed=routed, notice=notice)
@@ -290,15 +323,28 @@ class SetupPanel:
             )
 
     async def _routing(self, actor: Actor, page: int) -> AdaptiveCard:
-        roster = await self._roster(actor.tenant_id, actor.conversation_id)
+        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
         # A non-admin sees only their side of every isolated channel, as on Discord and Slack.
         answering_map = await self._answering_map(actor.tenant_id, actor)
         # The request names an agent nobody reaches yet, else the one answering here.
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)
         window = paginate(answering_map.channel_overrides, page=page, page_size=cards.PAGE_SIZE)
+        administered: frozenset[str] = frozenset()
+        if not actor.is_admin:
+            async with self._runtime.sessionmaker() as session:
+                administered = await load_administered_channel_ids(
+                    session,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    caller=ChannelAdminCaller(platform_user_id=actor.user_id),
+                )
         return cards.routing_card(
-            answering_map, window, is_admin=actor.is_admin, request_agent=request_agent
+            answering_map,
+            window,
+            is_admin=actor.is_admin,
+            request_agent=request_agent,
+            changes_channels=actor.is_admin or bool(administered),
         )
 
     async def _details(
@@ -308,7 +354,7 @@ class SetupPanel:
 
         The roster maps the clicked name to an MA id, so a click never names an id itself.
         """
-        roster = await self._roster(actor.tenant_id, actor.conversation_id)
+        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
         match = next((row for row in roster.rows if row.name == name), None)
         if match is None:
             return None
@@ -353,7 +399,10 @@ class SetupPanel:
             name, expanded = str(data.get("agent") or ""), cards.expanded_list(data)
             card = await self._details(actor, name, page, expanded)
             return replace_card(
-                card or await self._agents(actor.tenant_id, chat=chat, page=page, notice=GONE)
+                card
+                or await self._agents(
+                    actor.tenant_id, chat=chat, page=page, is_admin=actor.is_admin, notice=GONE
+                )
             )
         if op == "routing":
             return replace_card(await self._routing(actor, page))
@@ -373,7 +422,9 @@ class SetupPanel:
                 thread_id=str(data.get("thread") or ""),
             )
             return replace_card(cards.notice_card(cards.ENDED if ended else ALREADY_ENDED))
-        return replace_card(await self._agents(actor.tenant_id, chat=chat, page=page))
+        return replace_card(
+            await self._agents(actor.tenant_id, chat=chat, page=page, is_admin=actor.is_admin)
+        )
 
     async def _create(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -384,7 +435,7 @@ class SetupPanel:
         data = submitted_fields(ctx.activity.value.data)
         values = {key: str(data.get(key) or "").strip() for key in ("name", "purpose", "model")}
         name = values["name"]
-        error = None
+        error, created_id = None, None
         if not _NAME.match(name):
             error = "Name must be 1-64 characters: letters, digits, hyphens, underscores."
         elif values["model"] not in ALLOWED_MODEL_IDS:
@@ -401,13 +452,26 @@ class SetupPanel:
                     account_id=derive_guild_account_uuid(actor.tenant_id),
                     public_url=str(mcp_url) if mcp_url is not None else None,
                 )
-                if outcome.anthropic_id is None:
+                created_id = outcome.anthropic_id
+                if created_id is None:
                     error = "Agent creation did not return an identity. Reopen setup and retry."
             except DaimonError as exc:
                 error = str(exc)
-        if error is not None:
+        if error is not None or created_id is None:
             return dialog("New agent", cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
+        caller = await channel_admin_caller(
+            self._runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
+        )
+        async with self._runtime.sessionmaker.begin() as session:
+            await record_created_for_channel(  # One a channel admin makes here is the channel's.
+                session,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                ma_agent_id=created_id,
+                channel_id=actor.conversation_id.split(";", 1)[0],
+                caller=caller,
+            )
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
             await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
@@ -463,7 +527,7 @@ class SetupPanel:
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
             return dialog_message(NOT_CONFIGURED)
-        roster = await self._roster(actor.tenant_id, None)
+        roster = await self._roster(actor.tenant_id, None, is_admin=None)
         target = next((row for row in roster.rows if row.name == name), None)
         try:
             async with self._runtime.sessionmaker() as session:

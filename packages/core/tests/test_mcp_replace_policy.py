@@ -132,7 +132,19 @@ async def test_a_channel_admin_replaces_a_server_only_on_an_agent_local_to_them(
             default=DeploymentDefault(agent_name="other"),
         )
 
-    assert await outcome("u1") == "allow", "c1's admin repoints the agent only c1 uses"
+    assert await outcome("u1") == "needs_admin", (
+        "an agent someone else made and a member bound to c1 is not c1's admin's"
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+        tenant_id=tenant.id,
+        agent_name="private-bot",
+        mode="agent",
+        set_by_admin=True,
+    )
+    await db_session.commit()
+    assert await outcome("u1") == "allow", "c1's admin repoints the agent a server admin gave c1"
     assert await outcome("u9") == "needs_admin", "an admin of another channel may not"
     assert await outcome("u5") == "needs_admin", "a plain member may not"
     assert await outcome("u1", managed=True) == "managed_agent", "managed stays a server admin's"

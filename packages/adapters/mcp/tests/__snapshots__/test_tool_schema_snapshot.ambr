@@ -407,6 +407,54 @@
         'type': 'object',
       }),
     }),
+    'archive_isolation_copy': dict({
+      'description': '''
+        Archive the agent copied for an isolated channel, when that channel closes.
+        For example, retire #client-acme's agent once the engagement ends. Requires a
+        server or workspace admin.
+        
+        Only an agent ``set_channel_isolation`` copied for a channel can be archived
+        here, never a built-in agent or a default. Pass ``channel_id``, the channel it
+        was made for, to drop its pin and default there with it; while it is pinned
+        or a default anywhere else, the call is refused. The channel stays sealed and
+        isolated, so nothing answers there afterwards. ``expected_ma_agent_id`` guards
+        against a namesake made since the agent was listed.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'archive_my_session': dict({
       'description': '''
         Archive a session when its conversation is finished.
@@ -812,7 +860,8 @@
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
         
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. Pass this turn's ``origin_context_id`` so a channel admin
+        creating it for their channel may set it up there.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -1219,6 +1268,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'skill_repos': dict({
             'anyOf': list([
@@ -4810,7 +4870,8 @@
         handed tasks from elsewhere; inside it only they appear. Its messages are
         readable only from inside it. Ending isolation keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
-        ``channel_id`` MUST be the parent channel's id, never a thread's.
+        ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
+        thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4836,6 +4897,54 @@
         'required': list([
           'channel_id',
           'isolated',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_protection': dict({
+      'description': '''
+        Protect or seal one channel, or lift either. For example, stop daimon posting
+        in #announcements, or make #legal readable only from inside it. Leave a flag out
+        to keep it as it is.
+        
+        ``protected`` stops every post into the channel and its threads, replies
+        included. ``sealed`` makes its messages and conversations readable only from
+        inside it. Requires a server admin; a channel's own admins can't change either.
+        An isolated channel stays sealed until its isolation ends
+        (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
+        Teams thread id names its channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'protected': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'sealed': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
         ]),
         'type': 'object',
       }),

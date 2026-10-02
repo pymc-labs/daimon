@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import discord
+import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -31,6 +32,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
@@ -73,11 +75,14 @@ async def _channel_label(runtime: McpRuntime, auth: AuthIdentity, channel_id: st
             if isinstance(channel, discord.abc.GuildChannel) and str(channel.guild.id) == guild_id:
                 return channel.name
             return None
+        if auth.platform == "teams":
+            client, _ = require_client(runtime, auth)
+            return (await locate_channel(runtime, auth, client, channel_id)).channel_name
         client = await slack_web_client(runtime, team_id=_require_team_id(auth))
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
         name = cast("dict[str, object]", info["channel"]).get("name")
         return name if isinstance(name, str) else None
-    except (ToolError, discord.HTTPException, SlackApiError, ValueError):
+    except (ToolError, discord.HTTPException, SlackApiError, httpx.HTTPError, ValueError):
         return None
 
 
@@ -91,8 +96,8 @@ async def _set_channel_isolation_impl(
 ) -> SetChannelIsolationResult:
     require_scope(auth, "channels:write")
     _require_admin(auth)
-    if auth.platform not in ("discord", "slack"):
-        raise ToolError("Channel isolation exists only on Discord and Slack.")
+    if auth.platform not in ("discord", "slack", "teams"):
+        raise ToolError("Channel isolation exists only on Discord, Slack and Teams.")
     try:
         channel, _, _ = normalize_channel_admin_ids(
             auth.platform,
@@ -159,7 +164,8 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         handed tasks from elsewhere; inside it only they appear. Its messages are
         readable only from inside it. Ending isolation keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
-        ``channel_id`` MUST be the parent channel's id, never a thread's.
+        ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
+        thread id names its channel.
         """
         return await _set_channel_isolation_impl(
             runtime, await _auth(ctx), channel_id=channel_id, isolated=isolated, fork_from=fork_from

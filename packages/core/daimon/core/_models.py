@@ -278,6 +278,11 @@ class ChannelConfig(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # A server admin set `agent_name`, as decided when it was set: that makes the
+    # agent this channel's admins' to administer (`daimon.core.authz.channel_admin_holds`).
+    agent_name_set_by_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
@@ -986,6 +991,36 @@ class ChannelSkill(Base):
     owner_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentCreationChannel(Base):
+    """The channel an agent was created for, by a channel admin of it, from there.
+
+    Its admins administer the agent while it stays local to their channels
+    (`daimon.core.authz.channel_admin_holds`). No row: nobody's but server admins'.
+    """
+
+    __tablename__ = "agent_creation_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "ma_agent_id", name="pk_agent_creation_channels"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_agent_creation_channels_tenants",
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_agent_creation_channels_platform"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    ma_agent_id: Mapped[str] = mapped_column(Text)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

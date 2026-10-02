@@ -76,7 +76,9 @@ async def _state(factory: async_sessionmaker[AsyncSession]) -> tuple[list[Any], 
 def test_the_form_offers_only_tenant_scopes_and_reads_back_the_pick() -> None:
     form = build_operator_token_form(meta=META)
     offered = [o["value"] for o in form["blocks"][0]["element"]["options"]]
-    assert offered == ["tenant:read", "channels:write", "promo:redeem"], "never promo:create"
+    assert offered == ["tenant:read", "channels:write", "agents:archive", "promo:redeem"], (
+        "never promo:create"
+    )
     submission = evaluate_operator_token_submission(_payload(["tenant:read"]))
     assert submission == OperatorTokenSubmission(meta=META, scopes=("tenant:read",), label="ci")
 

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 108 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 110 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -18,6 +18,7 @@ tool is hidden by default and restored only for a matching caller.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **channel admins too** — carries the `channel-admin` tag.
 - **Discord callers** — carries the `discord` tag.
+- **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
 - **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
@@ -117,6 +118,14 @@ Channel isolation tool: keep a channel's own agents inside it.
 | --- | --- | --- |
 | `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
 
+## `channel_protection`
+
+Channel protection tool: protect or seal one channel, or lift either.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+
 ## `channel_skills`
 
 Channel skill tools: extra skills one channel's turns run with.
@@ -185,6 +194,14 @@ GitHub App install-link tool: post_github_app_install_link.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
+
+## `isolation_copies`
+
+Isolation copy archive tool: retire the copy a closing isolated channel was given.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for an isolated channel, when that channel closes. |
 
 ## `media`
 

@@ -14,6 +14,7 @@ off and named. Whether it may be copied is
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -192,8 +193,12 @@ async def copy_agent(
     new_name: str,
     public_url: str | None,
     subject: Subject,
+    extra_metadata: Mapping[str, str] | None = None,
 ) -> AgentCopy:
-    """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not."""
+    """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
+
+    `extra_metadata` is stamped on the copy too (an isolation copy's channel).
+    """
     async with sessionmaker() as session:
         try:
             policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -217,7 +222,7 @@ async def copy_agent(
     fork_params["name"] = new_name
     fork_params["metadata"] = build_metadata(
         tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
-    )
+    ) | dict(extra_metadata or {})
     fork_params["mcp_servers"] = merge_default_mcp_server(
         cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
         public_url,
@@ -275,6 +280,7 @@ async def fork_agent(
     new_name: str,
     public_url: str | None,
     subject: Subject,
+    extra_metadata: Mapping[str, str] | None = None,
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
@@ -290,6 +296,7 @@ async def fork_agent(
         new_name=new_name,
         public_url=public_url,
         subject=subject,
+        extra_metadata=extra_metadata,
     )
 
 

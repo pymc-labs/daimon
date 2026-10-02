@@ -33,6 +33,7 @@ from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.slack_file_token import mint_file_token
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
@@ -510,6 +511,7 @@ async def test_a_member_may_change_an_agent_that_answers_nowhere_but_not_a_defau
 async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Once it is theirs: a member's binding alone leaves it a server admin's."""
     world = await _world(db_session_factory)
     async with db_session_factory.begin() as session:
         await set_fields(
@@ -529,14 +531,27 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
             actor_account_id=None,
         )
 
-    result = await _add_skill_impl(
-        world.runtime,
-        world.auth(admin=False, platform="discord"),
-        agent_name="helper",
-        expected_ma_agent_id="agent_helper",
-        skill_md=_MD,
-    )
-    assert result.status == "preview"
+    async def add() -> object:
+        return await _add_skill_impl(
+            world.runtime,
+            world.auth(admin=False, platform="discord"),
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+        )
+
+    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+        await add()
+    async with db_session_factory.begin() as session:
+        await record_creation_channel(
+            session,
+            tenant_id=world.tenant_id,
+            ma_agent_id="agent_helper",
+            platform="discord",
+            channel_id=ROOM,
+        )
+    result = await add()
+    assert getattr(result, "status", None) == "preview", "one made for their channel is theirs"
 
 
 @pytest.mark.parametrize(
@@ -544,7 +559,10 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
     [
         ("discord", "https://evil.example/skill.zip", "Discord attachment link"),
         ("discord", "http://cdn.discordapp.com/a/b/skill.zip", "Discord attachment link"),
-        (None, "https://cdn.discordapp.com/a/b/skill.zip", "only from Discord or Slack"),
+        (None, "https://cdn.discordapp.com/a/b/skill.zip", "only from Discord, Slack or Teams"),
+        ("teams", "https://cdn.discordapp.com/a/b/skill.zip", "SharePoint or OneDrive link"),
+        ("teams", "http://contoso.sharepoint.com/s/skill.zip", "SharePoint or OneDrive link"),
+        ("teams", "https://contoso.sharepoint.com.evil.example/x", "SharePoint or OneDrive link"),
         ("slack", "https://files.slack.com/F1/skill.zip", "link Daimon gave"),
     ],
 )
@@ -605,6 +623,31 @@ async def test_a_discord_attachment_zip_is_previewed(
     assert fetched == [url]
     assert (result.preview.files, result.preview.scripts) == (["SKILL.md", "run.sh"], ["run.sh"])
     assert json.loads(result.model_dump_json())["status"] == "preview"
+
+
+async def test_a_teams_shared_file_is_previewed_from_its_sharepoint_link(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(_http: httpx.AsyncClient, url: str) -> tuple[bytes, str]:
+        fetched.append(url)
+        return _MD.encode(), "SKILL.md"
+
+    monkeypatch.setattr(skill_uploads, "fetch_teams_attachment", fake_fetch)
+    url = "https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1"
+
+    result = await _add_skill_impl(
+        world.runtime,
+        world.auth(platform="teams"),
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        attachment_url=url,
+    )
+
+    assert fetched == [url]
+    assert result.status == "preview" and result.preview.files == ["SKILL.md"]
 
 
 async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncSession]) -> str:

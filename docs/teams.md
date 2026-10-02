@@ -87,11 +87,19 @@ is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
-group ID in `role_ids` to admit that team's owners), channel budgets (`set_channel_budget`) and channel environments
-(`set_channel_environment`) work as on Discord and Slack; Who answers where
-lists each channel's environment, with no select, so pick one in chat.
-Channel isolation does not exist on Teams yet: `set_channel_isolation` and
-`daimon tenants access-policy set --isolated-channel` refuse a Teams channel.
+group ID in `role_ids` to admit that team's owners), channel budgets
+(`set_channel_budget`) and channel environments (`set_channel_environment`)
+work as on Discord and Slack. Who answers where lists each channel's
+environment, and its **Channel settings** dialog changes one channel picked
+there, since the panel lives in the 1:1 chat: its environment (server admins,
+or that channel's admins), and its isolation and admins by Entra object ID
+(server admins only).
+Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
+`daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
+counts as its channel, and the isolated agents send nothing to 1:1 chats. The
+CLI can't read channel names, so a copy it makes is named from the channel id.
+The setup panel lives in the 1:1 chat, outside every channel, so a member's
+Agents list leaves out each isolated channel's own agents; an admin sees all.
 
 ### Channel history
 
@@ -172,6 +180,12 @@ consent above) a followed thread stays mention-only.
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
 every redirect hop is re-checked (Graph reads follow none).
+
+A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
+takes its download link only over https from a SharePoint, OneDrive or Graph
+host, sends no token, refuses a redirect off those hosts, and checks the
+file's name before reading its capped body, with the usual preview and
+confirmation card.
 
 ### Channel files (optional)
 

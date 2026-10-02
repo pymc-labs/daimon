@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -202,6 +202,31 @@ async def require_dm_recipient_allowed(
         raise ToolError(
             "this agent is pinned to its own channels, so it can only send a direct "
             "message to the person it is answering. Tell the caller. Do not retry."
+        )
+
+
+async def require_agent_creatable(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """An isolated channel's own agent, or a key bound inside one, creates no agent
+    (`authorize(CREATE_AGENT)`): a new agent answers outside it, so a prompt
+    written there would carry the channel's content out."""
+    if auth.chat_agent_id is None and auth.agent_id is None:
+        return
+    policy = await load_channel_policy(runtime, auth)
+    if not policy.isolated_channel_ids:
+        return
+    decision = authorize(
+        policy,
+        subject=mcp_subject(auth),
+        action=Action.CREATE_AGENT,
+        agent=await _executing_agent(runtime, auth, policy),
+        origin=mcp_place(auth) if token_channel_id(auth) is not None else None,
+    )
+    if not decision:
+        record_authz_denial(Action.CREATE_AGENT, decision.reason)
+        raise ToolError(
+            "this conversation is held to an isolated channel, so it creates no agents: a "
+            "new agent would answer outside it. Tell the caller to create it from a "
+            "conversation outside that channel. Nothing was created. Do not retry."
         )
 
 

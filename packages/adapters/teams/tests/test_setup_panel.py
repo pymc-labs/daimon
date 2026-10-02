@@ -17,7 +17,7 @@ import structlog
 from daimon.adapters.teams import setup_card, setup_panel
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.setup_card import ENDED
-from daimon.core._models import ThreadSession
+from daimon.core._models import AgentCreationChannel, ThreadSession
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -167,6 +167,36 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
     assert ("vault-env" in routing) is admin, "the isolated channel's shows only to an admin"
 
 
+@pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
+async def test_the_agents_list_hides_an_isolated_channels_own_agent_from_outside(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """The panel lives in the 1:1 chat, outside every channel: a member never sees
+    an isolated channel's own agent there, nor opens its Details; an admin does."""
+    isolated = "19:vault@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,),
+                isolated_channel_ids=(isolated,),
+                agent_channel_pins={"analyst": (isolated,)},
+            ),
+        )
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+        await _say(service, "setup")
+        details = json.dumps(await post_activity(service, _click("details", agent="analyst")))
+
+    agents = json.dumps(teams_api_fake.activity_requests[-1].body)
+    assert "daimon" in agents, "the open agents are listed"
+    assert ("analyst" in agents) is admin, "the isolated channel's own agent shows only to an admin"
+    assert (setup_panel.GONE in details) is not admin, "a member can't open its Details"
+
+
 async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -226,6 +256,41 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     assert "Scout leads" in str(created["system"])
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel lands on Details"
+
+
+@pytest.mark.parametrize(
+    ("user", "admins", "theirs"),
+    [
+        (AAD_OBJECT_ID, (), True),
+        (OTHER_AAD_OBJECT_ID, (), False),
+        (AAD_OBJECT_ID, (AAD_OBJECT_ID,), False),
+    ],
+)
+async def test_a_channel_admins_new_agent_is_their_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    user: str,
+    admins: tuple[str, ...],
+    theirs: bool,
+) -> None:
+    """Only a channel admin, not a member or a server admin, makes it the channel's."""
+    async with db_session_factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=CONVERSATION_ID,
+            role_ids=[],
+            user_ids=[AAD_OBJECT_ID],
+            actor_account_id=None,
+        )
+    form = {"action": "agent_create", "name": "room", "model": DEFAULT_AGENT_MODEL}
+    async with _running(db_session_factory, teams_api_fake, admins) as (service, _):
+        await post_activity(service, _dialog("submit", form, user=user))
+
+    async with db_session_factory() as session:
+        channels = (await session.scalars(select(AgentCreationChannel.channel_id))).all()
+    assert channels == ([CONVERSATION_ID] if theirs else [])
 
 
 async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(

@@ -8,7 +8,9 @@ from daimon.core.errors import StoreError
 from daimon.core.scope import (
     ChannelScopeRef,
     PropagateResult,
+    TenantConfigRow,
     TenantScopeRef,
+    UserConfigRow,
     UserScopeRef,
 )
 from daimon.core.stores.scoped_config_read import get_scope
@@ -868,3 +870,26 @@ async def test_clear_environment_references_is_scoped_to_the_given_tenant(
     assert row is not None and row.environment_name == "doomed", (
         "another tenant's pick of the same name must be untouched"
     )
+
+
+async def test_a_channel_default_records_whether_a_server_admin_set_it(
+    db_session: AsyncSession,
+) -> None:
+    """Each agent write rewrites the flag, and clearing the agent drops it."""
+    t = await make_tenant(db_session)
+    scope = ChannelScopeRef(tenant_id=t.id, channel_id="c1")
+
+    async def flag() -> bool:
+        row = await get_scope(db_session, scope=scope)
+        assert row is not None and not isinstance(row, (UserConfigRow, TenantConfigRow))
+        return row.agent_name_set_by_admin
+
+    await set_fields(db_session, scope=scope, tenant_id=t.id, agent_name="a", set_by_admin=True)
+    assert await flag(), "a server admin's default is recorded as theirs"
+    await set_fields(db_session, scope=scope, tenant_id=t.id, agent_name="a")
+    assert not await flag(), "a later write by anyone else takes it back"
+    await set_fields(db_session, scope=scope, tenant_id=t.id, agent_name="a", set_by_admin=True)
+    await set_fields(db_session, scope=scope, tenant_id=t.id, environment_name="e")
+    assert await flag(), "an environment write leaves the agent's setter alone"
+    await unset_fields(db_session, scope=scope, fields=["agent_name"])
+    assert not await flag(), "a cleared default was set by nobody"

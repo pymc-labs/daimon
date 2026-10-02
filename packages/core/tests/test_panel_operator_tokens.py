@@ -34,7 +34,7 @@ async def _mint(session: AsyncSession, tenant_id: uuid.UUID, scopes: list[str]):
 
 
 def test_the_panel_never_offers_the_deployment_scope() -> None:
-    assert PANEL_SCOPES == ("tenant:read", "channels:write", "promo:redeem")
+    assert PANEL_SCOPES == ("tenant:read", "channels:write", "agents:archive", "promo:redeem")
 
 
 async def test_mint_stores_the_admin_role_and_refuses_promo_create(
