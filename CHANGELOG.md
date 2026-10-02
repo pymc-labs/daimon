@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elsewhere. Existing agents have no recorded creation channel, and defaults
   a server admin set before this are recognised by the setter's stored role,
   so a server admin re-sets any other default a channel admin should manage.
+  That role is the one at upgrade, so a setter promoted since counts as one.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a
   Teams team's Entra group id (whose owners it admits), from

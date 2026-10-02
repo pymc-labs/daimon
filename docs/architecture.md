@@ -439,7 +439,8 @@ admin made it from one of their channels (`agent_creation_channels`, written by
 `create_agent` from a verified turn origin and by each setup panel's New agent
 form), when a server admin pinned it inside their channels only, or when a
 server admin set it as one of their channels' default
-(`channel_config.agent_name_set_by_admin`); any other agent needs a server
+(`channel_config.agent_name_set_by_admin`; migration 0043 backfilled it from
+each setter's role at upgrade time, not when they set it); any other agent needs a server
 admin on every surface (`channel_admin_holds`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a

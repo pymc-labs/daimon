@@ -114,7 +114,9 @@ once.
 - **Channels with their own admins** (Discord too): the request goes to those
   admins by DM instead, then to the server admins when none could be reached, and
   to the escalation channel only when no DM landed. The asker never gets their own
-  request, and each DM follows the workspace's direct message policy.
+  request, and each DM follows the workspace's direct message policy. Recipients
+  are matched by the roles or groups stored at their last turn; a Slack user group
+  is looked up again first.
 
 Who may ask: anyone who could start a turn in that thread (the invoker allowlist and
 channel protection, checked on click and again on send). External Slack Connect
