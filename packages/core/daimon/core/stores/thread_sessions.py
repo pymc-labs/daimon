@@ -68,6 +68,33 @@ async def get_live_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def list_live_thread_sessions(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> list[ThreadSessionRow]:
+    """Every caller's live row in one thread, newest first.
+
+    For a decision about the thread itself (who may hand it over), never to
+    bind or resume a session: that stays caller-scoped (`get_live_thread_session`).
+    """
+    rows = (
+        await session.execute(
+            select(ThreadSession)
+            .where(
+                ThreadSession.tenant_id == tenant_id,
+                ThreadSession.platform == platform,
+                ThreadSession.thread_id == thread_id,
+                ThreadSession.status == "live",
+            )
+            .order_by(ThreadSession.created_at.desc())
+        )
+    ).scalars()
+    return [ThreadSessionRow.model_validate(row) for row in rows]
+
+
 async def get_thread_session_at(
     session: AsyncSession,
     *,

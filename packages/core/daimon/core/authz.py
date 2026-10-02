@@ -76,7 +76,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   isolation all apply, with no admin exemption. A member may bring in an agent
   scoped to the channel (the one it answers with, one pinned to it, or one of
   its own agents when isolated); any other needs a server admin, or a channel
-  admin of the parent channel when the place is not sealed.
+  admin of the parent channel when neither the place nor any live session in
+  it was sealed.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 - **Isolation** (`channel_isolated`): an isolated channel C is sealed and
@@ -391,6 +392,9 @@ class Request:
     # HAND_OFF: the channel/workspace cascade already sends this place's
     # parent channel to the agent.
     answers_here: bool = False
+    # HAND_OFF: every id that sealed a live session in the thread, as the
+    # sessions recorded it. A seal lifted since still counts.
+    recorded_seal_ids: frozenset[str] = frozenset()
 
 
 def _names_pinned(policy: TenantAccessPolicy, names: tuple[str | None, ...]) -> bool:
@@ -526,8 +530,10 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         and parent in subject.administered_channel_ids
     ):
         # Sealed content would reach an agent with its own keys and
-        # connectors: a server admin's call, as for an open network.
-        return _deny("sealed") if _place_sealed(policy, place) else ALLOW
+        # connectors: a server admin's call, as for an open network. A
+        # session sealed before an unseal still holds sealed content.
+        sealed = _place_sealed(policy, place) or bool(req.recorded_seal_ids)
+        return _deny("sealed") if sealed else ALLOW
     return _deny("admin_required")
 
 
@@ -944,6 +950,7 @@ def authorize(
     reach: AgentReach | None = None,
     open_network: bool = False,
     answers_here: bool = False,
+    recorded_seal_ids: frozenset[str] = frozenset(),
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -970,6 +977,7 @@ def authorize(
             reach=reach,
             open_network=open_network,
             answers_here=answers_here,
+            recorded_seal_ids=recorded_seal_ids,
         ),
     )
 

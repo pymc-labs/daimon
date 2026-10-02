@@ -12,12 +12,14 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.authz import Action, AgentRef, Place, SessionFacts, Subject, Surface, authorize
 from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -28,11 +30,15 @@ from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.thread_handoff import (
     HandoffCaller,
     HandoffDestination,
+    RecordedSession,
     ThreadHandoffRefused,
     hand_over_thread,
+    switch_thread_on_request,
 )
+from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -420,3 +426,162 @@ async def test_the_switch_neither_blocks_nor_deadlocks_with_audit_writes_or_an_a
         if switching is not None:
             await asyncio.wait_for(switching, 10)
     assert await _binding(factory, tenant_id) is not None
+
+
+# --- Recorded seals, unnamed agents, and an account purge -----------------------------
+
+
+def _channel_admin_of_c1() -> HandoffCaller:
+    return HandoffCaller(
+        account_id=None,
+        channel_admin=ChannelAdminCaller(platform_user_id="U1"),
+    )
+
+
+async def _grant_c1(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+    async with factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id="C1",
+            role_ids=(),
+            user_ids=("U1",),
+            actor_account_id=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("recorded", "refused"),
+    [
+        ((), False),
+        ((RecordedSession(account_id=None, facts=SessionFacts(seal_ids=frozenset({"C1"})))), True),
+        (None, True),
+    ],
+    ids=["no-sealed-session", "session-sealed-before-an-unseal", "seals-not-read"],
+)
+async def test_a_channel_admin_cant_hand_a_once_sealed_session_to_an_outside_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    recorded: Any,
+    refused: bool,
+) -> None:
+    """C1 is not sealed now, but a live session in the thread was sealed before an
+    admin lifted the seal: its content is still sealed content."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    sessions = (recorded,) if isinstance(recorded, RecordedSession) else recorded
+
+    async def switch() -> None:
+        async with db_session_factory.begin() as session:
+            await hand_over_thread(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                parent_channel_id="C1",
+                thread_id="T1",
+                caller=_channel_admin_of_c1(),
+                destination=_RESEARCH,
+                current_responder_ma_agent_id="agt_daimon",
+                default=_DEFAULT,
+                now=_NOW,
+                recorded=sessions,
+            )
+
+    if refused:
+        with pytest.raises(ThreadHandoffRefused) as error:
+            await switch()
+        assert error.value.refusal.reason == "sealed"
+        assert await _binding(db_session_factory, tenant_id) is None
+    else:
+        await switch()
+        assert await _binding(db_session_factory, tenant_id) is not None
+
+
+async def test_the_button_refuses_an_agent_with_no_configuration_name(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Same rule as `hand_off_task`: the cascade and the binding name agents by it."""
+    tenant_id = (await _seed(db_session)).id
+    router = MARouter()
+    router.add_agent(
+        ma_agent(
+            id="agt_research",
+            name="research-bot",
+            tenant_id=tenant_id,
+            metadata={MA_METADATA_KEY_NAME: ""},
+        )
+    )
+    outcome = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant_id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=ChannelAdminCaller(platform_user_id="U1", is_server_admin=True),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+    )
+    assert not outcome.switched
+    assert "no configuration name" in outcome.text
+    assert await _binding(db_session_factory, tenant_id) is None
+
+
+async def test_a_purge_of_the_binding_creators_account_and_a_switch_never_deadlock(
+    db_session: AsyncSession, race_engine: AsyncEngine
+) -> None:
+    """The purge takes the account FOR UPDATE, then (deleting the account) nulls
+    `creator_account_id` on the bindings it created. The switch takes the account
+    FOR KEY SHARE before the binding row, so it waits there without holding the
+    row the purge needs. Taking the binding first deadlocks the two."""
+    tenant = await _seed(db_session)
+    account_id = (await make_account(db_session, tenant=tenant)).id
+    await db_session.commit()
+    factory = async_sessionmaker(race_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            responder_ma_agent_id="agt_daimon",
+            responder_name="daimon",
+            creator_account_id=account_id,
+            kind="handoff",
+        )
+    switcher_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+    async def switch() -> None:
+        async with factory.begin() as session:
+            switcher_pid.set_result(await _pid(session))
+            await _switch(session, tenant.id, _caller(account_id, admin=True))
+
+    switching: asyncio.Task[None] | None = None
+    try:
+        async with factory() as purge, purge.begin():
+            await purge.execute(
+                text("SELECT id FROM accounts WHERE id = :id FOR UPDATE"), {"id": account_id}
+            )
+            switching = asyncio.create_task(switch())
+            await _until_lock_wait(race_engine, await switcher_pid)
+            # What deleting the account does to the bindings it created.
+            await asyncio.wait_for(
+                purge.execute(
+                    text(
+                        "UPDATE thread_agent_bindings SET creator_account_id = NULL "
+                        "WHERE creator_account_id = :id"
+                    ),
+                    {"id": account_id},
+                ),
+                5,
+            )
+    finally:
+        if switching is not None:
+            await asyncio.wait_for(switching, 10)
+    binding = await _binding(factory, tenant.id)
+    assert binding is not None and binding.responder_ma_agent_id == "agt_research"
+    assert binding.creator_account_id is None, "the purge committed before the switch wrote"

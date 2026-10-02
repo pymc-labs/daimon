@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import build_agent_ref
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -44,6 +44,7 @@ from daimon.core.continuity.tool_messages import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_session_lineage import request_fresh_start
@@ -56,6 +57,8 @@ from daimon.core.thread_handoff import (
     HandoffDestination,
     ThreadHandoffRefused,
     hand_over_thread,
+    may_carry_work,
+    recorded_thread_sessions,
     render_handoff_refused,
 )
 from fastmcp import Context, FastMCP
@@ -189,6 +192,38 @@ async def _hand_off_task_impl(
         )
     )
 
+    # The live sessions' recorded seals, read before any lock: a channel
+    # admin's switch is decided on them, and queued work only reaches a
+    # destination that could read the caller's session from here.
+    channel_admin = ChannelAdminCaller(
+        platform_user_id=auth.platform_user_id,
+        role_ids=frozenset(auth.platform_role_ids),
+        is_server_admin=auth.is_admin,
+    )
+    administered: frozenset[str] = frozenset()
+    if not auth.is_admin:
+        async with runtime.session_factory() as session:
+            administered = await load_administered_channel_ids(
+                session, tenant_id=auth.tenant_id, platform=platform, caller=channel_admin
+            )
+    recorded = (
+        await recorded_thread_sessions(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            platform=platform,
+            thread_id=origin.thread_id,
+        )
+        if request is not None or origin.parent_channel_id in administered
+        else None
+    )
+    handoff_destination = HandoffDestination(
+        ma_agent_id=destination.id,
+        name=destination_name,
+        agent=build_agent_ref(destination.name, destination.metadata, destination_name),
+    )
+    work_withheld = False
+
     try:
         # One transaction, decided under the tenant policy lock
         # (`hand_over_thread`): the confirmation promises both the switch and
@@ -204,21 +239,14 @@ async def _hand_off_task_impl(
                 thread_id=origin.thread_id,
                 caller=HandoffCaller(
                     account_id=auth.account_id,
-                    channel_admin=ChannelAdminCaller(
-                        platform_user_id=auth.platform_user_id,
-                        role_ids=frozenset(auth.platform_role_ids),
-                        is_server_admin=auth.is_admin,
-                    ),
+                    channel_admin=channel_admin,
                     via_agent_key=auth.agent_id is not None,
                 ),
-                destination=HandoffDestination(
-                    ma_agent_id=destination.id,
-                    name=destination_name,
-                    agent=build_agent_ref(destination.name, destination.metadata, destination_name),
-                ),
+                destination=handoff_destination,
                 current_responder_ma_agent_id=origin.responder_ma_agent_id,
                 default=runtime.deployment_default,
                 now=datetime.now(UTC),
+                recorded=recorded,
             )
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
@@ -229,6 +257,17 @@ async def _hand_off_task_impl(
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
+            if request is not None and not may_carry_work(
+                await load_access_policy(session, tenant_id=auth.tenant_id),
+                destination=handoff_destination,
+                parent_channel_id=origin.parent_channel_id,
+                thread_id=origin.thread_id,
+                recorded=recorded or (),
+                account_id=auth.account_id,
+            ):
+                # The next bind won't carry this session to the destination,
+                # so the work named in it doesn't go either.
+                request, queued_work, work_withheld = None, None, True
             if request is not None:
                 await record_continuation(
                     session,
@@ -253,17 +292,23 @@ async def _hand_off_task_impl(
     except HandoffRefusedInSetupThread as error:
         raise ToolError(render_tool_refusal_setup_thread(destination_name)) from error
 
+    confirmation = render_handoff_acknowledged(
+        target_name=destination_name,
+        from_name=origin.responder_name,
+        channel=_channel_mention(platform, origin.parent_channel_id),
+        requested_work=queued_work,
+    )
+    if work_withheld:
+        confirmation += (
+            f"\n{destination_name} can't read this conversation's sealed history, so the work "
+            "you named was not passed on."
+        )
     return TaskHandoffResult(
         destination_name=destination_name,
         destination_ma_agent_id=destination.id,
         previous_responder_name=origin.responder_name,
         continuation_recorded=request is not None,
-        confirmation=render_handoff_acknowledged(
-            target_name=destination_name,
-            from_name=origin.responder_name,
-            channel=_channel_mention(platform, origin.parent_channel_id),
-            requested_work=queued_work,
-        ),
+        confirmation=confirmation,
         instruction=_REPLY_VERBATIM,
     )
 

@@ -1389,3 +1389,86 @@ async def test_a_switch_the_policy_refuses_writes_nothing(
     )
     assert error is not None and copy in str(error)
     assert await _bound_to(committing_sessionmaker, tenant_id) is None
+
+
+@pytest.mark.parametrize(
+    ("old_seal", "queued"),
+    [("C_PARENT", True), ("C_ELSEWHERE", False)],
+    ids=["seal-inside-this-thread", "seal-from-elsewhere"],
+)
+async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    old_seal: str,
+    queued: bool,
+) -> None:
+    """The next bind carries the old session only to an agent that could read it
+    here; the continuation text, written in that session, follows the same rule."""
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_CHANNEL,
+        MA_METADATA_KEY_SEALED,
+        MA_METADATA_KEY_THREAD,
+    )
+    from daimon.testing.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="T_THREAD",
+        account_id=caller.id,
+        ma_session_id="sess_old",
+        ma_agent_id=_RESPONDER_ID,
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([_destination(tenant.id)]))
+    router.add_session(
+        ma_session(
+            id="sess_old",
+            metadata={
+                MA_METADATA_KEY_CHANNEL: "C_PARENT",
+                MA_METADATA_KEY_THREAD: "T_THREAD",
+                MA_METADATA_KEY_SEALED: old_seal,
+            },
+        )
+    )
+    runtime = _runtime(committing_sessionmaker, build_fake_anthropic(router.dispatch))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            continuation="finish the churn writeup from the sealed numbers",
+        )
+
+    async with committing_sessionmaker() as session:
+        pending = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
+        )
+    assert result.continuation_recorded is queued
+    assert len(pending) == (1 if queued else 0)
+    assert ("churn writeup" in result.confirmation) is queued, (
+        "no continuation text reaches a destination outside the old session's seal"
+    )

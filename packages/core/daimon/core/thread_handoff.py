@@ -35,10 +35,13 @@ conversations, lifecycle updates) never take one afterwards.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import anthropic as anthropic_pkg
+import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
@@ -60,6 +63,7 @@ from daimon.core.continuity.handoff import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_seal import session_facts
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -71,6 +75,7 @@ from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
+from daimon.core.stores.thread_sessions import list_live_thread_sessions
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -79,10 +84,13 @@ if TYPE_CHECKING:
 __all__ = [
     "HandoffCaller",
     "HandoffDestination",
+    "RecordedSession",
     "SwitchOutcome",
     "ThreadHandoffRefused",
     "destination_may_read",
     "hand_over_thread",
+    "may_carry_work",
+    "recorded_thread_sessions",
     "render_handoff_refused",
     "switch_thread_on_request",
 ]
@@ -112,6 +120,83 @@ class HandoffCaller:
     account_id: uuid.UUID | None
     channel_admin: ChannelAdminCaller
     via_agent_key: bool = False
+
+
+log = structlog.get_logger(__name__)
+
+# Stands in for a seal that couldn't be read: a session MA wouldn't return,
+# or sessions nobody looked up. Inside no place, so it reads as sealed.
+_UNREAD_SEAL = "\x00unread-session-seal"
+
+
+@dataclass(frozen=True)
+class RecordedSession:
+    """A live session in the thread, as its own metadata places and seals it."""
+
+    account_id: uuid.UUID | None
+    facts: SessionFacts
+
+
+async def recorded_thread_sessions(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> tuple[RecordedSession, ...]:
+    """Every live session in the thread with the seal it recorded.
+
+    Read before `hand_over_thread` takes its locks, so no MA call runs under
+    them. A session that can't be read counts as sealed.
+    """
+    async with sessionmaker() as session:
+        rows = await list_live_thread_sessions(
+            session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
+    recorded: list[RecordedSession] = []
+    for row in rows:
+        try:
+            ma_session = await anthropic.beta.sessions.retrieve(row.ma_session_id)
+        except anthropic_pkg.APIError as error:
+            log.warning(
+                "thread_handoff.session_unreadable",
+                session_id=row.ma_session_id,
+                error=type(error).__name__,
+            )
+            facts = SessionFacts(seal_ids=frozenset({_UNREAD_SEAL}))
+        else:
+            facts = session_facts(ma_session.metadata, owned=True)
+        recorded.append(RecordedSession(account_id=row.account_id, facts=facts))
+    return tuple(recorded)
+
+
+def may_carry_work(
+    policy: TenantAccessPolicy,
+    *,
+    destination: HandoffDestination,
+    parent_channel_id: str,
+    thread_id: str,
+    recorded: Sequence[RecordedSession],
+    account_id: uuid.UUID,
+) -> bool:
+    """Whether `account_id`'s work in the thread may reach the destination.
+
+    The carry rule the next bind applies to the transcript
+    (`destination_may_read`), applied here to anything else the switch
+    passes on, such as the queued continuation text.
+    """
+    return all(
+        destination_may_read(
+            policy,
+            agent=destination.agent,
+            channel_id=parent_channel_id,
+            thread_id=thread_id,
+            previous=item.facts,
+        )
+        for item in recorded
+        if item.account_id == account_id
+    )
 
 
 class ThreadHandoffRefused(DaimonError):
@@ -152,6 +237,7 @@ async def hand_over_thread(
     current_responder_ma_agent_id: str | None,
     default: DeploymentDefault,
     now: datetime,
+    recorded: Sequence[RecordedSession] | None = None,
 ) -> ThreadAgentBindingRow:
     """Decide the switch on the policy as it is now, then bind the thread to `destination`.
 
@@ -160,6 +246,10 @@ async def hand_over_thread(
     the caller's transaction then has nothing to roll back but its reads.
     Anything else the caller writes for this switch belongs in the same
     transaction, after this returns, so the decision covers it too.
+
+    `recorded` is the thread's live sessions (`recorded_thread_sessions`).
+    Their seals decide a channel admin's switch as the policy's do; None
+    (not read) counts as sealed.
     """
     await lock_access_policy(session, tenant_id=tenant_id)
     if caller.account_id is not None:
@@ -191,6 +281,9 @@ async def hand_over_thread(
         # A DM scope runs in no channel, so it is outside every pin.
         place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
         answers_here=channel_config.agent_name == destination.name,
+        recorded_seal_ids=frozenset({_UNREAD_SEAL})
+        if recorded is None
+        else frozenset(seal for item in recorded for seal in item.facts.seal_ids),
     )
     decision = decide_handoff(
         destination_ma_agent_id=destination.ma_agent_id,
@@ -312,7 +405,32 @@ async def switch_thread_on_request(
             switched=False,
             text="That agent is no longer available in this workspace. Nothing was changed.",
         )
-    name = agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+    name = agent.metadata.get(MA_METADATA_KEY_NAME)
+    if not name:
+        # As `hand_off_task`: the cascade and the binding name agents by
+        # their configuration name, so an agent without one can't answer here.
+        return SwitchOutcome(
+            switched=False,
+            text="That agent has no configuration name, so nobody can reach it by name. "
+            "Nothing was changed.",
+        )
+    # Only a channel admin's switch reads the sessions' seals; anyone else's
+    # is decided without them. Grants are read again under the lock, and a
+    # channel admin whose seals weren't read is refused there as sealed.
+    recorded: tuple[RecordedSession, ...] | None = None
+    if not caller.is_server_admin:
+        async with sessionmaker() as session:
+            administered = await load_administered_channel_ids(
+                session, tenant_id=tenant_id, platform=platform, caller=caller
+            )
+        if parent_channel_id in administered:
+            recorded = await recorded_thread_sessions(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+            )
     try:
         async with sessionmaker.begin() as session:
             principal = (
@@ -345,6 +463,7 @@ async def switch_thread_on_request(
                 current_responder_ma_agent_id=None,
                 default=default,
                 now=now,
+                recorded=recorded,
             )
     except ThreadHandoffRefused as refused:
         return SwitchOutcome(
