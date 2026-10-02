@@ -12,6 +12,7 @@ from typing import Any, Literal, cast
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.authz import build_subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_isolation_setup import (
     END_ISOLATION_WARNING,
@@ -72,6 +73,8 @@ async def change_isolation(
             channel_label=await _channel_name(client, channel) if copy else None,
             fork=copy,
             public_url=str(public_url) if public_url is not None else None,
+            # Only a workspace admin reaches the isolation buttons.
+            subject=build_subject(is_admin=True, platform_user_id=user_id),
         )
     except DaimonError as exc:  # a refusal, or a copy that can't be made
         return f"{exc} Nothing changed."

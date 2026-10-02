@@ -187,6 +187,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             )
             answering_map = await load_panel_answering_map(
                 session,
+                runtime.anthropic,
                 tenant_id=tenant_id,
                 default=runtime.deployment_default,
                 channel_id=channel_id or None,
@@ -348,6 +349,7 @@ async def load_agents_view(
         )
         answering_map = await load_panel_answering_map(
             session,
+            runtime.anthropic,
             tenant_id=tenant_id,
             default=runtime.deployment_default,
             channel_id=meta.channel_id or None,
@@ -380,6 +382,7 @@ async def load_routing_view(
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session,
+            runtime.anthropic,
             tenant_id=tenant_id,
             default=runtime.deployment_default,
             channel_id=meta.channel_id or None,

@@ -93,7 +93,7 @@ async def load_panel_roster(
         thread_id=thread_id,
         default=default,
         viewer=await load_isolation_viewer(
-            session, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+            session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
         ),
     )
 
@@ -139,6 +139,7 @@ async def load_panel_details(
 
 async def load_panel_answering_map(
     session: AsyncSession,
+    anthropic: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
@@ -155,7 +156,7 @@ async def load_panel_answering_map(
         platform="slack",
         default=default,
         viewer=await load_isolation_viewer(
-            session, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+            session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
         ),
     )
 

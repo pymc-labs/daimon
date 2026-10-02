@@ -331,6 +331,7 @@ async def run_new_agent_submission(
                 if details is not None
                 else await load_isolation_viewer(
                     session,
+                    runtime.anthropic,
                     tenant_id=tenant_id,
                     channel_id=channel_id or None,
                     is_admin=is_admin,
