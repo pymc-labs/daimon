@@ -205,8 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so. Its calls run as a turn there: the agent's pin admits it, it reads that
   channel's sealed conversations and continues those opened under the seal,
   and it uses the channel's environment and budget. Its sessions are stamped
-  with the channel (sealed, with read-only memory, in a sealed one), so their
-  spend counts there. The token never carries its minter's channel admin
+  with the channel (sealed in a sealed one, with read-only memory unless the
+  agent is that isolated channel's own), so their spend counts there. The token never carries its minter's channel admin
   grants. A channel admin of every channel an agent is pinned to may now mint
   one from inside those channels, always bound. Tokens minted elsewhere, and
   existing ones, are unchanged. Run migration `0037_mcp_token_channels`.

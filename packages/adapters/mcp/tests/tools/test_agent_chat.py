@@ -3404,6 +3404,51 @@ async def test_start_turn_opens_a_bound_keys_session_in_its_channel(
     assert kwargs["memory_read_only"] is bool(seal), "a sealed channel's memory is read-only"
 
 
+@pytest.mark.parametrize(
+    ("pinned_to", "read_only"),
+    [(("c-1",), False), (("c-1", "c-2"), True)],
+    ids=["own-agent", "pinned-wider"],
+)
+async def test_start_turn_keeps_memory_writable_for_an_isolated_channels_own_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    pinned_to: tuple[str, ...],
+    read_only: bool,
+) -> None:
+    """A key bound to isolated C running C's own agent keeps memory writable, as a
+    chat turn there does; an agent pinned beyond C is not C's own and reads only."""
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, platform="discord", workspace_id=str(_TENANT_ID), id=_TENANT_ID)
+        await set_access_policy(
+            session,
+            tenant_id=_TENANT_ID,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c-1",),
+                isolated_channel_ids=("c-1",),
+                agent_channel_pins={"test-agent": pinned_to},
+            ),
+        )
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _bound_auth("c-1"), "hi")
+
+    assert create.await_args is not None
+    kwargs = create.await_args.kwargs
+    assert kwargs["origin_seal_ids"] == frozenset({"c-1"}), "the session is sealed either way"
+    assert kwargs["memory_read_only"] is read_only, "only C's own agent keeps memory writable"
+
+
 async def test_start_turn_seals_a_bound_keys_session_sealed_during_the_recheck(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

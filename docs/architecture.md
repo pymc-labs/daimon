@@ -474,7 +474,8 @@ messages (`DIRECT_MESSAGE`). Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
-read-only for any other agent there, as in a sealed channel. A session
+read-only for any other agent there, as in a sealed channel; a session opened
+with a coding-tool token bound to C follows the same rule. A session
 whose seal ids lie in C is read and continued only by C's own agents
 (`READ_SESSION`, `CONTINUE_SESSION`). A verified turn origin in C holds the
 call to C whatever agent runs it (`origin`): its posts, cards and routines

@@ -30,8 +30,7 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
-    isolated_channel_of,
-    isolation_owner,
+    is_own_isolated_agent,
 )
 from daimon.core.authz import (
     Action,
@@ -464,10 +463,12 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 
 def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     """An isolated channel's own agent at work there, whose memory stays writable."""
-    inside = isolated_channel_of(
-        policy, grant.run_place.channel_id, grant.run_place.parent_channel_id
+    return is_own_isolated_agent(
+        policy,
+        grant.agent.names,
+        channel_id=grant.run_place.channel_id,
+        parent_channel_id=grant.run_place.parent_channel_id,
     )
-    return inside is not None and isolation_owner(policy, grant.agent.names) == inside
 
 
 def _seal_ids(

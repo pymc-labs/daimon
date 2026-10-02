@@ -84,6 +84,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.access_policy import is_own_isolated_agent
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
@@ -264,11 +265,25 @@ async def _bound_seal(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]
     Read right before the session is created or continued, as `reauthorize`
     reads a seal added since admission for a platform turn.
     """
+    return (await _bound_posture(runtime, auth, agent_names=()))[0]
+
+
+async def _bound_posture(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_names: tuple[str | None, ...]
+) -> tuple[frozenset[str], bool]:
+    """A channel-bound key's seal now, and whether its session's memory is read-only.
+
+    Memory is read-only under the seal unless the agent is the isolated
+    channel's own, the same rule chat admission applies (`is_own_isolated_agent`).
+    """
     channel_id = token_channel_id(auth)
     if channel_id is None:
-        return frozenset()
-    sealed = (await load_channel_policy(runtime, auth)).sealed_channel_ids
-    return frozenset({channel_id}) if channel_id in sealed else frozenset()
+        return frozenset(), False
+    policy = await load_channel_policy(runtime, auth)
+    if channel_id not in policy.sealed_channel_ids:
+        return frozenset(), False
+    own = is_own_isolated_agent(policy, agent_names, channel_id=channel_id)
+    return frozenset({channel_id}), not own
 
 
 async def _verify_agent_owns_session(
@@ -424,7 +439,8 @@ async def _start_turn_impl(
 
     An agent key minted in a channel (``token_channel_id``) opens the session
     as a turn in that channel would: stamped with the channel as its origin
-    and its budget channel, sealed (and memory read-only) when the channel is.
+    and its budget channel, sealed when the channel is, with read-only memory
+    unless the agent is that isolated channel's own.
 
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
 
@@ -479,7 +495,9 @@ async def _start_turn_impl(
         ]
         if recheck is not None:
             await recheck()
-        seal = await _bound_seal(runtime, auth)
+        seal, memory_read_only = await _bound_posture(
+            runtime, auth, agent_names=agent_pin_names(ma_agent)
+        )
         session = await create_isolated_session(
             runtime.client,
             agent=ma_agent,
@@ -488,7 +506,7 @@ async def _start_turn_impl(
             tenant_id=auth.tenant_id,
             resources=resources,
             billing_exempt=billing_exempt,
-            memory_read_only=bool(seal),
+            memory_read_only=memory_read_only,
             budget_channel_id=channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
@@ -508,7 +526,9 @@ async def _start_turn_impl(
 
         if recheck is not None:
             await recheck()
-        seal = await _bound_seal(runtime, auth)
+        seal, memory_read_only = await _bound_posture(
+            runtime, auth, agent_names=agent_pin_names(ma_agent)
+        )
 
         async def before_create() -> None:
             if recheck is not None:
@@ -532,7 +552,7 @@ async def _start_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
-            memory_read_only=bool(seal),
+            memory_read_only=memory_read_only,
             budget_channel_id=channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
