@@ -144,7 +144,7 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         fork_from: str | None = None,
     ) -> SetChannelIsolationResult:
         """Isolate one channel, or end its isolation. For example, give #team-alpha an
-        agent nobody outside it can see or reach. Requires Manage Server (admin).
+        agent nobody outside it can see or reach. Requires a server or workspace admin.
 
         Isolating seals the channel and pins its own agent to it: its default agent,
         answering nowhere else, pinned nowhere else and not built in. If it has none, pass

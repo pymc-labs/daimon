@@ -350,37 +350,6 @@ async def _caller_locality(
     )
 
 
-async def is_agent_local_to_caller(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    platform: str,
-    agent_names: tuple[str, ...],
-    ma_agent_id: str | None,
-    default: DeploymentDefault,
-    caller: ChannelAdminCaller,
-    caller_account_id: uuid.UUID | None = None,
-) -> bool:
-    """True when the caller administers some channels and the agent is local to them.
-
-    False for a caller with no channel admin grant, without reading the reach,
-    so a tenant with no channel admins pays one indexed read and nothing else.
-    `caller_account_id` leaves the caller's own live sessions out; None counts them.
-    """
-    locality = await _caller_locality(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        agent_names=agent_names,
-        ma_agent_id=ma_agent_id,
-        default=default,
-        caller=caller,
-        caller_account_id=caller_account_id,
-        caller_platform_user_id=caller.platform_user_id,
-    )
-    return locality.is_local
-
-
 async def may_bind_as_channel_default(
     session: AsyncSession,
     *,
@@ -526,7 +495,6 @@ __all__ = [
     "AgentReach",
     "UnattendedRights",
     "build_agent_reach",
-    "is_agent_local_to_caller",
     "load_agent_reach",
     "load_target_facts",
     "may_bind_as_channel_default",

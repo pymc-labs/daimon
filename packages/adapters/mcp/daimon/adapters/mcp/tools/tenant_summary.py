@@ -36,7 +36,7 @@ from fastmcp.exceptions import ToolError
 @dataclass(frozen=True)
 class ChannelAdmins:
     role_ids: list[str]
-    """Discord role ids; always empty on Slack, which has no roles."""
+    """Discord role ids; always empty on Slack and Teams, which have no roles here."""
     user_ids: list[str]
 
 

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core.agent_reach import (
-    is_agent_local_to_caller,
+    _caller_locality,  # pyright: ignore[reportPrivateUsage]
     load_agent_reach,
     load_target_facts,
     may_bind_as_channel_default,
@@ -45,6 +45,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 DEFAULT = DeploymentDefault(agent_name="daimon")
 
 
+async def _is_local_to_caller(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_names: tuple[str, ...],
+    ma_agent_id: str | None,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+) -> bool:
+    """Whether the agent is local to the caller's channels, as `load_target_facts` reads it."""
+    locality = await _caller_locality(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_names=agent_names,
+        ma_agent_id=ma_agent_id,
+        default=default,
+        caller=caller,
+        caller_account_id=None,
+        caller_platform_user_id=caller.platform_user_id,
+    )
+    return locality.is_local
+
+
 async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     await set_fields(
@@ -77,7 +102,7 @@ async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncS
     caller = ChannelAdminCaller(platform_user_id="u1")
 
     async def local() -> bool:
-        return await is_agent_local_to_caller(
+        return await _is_local_to_caller(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
@@ -218,7 +243,7 @@ async def _admin_of_c1(db_session: AsyncSession, tenant_id) -> None:
 
 
 async def _is_local(db_session: AsyncSession, tenant_id, agent_name: str = "helper") -> bool:
-    return await is_agent_local_to_caller(
+    return await _is_local_to_caller(
         db_session,
         tenant_id=tenant_id,
         platform="discord",
@@ -377,7 +402,7 @@ async def test_a_stronger_requesters_private_input_counts_against_the_agent_that
     )
 
     async def local() -> bool:
-        return await is_agent_local_to_caller(
+        return await _is_local_to_caller(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
@@ -735,7 +760,7 @@ async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
     facts = await _unrouted_key_facts(db_session, tenant.id, "u9")
     assert not facts.is_reachable_in_tenant, "an agent no one reaches is open to anyone"
     assert not facts.is_local_to_caller_channels, "and local to no channel admin"
-    assert not await is_agent_local_to_caller(
+    assert not await _is_local_to_caller(
         db_session,
         tenant_id=tenant.id,
         platform="discord",
