@@ -41,7 +41,11 @@ from daimon.core.stores.scoped_config_write import set_fields
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 IsolationRefusal = Literal[
-    "no_channel_agent", "shared_channel_agent", "managed_channel_agent", "pinned_elsewhere"
+    "no_channel_agent",
+    "shared_channel_agent",
+    "pinned_shared_channel_agent",
+    "managed_channel_agent",
+    "pinned_elsewhere",
 ]
 
 END_ISOLATION_WARNING = (
@@ -86,10 +90,16 @@ def render_isolation_refusal(
                 f"{name} is built in, so it can't belong to one channel. "
                 f"Isolate the channel with a copy of {name} instead."
             )
+        case "pinned_shared_channel_agent":
+            # A pinned agent can't be copied (`authorize(FORK)`), so no copy is offered.
+            return (
+                f"{name} also answers outside this channel, so it can't belong to this one, "
+                "and a pinned agent can't be copied. Change its pin first."
+            )
         case "pinned_elsewhere":
             return (
-                f"{name} is pinned to other channels too, so it can't belong to this one. "
-                f"Isolate the channel with a copy of {name} instead."
+                f"{name} is pinned to other channels too, so it can't belong to this one, "
+                "and a pinned agent can't be copied. Change its pin first."
             )
         case "channel_needs_own_agent":
             return (
@@ -220,7 +230,10 @@ async def _channel_agent(
         default=default,
     )
     if not reach.stays_inside({channel_id}):
-        return _ChannelAgent(name, answering, "shared_channel_agent", names)
+        refusal: IsolationRefusal = (
+            "pinned_shared_channel_agent" if pins else "shared_channel_agent"
+        )
+        return _ChannelAgent(name, answering, refusal, names)
     return _ChannelAgent(name, answering, None, names)
 
 
