@@ -258,7 +258,7 @@ async def load_agent_details(
     """
     agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     viewer = await load_isolation_viewer(
-        session, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+        session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
     if viewer is not None and not viewer.sees_agent(agent):
         raise DaimonError(

@@ -13,22 +13,25 @@ from daimon.core.answering_map import (
     SetupThreadRef,
     hide_across_isolation,
 )
+from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_isolation import (
     IsolationViewer,
     binding_refusal,
     clear_refusal,
-    is_refused_by_isolation,
     is_thread_turn_refused,
     keeps_routine_inside,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from pydantic import ValidationError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT = DeploymentDefault(agent_name="daimon")
 TENANT = uuid.uuid4()
@@ -60,19 +63,38 @@ def test_isolated_location_counts_threads_under_the_channel() -> None:
 
 
 def test_only_own_agents_answer_inside() -> None:
-    def refused(name: str, channel: str, *, setup: bool = False) -> bool:
-        return is_refused_by_isolation(
+    def refused(*names: str, channel: str, setup: bool = False) -> str | None:
+        place = Place(channel_id="t1", parent_channel_id=channel, setup_thread=setup)
+        return authorize(
             POLICY,
-            agent_names=(name,),
-            channel_id="t1",
-            parent_channel_id=channel,
-            is_setup_thread=setup,
-        )
+            subject=Subject(),
+            action=Action.RUN_AGENT,
+            agent=AgentRef.of(*names),
+            place=place,
+        ).reason
 
-    assert not refused("local", "c1")
-    assert refused("shared", "c1") and refused("roamer", "c1")
-    assert not refused("daimon", "c1", setup=True), "a setup thread answers as the built-in"
-    assert not refused("shared", "c2"), "outside is the pin's to judge"
+    assert refused("local", channel="c1") is None
+    assert refused("shared", channel="c1") == "channel_isolated"
+    assert refused("roamer", channel="c1") == "channel_isolated", "pinned beyond the channel"
+    assert refused("alias", "local", channel="c1") is None, "any of its names makes it own"
+    assert refused("daimon", channel="c1", setup=True) is None, "setup answers as the built-in"
+    assert refused("shared", channel="c2") is None, "outside is the pin's to judge"
+    assert refused("local", channel="c2") == "agent_pinned_elsewhere"
+
+
+def test_an_own_agent_never_posts_or_messages_outside() -> None:
+    def reason(action: Action, channel: str | None) -> str | None:
+        return authorize(
+            POLICY,
+            subject=Subject(),
+            action=action,
+            agent=AgentRef.of("local"),
+            place=Place(channel_id=channel),
+        ).reason
+
+    assert reason(Action.POST, "c1") is None
+    assert reason(Action.POST, "c2") == "channel_isolated"
+    assert reason(Action.DIRECT_MESSAGE, None) == "channel_isolated"
 
 
 def test_binding_refusals_keep_own_agents_in_and_others_out() -> None:
@@ -152,7 +174,9 @@ def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
     assert [ref.thread_id for ref in outside.setup_threads] == ["t2"]
 
 
-async def test_thread_precheck_refuses_a_handed_thread_inside(db_session: AsyncSession) -> None:
+async def test_thread_precheck_refuses_a_handed_thread_inside(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     tenant = await make_tenant(db_session)
     await set_fields(
         db_session,
@@ -161,7 +185,7 @@ async def test_thread_precheck_refuses_a_handed_thread_inside(db_session: AsyncS
         agent_name="local",
         mode="agent",
     )
-    for thread, responder in (("t1", "shared"), ("t2", "local")):
+    for thread, responder in (("t1", "shared"), ("t2", "local"), ("t4", "alias")):
         await create_binding(
             db_session,
             tenant_id=tenant.id,
@@ -172,10 +196,23 @@ async def test_thread_precheck_refuses_a_handed_thread_inside(db_session: AsyncS
             responder_name=responder,
             kind="handoff",
         )
+    await db_session.commit()
+    router = MARouter()
+    aliased = ma_agent(
+        id="agent_alias",
+        name="local",
+        tenant_id=tenant.id,
+        metadata={MA_METADATA_KEY_NAME: "alias"},
+    )
+    router.add(
+        "GET", r"/v1/agents", lambda _r, _m: list_response([aliased.model_dump(mode="json")])
+    )
+    anthropic = build_fake_anthropic(router.dispatch)
 
     async def refused(thread: str) -> bool:
         return await is_thread_turn_refused(
-            db_session,
+            db_session_factory,
+            anthropic,
             tenant_id=tenant.id,
             platform="discord",
             channel_id="c1",
@@ -185,7 +222,9 @@ async def test_thread_precheck_refuses_a_handed_thread_inside(db_session: AsyncS
 
     assert not await refused("t1"), "nothing isolated yet"
     await set_access_policy(db_session, tenant_id=tenant.id, policy=POLICY)
+    await db_session.commit()
     assert (await load_access_policy(db_session, tenant_id=tenant.id)) == POLICY
     assert await refused("t1")
     assert not await refused("t2")
     assert not await refused("t3"), "an unbound thread answers as the channel's own agent"
+    assert not await refused("t4"), "its MA name makes it an own agent"

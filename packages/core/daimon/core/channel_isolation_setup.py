@@ -24,6 +24,7 @@ from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.agent_fork import fork_agent
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
+from daimon.core.authz import Subject
 from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -90,6 +91,11 @@ def render_isolation_refusal(
             )
         case "agent_confined":
             return f"{name} belongs to another isolated channel, so it can't be used here."
+        case "agent_pinned":
+            return (
+                f"{name} is pinned to other channels, so it would refuse every turn here. "
+                "Pick another agent, or change its pin first."
+            )
         case "channel_isolated":
             return (
                 "This channel is isolated, so it keeps an agent of its own. Set another agent "
@@ -159,6 +165,8 @@ class _ChannelAgent:
     answering: str | None
     """The agent answering in the channel now, by the cascade."""
     refusal: IsolationRefusal | None
+    names: tuple[str | None, ...] = ()
+    """Every name the default agent carries, once found."""
 
 
 async def _channel_agent(
@@ -198,8 +206,8 @@ async def _channel_agent(
         default=default,
     )
     if not reach.stays_inside({channel_id}):
-        return _ChannelAgent(name, answering, "shared_channel_agent")
-    return _ChannelAgent(name, answering, None)
+        return _ChannelAgent(name, answering, "shared_channel_agent", names)
+    return _ChannelAgent(name, answering, None, names)
 
 
 async def isolation_refusal(
@@ -228,7 +236,7 @@ async def isolation_refusal(
     )
     if found.refusal is not None:
         return ChannelIsolationRefused(found.refusal, agent_name=found.name)
-    if isolation_owner(policy, (found.name,)) != channel_id:
+    if isolation_owner(policy, found.names) != channel_id:
         return ChannelIsolationRefused("channel_needs_own_agent", agent_name=found.name)
     return None
 
@@ -278,12 +286,14 @@ async def set_channel_isolation(
     fork_from: str | None = None,
     public_url: str | None = None,
     drop_seal_and_pins: bool = False,
+    subject: Subject,
 ) -> IsolationChange:
     """Isolate `channel_id` or end its isolation; raise `ChannelIsolationRefused` if refused.
 
     A copy is made only when `fork` is set and the channel has no agent that may
-    be its own, so repeating a request never copies twice. A copy the locked
-    re-check refuses is archived.
+    be its own, so repeating a request never copies twice; `subject` is who
+    asks for it (`authorize(FORK)`). A copy the locked re-check refuses is
+    archived.
     """
     if not isolated:
         async with sessionmaker.begin() as session:
@@ -321,6 +331,7 @@ async def set_channel_isolation(
         source_name=source,
         new_name=new_name,
         public_url=public_url,
+        subject=subject,
     )
     try:
         async with sessionmaker.begin() as session:

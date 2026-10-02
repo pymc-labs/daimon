@@ -4,8 +4,9 @@ The copy takes the source's prompt, model, tools, MCP definitions and skills
 from its live MA state, with the default daimon MCP server and base toolset
 guaranteed and the credential guidance applied. It starts with no credentials
 (`agent_lifecycle.strip_credentialed_mcp_servers`) and no skills scoped to
-another agent, which are left off and named. An agent pinned to channels is
-not copied. The chat `fork_agent` tool, the CLI and channel isolation use it.
+another agent, which are left off and named. Whether it may be copied is
+`authorize(FORK)`'s: an admin's call, and never a pinned agent. The chat
+`fork_agent` tool, the CLI and channel isolation use it.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 )
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
@@ -101,17 +103,26 @@ async def copy_agent(
     source: BetaManagedAgentsAgent,
     new_name: str,
     public_url: str | None,
+    subject: Subject,
 ) -> AgentCopy:
-    """Create `new_name` as a copy of `source`; raise `DaimonError` if it may not be copied."""
+    """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not."""
     async with sessionmaker() as session:
         try:
             policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable as exc:
             raise DaimonError("The access policy can't be read.") from exc
     source_name = source.metadata.get(MA_METADATA_KEY_NAME) or source.name
-    if any(name in policy.agent_channel_pins for name in {source.name, source_name}):
+    decision = authorize(
+        policy,
+        subject=subject,
+        action=Action.FORK,
+        agent=build_agent_ref(source.name, source.metadata),
+    )
+    if decision.reason == "agent_pinned":
         # The copy would be an unpinned agent with the pinned one's prompt and skills.
         raise DaimonError(f"{source_name} is pinned to specific channels, so it can't be copied.")
+    if not decision:
+        raise DaimonError("Only a workspace or server admin can copy an agent.")
     source_ma = await anthropic.beta.agents.retrieve(source.id)
     params = source_ma.model_dump(mode="json")
     fork_params: dict[str, object] = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
@@ -159,6 +170,7 @@ async def fork_agent(
     source_name: str,
     new_name: str,
     public_url: str | None,
+    subject: Subject,
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
@@ -173,6 +185,7 @@ async def fork_agent(
         source=source,
         new_name=new_name,
         public_url=public_url,
+        subject=subject,
     )
 
 

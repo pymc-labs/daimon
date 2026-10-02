@@ -467,7 +467,9 @@ async def test_load_agent_details_hides_an_isolated_channels_agent_from_a_member
         ),
     )
     router = MARouter()
-    router.add_agent(ma_agent(id="ag_local", name="local", tenant_id=tenant.id))
+    local = ma_agent(id="ag_local", name="local", tenant_id=tenant.id)
+    router.add_agent(local)
+    router.add_agent_list(local)
 
     with pytest.raises(DaimonError, match="no longer available"):
         await load_agent_details(

@@ -13,6 +13,7 @@ from daimon.core import channel_isolation_setup
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_fork import AgentCopy, fork_agent
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.authz import Subject
 from daimon.core.channel_isolation_setup import (
     ChannelIsolationRefused,
     IsolationChange,
@@ -44,6 +45,7 @@ from daimon.testing.ma import (
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+ADMIN = Subject(is_admin=True)
 DEFAULT = DeploymentDefault(agent_name="daimon")
 
 
@@ -92,6 +94,7 @@ async def _isolate(
         isolated=isolated,
         default=DEFAULT,
         actor_account_id=None,
+        subject=ADMIN,
         **kwargs,
     )
 
@@ -244,8 +247,19 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             source_name="shared",
             new_name=new_name,
             public_url=None,
+            subject=ADMIN,
         )
 
+    with pytest.raises(DaimonError, match="Only a workspace or server admin"):
+        await fork_agent(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            source_name="shared",
+            new_name="nope",
+            public_url=None,
+            subject=Subject(),
+        )
     await fork("team-alpha")
     agents = await list_agents_by_tenant(client, tenant_id=tenant.id)
     names = sorted(agent.metadata[MA_METADATA_KEY_NAME] for agent in agents)
@@ -331,6 +345,7 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
         source_name="shared",
         new_name="team-alpha",
         public_url=None,
+        subject=ADMIN,
     )
 
     assert [server.name for server in copy.agent.mcp_servers] == ["docs"], (

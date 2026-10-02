@@ -22,7 +22,10 @@ policy. Two limits to check when adding a rule:
 - Some callers still short-circuit before `authorize`: the hub's admin
   exemption in ``_ctx._policy_gate`` and `require_pin_write_access` for a
   trusted admin or an unpinned tenant. A rule that must also bind admins or
-  unpinned agents (isolation) has to remove the matching short-circuit.
+  unpinned agents has to remove the matching short-circuit.
+- Facts derived from the policy alone (`Place.isolated_channel`,
+  `AgentRef.confined_to`) are filled in by `authorize` itself, so every
+  re-check sees them as the policy is now.
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
@@ -65,6 +68,13 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   outside its pin, since it would refuse every turn there.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
+- **Isolation** (`channel_isolated`): an isolated channel C is sealed and
+  its own agents are pinned to C alone (`AgentRef.confined_to`). In C
+  (`Place.isolated_channel`) only they run, post, read and get routines or a
+  default binding; a setup thread (`Place.setup_thread`) answers there as the
+  built-in agent. They post nowhere outside C, not even the requester's DM,
+  and send no direct messages. Admins are exempt as for pins: a server admin
+  in their own DM or hub, and a channel admin of C there too.
 
 Nothing here does I/O: the callers load the policy and resolve the agent,
 and decide again at the moment of action (`daimon.core.turn.admission.reauthorize`
@@ -86,7 +96,7 @@ shared-agent table (`CHANGE_SHARED_AGENT`, asked by
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Literal
 
@@ -96,6 +106,8 @@ from daimon.core.access_policy import (
     is_invoker_allowed,
     is_outside_agent_pin,
     is_write_protected,
+    isolated_channel_of,
+    isolation_owner,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
@@ -114,7 +126,9 @@ class Action(StrEnum):
     RUN_AGENT = "run_agent"
     # Save (create or update) a routine for an agent: RUN_AGENT at the
     # routine's destination, but only once a non-empty name of the agent is
-    # pinned (an empty name never makes a routine pinned).
+    # pinned (an empty name never makes a routine pinned). `Place.channel_id`
+    # is the destination channel (None for a Discord thread or no
+    # destination) and `parent_channel_id` the channel it posts into.
     SAVE_ROUTINE = "save_routine"
     # Change what an agent reaches: keys, connectors, MCP servers, prompt,
     # tools, skills, repo binding.
@@ -197,6 +211,9 @@ class AgentRef:
     names: tuple[str | None, ...] = ()
     resolved: bool = True
     present: bool = True
+    # The isolated channel this is one of the own agents of (`isolation_owner`
+    # over `names`). Filled in by `authorize` from the policy; never pass it.
+    confined_to: str | None = None
 
     @classmethod
     def of(cls, *names: str | None) -> AgentRef:
@@ -226,6 +243,12 @@ class Place:
     category_id: str | None = None
     category_unresolved: bool = False
     own_dm: bool = False
+    # A setup conversation's thread: the built-in agent answers it to set the
+    # channel up, so isolation lets it run there.
+    setup_thread: bool = False
+    # The isolated channel the place lies in (a thread counts as its parent).
+    # Filled in by `authorize` from the policy; never pass it.
+    isolated_channel: str | None = None
 
     @classmethod
     def from_origin(cls, *, parent_channel_id: str | None, thread_id: str | None) -> Place:
@@ -289,6 +312,7 @@ DenyReason = Literal[
     "sealed",
     "not_owner",
     "managed_agent",
+    "channel_isolated",
 ]
 
 
@@ -352,6 +376,21 @@ def _pin_administered(
         if name is not None and name in policy.agent_channel_pins
     ]
     return bool(pins) and all(pin and frozenset(pin) <= administered_channel_ids for pin in pins)
+
+
+def _crosses_isolation(agent: AgentRef, place: Place) -> bool:
+    """An agent in an isolated channel not its own, or an own agent outside its channel."""
+    return agent.present and agent.confined_to != place.isolated_channel
+
+
+def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
+    """A channel admin of the agent's isolated channel, as a server admin is exempt."""
+    return (
+        agent.confined_to is not None
+        and subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and agent.confined_to in subject.administered_channel_ids
+    )
 
 
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
@@ -491,18 +530,28 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             and not subject.via_agent_key
         ):
             return ALLOW
+        if admin_only_surface and _isolation_exempt(subject, agent):
+            return ALLOW
         if not agent.present:
             return ALLOW
         if not agent.resolved:
+            if place.isolated_channel is not None and not place.setup_thread:
+                return _deny("channel_isolated")
             return _deny("agent_unresolved") if policy.agent_channel_pins else ALLOW
         if _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
+        if not place.setup_thread and _crosses_isolation(agent, place):
+            return _deny("channel_isolated")
         return ALLOW
 
     if req.action is Action.SAVE_ROUTINE:
+        if place.isolated_channel is not None and agent.confined_to != place.isolated_channel:
+            return _deny("channel_isolated")
         if not any(name in policy.agent_channel_pins for name in agent.names if name):
             return ALLOW
-        if _outside_pin(policy, agent, place):
+        # Straight into a pinned channel: a thread under one is refused, as a
+        # fire can't always tell its parent.
+        if _outside_pin(policy, agent, Place(channel_id=place.channel_id)):
             return _deny("agent_pinned_elsewhere")
         return ALLOW
 
@@ -522,6 +571,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.BIND_CHANNEL_DEFAULT:
         if _outside_pin(policy, agent, place):
             return _deny("agent_pinned_elsewhere")
+        if _crosses_isolation(agent, place):
+            return _deny("channel_isolated")
         return ALLOW
 
     if req.action is Action.MINT_CODING_TOKEN:
@@ -543,6 +594,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.POST:
         if _protected(policy, place):
             return _deny("channel_protected")
+        if agent.present and _crosses_isolation(agent, place):
+            if not agent.resolved:
+                return _deny("agent_unresolved")
+            return _deny("channel_isolated")
         if place.own_dm or not policy.agent_channel_pins or not agent.present:
             return ALLOW
         if not agent.resolved:
@@ -552,6 +607,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.DIRECT_MESSAGE:
+        if agent.present and agent.confined_to is not None:
+            return _deny("channel_isolated")
         if not agent.present or not policy.agent_channel_pins:
             return ALLOW
         if not agent.resolved:
@@ -575,11 +632,17 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.READ_CHANNEL:
         if place.channel_id is None:
             return ALLOW
-        if channel_readable(
+        if not channel_readable(
             policy, req.origin_channel_ids, place.channel_id, place.parent_channel_id
         ):
-            return ALLOW
-        return _deny("sealed")
+            return _deny("sealed")
+        if (
+            place.isolated_channel is not None
+            and agent.present
+            and agent.confined_to != place.isolated_channel
+        ):
+            return _deny("channel_isolated")
+        return ALLOW
 
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
@@ -699,14 +762,21 @@ def authorize(
     reach: AgentReach | None = None,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
+    agent = agent if agent is not None else AgentRef.none()
+    place = place if place is not None else Place()
     return _decide(
         policy,
         Request(
             subject=subject,
             action=action,
             surface=surface,
-            agent=agent if agent is not None else AgentRef.none(),
-            place=place if place is not None else Place(),
+            agent=replace(agent, confined_to=isolation_owner(policy, agent.names)),
+            place=replace(
+                place,
+                isolated_channel=isolated_channel_of(
+                    policy, place.channel_id, place.parent_channel_id
+                ),
+            ),
             recipient_id=recipient_id,
             origin_channel_ids=origin_channel_ids,
             session=session,

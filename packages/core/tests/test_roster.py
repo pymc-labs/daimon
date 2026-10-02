@@ -197,17 +197,18 @@ async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel
         ),
     )
     default = DeploymentDefault()
+    anthropic = build_fake_anthropic(router.dispatch)
 
     roster = await load_roster(
         db_session,
-        build_fake_anthropic(router.dispatch),
+        anthropic,
         tenant_id=tenant.id,
         platform="discord",
         channel_id=channel_id,
         thread_id=None,
         default=default,
         viewer=await load_isolation_viewer(
-            db_session, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
+            db_session, anthropic, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
         ),
     )
 
