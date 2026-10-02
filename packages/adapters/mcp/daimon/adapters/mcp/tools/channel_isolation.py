@@ -45,6 +45,7 @@ _NOTE = (
     "hidden everywhere else, and from inside it only its own agents are visible. Its "
     "messages are readable only from inside it; its own agents' memory stays writable."
 )
+_LIFT_HINT = "A server admin lifts them from Who answers where in the setup panel."
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,7 @@ async def _set_channel_isolation_impl(
         changed=change.changed,
         note=" ".join(filter(None, [_NOTE, change.dropped_skills_note]))
         if change.isolated
-        else f"Isolation ended. {END_ISOLATION_WARNING}",
+        else f"Isolation ended. {END_ISOLATION_WARNING} {_LIFT_HINT}",
     )
 
 
@@ -152,7 +153,8 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         While isolated, the channel's own agents can't be set as the default anywhere
         else, don't appear in agent, skill or routine lists outside it, and can't be
         handed tasks from elsewhere; inside it only they appear. Its messages are
-        readable only from inside it. Ending isolation keeps the seal and the pin.
+        readable only from inside it. Ending isolation keeps the seal and the pins; a
+        server admin lifts them from Who answers where in the setup panel.
         ``channel_id`` MUST be the parent channel's id, never a thread's.
         """
         return await _set_channel_isolation_impl(
