@@ -1,8 +1,11 @@
 # Teams adapter
 
-The Teams adapter answers in 1:1 chats and in channel threads where it is
-@mentioned. Registration steps live in
-[teams-app-manifest.yaml](teams-app-manifest.yaml).
+daimon on Microsoft Teams answers in 1:1 chats and in channel threads where
+it is @mentioned. It reads the thread it is asked about, works with files,
+runs routines, and has the same agents, memory and billing as on Discord and
+Slack. This page covers how it behaves and where it differs. To set it up
+(Entra, Azure Bot, the app package and the Teams admin center), follow
+[Microsoft Teams in the self-hosting guide](self-hosting.md#microsoft-teams-optional).
 
 ### Ingress is HTTP, not a dial-out
 

@@ -204,5 +204,6 @@ that differ from a deployed one. Both are in
 [configuration.md](configuration.md).
 
 The seeded Daimon prompt describes opt-in Markdown tables in final replies: Discord renders
-them as PNG attachments and Slack uses native table blocks. Existing custom agent
+them as PNG attachments and Slack uses native table blocks; Teams shows Markdown tables
+as they are, with no setting. Existing custom agent
 prompts are unchanged; see [platform table rendering](architecture.md#platform-table-rendering).

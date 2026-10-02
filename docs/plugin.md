@@ -1,7 +1,8 @@
 # Claude Code plugin
 
 `plugin/` is a Claude Code plugin that lets you ask the daimons in your Slack
-workspaces and Discord servers a question from inside Claude Code.
+workspaces and Discord servers a question from inside Claude Code. Teams has
+no login mount yet, so the plugin can't reach daimons on Teams.
 [`plugin/README.md`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) is the user-facing doc: what the
 plugin ships, how to install it, and how to log in. This page is the part you
 want before you install — what has to be true on the server side for any of
