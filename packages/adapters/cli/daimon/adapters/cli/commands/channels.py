@@ -13,6 +13,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.authz import Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
@@ -21,6 +22,7 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
+from daimon.core.channel_isolation_setup import set_channel_isolation
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -45,12 +47,71 @@ admins_app = typer.Typer(
     help="A channel's admins: roles and members who run it on top of the server admins."
 )
 channels_app.add_typer(admins_app, name="admins")
+isolation_app = typer.Typer(help="Isolate a channel with its own agent, or lift isolation.")
+channels_app.add_typer(isolation_app, name="isolation")
 
 _PLATFORMS = ("discord", "slack")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
 _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
+
+
+@isolation_app.command("set")
+def isolation_set_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    fork_from: Annotated[str | None, typer.Option("--fork-from")] = None,
+) -> None:
+    """Seal and isolate a channel, copying an agent when --fork-from is given."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+            change = await set_channel_isolation(
+                rt.anthropic,
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                isolated=True,
+                default=rt.deployment_default,
+                actor_account_id=None,
+                fork=fork_from is not None,
+                fork_from=fork_from,
+                public_url=str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url else None,
+                subject=Subject(is_admin=True),
+            )
+            console.print(f"{channel_id}: isolated, agent {change.agent_name}")
+
+    run_cli(_run(), console=console)
+
+
+@isolation_app.command("lift")
+def isolation_lift_command(platform: str, workspace_id: str, channel_id: str) -> None:
+    """End isolation and remove its seal and exclusive agent pins."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+            await set_channel_isolation(
+                rt.anthropic,
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                isolated=False,
+                default=rt.deployment_default,
+                actor_account_id=None,
+                drop_seal_and_pins=True,
+                subject=Subject(is_admin=True),
+            )
+            console.print(f"{channel_id}: isolation, seal and pins removed")
+
+    run_cli(_run(), console=console)
 
 
 class BudgetListing(BaseModel):
