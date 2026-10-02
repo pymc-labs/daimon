@@ -207,15 +207,16 @@ def verify_discord(
                         "Message Content Intent is disabled or unapproved; enable it under Bot "
                         "in the Discord Developer Portal."
                     )
-                if isinstance(application, dict) and application.get("verified") is True:
-                    guild_count = application.get("approximate_guild_count")
-                    if type(guild_count) is int and guild_count >= 100:
-                        warnings.append(
-                            "Verified app has approximately 100 or more guilds. Discord now "
-                            "requires privileged intent review at 10,000 reachable users; "
-                            "guild count and intent flags do not prove approval. Check the "
-                            "Developer Portal review status."
-                        )
+                if (
+                    isinstance(application, dict)
+                    and isinstance(application.get("flags"), int)
+                    and application["flags"] & _MESSAGE_CONTENT_FLAGS
+                ):
+                    warnings.append(
+                        "Discord requires privileged intent review at 10,000 reachable users. "
+                        "The API does not expose that count or review approval; check the "
+                        "Developer Portal."
+                    )
                 if guild_id and guild_id.isdecimal():
                     member, error = _get(client, f"/guilds/{guild_id}/members/{user['id']}")
                     if error:

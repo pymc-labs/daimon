@@ -271,7 +271,7 @@ def test_discord_verification_passes_all_checks(
         "guild_permissions",
     ]
     assert payload["failures"] == []
-    assert payload["warnings"] == []
+    assert "10,000 reachable users" in payload["warnings"][0]
     assert "test-token" not in json.dumps(payload)
 
 
@@ -327,15 +327,14 @@ def test_discord_verification_reports_missing_human_steps(
 
 
 @pytest.mark.parametrize(
-    ("verified", "guild_count", "expect_warning"),
-    [(True, 100, True), (True, 99, False), (False, 100, False), (None, 100, False)],
+    ("verified", "guild_count"),
+    [(True, 100), (True, 99), (False, 100), (None, 100)],
 )
-def test_discord_review_warning_uses_exposed_verified_guild_count(
+def test_discord_review_warning_does_not_infer_approval_from_guild_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     verified: bool | None,
     guild_count: int,
-    expect_warning: bool,
 ) -> None:
     monkeypatch.delenv("DAIMON_DISCORD__BOT_TOKEN", raising=False)
     env_file = _discord_env(tmp_path)
@@ -360,10 +359,8 @@ def test_discord_review_warning_uses_exposed_verified_guild_count(
     rc, payload = _invoke("verify", "discord", "--env-file", str(env_file), "--guild-id", "456")
     assert rc == 0
     assert payload["completed"][1] == "message_content_intent_flag"
-    assert bool(payload["warnings"]) is expect_warning
-    if expect_warning:
-        assert "10,000 reachable users" in payload["warnings"][0]
-        assert "do not prove approval" in payload["warnings"][0]
+    assert "10,000 reachable users" in payload["warnings"][0]
+    assert "does not expose that count or review approval" in payload["warnings"][0]
     assert "test-token" not in json.dumps(payload)
 
 
