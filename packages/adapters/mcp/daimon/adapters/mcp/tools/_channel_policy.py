@@ -31,6 +31,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp.exceptions import ToolError
 
@@ -40,6 +41,10 @@ _PROTECTED_MSG = (
 )
 _ISOLATED_WRITE_MSG = (
     "this channel is isolated: only its own agents post in it. Tell the caller. Do not retry."
+)
+_HELD_SEND_MSG = (
+    "this conversation is in an isolated channel, so nothing said here is posted or sent "
+    "outside it. Tell the caller. Do not retry."
 )
 _PINNED_SEND_MSG = (
     "this agent is pinned to its own channels, so it can only post in them (and "
@@ -72,6 +77,7 @@ async def require_channel_writable(
     channel_id: str,
     parent_channel_id: str | None = None,
     category_id: str | None = None,
+    origin: Place | None = None,
 ) -> None:
     """Raise ToolError when the tenant policy forbids this post (`authorize(POST)`).
 
@@ -83,7 +89,9 @@ async def require_channel_writable(
     channel. The requester's own 1:1 DM with daimon is allowed: only they see it.
 
     An isolated channel takes posts only from its own agents, and they post
-    nowhere else, not even into the requester's DM.
+    nowhere else, not even into the requester's DM. ``origin`` is the calling
+    turn's verified place (`turn_origin_place`): a call from inside an isolated
+    channel posts only there, and one from its setup thread may post into it.
     """
     policy = await load_channel_policy(runtime, auth)
     place = Place(
@@ -101,13 +109,31 @@ async def require_channel_writable(
     if not policy.isolated_channel_ids and (place.own_dm or not policy.agent_channel_pins):
         return
     agent = await _executing_agent(runtime, auth, policy)
-    decision = authorize(policy, subject=subject, action=Action.POST, agent=agent, place=place)
-    if decision.reason == "channel_isolated" and isolated_channel_of(
-        policy, channel_id, parent_channel_id
-    ):
-        raise ToolError(_ISOLATED_WRITE_MSG)
+    decision = authorize(
+        policy, subject=subject, action=Action.POST, agent=agent, place=place, origin=origin
+    )
+    if decision.reason == "channel_isolated":
+        if isolated_channel_of(policy, channel_id, parent_channel_id):
+            raise ToolError(_ISOLATED_WRITE_MSG)
+        if _origin_isolated(policy, origin):
+            raise ToolError(_HELD_SEND_MSG)
     if not decision:
         raise ToolError(_PINNED_SEND_MSG)
+
+
+def _origin_isolated(policy: TenantAccessPolicy, origin: Place | None) -> bool:
+    return origin is not None and (
+        isolated_channel_of(policy, origin.channel_id, origin.parent_channel_id) is not None
+    )
+
+
+def turn_origin_place(origin: TurnOriginRow) -> Place:
+    """Where a verified turn origin runs, marking a setup conversation's thread."""
+    return Place.from_origin(
+        parent_channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        setup_thread=origin.is_setup,
+    )
 
 
 def _is_requesters_own_dm(channel_id: str) -> bool:
@@ -183,12 +209,14 @@ class ChannelReadPolicy:
     """The tenant policy plus the channels the calling turn runs in.
 
     `agent` is the executing agent while the tenant isolates a channel: only
-    that channel's own agents read it.
+    that channel's own agents read it. `origin` is the verified turn origin
+    the ids came from, if any.
     """
 
     policy: TenantAccessPolicy
     origin_channel_ids: frozenset[str] = frozenset()
     agent: AgentRef = field(default_factory=AgentRef.none)
+    origin: TurnOriginRow | None = None
 
     def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
         return bool(
@@ -245,19 +273,31 @@ async def load_read_policy(
     bound = token_channel_id(auth)
     if bound is not None:
         return ChannelReadPolicy(policy, frozenset({bound}), agent)
-    outside = ChannelReadPolicy(policy, agent=agent)
+    if not (policy.sealed_channel_ids or resolve_without_seals):
+        return ChannelReadPolicy(policy, agent=agent)
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        return ChannelReadPolicy(policy, agent=agent)
+    inside = {origin.parent_channel_id, origin.thread_id}
+    if auth.platform == "slack":
+        # A Slack thread is sealed by its channel_id:thread_ts form.
+        inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
+    return ChannelReadPolicy(policy, frozenset(inside), agent, origin)
+
+
+async def get_verified_origin(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> TurnOriginRow | None:
+    """The caller's active turn origin, verified as `load_read_policy` describes; None
+    when none was named or it is malformed, expired, another account's or another
+    responder's."""
     executing_agent = auth.agent_id or auth.chat_agent_id
-    if (
-        not (policy.sealed_channel_ids or resolve_without_seals)
-        or not origin_context_id
-        or auth.platform is None
-        or executing_agent is None
-    ):
-        return outside
+    if not origin_context_id or auth.platform is None or executing_agent is None:
+        return None
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError:
-        return outside
+        return None
     async with runtime.session_factory() as session:
         origin = await get_active_origin(
             session,
@@ -270,9 +310,5 @@ async def load_read_policy(
     if origin is None or executing_agent != derive_agent_uuid(
         tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
-        return outside
-    inside = {origin.parent_channel_id, origin.thread_id}
-    if auth.platform == "slack":
-        # A Slack thread is sealed by its channel_id:thread_ts form.
-        inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
-    return ChannelReadPolicy(policy, frozenset(inside), agent)
+        return None
+    return origin

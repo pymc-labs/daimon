@@ -35,7 +35,11 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
@@ -328,10 +332,14 @@ async def _list_agents_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     page: str | None,
+    origin_context_id: str | None = None,
 ) -> list[AgentInfo]:
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    caller = await load_caller_isolation(runtime, auth, agents=rows)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    caller = await load_caller_isolation(
+        runtime, auth, agents=rows, location_channel_id=origin_channel_id(origin)
+    )
     rows = [row for row in rows if caller.sees_agent(row)]
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
@@ -344,9 +352,16 @@ async def _get_agent_impl(
     auth: AuthIdentity,
     name: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id, require_identity=False
+        runtime,
+        auth,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        require_identity=False,
+        location_channel_id=origin_channel_id(origin),
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
     # The prompt is readable only by callers who could replace it on any agent:
@@ -552,6 +567,7 @@ async def _update_agent_impl(
     mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None,
     skills: list[str | BetaManagedAgentsSkillParams] | None,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     if model is not None:
         _reject_unknown_model(model)
@@ -561,11 +577,16 @@ async def _update_agent_impl(
         raise ToolError("update_agent: at least one field is required")
     if mcp_servers is not None:
         _reject_reserved_servers(runtime, mcp_servers)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
     if tools is not None:
@@ -594,7 +615,9 @@ async def _update_agent_impl(
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
     if skills is not None:
         try:
-            caller = await load_caller_isolation(runtime, auth)
+            caller = await load_caller_isolation(
+                runtime, auth, location_channel_id=origin_channel_id(origin)
+            )
             owners = await load_skill_owners(runtime, caller, auth.tenant_id)
             resolved_skills = await resolve_skill_names(
                 runtime.client,
@@ -765,6 +788,7 @@ async def _attach_mcp_server_impl(
     server_name: str,
     url: str,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     # #142: guard the reserved daimon-mcp entry before even looking at the agent.
     # Also reject any URL that points at the deployment's own public_url under a
@@ -777,11 +801,16 @@ async def _attach_mcp_server_impl(
     rejection = get_reserved_mcp_rejection(server_name=server_name, url=url, public_url=public_url)
     if rejection is not None:
         raise ToolError(rejection)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
-        runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        runtime,
+        auth,
+        name=agent_name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
     await reachability.require_admin_for_reachable_agent(
         runtime, auth, agent_name=agent_name, agent=agent
     )
@@ -896,14 +925,20 @@ async def _archive_agent_impl(
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
-    async def list_agents(ctx: Context, page: str | None = None) -> list[AgentInfo]:  # pyright: ignore[reportUnusedFunction]
+    async def list_agents(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, page: str | None = None, origin_context_id: str | None = None
+    ) -> list[AgentInfo]:
         """List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination."""
-        return await _list_agents_impl(runtime, await _auth(ctx), page)
+        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
+        return await _list_agents_impl(runtime, await _auth(ctx), page, origin_context_id)
 
     @mcp.tool
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, name: str, expected_ma_agent_id: str | None = None
+        ctx: Context,
+        name: str,
+        expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Show what an agent can access: attached MCP servers and skills.
 
@@ -911,12 +946,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
         For an admin on an editable agent, ``system`` is the full system prompt;
-        null means withheld (non-admin caller, or Daimon/defaults-managed agent)."""
+        null means withheld (non-admin caller, or Daimon/defaults-managed agent).
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _get_agent_impl(
             runtime,
             await _auth(ctx),
             name,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -971,6 +1008,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None,
         skills: list[str | BetaManagedAgentsSkillParams] | None = None,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
@@ -985,7 +1023,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         one running now. ``skills`` accepts names such as
         ``["build-models", "compare-models"]``, resolved server-side; explicit
         ``{"type": "custom", "skill_id": "skill_..."}`` entries also work. A model or
-        prompt change also returns ``applies``: post it verbatim as part of the reply."""
+        prompt change also returns ``applies``: post it verbatim as part of the reply.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _update_agent_impl(
             runtime,
             await _auth(ctx),
@@ -997,6 +1036,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             mcp_servers=mcp_servers,
             skills=skills,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
@@ -1006,6 +1046,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         server_name: str,
         url: str,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Add an MCP server that needs no token, such as Context7, to an agent.
 
@@ -1016,7 +1057,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
-        name and URL is a no-op. Other connections are preserved."""
+        name and URL is a no-op. Other connections are preserved.
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _attach_mcp_server_impl(
             runtime,
             await _auth(ctx),
@@ -1024,6 +1066,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             server_name=server_name,
             url=url,
             expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
