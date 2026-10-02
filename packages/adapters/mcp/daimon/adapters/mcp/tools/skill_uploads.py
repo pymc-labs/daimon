@@ -7,10 +7,13 @@ turns refusals into ``ToolError``.
 
 A call without ``content_hash`` only previews. The upload needs the hash that
 preview returned, bound to this agent, and it never lands on the model's word
-alone: with tool safety on it waits for the person's Approve on the card (and
-an unattended run is refused); with it off there is no card, so the confirm
-adds nothing and points to Add skill in ``/agent-setup``, which previews and
-adds on the person's own click.
+alone: the server confirms only from a chat turn's verified origin whose live
+session itself makes ``add_skill`` wait for the person's Approve on the card
+(`has_confirmation_gate`). Anything else (tool safety off, an ``agent_chat``
+or unattended run, a session created before the gate) adds nothing and points
+to Add skill in ``/agent-setup``, which previews and adds on the person's own
+click. The pin and sharing gates run again on the fresh agent right before
+the upload and the attach.
 """
 
 from __future__ import annotations
@@ -66,7 +69,10 @@ from daimon.core.skills.ingest import (
 )
 from daimon.core.slack_file_token import verify_file_token
 from daimon.core.slack_files import fetch_slack_file
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import has_confirmation_gate
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -89,12 +95,49 @@ class AddSkillResult(BaseModel):
     summary: str
 
 
-def _no_card_refusal(agent_name: str) -> str:
+_TOOL_NAME = "add_skill"
+
+
+def _no_card_refusal(agent_name: str, *, deployment_has_cards: bool) -> str:
+    why = (
+        "this conversation can't show one (it runs without a person, or it started "
+        "before the card existed; a new thread shows it)"
+        if deployment_has_cards
+        else "this deployment shows none"
+    )
     return (
         "Nothing was added. Adding a skill from chat needs the person to press Approve on "
-        "a confirmation card, and this deployment shows none. Tell them to run "
-        f"/agent-setup, open {agent_name} and use Add skill: it shows the same preview and "
-        "adds it on their own click. Do not retry."
+        f"a confirmation card, and {why}. Tell them to run /agent-setup, open {agent_name} "
+        "and use Add skill: it shows the same preview and adds it on their own click. "
+        "Do not retry."
+    )
+
+
+async def _session_asks_first(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None
+) -> bool:
+    """Whether this call comes from a chat turn whose session waits for the person's Approve.
+
+    Read from the session itself, never the model's word: the verified origin's
+    live session must run the origin's responder and hold `add_skill` on
+    `always_ask`. An `agent_chat` session has no origin; one created before the
+    gate, or without tool safety, holds `always_allow`.
+    """
+    if origin is None:
+        return False
+    async with runtime.session_factory() as session:
+        live = await get_live_thread_session(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            thread_id=origin.thread_id,
+            account_id=auth.account_id,
+        )
+    if live is None:
+        return False
+    ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
+    return ma_session.agent.id == origin.responder_ma_agent_id and has_confirmation_gate(
+        [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=_TOOL_NAME
     )
 
 
@@ -263,16 +306,23 @@ async def _add_skill_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         location_channel_id=origin_channel_id(origin),
     )
-    # The upload waits for the person's Approve on the card, like the private
-    # request forms, so a member inside a pinned agent's channels may add one.
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=origin)
-    await require_skill_change(runtime, auth, agent, agent_name=agent_name, operation="skill_add")
-    has_card = runtime.settings.tool_safety.enabled
-    if content_hash is not None and not has_card:
-        raise ToolError(_no_card_refusal(agent_name))
+
+    async def recheck(fresh: BetaManagedAgentsAgent) -> None:
+        # The upload waits for the person's Approve on the card, like the private
+        # request forms, so a member inside a pinned agent's channels may add one.
+        await require_pin_write_access(runtime, auth, ma_agent=fresh, origin=origin)
+        await require_skill_change(
+            runtime, auth, fresh, agent_name=agent_name, operation="skill_add"
+        )
+
+    await recheck(agent)
+    deployment_has_cards = runtime.settings.tool_safety.enabled
     try:
+        has_card = deployment_has_cards and await _session_asks_first(runtime, auth, origin)
+        if content_hash is not None and not has_card:
+            raise ToolError(_no_card_refusal(agent_name, deployment_has_cards=deployment_has_cards))
         async with httpx.AsyncClient(timeout=30.0) as http:
-            bundle, origin = await _load_bundle(
+            bundle, source = await _load_bundle(
                 runtime,
                 auth,
                 http,
@@ -293,7 +343,7 @@ async def _add_skill_impl(
                 f"content_hash='{bound}'; they approve it once more on the card."
                 if has_card
                 else f"To add it they run /agent-setup, open {agent_name} and use Add skill; "
-                "adding from chat needs a confirmation card this deployment does not show."
+                "adding from chat needs a confirmation card this conversation can't show."
             )
             return AddSkillResult(
                 status="preview",
@@ -316,8 +366,9 @@ async def _add_skill_impl(
             agent=agent,
             agent_name=agent_name,
             bundle=bundle,
-            origin=origin,
+            origin=source,
             added_by_account_id=auth.account_id,
+            recheck=recheck,
         )
     except DaimonError as exc:
         raise ToolError(str(exc)) from exc
@@ -373,8 +424,8 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
-        approves the upload on a confirmation card. Without cards the preview's
-        summary says to use Add skill in /agent-setup instead. The skill belongs to
+        approves the upload on a confirmation card. Where this conversation can't
+        show one, the preview's summary says to use Add skill in /agent-setup. The skill belongs to
         this agent alone; ``sync_skills`` fills the shared library instead, and
         ``remove_skill`` detaches it. A built-in agent is refused. Anyone may change an
         agent nobody else uses (no default, bound thread, or other people's routine or

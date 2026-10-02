@@ -36,10 +36,11 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import ma_agent
+from daimon.testing import ma_agent, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -56,6 +57,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
 USER = "444444444444444444"
+CHAT_THREAD = "555555555555555555"
+SETUP_THREAD = "333333333333333333"
 _MD = "---\nname: notes\ndescription: Take meeting notes.\n---\nWrite them down.\n"
 
 
@@ -66,6 +69,7 @@ class _World:
     runtime: McpRuntime
     state: FakeMAState
     created: list[str] = field(default_factory=list[str])
+    sessions: dict[str, dict[str, Any]] = field(default_factory=dict[str, dict[str, Any]])
 
     def auth(
         self, *, admin: bool = True, platform: str | None = None, external_id: str | None = None
@@ -112,6 +116,14 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
         skills.append(skill)
         return httpx.Response(200, json=skill)
 
+    sessions: dict[str, dict[str, Any]] = {}
+
+    def sessions_handler(request: httpx.Request) -> httpx.Response:
+        found = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)", request.url.path)
+        if request.method != "GET" or found is None or found["id"] not in sessions:
+            raise NotHandled
+        return httpx.Response(200, json=sessions[found["id"]])
+
     settings = MagicMock()
     settings.tool_safety = ToolSafetyPolicy(enabled=True)
     settings.mcp.public_url = None
@@ -119,21 +131,94 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
     settings.mcp.jwt_secret = SecretStr("proxy-secret")
     runtime = McpRuntime(
         session_factory=factory,
-        client=build_fake_anthropic(combine_handlers(skills_handler, make_fake_ma_handler(state))),
+        client=build_fake_anthropic(
+            combine_handlers(skills_handler, sessions_handler, make_fake_ma_handler(state))
+        ),
         settings=settings,  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
         fernet=make_fernet(),
     )
-    return _World(tenant.id, account.id, runtime, state, created)
+    return _World(tenant.id, account.id, runtime, state, created, sessions)
+
+
+def _daimon_toolset(*, gated: bool) -> dict[str, Any]:
+    """Daimon's toolset as a session froze it: add_skill on always_ask once gated."""
+    policy = {"type": "always_ask" if gated else "always_allow"}
+    return {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [{"name": "add_skill", "enabled": True, "permission_policy": policy}],
+    }
+
+
+async def _live_session(
+    world: _World, *, thread_id: str, responder: str, gated: bool = True
+) -> None:
+    """The chat thread's live session, as MA reports its frozen tools."""
+    session_id = f"sesn_{thread_id}"
+    async with world.runtime.session_factory.begin() as session:
+        await create_thread_session(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            thread_id=thread_id,
+            account_id=world.account_id,
+            ma_session_id=session_id,
+            ma_agent_id=responder,
+        )
+    frozen = ma_session_agent(id=responder, tools=[_daimon_toolset(gated=gated)])
+    world.sessions[session_id] = ma_session(id=session_id, agent=frozen).model_dump(mode="json")
+
+
+async def _chat_turn(
+    world: _World,
+    *,
+    admin: bool = True,
+    gated: bool = True,
+    live: bool = True,
+    responder: str = "agent_helper",
+) -> tuple[AuthIdentity, str]:
+    """A Discord chat turn in ROOM: its caller and verified origin, with a live session."""
+    now = datetime.now(UTC)
+    async with world.runtime.session_factory.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id=CHAT_THREAD,
+            responder_ma_agent_id=responder,
+            responder_name=responder.removeprefix("agent_"),
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.ADMIN if admin else Role.USER,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+        )
+    if live:
+        await _live_session(world, thread_id=CHAT_THREAD, responder=responder, gated=gated)
+    auth = dataclasses.replace(
+        world.auth(admin=admin, platform="discord"),
+        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=responder),
+    )
+    return auth, str(origin.id)
 
 
 async def test_a_first_call_previews_and_changes_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
+    auth, origin = await _chat_turn(world)
 
     result = await _add_skill_impl(
-        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        skill_md=_MD,
+        origin_context_id=origin,
     )
 
     assert result.status == "preview" and result.added is None
@@ -147,18 +232,8 @@ async def test_the_confirmed_hash_uploads_the_agents_own_skill_and_records_who(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
-    preview = await _add_skill_impl(
-        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
 
-    result = await _add_skill_impl(
-        world.runtime,
-        world.auth(),
-        agent_name="helper",
-        expected_ma_agent_id=None,
-        skill_md=_MD,
-        content_hash=preview.preview.content_hash,
-    )
+    result = await _preview_then_confirm(world, skill_md=_MD)
 
     assert result.status == "added" and result.added is not None
     assert world.created == [
@@ -186,16 +261,55 @@ async def test_a_skill_that_changed_since_its_preview_is_not_uploaded(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
+    auth, origin = await _chat_turn(world)
     with pytest.raises(ToolError, match="changed since its preview"):
         await _add_skill_impl(
             world.runtime,
-            world.auth(),
+            auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="agent_helper",
             skill_md=_MD,
             content_hash="0" * 64,
+            origin_context_id=origin,
         )
     assert world.created == []
+
+
+@pytest.mark.parametrize(
+    "where", ["no_origin", "ungated_session", "another_agents_session", "no_live_session"]
+)
+async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_first(
+    db_session_factory: async_sessionmaker[AsyncSession], where: str
+) -> None:
+    """With tool safety on, an agent_chat or unattended call (no origin), a session created
+    before the gate, or an origin whose live session is not its own adds nothing."""
+    world = await _world(db_session_factory)
+    auth, origin = await _chat_turn(
+        world, gated=where != "ungated_session", live=where != "no_live_session"
+    )
+    if where == "another_agents_session":
+        frozen = ma_session_agent(id="agent_other", tools=[_daimon_toolset(gated=True)])
+        world.sessions[f"sesn_{CHAT_THREAD}"] = ma_session(
+            id=f"sesn_{CHAT_THREAD}", agent=frozen
+        ).model_dump(mode="json")
+    context = None if where == "no_origin" else origin
+
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            skill_md=_MD,
+            origin_context_id=context,
+            **extra,
+        )
+
+    preview = await add()
+    assert "content_hash=" not in preview.summary and "/agent-setup" in preview.summary
+    with pytest.raises(ToolError, match="this conversation can't show one"):
+        await add(content_hash=preview.preview.content_hash)
+    assert world.created == [], "nothing was uploaded"
 
 
 async def test_exactly_one_source_is_taken(
@@ -361,7 +475,7 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             account_id=world.account_id,
             platform="discord",
             parent_channel_id=ROOM,
-            thread_id="333333333333333333",
+            thread_id=SETUP_THREAD,
             responder_ma_agent_id="agent_shared",
             responder_name="shared",
             configuration_target_ma_agent_id="agent_helper",
@@ -371,6 +485,7 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             now=now,
             is_setup=True,
         )
+    await _live_session(world, thread_id=SETUP_THREAD, responder="agent_shared")
     return str(origin.id)
 
 
@@ -475,18 +590,67 @@ async def test_a_pinned_agent_takes_a_chat_add_only_from_its_own_channels(
     assert (await preview(origin_context_id=origin)).status == "preview", "inside the pin"
 
 
-async def _preview_then_confirm(world: _World, auth: AuthIdentity, **source: Any):
+async def _preview_then_confirm(
+    world: _World, *, admin: bool = True, gated: bool = True, **source: Any
+) -> AddSkillResult:
+    """Preview, then confirm, from one chat turn whose session is gated (or not)."""
+    auth, origin = await _chat_turn(world, admin=admin, gated=gated)
     preview = await _add_skill_impl(
-        world.runtime, auth, agent_name="helper", expected_ma_agent_id=None, **source
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        origin_context_id=origin,
+        **source,
     )
     return await _add_skill_impl(
         world.runtime,
         auth,
         agent_name="helper",
-        expected_ma_agent_id=None,
+        expected_ma_agent_id="agent_helper",
         content_hash=preview.preview.content_hash,
+        origin_context_id=origin,
         **source,
     )
+
+
+@pytest.mark.parametrize("change", ["pinned_elsewhere", "made_the_default"])
+async def test_a_pin_or_share_added_during_the_fetch_still_refuses_the_upload(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The gates run again on the fresh agent after the (slow) fetch, before any write."""
+    world = await _world(db_session_factory)
+    load = skill_uploads._load_bundle  # pyright: ignore[reportPrivateUsage]
+    loads: list[str] = []
+
+    async def load_then_change(*args: Any, **kwargs: Any) -> Any:
+        loaded = await load(*args, **kwargs)
+        loads.append(change)
+        if len(loads) == 2:  # the confirm's fetch, after its first check passed
+            async with db_session_factory.begin() as session:
+                if change == "pinned_elsewhere":
+                    await set_access_policy(
+                        session,
+                        tenant_id=world.tenant_id,
+                        policy=TenantAccessPolicy(agent_channel_pins={"helper": ("C_ELSEWHERE",)}),
+                    )
+                else:
+                    await set_fields(
+                        session,
+                        scope=TenantScopeRef(tenant_id=world.tenant_id),
+                        tenant_id=world.tenant_id,
+                        agent_name="helper",
+                        mode="agent",
+                    )
+        return loaded
+
+    monkeypatch.setattr(skill_uploads, "_load_bundle", load_then_change)
+    with pytest.raises(ToolError, match="No card was posted|used beyond this caller"):
+        await _preview_then_confirm(world, admin=False, skill_md=_MD)
+    assert world.created == [], "nothing was uploaded"
+    assert world.state.agents["agent_helper"]["skills"] == []
 
 
 async def test_without_a_confirmation_card_chat_adds_nothing_and_points_to_the_panel(
@@ -515,19 +679,26 @@ async def test_a_preview_confirms_only_for_the_agent_it_was_made_for(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
+    auth, origin = await _chat_turn(world)
     preview = await _add_skill_impl(
-        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        skill_md=_MD,
+        origin_context_id=origin,
     )
     raw = bundle_from_markdown(_MD).preview.content_hash
     assert preview.preview.content_hash != raw, "the hash to confirm is bound to agent_helper"
     with pytest.raises(ToolError, match="changed since its preview"):
         await _add_skill_impl(
             world.runtime,
-            world.auth(),
+            auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="agent_helper",
             skill_md=_MD,
             content_hash=raw,
+            origin_context_id=origin,
         )
     assert world.created == []
 
@@ -536,7 +707,7 @@ async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
-    await _preview_then_confirm(world, world.auth(), skill_md=_MD)
+    await _preview_then_confirm(world, skill_md=_MD)
     helper = world.state.agents["agent_helper"]
     stamp = ma_agent(name="helper-fork", tenant_id=world.tenant_id).metadata
     world.state.agents["agent_fork"] = helper | {
@@ -553,8 +724,8 @@ async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
             mode="agent",
         )
 
-    with pytest.raises(ToolError, match="also attached to helper-fork"):
-        await _preview_then_confirm(world, world.auth(admin=False), skill_md=_MD + "More.\n")
+    with pytest.raises(ToolError, match="also attached to another agent"):
+        await _preview_then_confirm(world, admin=False, skill_md=_MD + "More.\n")
     assert len(world.created) == 1, "nothing new was uploaded"
 
 
@@ -612,7 +783,7 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
     )
     assert (resolved, tokens) == ([], [None]), "a member fetches without the stored access"
 
-    await _preview_then_confirm(world, world.auth(), **source)
+    await _preview_then_confirm(world, **source)
     assert tokens[1:] == ["stored-token", "stored-token"]
     async with db_session_factory() as session:
         row = await load_user_skill(
@@ -636,7 +807,7 @@ async def test_an_upstream_failure_is_a_tool_error(
 
     monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
     with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)"):
-        await _preview_then_confirm(world, world.auth(), skill_md=_MD)
+        await _preview_then_confirm(world, skill_md=_MD)
 
 
 async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
