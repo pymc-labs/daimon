@@ -15,7 +15,8 @@ Code login mounts, Microsoft Teams, chart storage and connecting MCP servers.
 
 From a checkout, ask your coding agent to follow [SETUP.md](https://github.com/pymc-labs/daimon/blob/main/SETUP.md), or
 run its setup command yourself. The command creates `.env`, generates the MCP
-JWT secret, Postgres password and Fernet encryption key, and prints JSON with
+JWT secret, Postgres password, Fernet encryption key and a per-install CLI
+workspace identifier, and prints JSON with
 the next action. It preserves existing values when run again. Only the
 Anthropic API key needs to be supplied by you. Keep that key in a workspace
 dedicated to this deployment.
@@ -34,6 +35,8 @@ Open `.env`, then uncomment and fill in:
   HTTPS URL before enabling MCP tools or a chat platform; Managed Agents rejects
   a localhost MCP URL.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
+- `DAIMON_CLI__WORKSPACE_ID`: a stable, unique identifier for this install.
+  The setup command generates one; set one manually if you copy `.env.example`.
 - `DAIMON_CRYPTO__KEYS`: a Fernet key, from
   `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
   Paste the key as is. During rotation, list several keys newest first,
@@ -64,7 +67,7 @@ docker compose up --build -d postgres init
 docker compose ps --all
 ```
 
-`init` migrates the database and seeds the `cli:local` tenant. Wait for it to
+`init` migrates the database and seeds the configured CLI tenant. Wait for it to
 exit successfully before creating a session. The CLI commands run in a one-off
 container with the same database and Anthropic settings:
 

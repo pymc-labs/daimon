@@ -21,8 +21,9 @@ Managed Agents resources. Start with a clean clone and Docker Compose.
    ```
 
    Setup creates `.env` with mode `0600` and generates
-   `DAIMON_MCP__JWT_SECRET`, `POSTGRES_PASSWORD` and
-   `DAIMON_CRYPTO__KEYS`. It never prints their values. Read the one-line JSON
+   `DAIMON_MCP__JWT_SECRET`, `POSTGRES_PASSWORD`,
+   `DAIMON_CRYPTO__KEYS` and a per-install `DAIMON_CLI__WORKSPACE_ID`.
+   It never prints their values. Read the one-line JSON
    result. An initial run without a key reports
    `DAIMON_ANTHROPIC__API_KEY` under `missing` and names the next human step.
    Running the command again must preserve all existing secret values.
@@ -31,7 +32,7 @@ Managed Agents resources. Start with a clean clone and Docker Compose.
    `optional_actions` for Discord):
 
    ```json
-   {"schema_version":1,"status":"needs_input","completed":["POSTGRES_PASSWORD","DAIMON_MCP__JWT_SECRET","DAIMON_CRYPTO__KEYS","DAIMON_DATABASE__URL"],"missing":["DAIMON_ANTHROPIC__API_KEY"],"next_step":"Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace.","next_optional":[]}
+   {"schema_version":1,"status":"needs_input","completed":["DAIMON_CLI__WORKSPACE_ID","POSTGRES_PASSWORD","DAIMON_MCP__JWT_SECRET","DAIMON_CRYPTO__KEYS","DAIMON_DATABASE__URL"],"missing":["DAIMON_ANTHROPIC__API_KEY"],"next_step":"Set DAIMON_ANTHROPIC__API_KEY in .env to a key from a dedicated Anthropic workspace.","next_optional":[]}
    ```
 
 2. Stop here for the owner to confirm that this key belongs to a dedicated
@@ -51,7 +52,7 @@ Managed Agents resources. Start with a clean clone and Docker Compose.
 
    Wait for `init` to show `Exited (0)`. If it fails, read
    `docker compose logs init`. It runs migrations, applies the defaults and
-   creates the `cli:local` tenant.
+   creates the CLI tenant named by `DAIMON_CLI__WORKSPACE_ID` in `.env`.
 
 4. Create a CLI session and take `session_id` from the returned JSON:
 
