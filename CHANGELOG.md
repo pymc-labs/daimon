@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An isolated channel's content no longer leaves through new agents or timers.**
-  An isolated channel's own agent, wherever it runs and through any of its
-  coding-tool tokens, could call `create_agent`, and the new agent answered
-  outside the channel with whatever prompt was written into it. Such calls, and
-  `create_agent` from the channel's setup thread, are now refused
-  (`channel_isolated`), admins included. `list_timers` also showed
-  the notes of timers set in an isolated channel from anywhere; they now list
-  only inside that channel, as its routines do.
+- **An isolated channel's content no longer leaves through new agents or
+  timers.** An isolated channel's own agent, wherever it runs and through any
+  of its coding-tool tokens, could call `create_agent`, and the new agent
+  answered outside the channel with whatever prompt was written into it. Such
+  calls, and `create_agent` from the channel's setup thread, are now refused
+  (`channel_isolated`), admins included, as is a chat turn's `create_agent`
+  naming no `origin_context_id` while a channel in its workspace is isolated.
+  `list_timers` also showed the notes of timers set in an isolated channel
+  from anywhere; they now list only inside that channel, as its routines do.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to
@@ -339,8 +340,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord delivers files generated during tool-using turns into the chat thread,
   with upload-limit notices and protected-channel checks.
-- **Channel budgets.** Admins can cap what one Discord, Slack or Teams channel may
-  spend, monthly, in total or over a fixed date range, with
+- **Channel budgets.** Admins can cap what one Discord, Slack or Teams channel
+  may spend, monthly, in total or over a fixed date range, with
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
   included, threads counting toward their channel) reach its limit, new turns
