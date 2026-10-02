@@ -14,24 +14,39 @@ stale cached id flow downstream and corrupt downstream sessions.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from time import monotonic
 from typing import Literal
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from cachetools import TTLCache
 from daimon.core.defaults.ma_index import (
-    find_agent_by_daimon_tag,
-    find_environment_by_daimon_tag,
+    list_agents_by_tenant,
+    list_environments_by_tenant,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 
 _log = structlog.get_logger(__name__)
 
 Kind = Literal["agent", "environment"]
 _CacheKey = tuple[uuid.UUID, Kind, str]
-ResolverCache = TTLCache[_CacheKey, str]
+
+
+class ResolverCache(TTLCache[_CacheKey, str]):
+    """Resolver ids and one shared listing per tenant and resource kind."""
+
+    def __init__(
+        self, maxsize: int = 500, ttl: float = 1800, timer: Callable[[], float] = monotonic
+    ) -> None:
+        super().__init__(maxsize=maxsize, ttl=ttl, timer=timer)
+        self.inflight: dict[tuple[uuid.UUID, Kind], asyncio.Task[dict[str, str]]] = {}
 
 
 def new_resolver_cache() -> ResolverCache:
@@ -39,9 +54,9 @@ def new_resolver_cache() -> ResolverCache:
 
     maxsize=500: supports 100-tenant deployments with 5 simultaneous
     agent+environment resolutions each without eviction.
-    ttl=300: 5-minute TTL matches the original hand-rolled _TTL constant.
+    ttl=1800: 30 minutes limits org-wide MA listings during active turns.
     """
-    return ResolverCache(maxsize=500, ttl=300)
+    return ResolverCache()
 
 
 class MAResolverMissError(Exception):
@@ -93,18 +108,66 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
     return obj.archived_at is None and obj.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
 
 
-async def _lookup_agent_id(
-    client: AsyncAnthropic, tenant_id: uuid.UUID, daimon_tag: str
-) -> str | None:
-    match = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=daimon_tag)
-    return None if match is None else match.id
+async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind) -> dict[str, str]:
+    if kind == "agent":
+        resources = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    else:
+        resources = await list_environments_by_tenant(client, tenant_id=tenant_id)
+    canonical: dict[str, tuple[str, object, str | None]] = {}
+    duplicates: dict[str, list[str | None]] = {}
+    for resource in resources:
+        name = resource.metadata.get(MA_METADATA_KEY_NAME)
+        if name is None:
+            continue
+        prior = canonical.get(name)
+        account = resource.metadata.get(MA_METADATA_KEY_ACCOUNT)
+        if prior is None:
+            canonical[name] = (resource.id, resource.created_at, account)
+        elif str(resource.created_at) > str(prior[1]):
+            duplicates.setdefault(name, []).append(prior[2])
+            canonical[name] = (resource.id, resource.created_at, account)
+        else:
+            duplicates.setdefault(name, []).append(account)
+    for name, accounts in duplicates.items():
+        adopted_id, _, adopted_account = canonical[name]
+        _log.warning("ma_index.multi_match", kind=f"{kind}s", count=len(accounts) + 1)
+        if kind == "agent":
+            _log.warning(
+                "ma_index.resolver_ambiguous_name",
+                tenant_id=str(tenant_id),
+                name=name,
+                count=len(accounts) + 1,
+                adopted_id=adopted_id,
+                adopted_account=adopted_account,
+                duplicate_accounts=accounts,
+            )
+    return {name: resource_id for name, (resource_id, _, _) in canonical.items()}
 
 
-async def _lookup_environment_id(
-    client: AsyncAnthropic, tenant_id: uuid.UUID, daimon_tag: str
-) -> str | None:
-    match = await find_environment_by_daimon_tag(client, tenant_id=tenant_id, name=daimon_tag)
-    return None if match is None else match.id
+async def _lookup_tags(
+    client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind, cache: ResolverCache
+) -> dict[str, str]:
+    scope = (tenant_id, kind)
+    task = cache.inflight.get(scope)
+    if task is None:
+
+        async def load() -> dict[str, str]:
+            found = await _list_tag_ids(client, tenant_id, kind)
+            for name, resource_id in found.items():
+                cache[(tenant_id, kind, name)] = resource_id
+            return found
+
+        task = asyncio.create_task(load())
+        cache.inflight[scope] = task
+
+        def clear(done: asyncio.Task[dict[str, str]]) -> None:
+            if cache.inflight.get(scope) is done:
+                del cache.inflight[scope]
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(clear)
+    return await asyncio.shield(task)
 
 
 async def resolve_agent(
@@ -125,7 +188,6 @@ async def resolve_agent(
         apply_callable=apply_callable,
         cache=cache,
         liveness=_is_live_agent,
-        tag_lookup=_lookup_agent_id,
     )
 
 
@@ -147,7 +209,6 @@ async def resolve_environment(
         apply_callable=apply_callable,
         cache=cache,
         liveness=_is_live_environment,
-        tag_lookup=_lookup_environment_id,
     )
 
 
@@ -161,7 +222,6 @@ async def _resolve(
     apply_callable: Callable[[], Awaitable[object]],
     cache: ResolverCache,
     liveness: Callable[[AsyncAnthropic, str, uuid.UUID], Awaitable[bool]],
-    tag_lookup: Callable[[AsyncAnthropic, uuid.UUID, str], Awaitable[str | None]],
 ) -> str:
     key: _CacheKey = (tenant_id, kind, daimon_tag)
 
@@ -178,7 +238,7 @@ async def _resolve(
         return hit
 
     # 3. tag lookup
-    found = await tag_lookup(client, tenant_id, daimon_tag)
+    found = (await _lookup_tags(client, tenant_id, kind, cache)).get(daimon_tag)
     if found is not None:
         cache[key] = found
         return found
@@ -192,7 +252,7 @@ async def _resolve(
     )
     await apply_callable()
 
-    retried = await tag_lookup(client, tenant_id, daimon_tag)
+    retried = (await _lookup_tags(client, tenant_id, kind, cache)).get(daimon_tag)
     if retried is not None:
         cache[key] = retried
         return retried

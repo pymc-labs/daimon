@@ -24,8 +24,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Literal
 
+import structlog
+from anthropic import APIStatusError
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -83,6 +86,8 @@ __all__ = [
     "admit",
     "reauthorize",
 ]
+
+_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,15 @@ async def admit_impl(
     category_unresolved: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
+    started = last_stage = perf_counter()
+    stage_ms: dict[str, float] = {}
+
+    def mark(stage: str) -> None:
+        nonlocal last_stage
+        current = perf_counter()
+        stage_ms[stage] = round((current - last_stage) * 1000, 1)
+        last_stage = current
+
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
         principal = await get_or_create_platform_principal(
@@ -233,6 +247,7 @@ async def admit_impl(
         if platform_role_ids is not None:
             await set_platform_role_ids(session, principal.account_id, platform_role_ids)
         await session.commit()
+        mark("identity")
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         # Matched against the live role ids; a server admin needs no grant.
@@ -249,6 +264,7 @@ async def admit_impl(
                 ),
             )
         )
+    mark("policy_and_admins")
 
     # --- Channel protection, first of the policy gates: the turn's reply
     # would land in its thread or channel, so a protected target refuses the
@@ -274,6 +290,7 @@ async def admit_impl(
         category_unresolved=category_unresolved,
     )
     _require_turn_start(policy, subject, turn_place)
+    mark("start_policy")
 
     if (observation := current_outcome.get()) is not None:
         observation.account_id = principal.account_id
@@ -288,6 +305,7 @@ async def admit_impl(
     )
     async with deps.sessionmaker() as session:
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+    mark("config")
 
     # --- Missing config check (before any MA call) ---
     if config.agent_name is None or config.environment_name is None:
@@ -348,10 +366,27 @@ async def admit_impl(
     elif config.thread_binding_id is not None:
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     else:
-        agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+        try:
+            agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+        except APIStatusError as err:
+            if err.status_code not in (400, 404):
+                raise
+            deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+            raise MAResolverMissError(
+                kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name
+            ) from err
     if (observation := current_outcome.get()) is not None:
         observation.agent_id = agent.id
-    environment = await deps.anthropic.beta.environments.retrieve(env_id)
+    try:
+        environment = await deps.anthropic.beta.environments.retrieve(env_id)
+    except APIStatusError as err:
+        if err.status_code not in (400, 404):
+            raise
+        deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        raise MAResolverMissError(
+            kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
+        ) from err
+    mark("agent_environment")
 
     # --- Liveness check on the already-retrieved agent: it was archived out of
     # band since the resolver cached/looked up its id. Self-heal the scope
@@ -360,9 +395,15 @@ async def admit_impl(
     # raise the existing resolver-miss error so the friendly copy at the four
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
+        deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
         async with deps.sessionmaker() as session, session.begin():
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
+    if environment.archived_at is not None:
+        deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        raise MAResolverMissError(
+            kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
+        )
 
     # --- Agent pin: an operator can tie an agent to named channels because of
     # what its credentials reach. It runs after the cascade because it depends
@@ -389,10 +430,12 @@ async def admit_impl(
         is_dm=is_dm,
     )
     _require_run_agent(policy, grant)
+    mark("agent_policy")
 
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
         raise AdmissionDenied(reason="balance_depleted")
+    mark("balance")
 
     # --- Admission gate: monthly usage cap ---
     if await is_over_cap(
@@ -403,6 +446,7 @@ async def admit_impl(
         now=now,
     ):
         raise AdmissionDenied(reason="cap_exceeded")
+    mark("user_cap")
 
     # --- Admission gate: channel budget; a DM counts toward the channel it came from,
     # and an isolated channel's own agent toward that channel wherever an exempt
@@ -428,6 +472,7 @@ async def admit_impl(
                 group_members=deps.group_members,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
+    mark("channel_budget")
 
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
@@ -452,7 +497,9 @@ async def admit_impl(
         )
     )
 
-    return Admission(
+    mark("channel_skills")
+
+    result = Admission(
         memory_read_only=memory_read_only,
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
@@ -470,6 +517,17 @@ async def admit_impl(
         channel_skills=channel_skills,
         grant=grant,
     )
+    mark("result")
+    _log.info(
+        "turn.admission_timing",
+        tenant_id=str(tenant_id),
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        total_ms=round((perf_counter() - started) * 1000, 1),
+        stage_ms=stage_ms,
+    )
+    return result
 
 
 def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Place) -> None:

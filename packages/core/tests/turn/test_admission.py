@@ -595,6 +595,55 @@ async def test_admit_raises_resolver_miss_when_the_resolved_agent_is_archived(
     assert exc_info.value.daimon_tag == "doomed-agent", (
         "the raised error must name the scoped agent tag the channel resolved to"
     )
+    assert (tenant.id, "agent", "doomed-agent") not in cache
+
+
+async def test_admit_invalidates_archived_environment_cache(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="chan-1"),
+        tenant_id=tenant.id,
+        agent_name="daimon",
+        environment_name="archived-env",
+    )
+    await db_session.commit()
+    agent = ma_agent(id="ag_live", name="daimon", tenant_id=tenant.id)
+    environment = ma_environment(
+        id="env_dead",
+        name="archived-env",
+        tenant_id=tenant.id,
+        archived_at="2026-07-30T00:00:00Z",
+    )
+    router = MARouter()
+    router.add_agent(agent)
+    router.add_environment(environment)
+    cache = new_resolver_cache()
+    cache[(tenant.id, "agent", "daimon")] = agent.id
+    cache[(tenant.id, "environment", "archived-env")] = environment.id
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=router,
+        resolver_cache=cache,
+    )
+
+    with pytest.raises(MAResolverMissError) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+
+    assert exc_info.value.kind == "environment"
+    assert (tenant.id, "environment", "archived-env") not in cache
 
 
 async def test_admit_clears_the_scope_row_that_named_an_archived_agent(

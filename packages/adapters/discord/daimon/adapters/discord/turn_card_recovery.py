@@ -50,6 +50,7 @@ async def post_initial_turn_card(
     render loop; that post still commits its response ID before the render hook
     returns.
     """
+    intent_started = time.perf_counter()
     async with sessionmaker() as session:
         intent = await create_turn_card_intent(
             session,
@@ -59,6 +60,13 @@ async def post_initial_turn_card(
             turn_token=uuid4(),
         )
         await session.commit()
+    log.info(
+        "turn.card_intent_committed",
+        tenant_id=str(tenant_id),
+        thread_id=thread_id,
+        intent_id=str(intent.id),
+        commit_ms=round((time.perf_counter() - intent_started) * 1000, 1),
+    )
 
     async def record_posted_message(message: discord.Message) -> None:
         async with sessionmaker() as session:
