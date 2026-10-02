@@ -1165,6 +1165,36 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("channel_isolated"),
     ),
     (
+        "isolation an own agent creates no agent, even for an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": ACME},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a call from inside creates no agent, whatever agent runs it",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": SHARED, "origin": SETUP_ORIGIN},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation an unresolved agent creates no agent",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": AgentRef.unresolved()},
+        _deny("agent_unresolved"),
+    ),
+    (
+        "isolation an outside agent creates agents",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": SHARED, "origin": OUTSIDE},
+        ALLOW,
+    ),
+    (
+        "an unresolved agent creates agents while nothing is isolated",
+        PINNED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": AgentRef.unresolved()},
+        ALLOW,
+    ),
+    (
         "isolation a routine saved in the setup thread stays in the channel",
         ISOLATED,
         {

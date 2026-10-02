@@ -85,11 +85,12 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   (`Place.isolated_channel`) only they run, post, read and get routines or a
   default binding; a setup thread (`Place.setup_thread`) answers there as the
   built-in agent. They post nowhere outside C, not even the requester's DM,
-  and send no direct messages. Admins are exempt as for pins: a server admin
-  in their own DM or hub, and a channel admin of C there too. A call whose
-  verified turn origin lies in C is held to C the same way, whatever agent
-  runs it, and only C's own agents read C's sessions. A thread whose parent
-  is unknown (`Place.parent_unresolved`) may lie in C, so it fails closed.
+  and send no direct messages or create agents, which would answer outside
+  C. Admins are exempt as for pins: a server admin in their own DM or hub,
+  and a channel admin of C there too. A call whose verified turn origin lies
+  in C is held to C the same way, whatever agent runs it, and only C's own
+  agents read C's sessions. A thread whose parent is unknown
+  (`Place.parent_unresolved`) may lie in C, so it fails closed.
 
 Nothing here does I/O: the callers load the policy and resolve the agent,
 and decide again at the moment of action (`daimon.core.turn.admission.reauthorize`
@@ -102,9 +103,9 @@ callback), the caller gates of a platform turn and an MCP turn, pinned sends
 and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
 fork, channel default binds, channel environment picks, channel protection and
-seal toggles, isolation copy archives, coding-tool token
-mints, the protection of a turn's own notices and of a routine's destination
-(`POST` with no agent), a routine's creator at fire and delivery
+seal toggles, isolation copy archives, coding-tool token mints, agent
+creation (`CREATE_AGENT`), the protection of a turn's own notices and of a
+routine's destination (`POST` with no agent), a routine's creator at fire and delivery
 (`ACT_FOR_CREATOR`), and the shared-agent table (`CHANGE_SHARED_AGENT`, asked by
 `daimon.core.operation_policy`).
 """
@@ -160,6 +161,8 @@ class Action(StrEnum):
     ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
     DIRECT_MESSAGE = "direct_message"
+    # Create an agent from the calling turn; `agent` is the one it executes as.
+    CREATE_AGENT = "create_agent"
     # Change what a possibly shared agent runs or reaches: a spec edit, an
     # attachment replace/remove, or a posted-token contribution
     # (`daimon.core.operation_policy`). Decided per `Request.operation_family`
@@ -751,6 +754,15 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if req.recipient_id != subject.platform_user_id:
             return _deny("dm_recipient_not_requester")
+        return ALLOW
+
+    if req.action is Action.CREATE_AGENT:
+        # A new agent is nobody's own: what a call held to C wrote into it would
+        # answer outside C. An unresolved agent may be C's own, so it fails closed.
+        if not agent.resolved and policy.isolated_channel_ids:
+            return _deny("agent_unresolved")
+        if _held_to(agent, req.origin) is not None:
+            return _deny("channel_isolated")
         return ALLOW
 
     if req.action is Action.CHANGE_SHARED_AGENT:
