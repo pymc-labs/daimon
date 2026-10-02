@@ -203,6 +203,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--discord", action="store_true")
     p.add_argument("--discord-precreated", action="store_true")
     p.add_argument("--discord-layout-state", type=Path)
+    p.add_argument("--discord-layout-new-chats", action="store_true")
     p.add_argument("--discord-arrival-seconds", type=float, default=0)
     p.add_argument("--prompt-set", choices=("simple", "realistic"), default="simple")
     p.add_argument("--cleanup", action="store_true")
@@ -734,6 +735,7 @@ async def _discord_phase(
     extra_threads: set[str] = set()
     created_channels: set[str] = set()
     precreated: list[tuple[str, uuid.UUID]] = []
+    layout_channels: list[str] = []
     tasks: set[asyncio.Task[DiscordResult | None]] = set()
     try:
         me = await rest.request("GET", "/users/@me")
@@ -772,7 +774,6 @@ async def _discord_phase(
             layout = cast(dict[str, object], json.loads(args.discord_layout_state.read_text()))
             if layout.get("guild_id") != guild_ids[0] or len(guild_ids) != 1:
                 raise RuntimeError("layout state guild must match the selected QA guild")
-            layout_channels: list[str] = []
             team_threads: list[list[str]] = []
             teams = cast(dict[str, dict[str, object]], layout["teams"])
             for team in teams.values():
@@ -802,7 +803,11 @@ async def _discord_phase(
             # A 65 x 3 layout has 195 threads. For the 200-mention stage,
             # add five temporary threads so each concurrent mention has its
             # own thread, then remove only those five during cleanup.
-            for index in range(max(0, args.discord_concurrency - len(precreated))):
+            for index in range(
+                max(0, args.discord_concurrency - len(precreated))
+                if not args.discord_layout_new_chats
+                else 0
+            ):
                 channel_id = layout_channels[index % len(layout_channels)]
                 thread = await rest.request(
                     "POST",
@@ -857,7 +862,12 @@ async def _discord_phase(
         )
 
         async def launch(index: int) -> DiscordResult:
-            if args.discord_precreated or args.discord_layout_state is not None:
+            if args.discord_layout_new_chats:
+                channel_id, tenant_id = (
+                    layout_channels[index % len(layout_channels)],
+                    next(iter(previous)),
+                )
+            elif args.discord_precreated or args.discord_layout_state is not None:
                 channel_id, tenant_id = precreated[index % len(precreated)]
             else:
                 channel_id, tenant_id = channels[index % len(channels)]
@@ -892,7 +902,8 @@ async def _discord_phase(
                 started,
                 created_threads,
                 existing_thread_id=channel_id
-                if args.discord_precreated or args.discord_layout_state is not None
+                if args.discord_precreated
+                or (args.discord_layout_state is not None and not args.discord_layout_new_chats)
                 else None,
                 watch_seconds=args.discord_watch_seconds,
             )
@@ -939,9 +950,11 @@ async def _discord_phase(
                 results.extend(row for row in await asyncio.gather(*tasks) if row is not None)
                 tasks.clear()
         created_threads.update(row.thread_id for row in results if row.thread_id)
-        if not args.discord_precreated and args.discord_layout_state is None:
+        if not args.discord_precreated and (
+            args.discord_layout_state is None or args.discord_layout_new_chats
+        ):
             notices = 0
-            for channel_id in created_channels:
+            for channel_id in created_channels or layout_channels[: args.discord_turns]:
                 messages = cast(
                     list[dict[str, object]],
                     await rest.request("GET", f"/channels/{channel_id}/messages?limit=100"),
@@ -1007,6 +1020,12 @@ async def _discord_phase(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         cleanup_errors: list[str] = []
+        if args.discord_layout_new_chats:
+            for thread_id in created_threads:
+                try:
+                    await rest.request("DELETE", f"/channels/{thread_id}")
+                except Exception as exc:
+                    cleanup_errors.append(f"new-chat thread {thread_id}: {exc}")
         for thread_id in extra_threads:
             try:
                 await rest.request("DELETE", f"/channels/{thread_id}")
@@ -1215,6 +1234,12 @@ def main() -> None:
         raise SystemExit("choose --install, --turn-load, --discord, or --cleanup")
     if args.discord_precreated and not args.discord:
         raise SystemExit("--discord-precreated requires --discord")
+    if args.discord_layout_new_chats and (
+        args.discord_layout_state is None or args.discord_precreated
+    ):
+        raise SystemExit(
+            "--discord-layout-new-chats requires layout state and no --discord-precreated"
+        )
     if args.discord and (
         not args.discord_guild_id or any(g not in DISCORD_QA_GUILDS for g in args.discord_guild_id)
     ):
