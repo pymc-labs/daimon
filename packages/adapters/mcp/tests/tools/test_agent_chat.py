@@ -2298,6 +2298,41 @@ async def test_start_turn_returns_the_accepted_events_boundary(
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 
+async def test_continue_turn_gates_on_the_sessions_own_budget_channel() -> None:
+    """The follow-up is charged to the session's budget channel, so that channel's
+    spent budget refuses it whatever channel the caller's key names."""
+    sent: list[str] = []
+    session = ma_session(
+        id="ses_test001",
+        agent_id=_MA_AGENT_ID,
+        environment_id=_ENV_ID,
+        status="idle",
+        metadata={
+            MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
+            MA_METADATA_KEY_BUDGET_CHANNEL: "chan-spent",
+        },
+    ).model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=session))
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: sent.append("send") or send_events_response(data=[]),
+    )
+    gate = AsyncMock(return_value=True)
+
+    with (
+        patch("daimon.adapters.mcp.tools.agent_chat.is_over_channel_budget", gate),
+        pytest.raises(ToolError, match="used its spending budget"),
+    ):
+        await _continue_turn_impl(
+            _runtime(build_fake_anthropic(router.dispatch)), _auth(), "ses_test001", "again"
+        )
+
+    assert gate.await_args is not None and gate.await_args.kwargs["channel_id"] == "chan-spent"
+    assert sent == [], "a refused follow-up must never reach the session"
+
+
 async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS

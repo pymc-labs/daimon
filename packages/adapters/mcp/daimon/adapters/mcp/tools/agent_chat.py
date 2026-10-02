@@ -85,8 +85,9 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -243,6 +244,11 @@ async def _resolve_environment_name(
 _SEALED_SINCE_START_MSG = (
     "this conversation started before its channel was sealed, so it can't take "
     "messages under the seal. Start a new one with start_turn. Tell the caller."
+)
+
+_CHANNEL_BUDGET_SPENT_MSG = (
+    "TERMINAL ERROR: this conversation's channel has used its spending budget. "
+    "An admin can raise or clear it."
 )
 
 _SEAL_CHANGED_DURING_START_MSG = (
@@ -583,7 +589,8 @@ async def _continue_turn_impl(
 
     A channel-bound key's channel sealed since the session opened refuses the
     follow-up: the session's memory is writable and its stamp lacks the seal,
-    so sealed messages would outlive an unseal (`_bound_seal`).
+    so sealed messages would outlive an unseal (`_bound_seal`). The session's
+    own budget channel, which the follow-up is charged to, is gated too.
     """
     _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -594,6 +601,14 @@ async def _continue_turn_impl(
         await recheck()
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
+    if await is_over_channel_budget(
+        sessionmaker=runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
+        channel_id=(session.metadata or {}).get(MA_METADATA_KEY_BUDGET_CHANNEL),
+        now=dt.datetime.now(dt.UTC),
+    ):
+        raise ToolError(_CHANNEL_BUDGET_SPENT_MSG)
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         handle,
