@@ -992,6 +992,8 @@ class ChannelBudget(Base):
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
+    # The window whose exhausted notice went out; cleared when the budget is set or raised.
+    exhausted_notice_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

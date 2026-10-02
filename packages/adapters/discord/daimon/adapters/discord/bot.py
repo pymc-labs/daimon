@@ -17,6 +17,7 @@ import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
+from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
@@ -458,7 +459,7 @@ class DaimonBot(commands.Bot):
 
     def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
-        self.runtime = runtime
+        self.runtime = with_budget_notifier(runtime, self._open_member_dm)
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up

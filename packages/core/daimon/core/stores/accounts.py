@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from daimon.core._models import Account, PlatformPrincipal, Tenant, UserConfig
 from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Role
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,3 +161,33 @@ async def delete_user_config_for_account(session: AsyncSession, *, account_id: u
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount
+
+
+async def list_platform_user_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    limit: int,
+    admins: bool = False,
+    user_ids: Collection[str] = (),
+    role_ids: Collection[str] = (),
+) -> list[str]:
+    """Platform user ids of the tenant's stored admins (`admins`), or of the listed
+    users plus anyone whose stored roles overlap `role_ids`; sorted, at most `limit`."""
+    if admins:
+        match = Account.role == Role.ADMIN.value
+    else:
+        match = or_(
+            PlatformPrincipal.external_id.in_(list(user_ids)),
+            Account.platform_role_ids.overlap(list(role_ids)),
+        )
+    stmt = (
+        select(PlatformPrincipal.external_id)
+        .join(Account, Account.id == PlatformPrincipal.account_id)
+        .where(PlatformPrincipal.tenant_id == tenant_id, PlatformPrincipal.platform == platform)
+        .where(match)
+        .order_by(PlatformPrincipal.external_id)
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())

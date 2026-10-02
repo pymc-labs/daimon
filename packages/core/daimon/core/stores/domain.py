@@ -464,6 +464,7 @@ class ChannelBudgetRow(BaseModel):
     set_by_account_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    exhausted_notice_key: str | None = None
 
 
 class TenantUserCapRow(BaseModel):

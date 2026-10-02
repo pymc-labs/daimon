@@ -11,6 +11,7 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import cast
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.config import McpSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
@@ -56,6 +58,9 @@ class TurnDeps:
     public_url: str | None
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
+    # Sends the channel budget notice; set by an adapter with a platform client.
+    budget_notifier: BudgetNotifier | None = None
+    budget_notices_off: frozenset[uuid.UUID] = frozenset()
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
@@ -69,6 +74,14 @@ def _preparation_limit(settings: Settings) -> int:
         return configured
     pool_size = cast(object, settings.database.pool_size)
     return max(1, pool_size // 2) if isinstance(pool_size, int) else 1
+
+
+def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
+    """Tenants that turned the budget notice off; tolerate settings mocks in adapter tests."""
+    configured = cast(object, settings.budget_notices)
+    if not isinstance(configured, dict):
+        return frozenset()
+    return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
 
 
 def build_turn_deps(
@@ -99,4 +112,5 @@ def build_turn_deps(
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
+        budget_notices_off=_notices_off(settings),
     )

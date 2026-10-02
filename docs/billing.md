@@ -214,8 +214,9 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included, whatever paid for them (promo credit too): what the
-  tenant was charged for turns there, not the pre-markup usage `/billing` totals. Debits carry the parent channel, so a
-  thread counts toward its channel. A session records it in its own
+  tenant was charged for turns there, not the pre-markup usage `/billing`
+  totals. Debits carry the parent channel, so a thread counts toward its
+  channel. A session records it in its own
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
@@ -227,6 +228,16 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
+- **The notice.** The first chat turn the gate refuses in a window DMs the
+  channel's admins (users granted directly, and members whose roles at
+  their last turn match a granted role), or the server admins when the
+  channel has none, at most ten people, on Discord, Slack and Teams
+  (`daimon.core.channel_budget_notice`). A monthly budget's window is the
+  month; any other budget's is the budget itself. Setting or raising the
+  budget re-arms it (`channel_budgets.exhausted_notice_key`). It follows the
+  tenant's DM policy, never changes the refusal, and is off for a tenant set
+  to `false` in `DAIMON_BUDGET_NOTICES`. Refusals of MCP turns, media calls
+  and routines send none.
 
 Members can read a channel's budget with `get_channel_budget`; listing is
 admin-only. Setting and clearing are for server admins and, for the channels

@@ -68,6 +68,7 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
+from daimon.adapters.slack.budget_notice import with_budget_notifier
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -306,7 +307,7 @@ class SlackApp:
     """
 
     def __init__(self, *, runtime: SlackRuntime) -> None:
-        self.runtime = runtime
+        self.runtime = with_budget_notifier(runtime)
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}

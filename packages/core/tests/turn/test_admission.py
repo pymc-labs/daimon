@@ -6,6 +6,7 @@ resolve+retrieve -> balance gate -> cap gate.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -14,12 +15,14 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -41,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from daimon.testing.factories import (  # isort: skip
     make_channel_budget,
     make_ledger_entry,
+    make_platform_principal,
     make_tenant,
     make_tenant_config,
     make_tenant_user_cap,
@@ -263,6 +267,38 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
     assert [o.reason for o in outcomes] == ["admission_channel_budget_exceeded"], (
         "a budget refusal is recorded as its own outcome"
     )
+
+
+async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _funded_tenant_with_spent_channel(db_session)
+    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("1"))
+    admin = await make_platform_principal(
+        db_session, platform="discord", external_id="u-admin", tenant=tenant
+    )
+    await set_role(db_session, admin.account_id, Role.ADMIN)
+    await db_session.commit()
+    sent: list[BudgetNotice] = []
+
+    async def notifier(notice: BudgetNotice) -> None:
+        sent.append(notice)
+
+    base = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
+    )
+    args = {"tenant_id": tenant.id, "platform": "discord", "external_user_id": "user-1"}
+    opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
+    with pytest.raises(AdmissionDenied):
+        await admit(opted_out, **args, channel_id="chan-1", now=_NOW)
+    assert sent == [], "an opted-out tenant gets no notice"
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(replace(base, budget_notifier=notifier), **args, channel_id="chan-1", now=_NOW)
+    assert exc_info.value.reason == "channel_budget_exceeded", "the notice leaves the refusal as is"
+    assert [(n.channel_id, n.recipient_ids) for n in sent] == [("chan-1", ("u-admin",))]
 
 
 async def test_admit_attributes_the_channel_and_a_dm_to_its_source(

@@ -137,7 +137,9 @@ config). The order is load-bearing and documented as such in the module:
    parent channel, or for a DM the channel it was moved from with `/dm`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. The channel is carried on `Admission.channel_id` so every debit
-   for the turn is attributed to it.
+   for the turn is attributed to it. The window's first refusal also
+   DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
+   (`daimon.core.channel_budget_notice`).
 
 The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).

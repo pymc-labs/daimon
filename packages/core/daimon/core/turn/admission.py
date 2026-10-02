@@ -47,6 +47,7 @@ from daimon.core.authz import (
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_budget_notice import notify_budget_exhausted
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -403,6 +404,15 @@ async def admit_impl(
         channel_id=budget_channel_id,
         now=now,
     ):
+        if tenant_id not in deps.budget_notices_off:
+            await notify_budget_exhausted(
+                sessionmaker=deps.sessionmaker,
+                notifier=deps.budget_notifier,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=budget_channel_id,
+                now=now,
+            )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
     # Every id that seals the turn: its channel, and the thread sealed on its

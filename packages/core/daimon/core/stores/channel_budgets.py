@@ -63,6 +63,7 @@ async def set_channel_budget(
         "starts_at": starts_at,
         "ends_at": ends_at,
         "set_by_account_id": set_by_account_id,
+        "exhausted_notice_key": None,
     }
     stmt = (
         pg_insert(ChannelBudget)
@@ -111,10 +112,31 @@ async def raise_channel_budget(
             ChannelBudget.platform == platform,
             ChannelBudget.channel_id == channel_id,
         )
-        .values(limit_usd=ChannelBudget.limit_usd + amount_usd, updated_at=func.now())
+        .values(
+            limit_usd=ChannelBudget.limit_usd + amount_usd,
+            updated_at=func.now(),
+            exhausted_notice_key=None,
+        )
         .returning(ChannelBudget)
         .execution_options(populate_existing=True)
     )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     await session.flush()
     return None if orm is None else ChannelBudgetRow.model_validate(orm)
+
+
+async def claim_exhausted_notice(session: AsyncSession, *, budget_id: uuid.UUID, key: str) -> bool:
+    """Record that window ``key``'s exhausted notice is going out; False if it already has.
+
+    One UPDATE, so of several workers refused in the same window only one wins.
+    """
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.id == budget_id,
+            ChannelBudget.exhausted_notice_key.is_distinct_from(key),
+        )
+        .values(exhausted_notice_key=key, updated_at=ChannelBudget.updated_at)
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    return result.rowcount > 0
