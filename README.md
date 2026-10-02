@@ -3,7 +3,7 @@
 
 # daimon
 
-**The open source data science agent for Discord and Slack.**
+**The open source data science agent for Discord, Slack and Microsoft Teams.**
 
 daimon joins your team's chat, writes and runs code, fits Bayesian models
 with [PyMC](https://www.pymc.io), and posts charts and runnable notebooks
@@ -21,7 +21,7 @@ or self-host it from this repo.
 [Documentation site](https://pymc-labs.github.io/daimon/) ·
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
-[Teams personal-chat setup](docs/teams.md) ·
+[Teams setup](docs/self-hosting.md#microsoft-teams-optional) ·
 [Claude Code plugin](plugin/README.md) ·
 [Changelog](CHANGELOG.md)
 
@@ -45,11 +45,13 @@ or self-host it from this repo.
   to as an MCP server.
 - **One deployment, many communities.** Deploy once on your own Anthropic
   API key. Any number of Discord servers and Slack workspaces can install
-  it, each as an isolated tenant with its own agent, memory and data.
+  it, each as an isolated tenant with its own agent, memory and data. On
+  Teams, a deployment serves one Microsoft 365 organisation.
 
 Everything is done in conversation. Slash commands (`/agent-setup`,
 `/routines`, `/billing`, `/privacy`, `/help`) exist for people who prefer
-them.
+them; on Teams they are plain words (`setup`, `routines`, `help`) sent in a
+1:1 chat with the bot.
 
 ## Example prompts
 
@@ -97,8 +99,8 @@ key in a workspace dedicated to this deployment.
 silent, check `docker compose logs discord`.
 
 The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
-detail, running without Docker, Slack, the Claude Code login mounts, chart
-storage and connecting MCP servers. Prefer to skip all of that? The hosted
+detail, running without Docker, Slack, Microsoft Teams, the Claude Code login
+mounts, chart storage and connecting MCP servers. Prefer to skip all of that? The hosted
 version at [daimon.decision.ai](https://daimon.decision.ai/) installs in one
 click, no API key or server required.
 
@@ -110,6 +112,7 @@ flowchart LR
         direction TB
         Discord
         Slack
+        Teams
         CLI
         MCP
         Scheduler
@@ -132,9 +135,9 @@ goes idle.
 - Managed Agents holds the agents, environments, sessions and skills.
   Postgres holds only metadata: tenant identity, thread-to-session mappings,
   config, credentials and billing.
-- One Discord guild or Slack workspace is one tenant. Isolation is enforced
-  at the database `tenant_id` layer, so one Anthropic key can safely serve
-  every install.
+- One Discord guild, Slack workspace or Microsoft 365 organisation is one
+  tenant. Isolation is enforced at the database `tenant_id` layer, so one
+  Anthropic key can safely serve every install.
 
 ## Repository layout
 
@@ -143,6 +146,7 @@ goes idle.
 | `packages/core/` | `daimon-core`: Managed Agents client, stores, turn pipeline |
 | `packages/adapters/discord/` | Discord bot adapter |
 | `packages/adapters/slack/` | Slack adapter (optional, early) |
+| `packages/adapters/teams/` | Microsoft Teams adapter (optional, early) |
 | `packages/adapters/mcp/` | MCP server adapter and agent tools |
 | `packages/adapters/scheduler/` | Routines scheduler |
 | `packages/adapters/cli/` | `daimon` admin CLI |

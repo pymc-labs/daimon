@@ -3,7 +3,7 @@
 Talk to the daimons in your Slack workspace and Discord servers from inside Claude Code.
 The plugin connects to two hosted MCP servers — `daimon-slack` and `daimon-discord` — each
 behind its own OAuth login, so a daimon answers as you: it reads only the channels you can
-see and spends that workspace's credit.
+see and spends that workspace's credit. Microsoft Teams isn't supported yet.
 
 ## Install
 

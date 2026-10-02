@@ -1,5 +1,9 @@
 # Teams app registration for a daimon deployment.
 #
+# The full walkthrough, portal by portal, with troubleshooting, is in
+# docs/self-hosting.md under "Microsoft Teams (optional)". Below is the short
+# version.
+#
 # Teams has no manifest-paste equivalent of Slack's app creator that also
 # provisions the Entra side, so registration is two artifacts: an Entra app
 # registration (what the adapter authenticates as) and a Teams app package
@@ -25,8 +29,10 @@
 #        listener (DAIMON_TEAMS__PORT, default 3978) — a tunnel or reverse
 #        proxy in front of the `teams` compose service.
 #      - Channels → add Microsoft Teams.
-# 3. Build the Teams app package from the manifest below (manifest.json +
-#    two icons zipped), then sideload it or publish to the org catalog.
+# 3. Build the Teams app package from the manifest below: manifest.json,
+#    color.png (192×192) and outline.png (32×32, white on transparent),
+#    zipped at the top level. Then upload it in the Teams admin center or
+#    sideload it.
 #
 # The adapter provisions the tenant for DAIMON_TEAMS__TENANT_ID at boot; there
 # is no install flow. The bot answers in 1:1 chat and when @mentioned in a

@@ -9,14 +9,19 @@ questions about a particular deployment, contact that server's operator.
 
 ## What is stored
 
-For each tenant (a Discord server or Slack workspace that has installed the
-bot), daimon stores:
+For each tenant (a Discord server, a Slack workspace, or the Microsoft 365
+organisation a Teams deployment serves), daimon stores:
 
 - **Workspace/guild configuration** — the tenant's installed agents,
   environments, and skill bindings.
-- **Thread/session mappings** — which Discord thread or Slack conversation
-  maps to which Managed Agents session, so conversations can continue across
-  messages.
+- **Thread/session mappings** — which Discord thread, Slack conversation or
+  Teams chat or channel thread maps to which Managed Agents session, so
+  conversations can continue across messages.
+- **Teams installations** (Teams only) — the ID, group ID and name of each
+  team the app is added to, because Microsoft gives the app no other way to
+  list them. Removing the app from a team deletes its record. Channel history
+  is read through Microsoft Graph when a turn needs it and sent to the agent
+  with that turn; daimon keeps no copy of its own.
 - **Usage and billing events** — turn counts and credit/usage records used
   to enforce the operator's configured usage limits. Promo code redemptions
   record which account redeemed; a privacy deletion clears that link.
@@ -42,9 +47,10 @@ it along with the private routing record. Full JSON export remains unimplemented
 
 ## Your rights via `/privacy`
 
-Every daimon deployment exposes a `/privacy` slash command (Discord) or
-equivalent panel (Slack), available to any user, in DM or in a shared
-channel. It lets you:
+Every daimon deployment exposes a `/privacy` slash command (Discord), an
+equivalent panel (Slack) or a `privacy` command (Teams, answered in your 1:1
+chat with the bot), available to any user, in DM or in a shared channel. It
+lets you:
 
 - **View** what is stored about you under the current tenant.
 - **Export** your stored data.
@@ -64,8 +70,8 @@ handled independently — see the next section.
 
 ## Data isolation
 
-Data is scoped per tenant at the database `tenant_id` layer. Guilds and
-workspaces never see each other's data, even though many tenants may share a
+Data is scoped per tenant at the database `tenant_id` layer. Guilds,
+workspaces and organisations never see each other's data, even though many tenants may share a
 single operator's Anthropic API key. There is no cross-guild or
 cross-workspace sharing of stored data.
 
