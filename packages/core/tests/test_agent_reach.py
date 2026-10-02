@@ -13,7 +13,7 @@ from daimon.core.agent_reach import (
     may_bind_as_channel_default,
 )
 from daimon.core.channel_admins import ChannelAdminCaller
-from daimon.core.operation_policy import OperationKind
+from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -155,7 +155,7 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
             tenant_id=tenant.id,
             platform="discord",
             agent_names=("helper",),
-            ma_agent_id=None,
+            ma_agent_id="agent_1",
             default=DEFAULT,
             caller=caller,
             is_daimon_managed=False,
@@ -591,9 +591,13 @@ async def test_a_personal_default_is_shared_for_key_changes_and_never_local(
         "someone's personal default answers them everywhere"
     )
     spec = await _key_facts(
-        db_session, tenant.id, operation="agent_spec_edit", names=("solo",), ma_agent_id=None
+        db_session,
+        tenant.id,
+        operation="agent_spec_edit",
+        names=("solo",),
+        ma_agent_id="agent_solo",
     )
-    assert not spec.is_reachable_in_tenant, "a spec edit keeps the cascade-only read"
+    assert spec.is_reachable_in_tenant, "a spec edit reads the personal default too"
     assert not await _is_local(db_session, tenant.id, "solo"), "not local for binding either"
 
 
@@ -792,7 +796,9 @@ async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
         "a key change that cannot see live sessions is never a channel admin's"
     )
     spec = await _key_facts(db_session, tenant.id, operation="agent_spec_edit", ma_agent_id=None)
-    assert spec.is_local_to_caller_channels, "a spec edit reads the cascade and stays local"
+    assert spec.is_reachable_in_tenant and not spec.is_local_to_caller_channels, (
+        "a spec edit reads sharing as widely as a key change, so it fails closed too"
+    )
 
 
 @pytest.mark.parametrize("reach", ["personal_default", "thread_binding", "routine", "live_session"])
@@ -860,5 +866,51 @@ async def test_skill_changes_read_sharing_as_wide_as_a_key_change(
     assert await shared("skill_add") and await shared("skill_remove"), (
         f"{reach}: a skill upload or removal reaches every place a key does"
     )
-    if reach in ("routine", "live_session"):
-        assert not await shared("repo_bind"), "a repo bind keeps the cascade-only read"
+    assert await shared("agent_spec_edit") and await shared("repo_bind"), (
+        f"{reach}: a prompt edit or repo bind reaches every place a key does"
+    )
+
+
+async def test_a_member_may_not_edit_an_agent_only_an_admins_routine_runs(
+    db_session: AsyncSession,
+) -> None:
+    """A routine alone makes the agent shared for its prompt and repo, not just its keys.
+
+    The admin's routine would run whatever a member wrote; the routine's own
+    creator and any admin may still edit it.
+    """
+    tenant = await make_tenant(db_session)
+    await _member(db_session, tenant, "u9", admin=True)
+    await _member(db_session, tenant, "u7")
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u9", agent_id="agent_x", agent_name="solo"
+    )
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u7", agent_id="agent_y", agent_name="mine"
+    )
+
+    async def outcome(operation: OperationKind, user_id: str, name: str, *, admin: bool = False):
+        facts = await load_target_facts(
+            db_session,
+            operation,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=(name,),
+            ma_agent_id="agent_x" if name == "solo" else "agent_y",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=admin),
+            is_daimon_managed=False,
+            caller_platform_user_id=user_id,
+        )
+        return decide_operation(operation, is_admin=admin, target=facts)
+
+    for operation in ("agent_spec_edit", "repo_bind"):
+        assert await outcome(operation, "u7", "solo") == "needs_admin", (
+            f"{operation}: a member may not change what an admin's routine runs"
+        )
+        assert await outcome(operation, "u9", "solo", admin=True) == "allow", (
+            f"{operation}: an admin still may"
+        )
+        assert await outcome(operation, "u7", "mine") == "allow", (
+            f"{operation}: a member's own routine does not hold back their own agent"
+        )

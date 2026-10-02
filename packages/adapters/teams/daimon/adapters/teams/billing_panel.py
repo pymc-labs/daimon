@@ -9,6 +9,7 @@ redeemable, the admin view has a code box whose Redeem button submits it.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from datetime import UTC, datetime
 from typing import cast
@@ -48,6 +49,7 @@ from daimon.core.billing_panel import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
@@ -259,7 +261,16 @@ class BillingPanel:
 
     async def _redeem(self, actor: Actor, code: str) -> AdaptiveCardInvokeResponse:
         """Redeem for a live admin; a refusal leaves the card, and the typed code, as it was."""
+        audit = functools.partial(
+            record_panel_write,
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            platform="teams",
+            platform_user_id=actor.user_id,
+            op="promo_redeem",
+        )
         if not actor.is_admin:
+            await audit(outcome="denied", reason="needs_admin")
             return toast(REDEEM_ADMIN_ONLY)
         if not code.strip():
             return toast(ENTER_CODE)
@@ -271,6 +282,8 @@ class BillingPanel:
             now=datetime.now(UTC),
         )
         if isinstance(result, PromoRedeemRefused):
+            await audit(outcome="denied", reason=f"promo:{result.reason}")
             return toast(describe_refusal(result.reason))
+        await audit(outcome="allowed", reason="completed")
         card = await self._panel(actor.tenant_id, actor.user_id, True, notice=redeemed_text(result))
         return replace_card(card)

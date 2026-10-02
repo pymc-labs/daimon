@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from daimon.adapters.slack.billing_panel import redeem
 from daimon.adapters.slack.billing_panel.redeem import (
     evaluate_redeem_submission,
     handle_redeem_open,
@@ -260,10 +261,14 @@ async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
 
 
 async def test_submission_from_a_non_admin_redeems_nothing(fake_slack_web_client: Any) -> None:
-    """A non-admin submission is refused before any database lookup."""
+    """A non-admin submission is refused, and audited, before any database lookup."""
     runtime = MagicMock()
     runtime.sessionmaker = MagicMock(side_effect=AssertionError("must not open a session"))
-    with _slack(fake_slack_web_client, admin=False):
+    audit = AsyncMock()
+    with (
+        _slack(fake_slack_web_client, admin=False),
+        patch.object(redeem, "record_panel_write", audit),
+    ):
         await run_redeem_submission(
             runtime,
             fake_slack_web_client.client,
@@ -273,6 +278,11 @@ async def test_submission_from_a_non_admin_redeems_nothing(fake_slack_web_client
         )
     [body] = _bodies(fake_slack_web_client, "views.update")
     assert "admins" in _texts(body["view"]["blocks"]), "a non-admin should be told who can redeem"
+    assert audit.await_args is not None
+    assert (audit.await_args.kwargs["op"], audit.await_args.kwargs["outcome"]) == (
+        "promo_redeem",
+        "denied",
+    ), "the refusal is audited"
 
 
 async def test_submission_raises_the_panels_channel_budget(

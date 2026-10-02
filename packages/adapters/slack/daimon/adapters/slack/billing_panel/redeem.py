@@ -11,6 +11,7 @@ the refusal so the admin can retry.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -25,6 +26,7 @@ from daimon.core.billing_panel import load_billing_snapshot, month_start
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import (
     BudgetChannel,
@@ -233,13 +235,23 @@ async def run_redeem_submission(
     decision: RedeemDecision,
 ) -> None:
     """Background side of a ``billing_redeem`` submission (after the ack)."""
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    audit = functools.partial(
+        record_panel_write,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op="promo_redeem",
+    )
+    audited = False
     try:
         if not await resolve_is_admin(client, user_id=user_id):
+            await audit(outcome="denied", reason="needs_admin")
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=decision.view_id, view=_text_view(_ADMIN_ONLY)
             )
             return
-        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with runtime.sessionmaker() as session, session.begin():
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -258,6 +270,8 @@ async def run_redeem_submission(
             ),
         )
         if isinstance(result, PromoRedeemRefused):
+            audited = True
+            await audit(outcome="denied", reason=f"promo:{result.reason}")
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=decision.view_id,
                 view=build_redeem_modal(
@@ -267,6 +281,8 @@ async def run_redeem_submission(
                 ),
             )
             return
+        audited = True
+        await audit(outcome="allowed", reason="completed")
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=decision.view_id, view=_text_view(redeem_result_text(result))
         )
@@ -290,6 +306,8 @@ async def run_redeem_submission(
             exc_info=exc,
         )
         capture_exception_with_scope(exc)
+        if not audited:  # a failed redeem, not a failed reply after one
+            await audit(outcome="error", reason="failed")
         await surface_command_error(
             client,
             exc,

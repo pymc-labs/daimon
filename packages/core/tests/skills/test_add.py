@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,6 +21,7 @@ from daimon.core.skills.add import (
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    read_local_skill,
     repo_origin,
 )
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
@@ -426,3 +428,15 @@ def test_a_repo_origin_keeps_no_credentials_or_query() -> None:
     url = "https://user:ghp_secret@github.com/o/r.git?token=abc#frag"
     assert repo_origin(url, path="/skills/notes/", branch="main") == "o/r/skills/notes@main"
     assert repo_origin("https://github.com/o/r", path="", branch="dev") == "o/r@dev"
+
+
+async def test_read_local_skill_takes_a_folder_or_a_skill_md(tmp_path: Path) -> None:
+    """A folder and its SKILL.md read as the same skill; a missing path is refused."""
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(_md())
+    from_folder = await read_local_skill(folder)
+    from_file = await read_local_skill(folder / "SKILL.md")
+    assert from_folder.preview.name == from_file.preview.name == "notes", "both read the skill"
+    with pytest.raises(SkillIngestError, match="not a file or folder"):
+        await read_local_skill(tmp_path / "missing")

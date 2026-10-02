@@ -165,7 +165,7 @@ Environment tools: list / get / create / update / archive.
 | `archive_environment` | admin only | Archive the MA environment and delete from the tenant pool. |
 | `create_environment` | all callers | Create a sandbox environment a channel or the workspace can later run in. |
 | `get_environment` | all callers | Return one environment by name. |
-| `list_environments` | all callers | List environments in the tenant pool. |
+| `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
 
 ## `github_app`

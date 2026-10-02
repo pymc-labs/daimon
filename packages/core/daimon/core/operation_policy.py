@@ -23,9 +23,10 @@ There are three rule families, each a fixed short-circuit order:
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`. Adding or removing one of an agent's skills
   changes what it does, so it follows the same order: a managed agent is
-  refused, and anyone may change an agent nobody else uses. Skill files
-  reach every place keys do, so both kinds read sharing as wide as a key
-  change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
+  refused, and anyone may change an agent nobody else uses. A prompt or
+  skill change reaches every place keys do (an admin's routine runs the
+  edited agent), so every kind in this family and the next reads sharing as
+  wide as a key change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
 
 - **attachment** (`key_replace`, `key_remove`, `mcp_replace`, `mcp_remove`,
   `repo_bind`, `skill_repo_connect`): attachments never enter the agent

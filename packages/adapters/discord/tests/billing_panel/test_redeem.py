@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord.billing_panel import redeem
 
 # pyright: reportPrivateUsage=false
 from daimon.adapters.discord.billing_panel.panel import (
@@ -180,10 +181,14 @@ async def test_redeem_button_opens_the_modal_only_for_a_live_admin() -> None:
     )
 
 
-async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
-    """A submit from a user who lost admin rights is refused before any lookup."""
+async def test_modal_submit_from_a_demoted_admin_redeems_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submit from a user who lost admin rights is refused, and audited, before any lookup."""
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = MagicMock(side_effect=AssertionError("must not open a session"))
+    audit = AsyncMock()
+    monkeypatch.setattr(redeem, "record_panel_write", audit)
     rerender = AsyncMock()
     modal = RedeemCodeModal(runtime=runtime, account_id=uuid.uuid4(), rerender=rerender)
     modal.code_in._value = "WELCOME-2026"
@@ -193,14 +198,23 @@ async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
         "a demoted admin should be told the permission they lack"
     )
     rerender.assert_not_awaited()
+    assert audit.await_args is not None
+    assert audit.await_args.kwargs | {"tenant_id": None} == {
+        "tenant_id": None,
+        "platform": "discord",
+        "platform_user_id": str(interaction.user.id),
+        "op": "promo_redeem",
+        "outcome": "denied",
+        "reason": "needs_admin",
+    }, "the refusal is audited"
 
 
 async def test_modal_submit_answers_when_the_database_fails() -> None:
     """After defer() the admin still gets an ephemeral error, not a silent spinner."""
     runtime = MagicMock(spec=DiscordRuntime)
-    runtime.sessionmaker = MagicMock(
-        side_effect=OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
-    )
+    lost = OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+    runtime.sessionmaker = MagicMock(side_effect=lost)
+    runtime.sessionmaker.begin = MagicMock(side_effect=lost)  # the audit row is lost too
     rerender = AsyncMock()
     modal = RedeemCodeModal(runtime=runtime, account_id=uuid.uuid4(), rerender=rerender)
     modal.code_in._value = "WELCOME-2026"

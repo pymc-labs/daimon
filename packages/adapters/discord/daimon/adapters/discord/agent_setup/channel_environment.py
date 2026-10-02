@@ -37,6 +37,7 @@ from daimon.core.channel_environments import (
     save_scope_environment,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.panel_audit import PanelOutcome, record_panel_write
 
 import discord
 
@@ -134,8 +135,23 @@ async def load_environment_picker(
     )
 
 
+async def audit_environment_pick(
+    *, runtime: DiscordRuntime, state: PanelState, user_id: str, outcome: PanelOutcome, reason: str
+) -> None:
+    """One audit row for an environment pick on the panel's channel."""
+    await record_panel_write(
+        runtime.sessionmaker,
+        tenant_id=panel_tenant_id(state),
+        platform="discord",
+        platform_user_id=user_id,
+        op="environment",
+        outcome=outcome,
+        reason=reason,
+    )
+
+
 async def save_environment_choice(
-    *, runtime: DiscordRuntime, state: PanelState, subject: Subject, value: str
+    *, runtime: DiscordRuntime, state: PanelState, subject: Subject, user_id: str, value: str
 ) -> str:
     """Write the pick for the panel's channel and return what to tell the reader.
 
@@ -159,9 +175,16 @@ async def save_environment_choice(
             environment_name=name,
             default=runtime.deployment_default,
         )
-    if pick.decision.reason == "sealed":
-        return build_sealed_network_refusal(environment_name=name)
     if not pick.decision:
+        await audit_environment_pick(
+            runtime=runtime,
+            state=state,
+            user_id=user_id,
+            outcome="denied",
+            reason=f"authz:{pick.decision.reason}",
+        )
+        if pick.decision.reason == "sealed":
+            return build_sealed_network_refusal(environment_name=name)
         return REFUSED_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
@@ -175,6 +198,9 @@ async def save_environment_choice(
             environment_name=name,
             actor_account_id=state.account_id,
         )
+    await audit_environment_pick(
+        runtime=runtime, state=state, user_id=user_id, outcome="allowed", reason="completed"
+    )
     log.info(
         "agent_setup.channel_environment.saved",
         tenant_id=str(tenant_id),

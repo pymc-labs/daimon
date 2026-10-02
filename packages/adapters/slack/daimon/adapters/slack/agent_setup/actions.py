@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -118,6 +119,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
+from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
@@ -129,6 +132,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
+OPERATOR_TOKENS_NEED_ADMIN_MESSAGE = "Only a workspace admin can mint or revoke operator tokens."
 CHANNEL_ADMINS_NEED_ADMIN_MESSAGE = (
     "Only a workspace admin can name a channel's admins. Nothing changed."
 )
@@ -278,6 +282,8 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
+        panel_views.ACTION_OPERATOR_MINT,
+        panel_views.ACTION_OPERATOR_REVOKE,
         panel_views.ACTION_ENVIRONMENT,
         *_ISOLATION_ACTIONS,
     }
@@ -416,6 +422,11 @@ async def load_routing_view(
             if is_admin
             else None
         )
+        operator_tokens = (
+            await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
+            if is_admin and runtime.settings.mcp.jwt_secret is not None
+            else None
+        )
         isolation = (
             channel_isolation_status(
                 await load_access_policy(session, tenant_id=tenant_id), meta.channel_id
@@ -467,6 +478,7 @@ async def load_routing_view(
         channel_admins=channel_admins,
         environment_picker=environment_picker,
         isolation=isolation,
+        operator_tokens=operator_tokens,
     )
 
 
@@ -725,6 +737,49 @@ async def _dispatch_panel_action(
         )
         return
 
+    if action_id == panel_views.ACTION_OPERATOR_MINT:
+        if not is_admin:
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="operator_token_mint",
+                outcome="denied",
+                reason="needs_admin",
+                token_kind="operator",
+            )
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
+            )
+            return
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_operator_token_form(
+                meta=meta.with_view("operator_token", root_view_id=view_id)
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_OPERATOR_REVOKE:
+        # Lazy import: that module refreshes the routing view built here.
+        from daimon.adapters.slack.agent_setup.operator_tokens import (
+            handle_operator_token_revoke,
+        )
+
+        picked: dict[str, Any] = action.get("selected_option") or {}
+        try:
+            jti = uuid.UUID(str(picked.get("value") or ""))
+        except ValueError:
+            return
+        await handle_operator_token_revoke(
+            runtime, client, meta=meta, user_id=user_id, is_admin=is_admin, jti=jti, view_id=view_id
+        )
+        return
+
     if action_id == panel_views.ACTION_ENVIRONMENT:
         selected: dict[str, Any] = action.get("selected_option") or {}
         value = str(selected.get("value") or "")
@@ -741,6 +796,15 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id,
                 user_id=user_id,
                 text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
+            )
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="environment",
+                outcome="denied",
+                reason="needs_admin",
             )
             return
         note = await save_environment_choice(
@@ -763,6 +827,15 @@ async def _dispatch_panel_action(
     if action_id in _ISOLATION_ACTIONS:
         if not is_admin or not meta.channel_id:
             text = ISOLATION_NEED_ADMIN_MESSAGE
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="isolation",
+                outcome="denied",
+                reason="needs_admin",
+            )
         else:
             text = await change_isolation(
                 runtime,

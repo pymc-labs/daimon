@@ -284,7 +284,8 @@ credential outright if they are ever reached with it
 (`_require_outside_chat_turn`), so every session they create comes from a
 headless caller outside every channel. The one exception is an agent key
 minted with "Use from your coding tools" in a sealed channel, or in a channel
-its agent is pinned to (a thread counts as its parent): its `mcp_tokens` row
+its agent is pinned to (a thread counts as its parent; Teams panels live in
+the 1:1 chat, so its dialog asks which channel): its `mcp_tokens` row
 records that channel (`coding_token_channel`), and its calls run as a turn
 there -- under the channel's pin, seal, environment and budget, with its
 sessions stamped to the channel (`token_channel_id`). `authorize` sees it as
@@ -557,7 +558,11 @@ environments also check the caller can see the channel.
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
-or a GitHub folder read through the skill-repo fetch. Archives refuse links,
+or a GitHub folder read through the skill-repo fetch. `daimon skills add --agent
+NAME PATH|URL` adds a local folder, SKILL.md or `.zip`, or a public GitHub folder,
+from the CLI: it previews, asks unless `--yes`, and decides as a server admin
+(never a built-in agent, the pin rule asked again just before the upload and the
+attach). Archives refuse links,
 absolute or `..` paths, encryption and the repo sync's size caps; the
 frontmatter needs a lowercase name and a bounded description. The skill is
 uploaded under the agent-scoped title, never the shared library. A name a
@@ -584,7 +589,10 @@ where the person's own submit is the approval. The `skill_add` and
 admins on any other, channel admins on agents local to their channels, anyone
 on agents nobody else uses. Sharing is read as widely as a key change
 (`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
-default, or another member's routine or live session. A pinned agent takes a
+default, or another member's routine or live session. Prompt and setup edits
+(`agent_spec_edit`) and repo binds read sharing the same way, so an agent that
+only an admin's routine or a bound thread runs is not a member's to change. A
+pinned agent takes a
 chat add only from a verified origin in its channels (`require_pin_write_access`
 with the card's origin), and a panel add only from its channels' panels
 (`pin_refusal` with the panel's channel and thread) at the button, the submit
@@ -1265,10 +1273,14 @@ row), it writes a `denied` row under the token's own tenant with tool name
 verifier establishes a tenant cannot be safely attributed and are outside this trail.
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
-The policy remains synchronous and does no I/O outside an MCP audit scope;
-Discord/Slack setup-panel actions and the separate hub OAuth applications
-(`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
-audited in this version. This trail is not a complete record of hub tool activity.
+Admin-tier setup and billing panel writes on Discord, Slack and Teams (channel
+isolation, channel admins, a channel's environment, coding-tool and operator token
+mint and revoke, promo redeem) each write their own row through
+`core/panel_audit.py`, allowed or refused, with tool name `panel:<op>`; the clicker
+is named only when they have an account, so privacy erasure can reach the row.
+The policy remains synchronous and does no I/O outside an MCP audit scope; the
+separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use
+`HubIdentityMiddleware`) are not audited in this version. This trail is not a complete record of hub tool activity.
 
 Operators can read records using `daimon audit list TENANT_UUID --since
 2026-09-28T00:00:00Z --json`. Use `--account ACCOUNT_UUID` to include that person's
@@ -1306,10 +1318,13 @@ the CLI JSON export in the requested bundle.
 ### Operator tokens
 
 An operator token lets an external integration call a few MCP tools over
-`/mcp` for one server admin. Only `daimon mcp mint-operator-token` mints one
-(there is no chat or setup-panel flow), with one or more scopes, a TTL of 30
-days by default and at most 90 and, with `promo:create`, an optional
-`--max-issued-usd` ceiling in whole cents. `daimon mcp list-tokens` and
+`/mcp` for one server admin. `daimon mcp mint-operator-token` mints one, with
+one or more scopes, a TTL of 30 days by default and at most 90 and, with
+`promo:create`, an optional `--max-issued-usd` ceiling in whole cents. Server
+admins also mint, list and revoke them from Who answers where on the Discord,
+Slack and Teams setup panels (`core/panel_operator_tokens.py`): tenant scopes
+only, never `promo:create`, 30 days, shown once; the live admin check is
+stored as the account's role, as a turn stores it, so the verifier admits it. `daimon mcp list-tokens` and
 `revoke-token` manage every registered token, and `set-token-scopes --jti ...
 --scope ...` narrows an operator token to the scopes given: it only removes
 scopes, so adding one takes a new token. `mint-token` CLI tokens are
@@ -1317,7 +1332,7 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_environments` |
 | `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |

@@ -10,6 +10,7 @@ re-rendered so the new balance and any timed credit show at once.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import (
     BudgetChannel,
@@ -87,7 +89,17 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
     async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.guild_id is None:
             return
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+        audit = functools.partial(
+            record_panel_write,
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=str(interaction.user.id),
+            op="promo_redeem",
+        )
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
+            await audit(outcome="denied", reason="needs_admin")
             return
         # Launched from the panel message, so defer() is a deferred message update
         # and the re-render below edits the panel in place.
@@ -95,9 +107,7 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
         try:
             result = await redeem_promo_code(
                 self.runtime.sessionmaker,
-                tenant_id=derive_tenant_uuid(
-                    platform="discord", workspace_id=str(interaction.guild_id)
-                ),
+                tenant_id=tenant_id,
                 account_id=self.account_id,
                 code=str(self.code_in.value or ""),
                 now=datetime.now(UTC),
@@ -117,9 +127,12 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
             await interaction.followup.send(
                 render_error(exc, request_id=request_id), ephemeral=True
             )
+            await audit(outcome="error", reason="failed")
             return
         if isinstance(result, PromoRedeemRefused):
+            await audit(outcome="denied", reason=f"promo:{result.reason}")
             return
+        await audit(outcome="allowed", reason="completed")
         try:
             await self.rerender(interaction)
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:

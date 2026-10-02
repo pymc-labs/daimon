@@ -166,6 +166,8 @@ source_modules = [
     "daimon.core.operator_tokens",
     "daimon.core.security_audit",
     "daimon.core.output_delivery",
+    "daimon.core.panel_audit",
+    "daimon.core.panel_operator_tokens",
     "daimon.core.participation_gates",
     "daimon.core.pending_file_sweeper",
     "daimon.core.posted_controls",

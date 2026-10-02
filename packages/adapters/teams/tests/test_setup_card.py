@@ -43,3 +43,16 @@ def test_who_answers_where_says_when_no_channel_picks_an_environment() -> None:
     assert "**Deployment default:** base" in text and "not in effect" not in text, (
         "the deployment default is in effect with no organisation default"
     )
+
+
+def test_only_admins_get_the_operator_tokens_dialog_and_it_offers_tenant_scopes_only() -> None:
+    page = paginate((), page=1, page_size=setup_card.PAGE_SIZE)
+
+    def card_json(is_admin: bool) -> str:
+        card = setup_card.routing_card(AnsweringMap(), page, is_admin=is_admin, request_agent=None)
+        return json.dumps(card.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False)
+
+    assert setup_card.OPERATOR_DIALOG in card_json(True)
+    assert setup_card.OPERATOR_DIALOG not in card_json(False), "members never see the entry"
+    form = json.dumps(setup_card.operator_tokens_card([]).model_dump(by_alias=True))
+    assert "tenant:read" in form and "promo:create" not in form

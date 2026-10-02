@@ -48,7 +48,12 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_zip import MAX_FILES, MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.fetch import fetch_repo
-from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_files
+from daimon.core.skills.ingest import (
+    SkillBundle,
+    SkillIngestError,
+    bundle_from_files,
+    bundle_from_upload,
+)
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from pydantic import BaseModel, ConfigDict
@@ -60,6 +65,7 @@ __all__ = [
     "add_agent_skill",
     "fetch_attachment",
     "fetch_repo_skill",
+    "read_local_skill",
     "repo_origin",
 ]
 
@@ -122,6 +128,17 @@ async def fetch_repo_skill(
     finally:
         shutil.rmtree(fetched.cleanup_dir, ignore_errors=True)
     return await asyncio.to_thread(bundle_from_files, files)
+
+
+async def read_local_skill(path: Path) -> SkillBundle:
+    """One skill from disk: a folder (or the only skill under it), a SKILL.md or a .zip."""
+    if path.is_dir():
+        files = await asyncio.to_thread(_read_repo_skill, path, "")
+        return await asyncio.to_thread(bundle_from_files, files)
+    if not path.is_file():
+        raise SkillIngestError(f"{path} is not a file or folder.")
+    data = await asyncio.to_thread(path.read_bytes)
+    return await asyncio.to_thread(bundle_from_upload, data, filename=path.name)
 
 
 def repo_origin(url: str, *, path: str, branch: str) -> str:

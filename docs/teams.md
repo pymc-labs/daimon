@@ -68,7 +68,7 @@ longer goes to the agent. None of them runs an agent turn.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
@@ -293,7 +293,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted or in private and shared channels, and coding-tool tokens minted by
-a channel admin (one must be minted inside their channel, and panels live in
-the 1:1 chat). Removing the app does not
+not granted or in private and shared channels. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

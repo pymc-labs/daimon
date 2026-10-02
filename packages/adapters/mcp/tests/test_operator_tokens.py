@@ -10,6 +10,7 @@ import datetime as dt
 import uuid
 
 import jwt as pyjwt
+from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.access_policy import TenantAccessPolicy
@@ -18,6 +19,7 @@ from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.security_audit import list_events
+from daimon.testing import MARouter, build_fake_anthropic, ma_environment
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
@@ -30,7 +32,10 @@ SECRET = "a" * 32
 
 
 def _make_app(
-    sessionmaker: async_sessionmaker[AsyncSession], *, calls_per_minute: int = 60
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    calls_per_minute: int = 60,
+    anthropic: AsyncAnthropic | None = None,
 ) -> Starlette:
     return create_mcp_app(
         settings=Settings(
@@ -43,6 +48,7 @@ def _make_app(
             ),
         ),
         sessionmaker=sessionmaker,
+        anthropic=anthropic,
     )
 
 
@@ -99,7 +105,28 @@ async def test_tenant_read_token_lists_exactly_its_tools(
         "list_channel_budgets",
         "get_channel_budget",
         "list_channel_admins",
+        "list_environments",
     }, "an operator token sees only its scopes' tools, without the search collapse"
+
+
+async def test_tenant_read_token_lists_only_its_tenants_environments(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An integration picks an environment by name; another tenant's never shows up."""
+    tenant_id, _jti, reader = await _operator_token(sessionmaker, "tenant:read")
+    _other, _jti2, redeemer = await _operator_token(sessionmaker, "promo:redeem")
+    router = MARouter()
+    router.add_environment_list(
+        ma_environment(id="env_mine", name="python", tenant_id=tenant_id),
+        ma_environment(id="env_theirs", name="secret-env", tenant_id=uuid.uuid4()),
+    )
+    app = _make_app(sessionmaker, anthropic=build_fake_anthropic(router.dispatch))
+
+    listed = _text(await call_mcp_tool(app, token=reader, name="list_environments"))
+    refused = _text(await call_mcp_tool(app, token=redeemer, name="list_environments"))
+
+    assert "python" in listed and "secret-env" not in listed, f"own tenant only: {listed}"
+    assert "Unknown tool" in refused, f"promo:redeem alone cannot list them: {refused}"
 
 
 async def test_channels_write_token_lists_exactly_its_tools(

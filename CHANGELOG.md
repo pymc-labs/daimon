@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Agents that only routines or threads run count as shared.** Editing an
+  agent's prompt or setup, or binding a repo to it, now reads sharing as
+  widely as a key change: a bound thread, someone's personal default, or
+  another member's routine or live session makes the agent shared, not only
+  a channel or workspace default. A member can no longer change the prompt
+  an admin's routine runs; the routine's creator and admins still can.
+- **Admin panel writes are audited.** Changing a channel's isolation, admins
+  or environment, minting or revoking an access token, and redeeming a promo
+  code from the Discord, Slack or Teams panels each record a
+  `security_audit_events` row with tool name `panel:<op>`, whether it was
+  allowed or refused. Rows carry no codes or token values.
 - MCP calls refused by an access decision (an agent pin, channel isolation or protection, the invoker allowlist, a routine destination, a channel default binding or an environment pick) are now recorded in `security_audit_events` as denials, with the action as the operation and `authz:<reason>` as the reason. Before, they were recorded as tool errors with no operation.
 - A Teams routine posting into an isolated channel no longer falls back to its creator's 1:1 chat when the post fails, matching Discord and Slack: the result is skipped and stays inside the channel.
 - A chat turn's credential can now act only on its own responder's turn origin in the tools that require one (credential requests, publishing, repo binding, task continuity, timers, channel budgets and setup targets), as agent keys already could. Before, it could name another responder's origin on the same account.
@@ -89,6 +100,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Operator tokens from the setup panels.** Server admins on Discord, Slack
+  and Teams mint, list and revoke operator tokens from Who answers where:
+  `tenant:read`, `channels:write` and `promo:redeem` only (`promo:create`
+  stays with `daimon mcp mint-operator-token`), for 30 days, shown once. The
+  listing never shows a token, and every mint and revoke is audited.
+- **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
+  from your coding tools" dialog now asks a channel admin which of their
+  channels the token runs in, and binds it there under the same rule as
+  Discord and Slack: the agent must be pinned to channels they administer,
+  and an unbound token stays with server admins, who keep that choice.
+
+- **`daimon skills add`.** `daimon skills add --agent NAME PATH|URL` adds one
+  skill to one agent from the CLI: a local folder, SKILL.md or `.zip`, or a
+  folder of a public GitHub repo (`--branch`, `--path`). It shows the skill's
+  files and runnable files, asks before uploading unless `--yes`, and follows
+  the same rules as the chat tool and the setup panels: a built-in agent is
+  refused, and a skill another agent also has is never given a new version.
+
 - **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to the Discord/Teams one; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it
@@ -98,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   role, which changes on the person's next platform turn, so `revoke-token` is
   the immediate stop and `set-token-scopes` narrows. Calls are rate limited
   (`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`); calls, refusals and token changes
-  are audited. Channel budget, agent and admin tools take the scopes. New tools:
+  are audited. Channel budget, agent and admin tools take the scopes, and
+  `tenant:read` lists environments to pick for a channel. New tools:
   `get_tenant_summary` (with each channel's admins; `daimon channels list`
   prints the same) and, for `promo:create`,
   `create_promo_code`, `list_promo_codes`, `revoke_promo_code`. `mint-token`

@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import build_archive_environment_note
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
@@ -53,6 +54,7 @@ async def _list_environments_impl(
     page: str | None,
 ) -> list[EnvironmentInfo]:
     del page
+    require_scope(auth, "tenant:read")
     rows = await list_environments_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     return [EnvironmentInfo.from_ma(e) for e in rows]
 
@@ -179,17 +181,23 @@ async def _archive_environment_impl(
 
 
 def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    # Reads are untagged and ungated — full visibility for every session,
-    # matching the agents/skills read tools. Mutations carry tags={"admin"} plus
-    # the _require_admin impl gate, with one deliberate exception:
+    # Reads are ungated — full visibility for every session, matching the
+    # agents/skills read tools. list_environments also opens to operator tokens
+    # with tenant:read, so an integration can pick one for set_channel_environment;
+    # environments are tenant-wide, so the list carries no channel's data.
+    # Mutations carry tags={"admin"} plus the _require_admin impl gate, with one
+    # deliberate exception:
     # create_environment is ungated, because a new environment is inert until an
     # admin or a channel's admin picks it. See the comment on _create_environment_impl.
-    @mcp.tool
+    @mcp.tool(tags=scope_tags("tenant:read"))
     async def list_environments(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         page: str | None = None,
     ) -> list[EnvironmentInfo]:
-        """List environments in the tenant pool. ``page`` is reserved for future pagination."""
+        """List environments in the tenant pool. ``page`` is reserved for future pagination.
+
+        Operator tokens need the ``tenant:read`` scope.
+        """
         return await _list_environments_impl(runtime, await _auth(ctx), page)
 
     @mcp.tool

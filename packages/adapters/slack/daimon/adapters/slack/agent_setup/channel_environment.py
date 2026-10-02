@@ -9,6 +9,7 @@ channel admin is a member the channel's grant names.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from typing import Final
 
@@ -32,6 +33,7 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.identity import get_or_create_platform_principal
 
 log = structlog.get_logger()
@@ -138,9 +140,18 @@ async def save_environment_choice(
             environment_name=name,
             default=runtime.deployment_default,
         )
-    if pick.decision.reason == "sealed":
-        return build_sealed_network_refusal(environment_name=name)
+    audit = functools.partial(
+        record_panel_write,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op="environment",
+    )
     if not pick.decision:
+        await audit(outcome="denied", reason=f"authz:{pick.decision.reason}")
+        if pick.decision.reason == "sealed":
+            return build_sealed_network_refusal(environment_name=name)
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
@@ -157,6 +168,7 @@ async def save_environment_choice(
             environment_name=name,
             actor_account_id=actor.account_id,
         )
+    await audit(outcome="allowed", reason="completed")
     log.info(
         "slack.agent_setup.channel_environment.saved",
         tenant_id=str(tenant_id),
