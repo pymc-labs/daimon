@@ -213,7 +213,7 @@ async def require_external_publish_allowed(
     )
     if not decision:
         raise ToolError(
-            "this agent belongs to an isolated channel, so it cannot publish outside it. "
+            "this call is bound to an isolated channel, so it cannot publish outside it. "
             "Nothing was published."
         )
 
