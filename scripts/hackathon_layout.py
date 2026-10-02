@@ -38,6 +38,8 @@ READ_HISTORY = 1 << 16
 SEND_IN_THREADS = 1 << 38
 CREATE_PUBLIC_THREADS = 1 << 35
 MANAGE_MESSAGES = 1 << 13
+MANAGE_ROLES = 1 << 28
+MANAGE_CHANNELS = 1 << 4
 
 
 def slug(value: str) -> str:
@@ -126,6 +128,24 @@ def resolve_role(api: Discord, guild: str, name: str) -> str | None:
     if len(matches) > 1:
         raise RuntimeError(f"ambiguous role {name}")
     return matches[0] if matches else None
+
+
+def require_setup_permissions(api: Discord, guild: str, bot_id: str) -> None:
+    """Fail before any write if the selected bot cannot build the layout."""
+    member = api.request("GET", f"/guilds/{guild}/members/{bot_id}")
+    roles = api.request("GET", f"/guilds/{guild}/roles")
+    held = set(member["roles"]) | {guild}
+    permissions = 0
+    for role in roles:
+        if role["id"] in held:
+            permissions |= int(role["permissions"])
+    missing = [
+        label
+        for label, bit in (("Manage Channels", MANAGE_CHANNELS), ("Manage Roles", MANAGE_ROLES))
+        if not permissions & bit
+    ]
+    if missing:
+        raise RuntimeError(f"bot lacks {', '.join(missing)} in guild {guild}")
 
 
 def resolve_channel(api: Discord, guild: str, name: str) -> str | None:
@@ -314,6 +334,8 @@ def main() -> None:
     bot = api.request("GET", "/users/@me")
     if args.guild_id == QA_GUILD and str(bot["id"]) != QA_BOT_ID:
         parser.error("staging layout requires the QA bot token")
+    if not args.teardown:
+        require_setup_permissions(api, args.guild_id, str(bot["id"]))
     if args.teardown:
         for key in list(state["teams"]):
             teardown_team(api, args, state, key)

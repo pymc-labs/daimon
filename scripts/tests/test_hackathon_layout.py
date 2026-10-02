@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+# pyright: basic
 import argparse
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -20,6 +22,19 @@ def test_csv_rejects_duplicate_slugs_and_bad_ids(tmp_path: Path) -> None:
     path.write_text("team name,member Discord ids\nTeam A,123;bad\n")
     with pytest.raises(ValueError, match="non-numeric"):
         layout.read_teams(path)
+
+
+def test_setup_refuses_bot_without_role_management() -> None:
+    class Guild:
+        def request(self, method: str, path: str) -> object:
+            if path.endswith("/roles"):
+                return [{"id": layout.QA_GUILD, "permissions": str(layout.MANAGE_CHANNELS)}]
+            return {"roles": []}
+
+    with pytest.raises(RuntimeError, match="Manage Roles"):
+        layout.require_setup_permissions(
+            cast("layout.Discord", Guild()), layout.QA_GUILD, layout.QA_BOT_ID
+        )
 
 
 class FakeDiscord:
@@ -79,12 +94,14 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
     )
     state = {"guild_id": args.guild_id, "run_id": args.run_id, "teams": {}}
     api = FakeDiscord()
-    layout.setup_team(api, args, state, "Team A", ["123"])
+    layout.setup_team(cast("layout.Discord", api), args, state, "Team A", ["123"])
     created = len([call for call in api.calls if call[0] == "POST"])
-    layout.setup_team(api, args, json.loads(args.state.read_text()), "Team A", ["123"])
+    layout.setup_team(
+        cast("layout.Discord", api), args, json.loads(args.state.read_text()), "Team A", ["123"]
+    )
     assert len([call for call in api.calls if call[0] == "POST"]) == created
     assert len([call for call in calls if call[:3] == ("channels", "isolation", "set")]) == 1
-    layout.teardown_team(api, args, state, "team-a")
+    layout.teardown_team(cast("layout.Discord", api), args, state, "team-a")
     assert state["teams"] == {}
     assert ("channels", "isolation", "lift", "discord", args.guild_id, state_id(api)) in calls
     assert any(call[:2] == ("agents", "--guild") and "archive" in call for call in calls)
