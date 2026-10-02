@@ -227,6 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
+- Operators can isolate a channel from the CLI with `daimon channels isolation set PLATFORM WORKSPACE_ID CHANNEL_ID [--fork-from AGENT]`, which copies the agent when asked, and end it with `daimon channels isolation lift`, which also drops the seal and pins. `scripts/hackathon_layout.py` uses them to set up one private, isolated, budgeted channel per hackathon team with pre-created threads, and tears the layout down.
 - **Channel environments.** Admins can pick the environment a Discord or
   Slack channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not
