@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.adapters.mcp.auth.group_members import GroupLookups
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.artifacts import ArtifactStore
 from daimon.core.config import Settings
@@ -32,3 +33,5 @@ class McpRuntime:
     fernet: MultiFernet | None = field(default=None)
     artifact_store: ArtifactStore | None = field(default=None)
     teams_client: TeamsBotClient | None = field(default=None)
+    # Re-checks stored Slack groups and Teams teams outside a chat turn; None checks none.
+    group_lookups: GroupLookups | None = field(default=None)

@@ -4,7 +4,7 @@ import datetime as dt
 import uuid
 
 import pytest
-from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import mint_agent_mcp_token, mint_operator_mcp_token, token_jti
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_operator_tokens import (
     PANEL_SCOPES,
@@ -14,6 +14,7 @@ from daimon.core.panel_operator_tokens import (
 )
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
+from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,3 +77,32 @@ async def test_revoke_touches_only_this_tenants_operator_tokens(db_session: Asyn
         db_session, tenant_id=tenant.id, jti=minted.jti, now=NOW
     )
     assert await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW) == []
+
+
+async def test_the_panel_neither_lists_nor_revokes_a_deployment_scoped_token(
+    db_session: AsyncSession,
+) -> None:
+    """A CLI-minted `promo:create` token acts for the deployment, not the tenant."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    cli_jti = token_jti(
+        await mint_operator_mcp_token(
+            db_session,
+            account_id=account.id,
+            tenant_id=tenant.id,
+            scopes=frozenset({"promo:create"}),
+            label="issuer",
+            secret=b"s" * 48,
+            now=NOW,
+            ttl_days=30,
+        )
+    )
+    minted = await _mint(db_session, tenant.id, ["tenant:read"])
+
+    listed = await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW)
+    assert [row.jti for row in listed] == [minted.jti], "only tenant-scoped tokens are listed"
+    assert not await revoke_panel_operator_token(
+        db_session, tenant_id=tenant.id, jti=cli_jti, now=NOW
+    ), "the deployment's token is revoked only with the CLI"
+    row = await get_mcp_token(db_session, jti=cli_jti)
+    assert row is not None and row.revoked_at is None, "it keeps working"

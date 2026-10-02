@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An isolated channel's content no longer leaves through new agents or timers.**
   An isolated channel's own agent, wherever it runs and through any of its
   coding-tool tokens, could call `create_agent`, and the new agent answered
-  outside the channel with whatever prompt was written into it. Such calls are
-  now refused (`channel_isolated`), admins included. `list_timers` also showed
+  outside the channel with whatever prompt was written into it. Such calls, and
+  `create_agent` from the channel's setup thread, are now refused
+  (`channel_isolated`), admins included. `list_timers` also showed
   the notes of timers set in an isolated channel from anywhere; they now list
   only inside that channel, as its routines do.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
@@ -50,15 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elsewhere. Existing agents have no recorded creation channel, and defaults
   a server admin set before this are recognised by the setter's stored role,
   so a server admin re-sets any other default a channel admin should manage.
+  That role is the one at upgrade, so a setter promoted since counts as one.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a
   Teams team's Entra group id (whose owners it admits), from
   `set_channel_admins`, `daimon channels admins set --role` and, on Slack, a
   user group select in the channel admins form; listings show the groups
   before the members. Slack and Teams look up only the groups some grant
-  names, each cached for a minute, and a failed lookup grants nothing. Slack
-  needs the new `usergroups:read` bot scope and Teams the `TeamMember.Read.Group`
-  consent, so existing installs reinstall or upload the updated app package.
+  names, each cached for a minute, and outside a chat turn a stored group counts
+  only while a fresh lookup still lists the person. A failed lookup grants
+  nothing. Any Slack member can edit user groups by default, so limit that to
+  admins before naming one. Slack needs the new `usergroups:read` bot scope and
+  Teams the `TeamMember.Read.Group` consent, so existing installs reinstall or
+  upload the updated app package.
 - **Ask a human reaches a channel's own admins.** On Discord and Slack, a
   request from a channel with channel admins is sent to them by DM, then to the
   server admins if none could be reached, and to the escalation channel only
@@ -216,8 +221,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Teams mint, list and revoke operator tokens from Who answers where:
   `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only
   (`promo:create` stays with `daimon mcp mint-operator-token`), for 30 days,
-  shown once. The listing never shows a token, and every mint and revoke is
-  audited.
+  shown once. The panels list and revoke only tokens within those scopes, so a
+  CLI-minted `promo:create` token is managed only from the CLI. The listing
+  never shows a token, and every mint and revoke is audited.
 - **Teams channel admins mint coding-tool tokens.** The setup panel's "Use
   from your coding tools" dialog now asks a channel admin which of their
   channels the token runs in, and binds it there under the same rule as

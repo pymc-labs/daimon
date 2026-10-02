@@ -425,6 +425,7 @@ async def admit_impl(
                 platform=platform,
                 channel_id=budget_channel_id,
                 now=now,
+                group_members=deps.group_members,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 

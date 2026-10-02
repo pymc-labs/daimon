@@ -209,3 +209,10 @@ def test_every_refusal_has_a_sentence() -> None:
     """Every refusal reason has a full-sentence description."""
     for reason in get_args(PromoRefusal):
         assert describe_refusal(reason).endswith("."), f"{reason} should end with a full stop"
+
+
+def test_the_not_allowed_refusal_names_only_server_admins() -> None:
+    """A channel's admins never set its budget, so they redeem no channel budget code."""
+    assert describe_refusal("not_allowed") == (
+        "Only a workspace or server admin can redeem that code."
+    ), "the refusal must not promise channel admins a redemption"

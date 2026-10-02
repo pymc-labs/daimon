@@ -52,13 +52,14 @@ import uuid
 from typing import Any, Final, cast
 
 import structlog
+from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
 from daimon.core.authz import Action, Place, Subject, authorize, build_subject, build_turn_place
-from daimon.core.channel_admins import load_stored_subject
+from daimon.core.channel_admins import GroupMembers, load_stored_subject
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -259,7 +260,7 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
 
 
 async def _subject(
-    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str, members: GroupMembers
 ) -> tuple[Subject, uuid.UUID | None]:
     """The clicker as their stored role describes them, and their account id.
 
@@ -279,6 +280,7 @@ async def _subject(
         platform="slack",
         account_id=account_id,
         platform_user_id=user_id,
+        members=members,
     )
     return subject, account_id
 
@@ -364,7 +366,12 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         except AccessPolicyUnreadable:
             await reply(POLICY_UNREADABLE)
             return
-        subject, _account_id = await _subject(session, tenant_id=tenant_id, user_id=user_id)
+        subject, _account_id = await _subject(
+            session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            members=user_group_members(runtime, client, tenant_id=tenant_id),
+        )
         if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
             log.info("support.refused", tenant_id=str(tenant_id))
             await reply(NOT_ALLOWED)
@@ -432,7 +439,12 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         if tenant is None or tenant.archived_at is not None:
             log.info("support.tenant_missing", tenant_id=str(tenant_id))
             return
-        subject, account_id = await _subject(session, tenant_id=tenant_id, user_id=s.user_id)
+        subject, account_id = await _subject(
+            session,
+            tenant_id=tenant_id,
+            user_id=s.user_id,
+            members=user_group_members(runtime, client, tenant_id=tenant_id),
+        )
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=s.thread_ts
         )
@@ -555,6 +567,7 @@ async def _dm_channel_admins(
             platform="slack",
             channel_id=s.channel_id,
             requester_id=s.user_id,
+            members=user_group_members(runtime, client, tenant_id=tenant_id),
         )
     if not tiers:
         return False

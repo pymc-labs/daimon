@@ -180,6 +180,10 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
         which admits that team's owners. ``channel_id`` MUST be the parent channel's
         id; a Slack or Teams thread id names its channel.
+
+        A Slack user group makes anyone who can join or edit it a channel admin, and
+        Slack lets every member edit user groups by default: name one only where the
+        workspace limits user group management to admins.
         """
         return await _set_channel_admins_impl(
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids

@@ -3,7 +3,9 @@
 A grant's group ids are Discord roles, Slack user groups and Teams teams (whose
 owners count). Discord sends a member's roles with each event; Slack and Teams
 look up only grant-named groups, so each has its own lookup module and both
-store what a turn matched. No platform parametrization, no database.
+store what a turn matched. Outside a turn the stored Slack and Teams groups are
+looked up again; Discord's stored roles stand. No platform parametrization, no
+database.
 """
 
 from __future__ import annotations
@@ -16,7 +18,12 @@ import daimon.core.channel_admins
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import build_channel_admins_form
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_admins import (
+    LOOKED_UP_GROUP_PLATFORMS,
+    InvalidChannelAdminIds,
+    confirm_stored_group_ids,
+    normalize_channel_admin_ids,
+)
 
 _TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 
@@ -67,6 +74,14 @@ def test_slack_and_teams_store_the_groups_a_turn_matched() -> None:
         assert "platform_role_ids" in (root / "app.py").read_text(), (
             f"{package.__name__} admission records the matched groups"
         )
+
+
+async def test_only_discord_trusts_stored_groups_without_a_lookup() -> None:
+    """Slack lets members edit user groups by default; Discord guards roles with Manage Roles."""
+    assert {"slack", "teams"} == LOOKED_UP_GROUP_PLATFORMS
+    for platform, stands in (("discord", True), ("slack", False), ("teams", False)):
+        kept = await confirm_stored_group_ids(platform, "u1", ["g1"], None)
+        assert bool(kept) is stands, f"{platform}: a stored group with no lookup"
 
 
 def test_slack_channel_admins_form_offers_members_and_groups() -> None:

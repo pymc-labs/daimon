@@ -230,7 +230,8 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   progress finishes past the limit.
 - **The notice.** The first chat turn the gate refuses in a window DMs the
   channel's admins (users granted directly, and members whose roles at
-  their last turn match a granted role), or the server admins when the
+  their last turn match a granted role, a Slack user group or Teams team
+  only if a live lookup still lists them), or the server admins when the
   channel has none, at most ten people, on Discord, Slack and Teams
   (`daimon.core.channel_budget_notice`). A monthly budget's window is the
   month; any other budget's is the budget itself. Setting or raising the

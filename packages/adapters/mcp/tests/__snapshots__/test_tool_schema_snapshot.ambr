@@ -4719,6 +4719,10 @@
         role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
         which admits that team's owners. ``channel_id`` MUST be the parent channel's
         id; a Slack or Teams thread id names its channel.
+        
+        A Slack user group makes anyone who can join or edit it a channel admin, and
+        Slack lets every member edit user groups by default: name one only where the
+        workspace limits user group management to admins.
       ''',
       'parameters': dict({
         'additionalProperties': False,

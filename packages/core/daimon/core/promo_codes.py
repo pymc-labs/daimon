@@ -54,8 +54,7 @@ _REFUSAL_TEXT: dict[PromoRefusal, str] = {
     "throttled": "Too many failed attempts. Try again in a few minutes.",
     "needs_channel": "That code raises a channel's budget. Redeem it in that channel.",
     "no_channel_budget": "That code raises a channel's budget, and this channel has none.",
-    "not_allowed": "Only an admin, or for a channel budget code that channel's admin, "
-    "can redeem that code.",
+    "not_allowed": "Only a workspace or server admin can redeem that code.",
 }
 
 

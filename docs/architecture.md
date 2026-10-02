@@ -420,7 +420,13 @@ Slack and Teams look up only the groups some grant names
 `TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
 grants nothing. `admit()` stores the member's matched group ids on the account
 (`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
-without asking the platform. A channel admin may do what a server admin may for
+without asking the platform for Discord roles. Every Slack member can edit
+user groups by default, so a group grant admits whoever can join it and the
+workspace should limit group management to admins; outside a turn (the MCP
+verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack
+group or Teams team counts only while a live lookup still admits the person
+(`confirm_stored_group_ids`), and a private form's submit, which runs under
+the policy lock, ignores them. A channel admin may do what a server admin may for
 an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
@@ -433,7 +439,8 @@ admin made it from one of their channels (`agent_creation_channels`, written by
 `create_agent` from a verified turn origin and by each setup panel's New agent
 form), when a server admin pinned it inside their channels only, or when a
 server admin set it as one of their channels' default
-(`channel_config.agent_name_set_by_admin`); any other agent needs a server
+(`channel_config.agent_name_set_by_admin`; migration 0043 backfilled it from
+each setter's role at upgrade time, not when they set it); any other agent needs a server
 admin on every surface (`channel_admin_holds`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
@@ -497,8 +504,9 @@ default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
 (`Place.setup_thread`) still answers as the built-in agent. C's own agents
 post nowhere outside C, not even the requester's DM, and send no direct
-messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`), whose prompts
-would answer outside C. Admission, `reauthorize` and the scheduler's
+messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`, also refused
+for any call whose verified turn origin is in C, such as its setup thread),
+whose prompts would answer outside C. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
@@ -1385,7 +1393,8 @@ one or more scopes, a TTL of 30 days by default and at most 90 and, with
 `promo:create`, an optional `--max-issued-usd` ceiling in whole cents. Server
 admins also mint, list and revoke them from Who answers where on the Discord,
 Slack and Teams setup panels (`core/panel_operator_tokens.py`): tenant scopes
-only, never `promo:create`, 30 days, shown once; the live admin check is
+only, never `promo:create`, 30 days, shown once, and they list and revoke
+only tokens within those scopes; the live admin check is
 stored as the account's role, as a turn stores it, so the verifier admits it. `daimon mcp list-tokens` and
 `revoke-token` manage every registered token, and `set-token-scopes --jti ...
 --scope ...` narrows an operator token to the scopes given: it only removes
@@ -1394,8 +1403,8 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_protection`, `set_channel_environment` and `clear_channel_environment` (channels only) |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_environments` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_protection`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill` |
 | `agents:archive` | `archive_isolation_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |

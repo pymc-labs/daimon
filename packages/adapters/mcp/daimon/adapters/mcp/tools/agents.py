@@ -29,7 +29,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
-from daimon.adapters.mcp.tools._channel_policy import require_agent_creatable
+from daimon.adapters.mcp.tools._channel_policy import require_agent_creatable, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -83,6 +83,7 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
@@ -430,11 +431,10 @@ def _build_create_spec(
 
 
 async def _record_creation_channel(
-    runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str, origin_context_id: str | None
+    runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str, origin: TurnOriginRow | None
 ) -> None:
     """Make the new agent its channel admins' when one made it from their channel or its
     setup thread (`daimon.core.agent_reach.record_created_for_channel`). Never a DM."""
-    origin = await get_chat_origin(runtime, auth, origin_context_id)
     if origin is None or origin.thread_id.startswith(DM_SCOPE_PREFIX):
         return
     async with runtime.session_factory.begin() as session:
@@ -460,7 +460,10 @@ async def _create_agent_impl(
             "repo via skill_repos or use sync_skills after the agent "
             "is created."
         )
-    await require_agent_creatable(runtime, auth)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    await require_agent_creatable(
+        runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
+    )
     await _reject_guild_name_collision(runtime, auth, spec.name)
     public_url = (
         str(runtime.settings.mcp.public_url)
@@ -482,7 +485,7 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
-    await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin_context_id)
+    await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
     # agents.create succeeded — always return AgentInfo even if sync fails.
     # if agents.create itself raises, let it propagate as ToolError.

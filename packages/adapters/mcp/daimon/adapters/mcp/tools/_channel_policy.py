@@ -205,10 +205,13 @@ async def require_dm_recipient_allowed(
         )
 
 
-async def require_agent_creatable(runtime: McpRuntime, auth: AuthIdentity) -> None:
-    """An isolated channel's own agent, or a key bound inside one, creates no agent
-    (`authorize(CREATE_AGENT)`): a new agent answers outside it, so a prompt
-    written there would carry the channel's content out."""
+async def require_agent_creatable(
+    runtime: McpRuntime, auth: AuthIdentity, *, origin: Place | None = None
+) -> None:
+    """An isolated channel's own agent, a key bound inside one, or a call whose
+    verified turn origin (`turn_origin_place`) lies in one, such as its setup
+    thread, creates no agent (`authorize(CREATE_AGENT)`): a new agent answers
+    outside it, so a prompt written there would carry the channel's content out."""
     if auth.chat_agent_id is None and auth.agent_id is None:
         return
     policy = await load_channel_policy(runtime, auth)
@@ -219,7 +222,7 @@ async def require_agent_creatable(runtime: McpRuntime, auth: AuthIdentity) -> No
         subject=mcp_subject(auth),
         action=Action.CREATE_AGENT,
         agent=await _executing_agent(runtime, auth, policy),
-        origin=mcp_place(auth) if token_channel_id(auth) is not None else None,
+        origin=origin or (mcp_place(auth) if token_channel_id(auth) is not None else None),
     )
     if not decision:
         record_authz_denial(Action.CREATE_AGENT, decision.reason)

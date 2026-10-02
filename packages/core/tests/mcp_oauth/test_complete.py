@@ -315,7 +315,8 @@ async def test_complete_decides_a_repoint_as_the_request_did_for_a_channel_admin
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], granted: bool
 ) -> None:
     """The callback builds the requester from their stored platform id and role ids, so a
-    channel admin allowed when asking is not refused after the token is already stored."""
+    channel admin allowed when asking is not refused after the token is already stored.
+    A server admin set c1's default, so its admins hold the agent."""
     from daimon.core.mcp_attach import McpServerReplaceRefusedError
     from daimon.core.scope import ChannelScopeRef
     from daimon.core.stores.accounts import get_account, set_platform_role_ids
@@ -338,6 +339,7 @@ async def test_complete_decides_a_repoint_as_the_request_did_for_a_channel_admin
         tenant_id=tenant_id,
         agent_name="daimon",
         mode="agent",
+        set_by_admin=True,
     )
     await set_channel_admins(
         db_session,

@@ -3,7 +3,8 @@
 A grant's group id is a team's Entra group id, and admits that team's owners.
 Only teams some grant names are looked up, each through the runtime's short
 cache, with the `TeamMember.Read.Group` consent the team owner granted at
-install. A team without it, or a failed read, grants nothing.
+install. A team without it, or a failed read, grants nothing. Outside a chat
+turn a stored team is looked up again, so a removed owner's rights lapse.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     GroupLookupFailed,
+    GroupMembers,
+    GroupMembersFor,
     load_member_group_ids,
 )
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
@@ -27,17 +30,32 @@ async def fetch_team_owner_ids(graph: GraphClient, group_id: str) -> frozenset[s
         raise GroupLookupFailed(exc.reason) from exc
 
 
-async def owned_team_ids(
-    runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str
-) -> frozenset[str]:
-    """The teams named by this tenant's grants that `user_id` owns."""
+def team_owner_lookup(runtime: TeamsRuntime) -> GroupMembers | None:
+    """A team's live owners, through the runtime's short cache; None without Graph."""
     lookup = runtime.team_owners
     if lookup is None:
-        return frozenset()
+        return None
 
     async def members(group_id: str) -> frozenset[str]:
         return await runtime.group_members.members(("teams", group_id), lambda: lookup(group_id))
 
+    return members
+
+
+def stored_team_owners(runtime: TeamsRuntime) -> GroupMembersFor:
+    """The live re-check of a stored team, for a message sent outside its owner's turn."""
+    return lambda platform, _workspace_id: (
+        team_owner_lookup(runtime) if platform == "teams" else None
+    )
+
+
+async def owned_team_ids(
+    runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str
+) -> frozenset[str]:
+    """The teams named by this tenant's grants that `user_id` owns."""
+    members = team_owner_lookup(runtime)
+    if members is None:
+        return frozenset()
     async with runtime.sessionmaker() as session:
         return await load_member_group_ids(
             session,

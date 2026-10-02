@@ -20,6 +20,7 @@ from typing import cast
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_admins import GroupMembersFor
 from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.config import McpSettings, Settings
 from daimon.core.github_credentials import build_multifernet
@@ -60,6 +61,8 @@ class TurnDeps:
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
     # Sends the channel budget notice; set by an adapter with a platform client.
     budget_notifier: BudgetNotifier | None = None
+    # Re-checks a notice recipient's stored Slack group or Teams team; set with the notifier.
+    group_members: GroupMembersFor | None = None
     budget_notices_off: frozenset[uuid.UUID] = frozenset()
 
 
