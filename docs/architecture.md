@@ -508,9 +508,12 @@ parent. Who answers where in both setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
 (`packages/core/daimon/core/channel_environments.py`). The name must match an
 existing environment in the tenant; conversations pick it up from their next
-message, keeping their files, and `explain_agent_resolution` reports each
-tier's environment. A channel admin can move their channel onto any
-environment a member created, including one with unrestricted networking. A
+message, keeping their files and their seal, and `explain_agent_resolution`
+reports each tier's environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides
+every pick: in a sealed channel, an environment with unrestricted networking
+(anything but a cloud environment on limited networking) needs a server admin,
+and so does clearing a pick onto a default that has one. An operator token's
+`channels:write` covers a channel's environment, never the tenant default. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default.
@@ -1218,7 +1221,7 @@ registered and expire too, while older jti-less ones keep working.
 | Scope | Tools |
 | --- | --- |
 | `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_isolation`, `set_channel_environment` and `clear_channel_environment` (channels only) |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
