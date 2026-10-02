@@ -22,11 +22,12 @@ twice.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from daimon.core._models import SupportEscalation
+from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import SupportEscalationRow
 from daimon.core.support_escalation import has_credit, remaining_credits
 from sqlalchemy import (
@@ -131,7 +132,7 @@ async def record_escalation(
     return SupportEscalationRow.model_validate(orm)
 
 
-EscalationStatus = Literal["recorded", "duplicate", "out_of_credits"]
+EscalationStatus = Literal["recorded", "duplicate", "out_of_credits", "refused"]
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,9 @@ class EscalationOutcome:
 
     `row` is the new row for "recorded" and None otherwise. `remaining` is
     counted inside the same transaction, so the confirmation shows the count
-    the write actually left rather than a later re-read.
+    the write actually left rather than a later re-read. "refused" means the
+    caller's `source_allowed` check said no; nothing was written or counted
+    (`remaining` is then -1, meaning "not read").
     """
 
     status: EscalationStatus
@@ -185,8 +188,21 @@ async def record_escalation_once(
     ma_session_id: str | None,
     note: str,
     allowance: int,
+    source_allowed: Callable[[AsyncSession], Awaitable[bool]] | None = None,
 ) -> EscalationOutcome:
     """`record_escalation`, refusing a second request from one person on one message.
+
+    `source_allowed` is the caller's authoritative access decision for the
+    place the request comes from. It runs inside this transaction AFTER both
+    locks are held, so it must read the policy itself (fresh): lock order is
+    the per-person ledger lock, then the tenant policy lock
+    (`lock_access_policy`, FOR NO KEY UPDATE on the tenant row), each held to
+    the end of the caller's transaction. A policy edit committed while this
+    waited for the ledger lock is therefore read and refuses, with nothing
+    spent; an edit arriving once the policy lock is held waits for the commit.
+    No holder of the tenant lock (the policy writers, a private form's consume)
+    ever takes a ledger lock, and the insert's foreign-key check takes only KEY
+    SHARE, which NO KEY UPDATE does not block, so the order cannot deadlock.
 
     The duplicate check, the credit count and the insert all run under the
     (tenant, user) lock in the caller's transaction, so two submissions racing
@@ -196,6 +212,10 @@ async def record_escalation_once(
     message hears that it is in hand, not that they are out.
     """
     await _lock_user_ledger(session, tenant_id=tenant_id, platform_user_id=platform_user_id)
+    if source_allowed is not None:
+        await lock_access_policy(session, tenant_id=tenant_id)
+        if not await source_allowed(session):
+            return EscalationOutcome(status="refused", row=None, remaining=-1)
     existing = await find_escalation_for_message(
         session,
         tenant_id=tenant_id,

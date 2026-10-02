@@ -16,10 +16,13 @@ Clicking spends nothing; only sending the note does. The click and the submit
 both decide access the way a turn does — the clicker must be someone the
 tenant lets start a turn in that place (`authorize(START_TURN)`), and an
 external Slack Connect member is refused — and the submit decides again at the
-moment of action, so a policy change between the two holds. The post into the
-escalation channel is a plain adapter post, so it asks `authorize(POST)` with
-no agent, the same check a routine delivery asks: a protected destination is
-refused.
+moment of action: under the per-person ledger lock and then the tenant policy
+lock, in the transaction that spends the credit (`record_escalation_once`), so
+a policy edit committed first refuses with nothing spent and one arriving
+later waits. The post into the escalation channel is a plain adapter post, so
+it asks `authorize(POST)` with no agent, the same check a routine delivery
+asks, from a fresh policy read right before the send: a protected destination
+is refused.
 
 What reaches the escalation channel: the requester (mention, name, workspace),
 a permalink to the answer, and the note the person typed. Nothing from the
@@ -417,24 +420,34 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         return
 
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=s.team_id)
+    # What the authoritative source check saw, for the reply and the post.
+    decided: dict[str, Any] = {}
     async with runtime.sessionmaker() as session, session.begin():
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
             log.info("support.tenant_missing", tenant_id=str(tenant_id))
             return
-        try:
-            policy = await load_access_policy(session, tenant_id=tenant_id)
-        except AccessPolicyUnreadable:
-            await reply(POLICY_UNREADABLE)
-            return
         subject, account_id = await _subject(session, tenant_id=tenant_id, user_id=s.user_id)
-        if not _may_ask(policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts):
-            log.info("support.refused", tenant_id=str(tenant_id))
-            await reply(NOT_ALLOWED)
-            return
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=s.thread_ts
         )
+
+        async def source_allowed(locked: AsyncSession) -> bool:
+            # Runs under the ledger and policy locks (`record_escalation_once`),
+            # so this policy read is the one the credit is spent against.
+            try:
+                policy = await load_access_policy(locked, tenant_id=tenant_id)
+            except AccessPolicyUnreadable:
+                decided["refusal"] = POLICY_UNREADABLE
+                return False
+            decided["sealed"] = is_sealed_source(
+                policy, channel_id=s.channel_id, thread_id=s.thread_ts
+            )
+            if not _may_ask(policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts):
+                decided["refusal"] = NOT_ALLOWED
+                return False
+            return True
+
         outcome = await record_escalation_once(
             session,
             tenant_id=tenant_id,
@@ -446,9 +459,14 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             ma_session_id=thread_row.ma_session_id if thread_row is not None else None,
             note=s.note,
             allowance=support.credits_per_user,
+            source_allowed=source_allowed,
         )
-    sealed = is_sealed_source(policy, channel_id=s.channel_id, thread_id=s.thread_ts)
+    sealed = bool(decided.get("sealed", False))
 
+    if outcome.status == "refused":
+        log.info("support.refused", tenant_id=str(tenant_id))
+        await reply(str(decided.get("refusal") or NOT_ALLOWED))
+        return
     if outcome.status == "duplicate":
         log.info("support.duplicate_request", tenant_id=str(tenant_id))
         await reply(ALREADY_REQUESTED)
@@ -521,8 +539,12 @@ async def _post_to_escalation_channel(
 
     Posts with the escalation workspace's token when
     `slack_escalation_team_id` names one, else the requester's own. The
-    destination tenant's policy is asked `authorize(POST)` with no agent, so a
-    protected channel is refused and the row stays undelivered.
+    destination tenant's policy is read fresh and asked `authorize(POST)` with
+    no agent immediately before the send (after the permalink round trip), so
+    a channel protected meanwhile is refused and the row stays undelivered.
+    No policy lock is held across the send: a protection committed in the
+    instant between that read and Slack accepting the post is not ordered
+    against it.
     """
     support = runtime.settings.support
     dest_team = support.slack_escalation_team_id or submission.team_id
@@ -534,6 +556,12 @@ async def _post_to_escalation_channel(
     if dest_client is None:
         log.warning("support.destination_workspace_unavailable")
         return False
+    # Network I/O first, so the destination decision below is the last thing
+    # before the send and nothing awaits between them but the policy read.
+    link = await _permalink(
+        source_client, channel_id=submission.channel_id, message_ts=submission.message_ts
+    )
+    text = render_escalation_post(submission=submission, link=link, sealed=sealed)
     dest_tenant = derive_tenant_uuid(platform="slack", workspace_id=dest_team)
     async with runtime.sessionmaker() as session:
         try:
@@ -546,10 +574,6 @@ async def _post_to_escalation_channel(
     ):
         log.warning("support.destination_protected", channel_id=dest_channel)
         return False
-    link = await _permalink(
-        source_client, channel_id=submission.channel_id, message_ts=submission.message_ts
-    )
-    text = render_escalation_post(submission=submission, link=link, sealed=sealed)
     try:
         await dest_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=dest_channel, text=text, unfurl_links=False, unfurl_media=False
