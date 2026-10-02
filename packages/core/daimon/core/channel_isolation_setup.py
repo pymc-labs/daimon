@@ -20,7 +20,8 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from anthropic import AsyncAnthropic
+import structlog
+from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.agent_fork import fork_agent
@@ -32,15 +33,18 @@ from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, pick_agent
+from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
     set_access_policy,
 )
-from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 IsolationRefusal = Literal[
     "no_channel_agent",
@@ -349,6 +353,42 @@ async def _network_warning(
         )
 
 
+async def _archive_unused_copy(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    name: str,
+    agent_id: str,
+) -> None:
+    """Archive a copy whose write failed, unless the channel may point at it.
+
+    A commit can fail after the database applied it, so the channel is read
+    again first; a copy it names, or one when that read fails, is kept and
+    logged. A failed archive is logged too: the caller re-raises the write's
+    own error.
+    """
+    log_fields = {"tenant_id": str(tenant_id), "channel_id": channel_id, "agent_id": agent_id}
+    try:
+        async with sessionmaker() as session:
+            scope = await get_scope(
+                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
+            )
+    except (SQLAlchemyError, OSError):
+        _log.warning(
+            "channel_isolation.fork_kept", reason="unreadable", exc_info=True, **log_fields
+        )
+        return
+    if isinstance(scope, ChannelConfigRow) and scope.agent_name == name:
+        _log.warning("channel_isolation.fork_kept", reason="channel_points_at_it", **log_fields)
+        return
+    try:
+        await anthropic.beta.agents.archive(agent_id)
+    except APIError:
+        _log.warning("channel_isolation.fork_archive_failed", exc_info=True, **log_fields)
+
+
 async def set_channel_isolation(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -371,7 +411,8 @@ async def set_channel_isolation(
     A copy is made only when `fork` is set and the channel has no agent that may
     be its own, so repeating a request never copies twice; `subject` is who
     asks for it (`authorize(FORK)`). A copy the locked re-check refuses, or
-    one whose write fails, is archived.
+    one whose write fails, is archived unless the channel names it
+    (`_archive_unused_copy`).
     """
     if not isolated:
         async with sessionmaker.begin() as session:
@@ -455,7 +496,14 @@ async def set_channel_isolation(
                 raise ChannelIsolationRefused(found.refusal, agent_name=new_name)
     except Exception:
         # Re-raised: a copy no channel got, refused or not, must not linger.
-        await anthropic.beta.agents.archive(copy.agent.id)
+        await _archive_unused_copy(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            name=new_name,
+            agent_id=copy.agent.id,
+        )
         raise
     return IsolationChange(
         channel_id,

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import httpx
 import pytest
+import structlog.testing
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.core import channel_isolation_setup
@@ -357,6 +360,106 @@ async def test_a_copy_whose_isolation_write_fails_is_archived(
     assert len(archived) == 1 and archived[0] != shared.id, "the orphan copy is archived"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == (), "nothing was isolated"
+
+
+def _archive_recorder(
+    state: FakeMAState, archived: list[str], *, status: int = 200
+) -> AsyncAnthropic:
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        if status != 200:
+            return httpx.Response(status, json={"type": "error", "error": {"type": "api_error"}})
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    return build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+
+
+async def _shared_in_two_channels(db_session: AsyncSession) -> tuple[uuid.UUID, FakeMAState]:
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    return tenant.id, state
+
+
+class _LostCommit:
+    """A sessionmaker whose transaction, once armed, commits and then reports a
+    dropped connection: the ambiguous commit a caller cannot tell from a failure."""
+
+    def __init__(self, inner: async_sessionmaker[AsyncSession]) -> None:
+        self.inner = inner
+        self.armed = False
+
+    def __call__(self) -> AsyncSession:
+        return self.inner()
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[AsyncSession]:
+        async with self.inner.begin() as session:
+            yield session
+        if self.armed:
+            self.armed = False
+            raise OSError("connection lost after commit")
+
+
+async def test_a_copy_the_channel_already_names_is_kept_when_its_commit_errors(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit the database applied before the error surfaced leaves the channel
+    naming the copy: it is kept and logged, never archived under the channel."""
+    tenant_id, state = await _shared_in_two_channels(db_session)
+    archived: list[str] = []
+    client = _archive_recorder(state, archived)
+    sessionmaker = _LostCommit(db_session_factory)
+
+    async def fork_then_arm(*args: Any, **kwargs: Any) -> AgentCopy:
+        copy = await fork_agent(*args, **kwargs)
+        sessionmaker.armed = True
+        return copy
+
+    monkeypatch.setattr(channel_isolation_setup, "fork_agent", fork_then_arm)
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(OSError, match="connection lost after commit"),
+    ):
+        await _isolate(client, cast(Any, sessionmaker), tenant_id, "c1", fork=True)
+
+    assert archived == [], "the copy the channel names is never archived"
+    kept = [log.get("reason") for log in logs if log["event"] == "channel_isolation.fork_kept"]
+    assert kept == ["channel_points_at_it"], logs
+    policy = await load_access_policy(db_session, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == ("c1",), "the commit did apply"
+
+
+async def test_a_failed_archive_never_hides_the_write_error(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, state = await _shared_in_two_channels(db_session)
+    archived: list[str] = []
+    client = _archive_recorder(state, archived, status=500)
+
+    async def broken_write(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(channel_isolation_setup, "set_fields", broken_write)
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(RuntimeError, match="write failed"),
+    ):
+        await _isolate(client, db_session_factory, tenant_id, "c1", fork=True)
+
+    assert archived, "the archive was tried"
+    assert any(log["event"] == "channel_isolation.fork_archive_failed" for log in logs), logs
 
 
 async def test_fork_agent_copies_the_source_under_a_new_name(
