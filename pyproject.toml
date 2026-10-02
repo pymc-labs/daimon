@@ -210,6 +210,7 @@ source_modules = [
     "daimon.core.teams_sharepoint",
     "daimon.core.teams_threads",
     "daimon.core.tenant_balance",
+    "daimon.core.tenant_summary",
     "daimon.core.thread_classifier",
     "daimon.core.thread_naming",
     "daimon.core.thread_participation",
