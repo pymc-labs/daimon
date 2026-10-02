@@ -12,15 +12,17 @@ import uuid
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.testing.asgi import mcp_session
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "make_identity",
     "make_jwt",
     "mcp_session",
+    "seed_server_admin",
     "seed_tenant",
     "seed_tenant_and_account",
 ]
@@ -68,4 +70,25 @@ async def seed_tenant_and_account(
     """Insert a Tenant + Account and return (tenant_id, account_id)."""
     tenant = await make_tenant(session, platform="discord")
     account = await make_account(session, tenant=tenant)
+    return tenant.id, account.id
+
+
+async def seed_server_admin(
+    session: AsyncSession, *, platform_user_id: str | None = "u-admin"
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """A Discord tenant and an account with a stored admin role: (tenant_id, account_id).
+
+    ``platform_user_id=None`` leaves the account without a platform user.
+    """
+    tenant = await make_tenant(session, platform="discord")
+    account = await make_account(session, tenant=tenant)
+    await set_role(session, account.id, Role.ADMIN)
+    if platform_user_id is not None:
+        await make_platform_principal(
+            session,
+            platform="discord",
+            external_id=platform_user_id,
+            tenant=tenant,
+            account=account,
+        )
     return tenant.id, account.id

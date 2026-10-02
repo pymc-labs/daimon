@@ -16,6 +16,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core import promo_credit
 from daimon.core.promo_codes import PromoRefusal, describe_refusal
 from daimon.core.stores.domain import PromoCodeKind
@@ -48,6 +49,7 @@ def _when(value: datetime) -> str:
 async def _redeem_promo_code_impl(
     runtime: McpRuntime, auth: AuthIdentity, code: str
 ) -> RedeemPromoCodeResult:
+    require_scope(auth, "promo:redeem")
     _require_admin(auth)
     result = await promo_credit.redeem_promo_code(
         runtime.session_factory,
@@ -90,7 +92,7 @@ async def _redeem_promo_code_impl(
 
 
 def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("promo:redeem")})
     async def redeem_promo_code(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         code: str,

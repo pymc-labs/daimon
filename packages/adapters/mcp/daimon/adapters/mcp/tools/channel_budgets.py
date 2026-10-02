@@ -4,7 +4,8 @@ A budget caps what one channel may spend (see ``daimon.core.channel_budget``
 for how spend and windows are counted). Reading one is a member action for a
 channel the caller can see. Listing, setting and clearing act on the whole
 server or workspace, so they are admin-tagged and re-checked in the impl.
-Money crosses this boundary as decimal strings, both ways.
+Operator tokens read them with ``tenant:read`` and change them with
+``channels:write``. Money crosses this boundary as decimal strings, both ways.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import (
@@ -209,6 +211,7 @@ async def _get_channel_budget_impl(
     channel_id: str | None,
     origin_context_id: str | None = None,
 ) -> ChannelBudgetLookup:
+    require_scope(auth, "tenant:read")
     platform = _require_platform(auth)
     if channel_id is not None and channel_id.strip():
         target = await _budget_channel(runtime, auth, channel_id.strip())
@@ -230,6 +233,7 @@ async def _get_channel_budget_impl(
 async def _list_channel_budgets_impl(
     runtime: McpRuntime, auth: AuthIdentity
 ) -> list[ChannelBudgetResult]:
+    require_scope(auth, "tenant:read")
     _require_admin(auth)
     platform = _require_platform(auth)
     now = datetime.now(UTC)
@@ -253,6 +257,7 @@ async def _set_channel_budget_impl(
     ends_at: str | None,
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
     try:
@@ -285,6 +290,7 @@ async def _clear_channel_budget_impl(
     Any other id is used as given, so a budget on a channel since deleted or
     hidden can still be cleared.
     """
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _require_platform(auth)
     target = _require_channel_id(channel_id).partition(":")[0]
@@ -299,7 +305,7 @@ async def _clear_channel_budget_impl(
 
 
 def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", *scope_tags("tenant:read")})
     async def get_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, origin_context_id: str | None = None
     ) -> ChannelBudgetLookup:
@@ -316,12 +322,12 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), channel_id, origin_context_id
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
         """List every channel budget in this server or workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -353,7 +359,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ends_at=ends_at,
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str
     ) -> ClearChannelBudgetResult:

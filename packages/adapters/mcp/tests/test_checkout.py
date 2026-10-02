@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import uuid
@@ -18,11 +19,14 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.mcp_auth import mint_operator_mcp_token
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from stripe._http_client import HTTPClient as StripeHTTPClient
+
+from .harness import make_jwt, seed_server_admin
 
 _VALID_TOKEN = "bearer-test-token"
 _TENANT_ID: uuid.UUID = uuid.uuid4()
@@ -306,3 +310,54 @@ async def test_checkout_metadata_keys_are_tenant_id_only(
         "handler must send exactly {tenant_id} as checkout metadata — "
         f"no platform/guild_id/amount_usd; got {sent_keys}"
     )
+
+
+async def test_checkout_refuses_an_operator_token(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An operator token gets a 403 at checkout, while its admin's own token gets a session.
+
+    Both go through the real JWT verifier, so the token kind is the one it reads from the row.
+    """
+    secret = b"a" * 32
+    async with sessionmaker() as s, s.begin():
+        tenant_id, account_id = await seed_server_admin(s)
+        operator_token = await mint_operator_mcp_token(
+            s,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            scopes=frozenset({"tenant:read", "promo:redeem"}),
+            label=None,
+            secret=secret,
+            now=dt.datetime.now(dt.UTC),
+            ttl_days=30,
+        )
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(secret.decode()), public_url=HttpUrl("https://x/mcp")
+            ),
+        ),
+        sessionmaker=sessionmaker,
+        billing_config=_build_billing_config(),
+        stripe_http_client=_FakeStripeHTTPClient(_CANNED_SESSION),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        refused = await ac.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {operator_token}"},
+        )
+        admin = await ac.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {make_jwt(account_id=account_id)}"},
+        )
+
+    assert refused.status_code == 403, f"an operator token cannot buy credit: {refused.text}"
+    assert admin.status_code == 200, f"the same admin's own token still can: {admin.text}"

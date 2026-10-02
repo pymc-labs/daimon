@@ -20,8 +20,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from decimal import Decimal
 
 import jwt as pyjwt
+from daimon.core.operator_tokens import OperatorScope
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -140,6 +142,7 @@ async def mint_agent_mcp_token(
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
     jti = uuid.uuid4()
+    expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
         session,
         jti=jti,
@@ -148,14 +151,104 @@ async def mint_agent_mcp_token(
         agent_id=str(agent_id),
         label=label,
         created_at=now,
+        expires_at=expires_at,
     )
-    exp = int((now + dt.timedelta(days=ttl_days)).timestamp())
     return pyjwt.encode(
         {
             "sub": str(account_id),
             "agent_id": str(agent_id),
             "jti": str(jti),
-            "exp": exp,
+            "exp": int(expires_at.timestamp()),
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+
+async def mint_operator_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    scopes: frozenset[OperatorScope],
+    label: str | None,
+    secret: bytes,
+    now: dt.datetime,
+    ttl_days: int,
+    max_issued_usd: Decimal | None = None,
+) -> str:
+    """Mint a scoped operator token for one server admin's account.
+
+    Claims are ``{sub, jti, exp, kind: "operator"}``. The scopes live only on
+    the row, which the verifier reads on every request, so they can be
+    narrowed or the token revoked without re-minting. The caller checks that
+    the account is a server admin; the verifier re-checks it on every call.
+    """
+    from daimon.core.stores.mcp_tokens import create_mcp_token_row
+
+    jti = uuid.uuid4()
+    expires_at = now + dt.timedelta(days=ttl_days)
+    await create_mcp_token_row(
+        session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=None,
+        kind="operator",
+        scopes=scopes,
+        label=label,
+        created_at=now,
+        expires_at=expires_at,
+        max_issued_usd=max_issued_usd,
+    )
+    return pyjwt.encode(
+        {
+            "sub": str(account_id),
+            "jti": str(jti),
+            "exp": int(expires_at.timestamp()),
+            "kind": "operator",
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+
+async def mint_cli_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+    ttl_days: int,
+) -> str:
+    """Mint the CLI's own token: ``{sub, iat, jti, exp, kind: "cli"}`` plus a row.
+
+    Unlike the jti-less tokens `mint_jwt` signs, this one expires and
+    `daimon mcp revoke-token` can revoke it.
+    """
+    from daimon.core.stores.mcp_tokens import create_mcp_token_row
+
+    jti = uuid.uuid4()
+    expires_at = now + dt.timedelta(days=ttl_days)
+    await create_mcp_token_row(
+        session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=None,
+        kind="cli",
+        label=None,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    return pyjwt.encode(
+        {
+            "sub": str(account_id),
+            "iat": int(now.timestamp()),
+            "jti": str(jti),
+            "exp": int(expires_at.timestamp()),
+            "kind": "cli",
         },
         secret,
         algorithm="HS256",

@@ -877,12 +877,16 @@ class WizardSessionRow(BaseModel):
     expires_at: datetime
 
 
+McpTokenKind = Literal["agent", "operator", "cli"]
+"""An agent-scoped key, a scoped operator token, or a CLI token."""
+
+
 class McpTokenRow(BaseModel):
     """Pydantic row for McpToken.
 
-    Represents a minted agent-scoped MCP JWT registered in the `mcp_tokens`
-    table. The verifier reads `revoked_at` to reject revoked tokens without
-    rotating the shared HS256 secret.
+    Represents a minted MCP JWT registered in the `mcp_tokens` table. The
+    verifier reads `revoked_at` (and, for operator tokens, `scopes`) on every
+    request, so revoking or narrowing a token needs no secret rotation.
     """
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
@@ -890,10 +894,15 @@ class McpTokenRow(BaseModel):
     jti: uuid.UUID
     account_id: uuid.UUID
     tenant_id: uuid.UUID
-    agent_id: str
+    kind: McpTokenKind
+    agent_id: str | None
+    scopes: tuple[str, ...]
     label: str | None
     created_at: datetime
+    expires_at: datetime | None
     revoked_at: datetime | None
+    max_issued_usd: Decimal | None
+    issued_usd: Decimal
 
 
 class FileUploadRow(BaseModel):
