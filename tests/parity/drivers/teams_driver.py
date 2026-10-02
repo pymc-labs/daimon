@@ -153,6 +153,7 @@ async def _exchange(
         patch.object(TokenManager, "get_bot_token", AsyncMock(return_value="parity-bot-token")),
         patch("daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock),
         patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock),
+        patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock),
     ):
         service = create_teams_http_service(
             settings=runtime.settings.teams, runtime=runtime, client=client
