@@ -8,7 +8,7 @@ reads; platform adapters supply live channel visibility.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import datetime
 
 from anthropic import AsyncAnthropic
@@ -52,7 +52,6 @@ class HereCard(BaseModel):
     model_config = ConfigDict(frozen=True)
     agent_name: str | None
     tier: str | None
-    set_by_account_id: uuid.UUID | None = None
     set_at: datetime | None = None
     configuration_target_name: str | None = None
     sealed: bool
@@ -270,7 +269,6 @@ def assemble_here_card(
     return HereCard(
         agent_name=agent_name,
         tier=tier,
-        set_by_account_id=set_by,
         set_at=set_at,
         configuration_target_name=configuration_target_name,
         sealed=channel_id in policy.sealed_channel_ids,
@@ -323,6 +321,7 @@ async def load_here_card(
     public_mcp_url: str | None,
     is_admin: bool,
     caller_account_id: uuid.UUID | None,
+    resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
     channel_level_only: bool = False,
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
@@ -432,7 +431,18 @@ async def load_here_card(
             else await get_slack_principal_for_account(session, account_id=setter_account_id)
         )
         if external_id is not None:
-            set_by_label = f"<@{external_id}>"
+            if resolve_setter_display is None:
+                set_by_label = f"<@{external_id}>"
+            else:
+                display = await resolve_setter_display(external_id)
+                if display:
+                    set_by_label = _short(
+                        display.replace("@", "＠")
+                        .replace("<", "‹")
+                        .replace(">", "›")
+                        .replace("\n", " ")
+                        .replace("\r", " ")
+                    )
     category_labels = tuple(
         label
         for cid, label in category_channels_bot_can_view

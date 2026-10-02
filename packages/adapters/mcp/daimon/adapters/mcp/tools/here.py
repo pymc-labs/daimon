@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
 from daimon.adapters.mcp.tools.discord._read import (
     _list_channels_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.slack._read import (
     _slack_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -16,6 +24,36 @@ from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.here_card import HereCard, load_here_card
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from slack_sdk.errors import SlackApiError
+
+
+async def _setter_display_name(
+    runtime: McpRuntime, auth: AuthIdentity, external_id: str
+) -> str | None:
+    """Resolve a human-readable name; failed lookups never expose a mention."""
+    if auth.external_id is None:
+        return None
+    if auth.platform == "discord":
+        try:
+            async with rest_client(_require_bot_token(runtime)) as client:
+                guild = await client.fetch_guild(int(auth.external_id))
+                member = await guild.fetch_member(int(external_id))
+                return member.display_name
+        except (discord.HTTPException, ToolError, ValueError):
+            return None
+    if auth.platform == "slack":
+        try:
+            client = await slack_web_client(runtime, team_id=auth.external_id)
+            response = await client.users_info(user=external_id)  # pyright: ignore[reportUnknownMemberType]
+        except (SlackApiError, ToolError):
+            return None
+        user = cast(dict[str, Any], response.get("user") or {})
+        profile = cast(dict[str, Any], user.get("profile") or {})
+        return (
+            str(profile.get("display_name") or user.get("real_name") or user.get("name") or "")
+            or None
+        )
+    return None
 
 
 async def _where_am_i_impl(
@@ -59,6 +97,9 @@ async def _where_am_i_impl(
             # to everyone there. Admin-only views belong in private surfaces.
             is_admin=False,
             caller_account_id=auth.account_id,
+            resolve_setter_display=lambda external_id: _setter_display_name(
+                runtime, auth, external_id
+            ),
             visible_channel_ids=visible,
             bot_can_view=None,
             caller_can_view=True,
