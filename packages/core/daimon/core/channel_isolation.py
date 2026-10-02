@@ -24,11 +24,17 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of, isolation_owner
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    isolated_channel_of,
+    isolation_owner,
+    source_seal_ids,
+)
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.errors import DaimonError
+from daimon.core.routine_delivery import delivery_target
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -111,6 +117,46 @@ def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Pla
         channel_id=channel_id,
         parent_channel_id=routine_destination_channel(row),
         parent_unresolved=is_routine_parent_unknown(row),
+    )
+
+
+@dataclass(frozen=True)
+class RoutineOrigin:
+    """Where a routine's session runs, stamped on it like a turn there."""
+
+    channel_id: str
+    thread_id: str | None
+    seal_ids: frozenset[str]
+
+
+def routine_origin(
+    policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
+) -> RoutineOrigin | None:
+    """The channel and thread a routine fires into, with the seal over them now.
+
+    Stamped on the routine's session so its transcript reads only where a
+    turn's would: an isolated or sealed channel's routine stays inside it. A
+    routine without a destination runs where it was made; one with neither
+    is headless (None).
+    """
+    channel_id = routine_destination_channel(row) or row.channel_id
+    if channel_id is None:
+        return None
+    thread_id: str | None = None
+    if row.destination_kind == "thread" and row.destination_id is not None:
+        # Slack names a thread by its ts under the channel; Discord and Teams by its own id.
+        target = delivery_target(row, platform=platform)
+        thread_id = (
+            (target.thread_ts if target is not None else None)
+            if platform == "slack"
+            else row.destination_id
+        )
+    if thread_id == channel_id:
+        thread_id = None
+    return RoutineOrigin(
+        channel_id=channel_id,
+        thread_id=thread_id,
+        seal_ids=source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id),
     )
 
 

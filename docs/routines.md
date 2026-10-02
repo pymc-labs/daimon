@@ -390,6 +390,13 @@ it with `context_fragments.routine` in their YAML spec; see [architecture](archi
 Routine sessions always mount persistent agent memory read-only, regardless of the
 tenant's chat or DM policy. They can use saved memory but cannot change it.
 
+A routine session is stamped like a turn in the channel it fires into: the
+destination's channel (a thread's parent), the thread, and the seal over
+them at fire time (`channel_isolation.routine_origin`). A routine with no
+destination is stamped with the channel it was made in. So a sealed or
+isolated channel's routine transcript is read only from inside that channel,
+as its conversations are.
+
 
 ### Durable fire diagnostics
 

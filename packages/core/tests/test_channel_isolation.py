@@ -18,12 +18,14 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_isolation import (
     ChannelIsolationStatus,
     IsolationViewer,
+    RoutineOrigin,
     binding_refusal,
     channel_isolation_status,
     clear_refusal,
     is_thread_turn_refused,
     keeps_routine_inside,
     routine_destination_place,
+    routine_origin,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -169,6 +171,32 @@ def test_a_thread_routine_saved_without_its_parent_stays_inside_until_placed() -
     assert not routine_destination_place(slack, channel_id="c1").parent_unresolved, (
         "a Slack thread carries its channel"
     )
+
+
+def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None:
+    """Channel, thread and seal follow the destination; Slack names a thread by its
+    ts, Discord by its id; a routine with no channel at all is headless."""
+    channel = _routine("local", "c1")
+    assert routine_origin(POLICY, channel, platform="discord") == RoutineOrigin(
+        "c1", None, frozenset({"c1"})
+    )
+    discord = channel.model_copy(update={"destination_kind": "thread", "destination_id": "t9"})
+    assert routine_origin(POLICY, discord, platform="discord") == RoutineOrigin(
+        "c1", "t9", frozenset({"c1"})
+    ), "a Discord thread sits under its saved parent"
+    slack = channel.model_copy(update={"destination_kind": "thread", "destination_id": "c1:1.2"})
+    assert routine_origin(POLICY, slack, platform="slack") == RoutineOrigin(
+        "c1", "1.2", frozenset({"c1"})
+    )
+    open_channel = _routine("shared", "c2")
+    assert routine_origin(POLICY, open_channel, platform="discord") == RoutineOrigin(
+        "c2", None, frozenset()
+    ), "an unsealed destination carries no seal"
+    no_destination = _routine("shared", None).model_copy(update={"channel_id": "c1"})
+    assert routine_origin(POLICY, no_destination, platform="discord") == RoutineOrigin(
+        "c1", None, frozenset({"c1"})
+    ), "without a destination it runs where it was made"
+    assert routine_origin(POLICY, _routine("shared", None), platform="discord") is None
 
 
 def test_a_viewer_sees_only_its_side() -> None:

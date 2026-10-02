@@ -31,6 +31,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
     is_own_isolated_agent,
+    source_seal_ids,
 )
 from daimon.core.authz import (
     Action,
@@ -407,7 +408,7 @@ async def admit_impl(
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = _seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
+    seal_ids = source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
         is_dm and policy.dm_memory_read_only
@@ -471,25 +472,6 @@ def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     )
 
 
-def _seal_ids(
-    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
-) -> frozenset[str]:
-    """Every id that seals a turn: its channel and a thread sealed on its own.
-
-    A Discord thread is sealed by its id, a Slack one as channel_id:thread_ts.
-    All of them are recorded, so unsealing one later leaves the others holding.
-    """
-    return frozenset(
-        candidate
-        for candidate in (
-            channel_id,
-            thread_id,
-            f"{channel_id}:{thread_id}" if thread_id is not None else None,
-        )
-        if candidate is not None and candidate in policy.sealed_channel_ids
-    )
-
-
 async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     """Decide an admission again, on the policy as it is now.
 
@@ -518,7 +500,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         source_thread_keys=grant.dm_source.thread_keys,
     ):
         raise DmSourceSealedError("dm_source_sealed")
-    seal_ids = admission.origin_seal_ids | _seal_ids(
+    seal_ids = admission.origin_seal_ids | source_seal_ids(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
     # Memory posture is decided from the policy as it is now, not only from

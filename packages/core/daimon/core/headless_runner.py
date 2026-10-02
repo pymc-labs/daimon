@@ -57,6 +57,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.sessions import create_session
@@ -138,6 +139,7 @@ async def run_turn(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
+    origin_place: RoutineOrigin | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -164,6 +166,7 @@ async def run_turn(
             tool_safety=tool_safety,
             on_state=on_state,
             budget_channel_id=budget_channel_id,
+            origin_place=origin_place,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -190,6 +193,7 @@ async def run_turn(
                 tool_safety=tool_safety,
                 on_state=on_state,
                 budget_channel_id=budget_channel_id,
+                origin_place=origin_place,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -220,6 +224,7 @@ async def run_turn_impl(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
+    origin_place: RoutineOrigin | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
@@ -289,6 +294,8 @@ async def run_turn_impl(
 
     ``budget_channel_id`` is stamped on the session as ``daimon_budget_channel``
     so the usage sweep attributes any spend it replays to that channel's budget.
+    ``origin_place`` stamps where the routine fires (`routine_origin`), so its
+    transcript reads only where a turn there would.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
     # Decided before the session exists so the session carries it: an
@@ -318,6 +325,9 @@ async def run_turn_impl(
             memory_read_only=origin == "routine",
             tool_safety=tool_safety,
             budget_channel_id=budget_channel_id,
+            origin_channel_id=origin_place.channel_id if origin_place is not None else None,
+            origin_thread_id=origin_place.thread_id if origin_place is not None else None,
+            origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
         )
 
     try:

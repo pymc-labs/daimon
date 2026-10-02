@@ -61,6 +61,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
     BetaManagedAgentsUnknownError,
 )
 from cryptography.fernet import Fernet
+from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
@@ -882,6 +883,28 @@ async def test_run_turn_without_usage_record_factory_stamps_session_billing_exem
     assert metadata[MA_METADATA_KEY_BILLING_EXEMPT] == "headless-unrecorded", (
         f"an unrecorded headless session must be stamped exempt; got {metadata!r}"
     )
+
+
+async def test_run_turn_stamps_a_routine_session_with_where_it_fires() -> None:
+    """A routine session carries its destination's channel, thread and seal, so
+    its transcript reads only where a turn there would."""
+    session_create_capture: list[dict[str, Any]] = []
+    client = _build_client(_idle_events(), session_create_capture=session_create_capture)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        tenant_id=uuid.uuid4(),
+        origin_place=RoutineOrigin(channel_id="c1", thread_id="t1", seal_ids=frozenset({"c1"})),
+    )
+
+    metadata = session_create_capture[0]["metadata"]
+    assert (metadata.get("daimon_channel"), metadata.get("daimon_thread")) == ("c1", "t1"), (
+        f"the routine session must be stamped with its destination; got {metadata!r}"
+    )
+    assert metadata.get("daimon_sealed") == "c1", "and with the seal over it"
 
 
 # --- .env resource mount threading ---
