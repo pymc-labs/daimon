@@ -179,6 +179,13 @@ def hide_across_isolation(answering: AnsweringMap, viewer: IsolationViewer) -> A
             ),
             "tenant_default": tenant_default if outside else None,
             "deployment_default": deployment_default,
+            # Environments follow the same line: the workspace's and the
+            # deployment's are shared fallbacks across it.
+            "channel_environments": tuple(
+                row for row in answering.channel_environments if viewer.sees_place(row.channel_id)
+            ),
+            "tenant_environment": answering.tenant_environment if outside else None,
+            "deployment_environment": answering.deployment_environment if outside else None,
             "setup_threads": tuple(
                 ref
                 for ref in answering.setup_threads
