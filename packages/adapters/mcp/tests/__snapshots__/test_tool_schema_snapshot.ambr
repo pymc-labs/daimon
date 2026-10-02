@@ -1643,7 +1643,8 @@
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
-        ts>``. A protected channel is refused. Without a destination the
+        ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
+        are in. A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
@@ -2285,7 +2286,9 @@
       'description': '''
         Fetch a single message by channel and message id (Slack: the message ts).
         
-        Sealed channels need origin_context_id, as read_channel does.
+        Teams: a reply is addressed under its thread, channel_id
+        <channel>;messageid=<root>; a post by its channel. Sealed channels
+        need origin_context_id, as read_channel does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2673,7 +2676,13 @@
       }),
     }),
     'list_channels': dict({
-      'description': 'List channels in this server/workspace that you can view.',
+      'description': '''
+        List channels in this server/workspace that you can view.
+        
+        Teams: the channels of every team daimon is in that you belong to,
+        with each channel's team. A team appears once daimon has seen activity
+        in it since being added.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2980,8 +2989,9 @@
       'description': '''
         List active and archived public threads for a channel.
         
-        Archived private threads are not listed. Sealed channels need
-        origin_context_id, as read_channel does.
+        Archived private threads are not listed. Teams: every post is a
+        thread; lists the 50 most recently active with their reply counts.
+        Sealed channels need origin_context_id, as read_channel does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3044,6 +3054,10 @@
         message ts, and thread_ts when the link is a reply. Try
         read_thread(thread_id=f"{channel_id}:{thread_ts or message_ts}")
         first; if that fails, use get_message(channel_id, message_ts).
+        
+        Teams: supports teams.microsoft.com/l/channel/... and /l/message/...
+        links (teams.cloud.microsoft too). A message link returns its
+        thread_id for read_thread and get_message.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3095,8 +3109,9 @@
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
         for the two choice kinds. A step may carry one finished image by
         passing the file-store handle returned by the image-generation tool —
-        never a URL, never a diagram source. Server channels and threads are
-        supported; direct messages are not. A form that exceeds a platform
+        never a URL, never a diagram source. Discord: server channels and
+        threads, not direct messages. Teams: a channel (the form starts a new
+        post), a thread or a 1:1 chat, with no step images. A form that exceeds a platform
         ceiling (too many steps, too many options, too long a question)
         raises an error naming the offending step — split the form into a
         shorter follow-up and retry.
@@ -3378,9 +3393,14 @@
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
         cursor to fetch the next page; at most 15 messages are returned.
+        Teams: channel_id is the channel (parent_channel_id in turn_controls);
+        returns up to 50 posts with their replies, ordered by latest activity;
+        pass next_cursor as cursor for less recently active posts. A 1:1 chat
+        cannot be read back.
         
         A channel the workspace sealed is readable only from a conversation
-        inside it: pass this turn's origin_context_id when reading one.
+        inside it: pass this turn's origin_context_id when reading one. On
+        Teams that also holds for private and shared channels.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3440,13 +3460,26 @@
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
         before is rejected — Slack threads read one page of at most 15 messages
         from the thread root, and has_more=true means the newest replies were
-        not returned. Threads under a sealed channel need origin_context_id,
-        as read_channel does.
+        not returned. Teams: thread_id is <channel>;messageid=<root> (thread_id
+        in turn_controls); returns the root and the newest 50 replies; pass
+        next_cursor as cursor for older ones. cursor is Teams-only. Threads
+        under a sealed channel need origin_context_id, as read_channel does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'before': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'cursor': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -4007,6 +4040,10 @@
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
         Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Teams: Microsoft has no message search for apps, so this scans the
+        most recently active posts (and their replies) of up to 10 channels
+        for content; only content, channel_ids, author_ids (Entra ids) and
+        limit are supported, and complete=false says the scan stopped short.
         Hits in sealed channels are withheld unless origin_context_id places
         this turn inside that channel; scoping to one from outside is refused.
       ''',
@@ -4203,7 +4240,9 @@
         Privately message one human member of the current server/workspace.
         
         Pass a platform user ID, not a channel or mention. Both sender and
-        recipient must still belong to this tenant. Tenant policy may disable
+        recipient must still belong to this tenant. Teams: the recipient's
+        Entra object id; both of you must be in a team daimon is in, and the
+        message arrives in their 1:1 chat with daimon. Tenant policy may disable
         delivery or restrict recipients to an allowlist. Plain text only, up to
         19000 characters, split into bounded messages. Returns all delivery IDs;
         a partial failure states how many messages were already sent, so do not
@@ -4242,19 +4281,14 @@
         paragraphs above together or you will conclude, wrongly, that you
         should hand a file back "in your reply" and silently deliver nothing.
         
-        ``attachments=[{url, filename}]`` fetches over https, restricted to
-        Discord's own CDN hosts — an arbitrary external URL will be refused
-        (<=25 MiB each). ``file_handles=[handle_id, ...]`` references any
-        file daimon is already holding — this is how you post a file
-        you produced yourself, not only output from a built-in tool. Any
-        tool that stores a file and returns a handle works here (e.g.
-        ``create_file_upload_url``, ``generate_audio``, ``generate_image``).
-        To post a file you made in your sandbox, call
+        ``file_handles=[handle_id, ...]`` references a file daimon is
+        holding: to post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
-        returns — never base64 a file into a tool argument. Combined
-        cap of 10 attachments per message. Both FILES paragraphs are
-        Discord-only for now — Slack file posting needs a scope this
-        install does not have, and Teams file posting is not built yet.
+        returns — never base64 a file into a tool argument. Discord also
+        takes ``attachments=[{url, filename}]``, fetched over https from
+        Discord's own CDN hosts only (<=25 MiB each). Combined cap of 10
+        files per message. Slack takes no files: that needs a scope this
+        install does not have.
         
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
@@ -4264,8 +4298,13 @@
         
         Teams: ``channel_id`` is a conversation id — ``thread_id`` from
         turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
-        ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
-        6,000 characters, and you must be a member of that conversation.
+        ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
+        characters, and you must be a member of that conversation. In a
+        channel, files are saved to its Files tab and the message links
+        them; that needs the team's SharePoint site granted to daimon, and
+        a private or shared channel takes none. In a 1:1 chat each file
+        is a card the person accepts to save it to their OneDrive; content
+        may be empty when sending files. A group chat takes no files.
         Channels the workspace marked protected, and threads under them,
         refuse every post — tell the caller rather than retrying elsewhere
         unasked.
@@ -4390,9 +4429,9 @@
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
         
-        Ids are the platform's own: Discord role and user ids, Slack user ids (Slack
-        has no roles, so ``role_ids`` must be empty there). ``channel_id`` MUST be the
-        parent channel's id, never a thread's.
+        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
+        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
+        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
       ''',
       'parameters': dict({
         'additionalProperties': False,

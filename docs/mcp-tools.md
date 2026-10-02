@@ -96,7 +96,7 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
-| `get_channel_budget` | Discord callers, Slack callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
+| `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
@@ -115,15 +115,15 @@ Shared channel MCP tools with per-platform dispatch.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
-| `get_message` | Discord callers, Slack callers | Fetch a single message by channel and message id (Slack: the message ts). |
-| `list_channels` | Discord callers, Slack callers | List channels in this server/workspace that you can view. |
-| `list_threads` | Discord callers | List active and archived public threads for a channel. |
-| `parse_link` | Discord callers, Slack callers | Extract IDs from a channel or message link. |
-| `read_channel` | Discord callers, Slack callers | Read channel messages, oldest-first, with pagination metadata. |
-| `read_thread` | Discord callers, Slack callers | Read messages from a thread, oldest-first. |
+| `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id (Slack: the message ts). |
+| `list_channels` | Discord callers, Slack callers, Teams callers | List channels in this server/workspace that you can view. |
+| `list_threads` | Discord callers, Teams callers | List active and archived public threads for a channel. |
+| `parse_link` | Discord callers, Slack callers, Teams callers | Extract IDs from a channel or message link. |
+| `read_channel` | Discord callers, Slack callers, Teams callers | Read channel messages, oldest-first, with pagination metadata. |
+| `read_thread` | Discord callers, Slack callers, Teams callers | Read messages from a thread, oldest-first. |
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
-| `search_messages` | Discord callers, Slack callers | Search messages with server-side filters. |
-| `send_direct_message` | Discord callers, Slack callers | Privately message one human member of the current server/workspace. |
+| `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
+| `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
 
@@ -347,7 +347,7 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `post_wizard` | Discord callers | Post a multi-step form in the channel instead of asking in prose. |
+| `post_wizard` | Discord callers, Teams callers | Post a multi-step form in the channel instead of asking in prose. |
 
 ## Hub login mounts: `hub`
 
