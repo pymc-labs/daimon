@@ -1297,6 +1297,52 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
+        "channel admin never opens the network of a channel holding a sealed slack thread",
+        TenantAccessPolicy(sealed_channel_ids=("C_ACME:1700000000.000100",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "channel admin never opens the network of a sealed discord thread it names",
+        TenantAccessPolicy(sealed_channel_ids=("T_ACME",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "channel admin never opens the network from inside a sealed discord thread",
+        TenantAccessPolicy(sealed_channel_ids=("T_ACME",)),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "origin": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
+            "open_network": True,
+        },
+        _deny("sealed"),
+    ),
+    (
+        "a thread sealed under another channel leaves the channel admin's pick open",
+        TenantAccessPolicy(sealed_channel_ids=("C_OTHER:1700000000.000100", "T_OTHER")),
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "origin": Place(channel_id="T_OTHER", parent_channel_id="C_OTHER"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
         "an agent key picks no environment, whoever minted it",
         PINNED,
         {

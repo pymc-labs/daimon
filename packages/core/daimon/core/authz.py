@@ -67,7 +67,7 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
 - **Channel environments**: a server admin picks any channel's environment
   or the workspace default; a channel admin picks the channels they
   administer, except an environment with unrestricted networking in a
-  sealed channel (`sealed`).
+  sealed channel, or one holding a sealed thread (`sealed`).
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -113,6 +113,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_invoker_allowed,
     is_outside_agent_pin,
+    is_sealed_source,
     is_write_protected,
     isolated_channel_of,
     isolation_owner,
@@ -448,6 +449,18 @@ def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
     )
 
 
+def _holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
+    """Whether `channel`, or a thread under it, is sealed: a Slack ``channel:ts``
+    by its id, a Discord thread only when one of `places` names it as a thread."""
+    if any(key.startswith(f"{channel}:") for key in policy.sealed_channel_ids):
+        return True
+    return is_sealed_source(policy, channel_id=channel, thread_id=None) or any(
+        is_sealed_source(policy, channel_id=channel, thread_id=at.channel_id)
+        for at in places
+        if at is not None and at.parent_channel_id == channel and at.channel_id is not None
+    )
+
+
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
     if place.channel_id is None:
         return False
@@ -654,12 +667,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.SET_CHANNEL_ENVIRONMENT:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
-        channel = place.channel_id
+        channel = place.parent_channel_id or place.channel_id
         if subject.via_agent_key or channel not in subject.administered_channel_ids:
             return _deny("admin_required")
         # A sealed channel's content must not leave through an open network
-        # that the channel admin chose; that is a server admin's call.
-        if req.open_network and channel in policy.sealed_channel_ids:
+        # that the channel admin chose; that is a server admin's call. The
+        # environment covers every thread under the channel, so a sealed one counts.
+        if req.open_network and _holds_seal(policy, channel, place, req.origin):
             return _deny("sealed")
         return ALLOW
 
