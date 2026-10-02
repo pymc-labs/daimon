@@ -4574,7 +4574,8 @@
         
         Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
         Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
+        empty). ``channel_id`` MUST be the parent channel's id; a Slack or Teams thread
+        id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4681,7 +4682,8 @@
         
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
+        ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
+        id resolves to its parent. The caller must be able to see the channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4710,7 +4712,7 @@
     'set_channel_isolation': dict({
       'description': '''
         Isolate one channel, or end its isolation. For example, give #team-alpha an
-        agent nobody outside it can see or reach. Requires Manage Server (admin).
+        agent nobody outside it can see or reach. Requires a server or workspace admin.
         
         Isolating seals the channel and pins its own agent to it: its default agent,
         answering nowhere else, pinned nowhere else and not built in. If it has none, pass
