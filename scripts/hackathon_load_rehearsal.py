@@ -843,6 +843,24 @@ async def _discord_phase(
             results.extend(await asyncio.gather(*tasks))
             tasks.clear()
         created_threads.update(row.thread_id for row in results if row.thread_id)
+        if not args.discord_precreated:
+            notices = 0
+            for channel_id in created_channels:
+                messages = cast(
+                    list[dict[str, object]],
+                    await rest.request("GET", f"/channels/{channel_id}/messages?limit=100"),
+                )
+                for item in messages:
+                    author = item.get("author")
+                    if (
+                        not isinstance(author, dict)
+                        or str(author.get("id")) != DISCORD_DAIMON_BOT_ID
+                    ):
+                        continue
+                    content = str(item.get("content") or "")
+                    if content.startswith(("Opening your chat", "Your chat is ready:")):
+                        notices += 1
+            print(f"Discord opening notices: {notices}", flush=True)
         for row in results:
             print(
                 f"Discord {row.message_id}: thread={row.thread_id or 'none'} "
