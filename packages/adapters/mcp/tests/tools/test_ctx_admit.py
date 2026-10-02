@@ -275,7 +275,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
     member = await _member(db_session, policy=_ISOLATED, role=role)
     tenant = await get_tenant(db_session, member.tenant_id)
     assert tenant is not None
-    # A closed space: its budget is $0.
+    # The isolated channel is closed with a $0 budget.
     await make_channel_budget(db_session, tenant=tenant, channel_id="room", limit_usd=Decimal("0"))
     await db_session.commit()
     auth = dataclasses.replace(

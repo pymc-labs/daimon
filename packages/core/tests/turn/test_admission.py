@@ -1860,4 +1860,4 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
     await db_session.commit()
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(deps, **args, now=_NOW)
-    assert exc_info.value.reason == "channel_budget_exceeded", "a closed space stops it"
+    assert exc_info.value.reason == "channel_budget_exceeded", "a $0 channel budget stops it"
