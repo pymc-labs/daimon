@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
 CHANNEL_ID = 900000000000000001
+THREAD_ID = 900000000000000009
 USER_ID = 444444444444444444
 _MD = "---\nname: notes\ndescription: Take meeting notes.\n---\nWrite them down.\n"
 
@@ -157,7 +158,9 @@ def _details_view(world: _World, agent: RosterAgent) -> DetailsView:
     )
 
 
-def _interaction(*, admin: bool = False, channel_id: int = CHANNEL_ID) -> MagicMock:
+def _interaction(
+    *, admin: bool = False, channel_id: int = CHANNEL_ID, thread_of: int | None = None
+) -> MagicMock:
     interaction = MagicMock()
     interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = USER_ID
@@ -167,6 +170,10 @@ def _interaction(*, admin: bool = False, channel_id: int = CHANNEL_ID) -> MagicM
     interaction.user.guild.owner_id = 1
     interaction.guild_id = GUILD_ID
     interaction.channel = MagicMock(spec=discord.TextChannel)
+    if thread_of is not None:
+        interaction.channel = MagicMock(spec=discord.Thread)
+        interaction.channel.id = channel_id
+        interaction.channel.parent_id = thread_of
     interaction.channel_id = channel_id
     interaction.response.is_done = MagicMock(return_value=False)
     interaction.response.send_message = AsyncMock()
@@ -485,6 +492,23 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
     # An admin of every pinned channel may add from anywhere.
     channel_admin.response.send_modal.assert_awaited_once()
+
+
+async def test_a_member_in_a_thread_of_a_pinned_channel_may_add(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A thread is inside its parent channel's pin; a thread elsewhere is not."""
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    await _pin(world, OTHER_CHANNEL_ID)
+
+    inside = _interaction(channel_id=THREAD_ID, thread_of=OTHER_CHANNEL_ID)
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
+    inside.response.send_modal.assert_awaited_once()
+
+    elsewhere = _interaction(channel_id=THREAD_ID, thread_of=CHANNEL_ID)
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(elsewhere)
+    elsewhere.response.send_modal.assert_not_awaited()
 
 
 async def test_a_pin_added_after_the_button_refuses_the_submit_and_the_add(
