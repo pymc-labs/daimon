@@ -227,6 +227,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated agent and hidden. Ending keeps the seal and pins unless lifted too,
   and warns that the agents keep what they remembered there. No migration;
   clear isolation before rolling back, as older releases reject the field.
+- Operators can use `daimon channels isolation set PLATFORM WORKSPACE_ID
+  CHANNEL_ID --fork-from AGENT` to seal a channel and give it a dedicated
+  agent copy, or `daimon channels isolation lift PLATFORM WORKSPACE_ID
+  CHANNEL_ID` to remove its isolation, seal and exclusive pins.
 - **Channel environments.** Admins can pick the environment a Discord or
   Slack channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment` (a channel's, not

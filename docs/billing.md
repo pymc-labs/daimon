@@ -212,6 +212,12 @@ with no row there is no limit, and nothing is created by default. It works
 the same with or without Stripe and for either funding mode. Budgets exist on
 Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
+For a dedicated agent alongside a budget, an operator can run
+`daimon channels isolation set PLATFORM WORKSPACE_ID CHANNEL_ID --fork-from AGENT`.
+This seals the channel and copies the named agent for that channel alone.
+`daimon channels isolation lift PLATFORM WORKSPACE_ID CHANNEL_ID` removes the
+isolation, seal and exclusive pins. Set the budget separately.
+
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
   pre-markup usage `/billing` totals. Debits carry the parent channel, so a
