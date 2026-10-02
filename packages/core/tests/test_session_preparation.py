@@ -3226,3 +3226,191 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         await deps.anthropic.close()
         await admission_deps.anthropic.close()
         await engine.dispose()
+
+
+def _advance_fence_clock(monkeypatch):
+    """Advance monotonic time without spending seconds asleep."""
+    loop = asyncio.get_running_loop()
+    original_time = loop.time
+    offset = 0.0
+
+    def time_now():
+        return original_time() + offset
+
+    def advance(seconds):
+        nonlocal offset
+        offset += seconds
+
+    monkeypatch.setattr(loop, "time", time_now)
+    return advance
+
+
+async def test_replacement_prelock_ma_work_exceeds_old_fence_budget(
+    db_session, db_session_factory, monkeypatch
+):
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    moved = _agent(model_id="claude-opus-5")
+    _register(transport.state, moved)
+    # Legacy rows require an MA identity read before taking the mutation fence.
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE thread_sessions SET ma_agent_id = NULL WHERE id = :id"),
+            {"id": first.mapping_id},
+        )
+    advance = _advance_fence_clock(monkeypatch)
+    original_retrieve = deps.anthropic.beta.sessions.retrieve
+    advanced = False
+
+    async def slow_read(*args, **kwargs):
+        nonlocal advanced
+        result = await original_retrieve(*args, **kwargs)
+        if not advanced:
+            advanced = True
+            advance(6)
+        return result
+
+    monkeypatch.setattr(deps.anthropic.beta.sessions, "retrieve", slow_read)
+    try:
+        result = await _prepare(
+            deps, _admission(account=account, agent=moved), tenant=tenant, account=account
+        )
+        assert isinstance(result, PreparedTurn)
+        assert result.ma_session_id != first.ma_session_id
+    finally:
+        await deps.anthropic.close()
+
+
+@pytest.mark.parametrize("queue", ["gate", "same_session"])
+async def test_turn_queued_behind_long_replacements_waits_then_runs(
+    db_session, db_nullpool_engine, db_schema, monkeypatch, queue
+):
+    from daimon.core.session_preparation_gate import PreparationGate, preparation_counts
+    from daimon.core.turn import run as turn_run
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.turn_fakes import RecordingLifecycle
+
+    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, seed_factory
+    )
+    account = await _account_of(seed_factory, first.admission.account_id)
+    await _prepare(deps, first.admission, tenant=tenant, account=account, thread_id="replacement-2")
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=5, max_overflow=10
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    deps = replace(deps, sessionmaker=factory, preparation_gate=PreparationGate(2))
+    moved = first.admission.agent.model_copy(
+        update={"model": _agent(model_id="claude-opus-5").model}
+    )
+    _register(transport.state, moved)
+    changed = replace(first.admission, agent=moved)
+    entered, release, attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    count = 0
+
+    async def checkpoint(**kwargs):
+        nonlocal count
+        await kwargs["before_send"]()
+        count += 1
+        if count == 2:
+            entered.set()
+        await release.wait()
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
+        )
+
+    from daimon.core import session_preparation_stages
+
+    original_lock = session_preparation_stages.try_fence
+
+    async def observed_lock(*args, **kwargs):
+        if asyncio.current_task() is waiter:
+            attempted.set()
+        return await original_lock(*args, **kwargs)
+
+    monkeypatch.setattr(session_preparation_stages, "try_fence", observed_lock)
+    advance = _advance_fence_clock(monkeypatch)
+    tasks = [
+        asyncio.create_task(
+            _prepare(
+                deps, changed, tenant=tenant, account=account, thread_id=thread, transfer=checkpoint
+            )
+        )
+        for thread in ("thread-1", "replacement-2")
+    ]
+    waiter = None
+
+    async def queued_turn():
+        prepared = await _prepare(deps, changed, tenant=tenant, account=account)
+        assert isinstance(prepared, PreparedTurn)
+
+        async def reseed():
+            return "queued message"
+
+        await turn_run.run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="queued message",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            render_interval_s=0.001,
+        )
+        return prepared
+
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if queue == "same_session":
+            # Let this waiter reach the PostgreSQL preparation fence instead of the gate.
+            deps = replace(deps, preparation_gate=PreparationGate(3))
+            # Also provide room at the connection headroom gate for its try-lock.
+            from daimon.core import session_preparation_gate
+
+            session_preparation_gate._preparation_pool_gates[engine.pool].release()
+        waiter = asyncio.create_task(queued_turn())
+        if queue == "same_session":
+            await asyncio.wait_for(attempted.wait(), 2)
+            # Allow the failed try-lock to roll back before advancing time.
+            await asyncio.sleep(0.1)
+        else:
+            while preparation_counts()["waiting"] == 0:
+                await asyncio.sleep(0)
+        assert not waiter.done()
+        assert engine.pool.checkedout() == 2
+        advance(6)
+        # Let elapsed acquisition timers run before releasing the replacements.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        release.set()
+        successors = await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        prepared = await asyncio.wait_for(waiter, 3)
+        assert prepared.ma_session_id == successors[0].ma_session_id
+        assert any(
+            e["type"] == "user.message" and "queued message" in json.dumps(e["content"])
+            for e in transport.state.events[prepared.ma_session_id]
+        )
+        assert not any(
+            e["type"] == "user.message" and "queued message" in json.dumps(e["content"])
+            for e in transport.state.events[first.ma_session_id]
+        )
+    finally:
+        release.set()
+        for task in [*tasks, *([waiter] if waiter is not None else [])]:
+            task.cancel()
+        await asyncio.gather(
+            *tasks, *([waiter] if waiter is not None else []), return_exceptions=True
+        )
+        await deps.anthropic.close()
+        await admission_deps.anthropic.close()
+        await engine.dispose()

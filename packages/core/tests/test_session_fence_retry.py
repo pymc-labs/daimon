@@ -66,7 +66,11 @@ async def test_remote_fence_waiter_releases_permit_and_connection(
                     pass
             if timeout:
                 # Hold the external fence beyond the actual production wait bound.
-                await original_sleep(5.1)
+                from daimon.core.turn.ceiling import TURN_CEILING_S
+
+                loop = asyncio.get_running_loop()
+                original_time = loop.time
+                monkeypatch.setattr(loop, "time", lambda: original_time() + TURN_CEILING_S + 1)
                 resume.set()
                 with pytest.raises(SessionBusyError) as error:
                     await asyncio.wait_for(waiter, 1)

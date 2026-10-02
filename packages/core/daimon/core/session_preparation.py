@@ -23,7 +23,8 @@ Preparation outcomes:
 Changes acquire a transaction-scoped Postgres advisory lock on the caller's
 (tenant, platform, thread, account) tuple, so racing mentions create one
 successor. Contenders use try-locks and release transactions and permits before
-retrying for at most five seconds; timeout raises retryable SessionBusyError.
+retrying each acquisition up to the existing turn ceiling; timeout raises
+retryable SessionBusyError. In-process gates queue without an acquisition timer.
 A compatible reused session releases that transaction before vault network I/O
 and verifies that the mapping is still current afterward.
 """

@@ -7,7 +7,6 @@ import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from daimon.core.session_fence_retry import fence_acquisition
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import Pool, QueuePool
 
@@ -66,8 +65,7 @@ async def pool_headroom(
         _preparation_pool_gates[pool] = preparation_gate
     if preparation:
         gate = _preparation_pool_gates[pool]
-    async with fence_acquisition():
-        await gate.acquire()
+    await gate.acquire()
     try:
         yield
     finally:
@@ -88,8 +86,7 @@ class PreparationGate:
         global _waiting, _active
         _waiting += 1
         try:
-            async with fence_acquisition():
-                await self._semaphore.acquire()
+            await self._semaphore.acquire()
         finally:
             _waiting -= 1
         _active += 1
