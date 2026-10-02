@@ -123,7 +123,7 @@ Channel protection tool: protect or seal one channel, or lift either.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_channel_protection` | admin only, channel admins too, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+| `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
 
 ## `channels`
 

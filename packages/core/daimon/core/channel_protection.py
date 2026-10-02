@@ -1,9 +1,8 @@
 """Protect or seal one channel, or lift either, in one locked policy write.
 
 `set_channel_protection` asks `authorize(SET_CHANNEL_PROTECTION)` against the
-policy it locks, so a server admin may change any channel and a channel admin
-their own, short of lifting a seal. An isolated channel keeps its seal until
-its isolation ends.
+policy it locks: server admins and operator tokens only, never a channel
+admin. An isolated channel keeps its seal until its isolation ends.
 """
 
 from __future__ import annotations
@@ -25,11 +24,10 @@ from daimon.core.stores.access_policy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ProtectionRefusal = Literal["admin_required", "seal_admin_required", "isolated"]
+ProtectionRefusal = Literal["admin_required", "isolated"]
 
-_REFUSALS: dict[str, str] = {
-    "admin_required": "This change needs a server admin, or an admin of this channel.",
-    "seal_admin_required": "Lifting a channel's seal needs a server admin.",
+_REFUSALS: dict[ProtectionRefusal, str] = {
+    "admin_required": "Protecting or sealing a channel needs a server admin.",
     "isolated": "This channel is isolated, so it stays sealed: end its isolation first.",
 }
 
@@ -91,22 +89,13 @@ async def set_channel_protection(
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        lifts_seal = sealed is False and channel_id in policy.sealed_channel_ids
-
-        def decide(*, lifts: bool) -> bool:
-            return bool(
-                authorize(
-                    policy,
-                    subject=subject,
-                    action=Action.SET_CHANNEL_PROTECTION,
-                    place=Place(channel_id=channel_id),
-                    lifts_seal=lifts,
-                )
-            )
-
-        if not decide(lifts=lifts_seal):
-            seal_only = lifts_seal and decide(lifts=False)
-            raise ChannelProtectionRefused("seal_admin_required" if seal_only else "admin_required")
+        if not authorize(
+            policy,
+            subject=subject,
+            action=Action.SET_CHANNEL_PROTECTION,
+            place=Place(channel_id=channel_id),
+        ):
+            raise ChannelProtectionRefused("admin_required")
         updated = toggle_channel(policy, channel_id=channel_id, protected=protected, sealed=sealed)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)

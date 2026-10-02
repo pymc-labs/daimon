@@ -98,30 +98,26 @@ async def test_a_server_admin_protects_seals_and_lifts_both(
     assert policy.protected_channel_ids == (), "the protection is lifted"
 
 
-async def test_a_channel_admin_seals_their_channel_but_never_lifts_a_seal(
+async def test_a_channel_admin_neither_protects_nor_seals_their_own_channel(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
-    channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM}))
+    channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM, ISOLATED}))
 
-    sealed = await _set_channel_protection_impl(
-        runtime, channel_admin, channel_id=ROOM, sealed=True, protected=True
-    )
-    assert sealed.sealed and sealed.protected, "their own channel is theirs to seal"
-    unprotected = await _set_channel_protection_impl(
-        runtime, channel_admin, channel_id=ROOM, protected=False
-    )
-    assert not unprotected.protected, "and to unprotect"
-    with pytest.raises(ToolError, match="Lifting a channel's seal needs a server admin"):
-        await _set_channel_protection_impl(runtime, channel_admin, channel_id=ROOM, sealed=False)
-    with pytest.raises(ToolError, match="an admin of this channel"):
-        await _set_channel_protection_impl(runtime, channel_admin, channel_id=OTHER, sealed=True)
-    with pytest.raises(ToolError, match="an admin of this channel"):
+    for change in ({"protected": True}, {"sealed": True}, {"protected": False}):
+        with pytest.raises(ToolError, match="needs a server admin"):
+            await _set_channel_protection_impl(runtime, channel_admin, channel_id=ROOM, **change)
+    with pytest.raises(ToolError, match="needs a server admin"):
+        await _set_channel_protection_impl(
+            runtime, channel_admin, channel_id=ISOLATED, sealed=False
+        )
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _set_channel_protection_impl(
             runtime, _auth(tenant_id, account_id), channel_id=ROOM, protected=True
         )
     policy = await _policy(committing_sessionmaker, tenant_id)
-    assert set(policy.sealed_channel_ids) == {ISOLATED, ROOM}, "refusals write nothing"
+    assert policy.sealed_channel_ids == (ISOLATED,), "refusals write nothing"
+    assert policy.protected_channel_ids == (), "refusals protect nothing"
 
 
 async def test_an_isolated_channel_stays_sealed_until_its_isolation_ends(

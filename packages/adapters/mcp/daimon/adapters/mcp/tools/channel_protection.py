@@ -4,8 +4,7 @@
 closure; it delegates to ``_set_channel_protection_impl``, which tests call
 without a FastMCP Context. `authorize(SET_CHANNEL_PROTECTION)` decides who
 may (``daimon.core.channel_protection``): server admins and operator tokens
-with ``channels:write`` on any channel, a channel's admins on theirs, short of
-lifting a seal.
+with ``channels:write`` only, never a channel's admins.
 """
 
 from __future__ import annotations
@@ -77,8 +76,8 @@ async def _set_channel_protection_impl(
     except AccessPolicyUnreadable as exc:
         raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
     except ChannelProtectionRefused as exc:
-        if exc.reason != "isolated":
-            record_authz_denial(Action.SET_CHANNEL_PROTECTION, "admin_required")
+        if exc.reason == "admin_required":
+            record_authz_denial(Action.SET_CHANNEL_PROTECTION, exc.reason)
         raise ToolError(f"{exc} Nothing was changed. Tell the caller. Do not retry.") from exc
     state = [
         "daimon posts nothing there" if change.protected else "daimon may post there",
@@ -97,7 +96,7 @@ async def _set_channel_protection_impl(
 
 
 def register_channel_protection_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_protection(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -110,10 +109,10 @@ def register_channel_protection_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         ``protected`` stops every post into the channel and its threads, replies
         included. ``sealed`` makes its messages and conversations readable only from
-        inside it. A server admin may change any channel; an admin of the channel may
-        change that channel, except lifting its seal. An isolated channel stays sealed
-        until its isolation ends (``set_channel_isolation``). ``channel_id`` is the
-        channel's id; a Slack or Teams thread id names its channel.
+        inside it. Requires a server admin; a channel's own admins can't change either.
+        An isolated channel stays sealed until its isolation ends
+        (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
+        Teams thread id names its channel.
         """
         return await _set_channel_protection_impl(
             runtime,

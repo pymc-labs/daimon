@@ -4770,10 +4770,10 @@
         
         ``protected`` stops every post into the channel and its threads, replies
         included. ``sealed`` makes its messages and conversations readable only from
-        inside it. A server admin may change any channel; an admin of the channel may
-        change that channel, except lifting its seal. An isolated channel stays sealed
-        until its isolation ends (``set_channel_isolation``). ``channel_id`` is the
-        channel's id; a Slack or Teams thread id names its channel.
+        inside it. Requires a server admin; a channel's own admins can't change either.
+        An isolated channel stays sealed until its isolation ends
+        (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
+        Teams thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,

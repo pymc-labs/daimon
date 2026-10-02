@@ -401,9 +401,9 @@ and set the rest again. `set` refuses to overwrite an unreadable row, so
 One channel's protection and seal toggle without restating the lists, with
 `set_channel_protection` or `daimon channels protect PLATFORM WORKSPACE_ID
 CHANNEL_ID [--protect/--unprotect] [--seal/--unseal]`
-(`packages/core/daimon/core/channel_protection.py`). Server admins and
-operator tokens change any channel, a channel admin their own except lifting
-its seal, and an isolated channel stays sealed until its isolation ends.
+(`packages/core/daimon/core/channel_protection.py`). Only server admins and
+operator tokens may, never a channel admin, and an isolated channel stays
+sealed until its isolation ends.
 
 **Channel admins.** A tenant can name, per channel, roles and members who run
 that channel on top of the server admins (`channel_admins`,

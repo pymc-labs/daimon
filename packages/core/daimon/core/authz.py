@@ -29,8 +29,8 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT,
-SET_CHANNEL_PROTECTION and READ_SESSION.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
+and READ_SESSION.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -68,9 +68,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   or the workspace default; a channel admin picks the channels they
   administer, except an environment with unrestricted networking in a
   sealed channel, or one holding a sealed thread (`sealed`).
-- **Channel protection and seals**: a server admin protects or seals any
-  channel, or lifts either; a channel admin the channels they administer,
-  except lifting a seal, which stays a server admin's call.
+- **Channel protection and seals**: a server admin's call, never a channel
+  admin's, even on a channel they administer.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
   outside its pin, since it would refuse every turn there.
@@ -173,7 +172,6 @@ class Action(StrEnum):
     # the channel in has unrestricted networking.
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
     # Protect or seal one channel (`Place.channel_id`), or lift either.
-    # `lifts_seal` says the change unseals it.
     SET_CHANNEL_PROTECTION = "set_channel_protection"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
@@ -382,7 +380,6 @@ class Request:
     operation_family: OperationFamily | None = None
     reach: AgentReach | None = None
     open_network: bool = False
-    lifts_seal: bool = False
 
 
 def _names_pinned(policy: TenantAccessPolicy, names: tuple[str | None, ...]) -> bool:
@@ -686,14 +683,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.SET_CHANNEL_PROTECTION:
+        # Protection and seals guard what a server admin owns, so a channel
+        # admin changes neither, even on their own channel.
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
-        if subject.via_agent_key or place.channel_id not in subject.administered_channel_ids:
-            return _deny("admin_required")
-        # A seal keeps the channel's content inside it; lifting one is a server admin's call.
-        if req.lifts_seal:
-            return _deny("admin_required")
-        return ALLOW
+        return _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:
         if subject.is_admin and not subject.via_agent_key:
@@ -888,7 +882,6 @@ def authorize(
     operation_family: OperationFamily | None = None,
     reach: AgentReach | None = None,
     open_network: bool = False,
-    lifts_seal: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -914,7 +907,6 @@ def authorize(
             operation_family=operation_family,
             reach=reach,
             open_network=open_network,
-            lifts_seal=lifts_seal,
         ),
     )
 
