@@ -133,6 +133,10 @@ class AgentInfo(BaseModel):
     dropped_skills: list[str] | None = None
     """Set only by ``fork_agent``: skills left off the copy (another agent's, or the
     source's own that failed to copy; its own are otherwise copied). Tell the person."""
+    copied_skills: list[str] | None = None
+    """Set only by ``fork_agent``: the source's own skills, uploaded again under the
+    copy's name. The copy has them even when ``skills`` does not list them yet; do
+    not add them again."""
 
     @classmethod
     def from_ma(
@@ -910,6 +914,8 @@ async def _fork_agent_impl(
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
+    if copy.copied_skills:
+        info = info.model_copy(update={"copied_skills": list(copy.copied_skills)})
     return await _with_answering_note(runtime, auth, info)
 
 
