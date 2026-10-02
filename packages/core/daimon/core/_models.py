@@ -1366,6 +1366,11 @@ class GitHubAppInstallation(Base):
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_login: Mapped[str] = mapped_column(Text, nullable=False)
     repo_full_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    account_id: Mapped[int | None] = mapped_column(BigInteger)
+    account_type: Mapped[str | None] = mapped_column(Text)
+    repository_selection: Mapped[str | None] = mapped_column(Text)
+    permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2394,6 +2399,138 @@ class TurnOutcome(Base):
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     unpriced_calls: Mapped[int | None] = mapped_column(Integer)
     billing_posture: Mapped[str | None] = mapped_column(Text)
+
+
+class TenantGitHubRepo(Base):
+    __tablename__ = "tenant_github_repos"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "repo_id"),
+        CheckConstraint("max_access IN ('read', 'write')"),
+        CheckConstraint("status IN ('active', 'suspended', 'revoked')"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    owner_id: Mapped[int] = mapped_column(BigInteger)
+    installation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_app_installations.installation_id")
+    )
+    repo_full_name: Mapped[str] = mapped_column(Text)
+    max_access: Mapped[str] = mapped_column(Text)
+    authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
+    authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(Text, server_default="active")
+    status_reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+
+
+class AgentGitHubGrant(Base):
+    __tablename__ = "agent_github_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "repo_id"],
+            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("baseline_access IN ('none', 'read', 'write')"),
+        CheckConstraint("ceiling_access IN ('read', 'write')"),
+        CheckConstraint(
+            "baseline_access = 'none' OR baseline_access = 'read' OR ceiling_access = 'write'"
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    baseline_access: Mapped[str] = mapped_column(Text)
+    ceiling_access: Mapped[str] = mapped_column(Text)
+    staged: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    mount_path: Mapped[str | None] = mapped_column(Text)
+    is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+
+
+class AgentGitHubMode(Base):
+    __tablename__ = "agent_github_mode"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id"),
+        CheckConstraint("mode IN ('legacy', 'app')"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    mode: Mapped[str] = mapped_column(Text, server_default="legacy")
+
+
+class GitHubUserLink(Base):
+    __tablename__ = "github_user_links"
+    __table_args__ = (CheckConstraint("status IN ('active', 'broken')"),)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    login: Mapped[str] = mapped_column(Text)
+    encrypted_access_token: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    token_generation: Mapped[int] = mapped_column(Integer, server_default="1")
+    link_generation: Mapped[int] = mapped_column(Integer, server_default="1")
+    status: Mapped[str] = mapped_column(Text, server_default="active")
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountGitHubLink(Base):
+    __tablename__ = "account_github_links"
+    __table_args__ = (
+        CheckConstraint("verified_via IN ('discord_oauth', 'slack_oidc', 'auto_attach_discord')"),
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    github_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user_links.github_user_id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    platform_user_id: Mapped[str] = mapped_column(Text)
+    verified_via: Mapped[str] = mapped_column(Text)
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubIssuedToken(Base):
+    __tablename__ = "github_issued_tokens"
+    __table_args__ = (CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),)
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    session_id: Mapped[str] = mapped_column(Text)
+    installation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_app_installations.installation_id")
+    )
+    repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
+    grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
+    requester_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    link_generation: Mapped[int | None] = mapped_column(Integer)
+    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, server_default="pending")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
 
 
 class SecurityAuditEvent(Base):

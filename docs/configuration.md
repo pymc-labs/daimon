@@ -29,6 +29,7 @@ typo is silent — check the spelling here.
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
+- [GitHub App](#github-app)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
 - [Gemini](#gemini)
@@ -701,6 +702,48 @@ production).
 Decompressed (extracted) size cap enforced against the sum of tar member sizes before
 extraction, guarding against zip bombs. 200 MiB is the operator default. Set to 0 to
 disable (not recommended in production).
+
+## GitHub App
+
+Read from `daimon.core.config.GithubAppSettings`. Prefix `DAIMON_GITHUB_APP__`.
+
+Credentials for agent-scoped GitHub App access.
+
+### `DAIMON_GITHUB_APP__APP_ID`
+
+`str | None` · optional · default unset
+
+GitHub App ID for agent-scoped access.
+
+### `DAIMON_GITHUB_APP__APP_SLUG`
+
+`str | None` · optional · default unset
+
+GitHub App URL slug used for installation links.
+
+### `DAIMON_GITHUB_APP__PRIVATE_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+GitHub App private key as PEM or base64-encoded PEM.
+
+### `DAIMON_GITHUB_APP__WEBHOOK_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret for verifying this App's webhook signatures.
+
+### `DAIMON_GITHUB_APP__CLIENT_ID`
+
+`str | None` · optional · default unset
+
+GitHub App client ID for user authorization.
+
+### `DAIMON_GITHUB_APP__CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+GitHub App client secret for user authorization.
 
 ## Crypto
 

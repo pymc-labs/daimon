@@ -51,6 +51,7 @@ SECTION_TITLES: dict[str, str] = {
     "discord": "Discord",
     "slack": "Slack",
     "github": "GitHub",
+    "github_app": "GitHub App",
     "crypto": "Crypto",
     "credentials": "Credentials",
     "gemini": "Gemini",

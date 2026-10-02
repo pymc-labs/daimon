@@ -757,6 +757,37 @@ class GithubSettings(BaseModel):
         return value
 
 
+class GithubAppSettings(BaseModel):
+    """Credentials for agent-scoped GitHub App access."""
+
+    app_id: str | None = Field(default=None, description="GitHub App ID for agent-scoped access.")
+    app_slug: str | None = Field(
+        default=None, description="GitHub App URL slug used for installation links."
+    )
+    private_key: SecretStr | None = Field(
+        default=None, description="GitHub App private key as PEM or base64-encoded PEM."
+    )
+    webhook_secret: SecretStr | None = Field(
+        default=None, description="Secret for verifying this App's webhook signatures."
+    )
+    client_id: str | None = Field(
+        default=None, description="GitHub App client ID for user authorization."
+    )
+    client_secret: SecretStr | None = Field(
+        default=None, description="GitHub App client secret for user authorization."
+    )
+
+    @field_validator("private_key", mode="before")
+    @classmethod
+    def _decode_private_key(cls, value: object) -> object:
+        return GithubSettings._decode_base64_private_key(value)  # pyright: ignore[reportPrivateUsage]
+
+    @field_validator("app_slug")
+    @classmethod
+    def _validate_slug(cls, value: str | None) -> str | None:
+        return GithubSettings._validate_app_slug(value)  # pyright: ignore[reportPrivateUsage]
+
+
 class CryptoSettings(BaseModel):
     """MultiFernet keys for at-rest token encryption.
 
@@ -1193,6 +1224,7 @@ class Settings(BaseSettings):
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
+    github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
