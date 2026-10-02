@@ -26,13 +26,14 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import CommandHandler
+from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
-from daimon.adapters.teams.routine_delivery import SdkRoutineTeams, make_teams_routine_poster
+from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
@@ -265,6 +266,7 @@ def create_teams_http_service(
         "billing": billing.command,
     }
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
+    direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
     turns = TeamsApp(
         runtime=runtime,
         sender=teams_app,
@@ -273,9 +275,10 @@ def create_teams_http_service(
         reader=reader,
         channel_files=files,
         installs=installs,
+        direct=direct,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
-            SdkRoutineTeams(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id),
+            direct,
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
         ),

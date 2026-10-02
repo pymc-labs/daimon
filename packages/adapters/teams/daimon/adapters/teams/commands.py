@@ -21,6 +21,8 @@ from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.cards import AdaptiveCard
 
 CHANNEL_POINTER = "Commands work in our 1:1 chat. Open a chat with me and send `{name}` there."
+ANSWERED_IN_CHAT = "I've answered `{name}` in our 1:1 chat."
+NEW_IN_CHANNEL = "Each post is its own conversation: start a new post to begin afresh."
 
 
 @dataclass(frozen=True)

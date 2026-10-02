@@ -29,7 +29,9 @@ from daimon.adapters.teams.card import enable_files_card
 from daimon.adapters.teams.card_actions import toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
+    ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
+    NEW_IN_CHANNEL,
     CommandContext,
     CommandHandler,
     parse_command,
@@ -41,6 +43,7 @@ from daimon.adapters.teams.context import (
     render_user_message,
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
+from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
@@ -235,6 +238,7 @@ class TeamsApp:
         reader: ThreadReader | None = None,
         channel_files: ChannelFiles | None = None,
         installs: TeamInstalls | None = None,
+        direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
     ) -> None:
         teams = runtime.settings.teams
@@ -253,6 +257,8 @@ class TeamsApp:
         self._channel_files = channel_files
         # Records each team for the MCP server's channel reads; None records nothing.
         self._installs = installs
+        # Opens 1:1 chats for commands sent in a channel; None points the sender there.
+        self._direct = direct
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
         self.outputs = TeamsOutputDelivery(
@@ -582,9 +588,18 @@ class TeamsApp:
         command = parse_command(inbound.text, self._commands)
         if command is not None:
             name, args = command
-            if inbound.kind != "dm":
-                await self._say(inbound, CHANNEL_POINTER.format(name=name))
+            if inbound.kind != "dm" and name == "new":
+                await self._say(inbound, NEW_IN_CHANNEL)
                 return
+            if inbound.kind != "dm":
+                # Teams has no message only its sender sees: answer in their 1:1 chat.
+                chat = await self._direct_chat(inbound)
+                await self._say(
+                    inbound, (ANSWERED_IN_CHAT if chat else CHANNEL_POINTER).format(name=name)
+                )
+                if chat is None:
+                    return
+                inbound = chat
             inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
             await self._commands[name](
                 CommandContext(
@@ -600,6 +615,30 @@ class TeamsApp:
             )
             return
         await self._orchestrate(inbound, tenant_id)
+
+    async def _direct_chat(self, inbound: TeamsInbound) -> TeamsInbound | None:
+        """`inbound` moved to its sender's 1:1 chat; None when Teams will not open one."""
+        if self._direct is None:
+            return None
+        try:
+            member = await self._direct.member(inbound.channel_id, inbound.user_id)
+            chat = await self._direct.open_chat(member) if member else None
+        except TEAMS_SEND_ERRORS as exc:
+            log.info("teams.command.no_direct_chat", reason=type(exc).__name__)
+            return None
+        if chat is None:
+            return None
+        return dataclasses.replace(
+            inbound,
+            kind="dm",
+            conversation_id=chat,
+            channel_id=chat,
+            team_id=None,
+            team_group_id=None,
+            channel_name=None,
+            channel_type=None,
+            team_name=None,
+        )
 
     async def _turn_cap(self, tenant_id: uuid.UUID) -> int:
         default = self._teams.max_concurrent_turns_per_tenant

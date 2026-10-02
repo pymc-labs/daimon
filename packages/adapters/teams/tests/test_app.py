@@ -14,7 +14,7 @@ import pytest
 import structlog
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
-from daimon.adapters.teams.commands import fresh_start
+from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
 from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
@@ -168,6 +168,56 @@ async def test_a_failing_command_is_answered(
     )
     await teams._handle(make_inbound("new"))
     assert [a.text for a in sender.activities] == [app_module._FAILED]
+
+
+@dataclasses.dataclass
+class _Direct:
+    """A `DirectChats` whose member lookup finds the person only when `present`."""
+
+    present: bool = True
+    looked_up: list[tuple[str, str]] = dataclasses.field(default_factory=list[tuple[str, str]])
+
+    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
+        self.looked_up.append((conversation_id, aad_object_id))
+        return "29:member" if self.present else None
+
+    async def open_chat(self, member_id: str) -> str:
+        return "a:direct"
+
+    async def post(self, conversation_id: str, text: str) -> None:
+        raise AssertionError("commands answer through the sender")
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("present", [True, False])
+async def test_a_channel_command_is_answered_in_the_senders_1_1_chat(
+    db_session_factory: async_sessionmaker[AsyncSession], present: bool
+) -> None:
+    sender, direct = FakeSender(), _Direct(present)
+    seen: list[TeamsInbound] = []
+
+    async def _memory(context: Any) -> None:
+        seen.append(context.inbound)
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"memory": _memory},
+        bot_token=bot_token,
+        direct=direct,
+    )
+    inbound = dataclasses.replace(
+        make_inbound("memory", conversation=THREAD_ID, kind="channel"), channel_id=CHANNEL_ID
+    )
+    await teams._handle(inbound)
+    [(where, reply, _)] = sender.sent
+    assert where == THREAD_ID and direct.looked_up == [(CHANNEL_ID, AAD_OBJECT_ID)]
+    if present:
+        assert reply.text == ANSWERED_IN_CHAT.format(name="memory")
+        [moved] = seen
+        assert (moved.kind, moved.conversation_id, moved.team_id) == ("dm", "a:direct", None)
+    else:
+        assert reply.text == CHANNEL_POINTER.format(name="memory") and seen == []
 
 
 async def _outcomes(db_factory: async_sessionmaker[AsyncSession]) -> list[OutcomeRecord]:

@@ -59,6 +59,7 @@ CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
 # The Entra group behind the fixtures' team, as Bot Framework's team details name it.
 TEAM_GROUP_ID = "00000000-0000-0000-0000-000000007ea3"
+DIRECT_CHAT_ID = "a:direct-chat"
 USER_NAME = "Ada Lovelace"
 # Vendored for an offline test from
 # https://raw.githubusercontent.com/microsoft/AdaptiveCards/main/schemas/1.5.0/adaptive-card.json
@@ -231,7 +232,7 @@ class TeamsApiFake:
 
     Passed to `create_teams_http_service(client=...)`; nothing reaches the
     network. POST /activities answers with `m-<n>`; PUT echoes the id; team
-    details name `TEAM_GROUP_ID`.
+    details name `TEAM_GROUP_ID`; everyone is a member, with 1:1 chat `DIRECT_CHAT_ID`.
     """
 
     requests: list[SentRequest] = dataclasses.field(default_factory=list[SentRequest])
@@ -260,6 +261,10 @@ class TeamsApiFake:
         if context.method == "GET" and team:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
+        if context.method == "GET" and "/members/" in context.url:
+            return httpx.Response(200, json={"id": "29:member"}, request=request)
+        if context.method == "POST" and httpx.URL(context.url).path.endswith("/v3/conversations"):
+            return httpx.Response(200, json={"id": DIRECT_CHAT_ID}, request=request)
         if context.method == "PUT" and update:
             return httpx.Response(200, json={"id": update.group(1)}, request=request)
         if context.method == "POST" and re.search(r"/conversations/[^/]+/activities$", context.url):

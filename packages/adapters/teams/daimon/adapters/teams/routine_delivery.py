@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Protocol
 
 import httpx
 import structlog
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.adapters.teams.direct_chats import DirectChats
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
@@ -34,66 +34,16 @@ from daimon.core.routine_delivery import (
     teams_thread_id,
 )
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.teams_bot_framework import SERVICE_URL
-from microsoft_teams.api import Account, MessageActivityInput
-from microsoft_teams.api.clients.conversation import CreateConversationParams
-from microsoft_teams.apps import App
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["RoutineTeams", "SdkRoutineTeams", "make_teams_routine_poster"]
+__all__ = ["make_teams_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
 
-class RoutineTeams(Protocol):
-    """The Bot Framework calls a routine post needs."""
-
-    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
-        """The person's roster id (`29:…`) in the conversation, or None when absent."""
-        ...
-
-    async def open_chat(self, member_id: str) -> str:
-        """The bot's 1:1 chat with a roster member."""
-        ...
-
-    async def post(self, conversation_id: str, text: str) -> None: ...
-
-
-class SdkRoutineTeams:
-    """`RoutineTeams` over the SDK app, sending through the adapter's timed sender."""
-
-    def __init__(self, app: App, sender: TeamsSender, *, entra_tenant_id: str) -> None:
-        self._app = app
-        self._sender = sender
-        self._entra_tenant_id = entra_tenant_id
-
-    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
-        conversations = self._app.api.from_service_url(SERVICE_URL).conversations
-        try:
-            account = await conversations.get_member_by_id(conversation_id, aad_object_id)
-        except httpx.HTTPStatusError as err:
-            if err.response.status_code in (403, 404):
-                return None
-            raise
-        return account.id or None
-
-    async def open_chat(self, member_id: str) -> str:
-        params = CreateConversationParams(
-            members=[Account(id=member_id)],
-            tenant_id=self._entra_tenant_id,
-            channel_data={"tenant": {"id": self._entra_tenant_id}},
-        )
-        conversations = self._app.api.from_service_url(SERVICE_URL).conversations
-        return (await conversations.create(params)).id
-
-    async def post(self, conversation_id: str, text: str) -> None:
-        activity = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
-        await self._sender.send(conversation_id, activity, service_url=SERVICE_URL)
-
-
 def make_teams_routine_poster(
     sessionmaker: async_sessionmaker[AsyncSession],
-    teams: RoutineTeams,
+    teams: DirectChats,
     *,
     tenant_id: uuid.UUID,
     dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
