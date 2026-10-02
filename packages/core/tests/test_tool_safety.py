@@ -12,6 +12,7 @@ from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     classify_tool,
     decide_tool_call,
+    has_confirmation_gate,
     heal_reserved_server,
     session_tools_for_policy,
     toolset_permission_policy,
@@ -222,11 +223,15 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     out = session_tools_for_policy(_ON, _tools(), trusted_servers=frozenset({DAIMON_SERVER_NAME}))
     assert out is not None
     assert out[0] == _tools()[0]
-    assert out[1] == _tools()[1]
+    assert out[1] == _tools()[1] | {
+        "configs": [
+            {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+        ]
+    }, "daimon's own toolset stays trusted, except the one tool that confirms"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
-    assert out[2]["configs"] == [{"name": "create_issue"}], (
-        "a per-tool always_allow would let that tool skip the pause"
-    )
+    assert out[2]["configs"] == [
+        {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
+    ], "a per-tool always_allow would let that tool skip the pause"
 
 
 def test_session_tools_report_no_change_once_gated() -> None:
@@ -234,3 +239,42 @@ def test_session_tools_report_no_change_once_gated() -> None:
     once = session_tools_for_policy(_ON, _tools(), trusted_servers=trusted)
     assert once is not None
     assert session_tools_for_policy(_ON, once, trusted_servers=trusted) is None
+
+
+def test_daimon_add_skill_asks_only_when_it_uploads() -> None:
+    trusted = trusted_servers_for("https://mcp.example.com/mcp")
+    preview = _call(DAIMON_SERVER_NAME, "add_skill")
+    upload = ToolCall(
+        tool_use_id="tu_2",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="add_skill",
+        input={"agent_name": "a", "content_hash": "abc"},
+    )
+    decide = decide_tool_call
+    assert decide(_ON, preview, attended=True, trusted_servers=trusted).outcome == "allow"
+    assert decide(_ON, upload, attended=True, trusted_servers=trusted).outcome == "ask"
+    unattended = decide(_ON, upload, attended=False, trusted_servers=trusted)
+    assert (unattended.outcome, unattended.reason) == ("deny", "unattended_write")
+    for allowed in (("*",), ("daimon-mcp",), ("daimon-mcp/add_skill",)):
+        open_policy = _ON.model_copy(update={"unattended_writes": allowed})
+        for servers in (trusted, frozenset[str]()):
+            verdict = decide(open_policy, upload, attended=False, trusted_servers=servers)
+            assert verdict.outcome == "deny", f"{allowed}: nobody watching never confirms"
+    assert decide(OPEN_TOOL_SAFETY, upload, attended=True, trusted_servers=trusted).reason == (
+        "disabled"
+    ), "off by default: nothing about add_skill changes until the policy is on"
+
+
+def test_only_a_session_created_gated_holds_add_skill_for_a_person() -> None:
+    """The server reads the session's own tools: the gate as created, never the model's word."""
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    gated = session_tools_for_policy(_ON, _tools(), trusted_servers=trusted)
+    assert gated is not None
+    assert has_confirmation_gate(gated, tool_name="add_skill"), "the per-tool ask"
+    untrusted = session_tools_for_policy(_ON, _tools())
+    assert untrusted is not None
+    assert has_confirmation_gate(untrusted, tool_name="add_skill"), "the whole toolset asks"
+    assert not has_confirmation_gate(_tools(), tool_name="add_skill"), (
+        "a session created before the gate, or without tool safety, never asks"
+    )
+    assert not has_confirmation_gate(_tools()[2:], tool_name="add_skill"), "no daimon toolset"

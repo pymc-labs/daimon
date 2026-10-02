@@ -31,6 +31,9 @@ import httpx
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.beta_managed_agents_mcp_server_url_definition import (
+    BetaManagedAgentsMCPServerURLDefinition,
+)
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
     Tool,
@@ -51,7 +54,6 @@ from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
-from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.session_compat import (
     ChangeReason,
     RemirrorVaultCredentials,
@@ -61,13 +63,17 @@ from daimon.core.session_compat import (
     UpdateOp,
 )
 from daimon.core.session_snapshot import (
+    MaTool,
     SessionSnapshot,
     hash_env_bytes,
     hash_mcp_servers,
     hash_tools,
+    session_mcp_servers,
+    session_tools,
 )
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -110,7 +116,7 @@ def _is_session_running(error: APIStatusError) -> bool:
 
 
 def _agent_update(
-    agent: BetaManagedAgentsAgent, hidden_mcp_server_names: frozenset[str]
+    tools: Sequence[MaTool], mcp_servers: Sequence[BetaManagedAgentsMCPServerURLDefinition]
 ) -> BetaManagedAgentsSessionAgentUpdateParam:
     """Both arrays, in full, from the agent as it stands now.
 
@@ -122,16 +128,16 @@ def _agent_update(
     "In full" means the caller's full list, not the agent's: a server only
     somebody else's OAuth grant can authenticate is left out here exactly as
     `create_session` leaves it out, or the first configuration change of the
-    session's life would push it back onto a caller who cannot open it.
+    session's life would push it back onto a caller who cannot open it. And
+    both are gated as `create_session` gated them (`session_tools`), or the
+    update would write the agent's `always_allow` over the session's
+    `always_ask`.
     """
     return {
-        "tools": [
-            cast(Tool, tool.model_dump(mode="json"))
-            for tool in visible_tools(agent, hidden_mcp_server_names)
-        ],
+        "tools": [cast(Tool, tool.model_dump(mode="json")) for tool in tools],
         "mcp_servers": [
             cast(BetaManagedAgentsURLMCPServerParams, server.model_dump(mode="json"))
-            for server in visible_mcp_servers(agent, hidden_mcp_server_names)
+            for server in mcp_servers
         ],
     }
 
@@ -259,6 +265,7 @@ async def apply_update_ops(
     agent_uuid: uuid.UUID,
     account_id: uuid.UUID,
     mcp: McpSettings,
+    tool_safety: ToolSafetyPolicy,
     fernet: MultiFernet | None,
     github_fallback_pat: str | None,
     github_app_id: str | None,
@@ -297,9 +304,14 @@ async def apply_update_ops(
                     account_id=account_id,
                     server_urls={server.name: server.url for server in agent.mcp_servers},
                 )
+                public_url = None if mcp.public_url is None else str(mcp.public_url)
+                tools = session_tools(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+                servers = session_mcp_servers(
+                    agent, hidden, tool_safety=tool_safety, public_url=public_url
+                )
                 try:
                     await anthropic.beta.sessions.update(
-                        session_id, agent=_agent_update(agent, hidden)
+                        session_id, agent=_agent_update(tools, servers)
                     )
                 except APIStatusError as error:
                     if not _is_session_running(error):
@@ -308,8 +320,8 @@ async def apply_update_ops(
                     return SessionBusy(snapshot=snapshot, applied=tuple(applied))
                 snapshot = snapshot.model_copy(
                     update={
-                        "tools_sha256": hash_tools(visible_tools(agent, hidden)),
-                        "mcp_servers_sha256": hash_mcp_servers(visible_mcp_servers(agent, hidden)),
+                        "tools_sha256": hash_tools(tools),
+                        "mcp_servers_sha256": hash_mcp_servers(servers),
                     }
                 )
                 applied.extend(("tools", "mcp_servers"))

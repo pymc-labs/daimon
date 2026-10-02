@@ -23,6 +23,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -606,7 +607,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -635,6 +636,74 @@ async def test_remove_skill_impl_allows_non_admin_when_agent_unreachable(
         skill_id="skill_x",
     )
     assert captured.get("skills") == [], "an unreachable agent's skill removal is not gated"
+
+
+async def test_remove_skill_impl_refuses_a_built_in_agent_even_for_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = uuid.uuid4()
+    _captured, request_log, client = _spec_agent_router(
+        tenant_id=tenant_id,
+        account_id=uuid.uuid4(),
+        agent_name="daimon",
+        skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
+        managed=True,
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    with pytest.raises(ToolError, match="fork_agent"):
+        await _remove_skill_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="daimon",
+            skill_id="skill_x",
+        )
+    assert "POST /v1/agents/{id}" not in request_log
+
+
+async def test_remove_skill_impl_forgets_a_skill_added_by_hand(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    account_id = uuid.uuid4()
+    _captured, _log, client = _spec_agent_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_name="demo",
+        # Typed "anthropic" only so the router needs no skills listing.
+        skills=[{"type": "anthropic", "skill_id": "skill_up", "version": "1"}],
+    )
+    ledger = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_removal")
+    async with db_session_factory.begin() as session:
+        await upsert_user_skill(
+            session,
+            tenant_id=tenant_id,
+            principal_id=ledger,
+            agent_name="demo",
+            name="notes",
+            source_repo_url="",
+            source_repo_branch="",
+            source_path="",
+            content_hash="h",
+            anthropic_id="skill_up",
+            anthropic_latest_version="1",
+            source="upload",
+        )
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    await _remove_skill_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        agent_name="demo",
+        skill_id="skill_up",
+    )
+
+    async with db_session_factory() as session:
+        row = await load_user_skill(
+            session, tenant_id=tenant_id, principal_id=ledger, agent_name="demo", name="notes"
+        )
+    assert row is None, "a later skill-repo sync must not attach it again"
 
 
 # ---------------------------------------------------------------------------

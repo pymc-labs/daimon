@@ -96,6 +96,9 @@ CASES = [
         "add the build-models skill to research-bot", "update_agent", frozenset(["remove_skill"])
     ),
     SearchCase(
+        "add this pasted SKILL.md to research-bot", "add_skill", frozenset(["remove_skill"])
+    ),
+    SearchCase(
         "stop research-bot using the eda skill", "remove_skill", frozenset(["delete_skill"])
     ),
     SearchCase(

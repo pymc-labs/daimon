@@ -32,6 +32,7 @@ from daimon.adapters.slack.agent_setup.actions import (
 )
 from daimon.adapters.slack.agent_setup.isolation import ISOLATION_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_ADD_SKILL,
     ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
@@ -44,6 +45,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
     ACTION_ROUTING,
+    CALLBACK_ADD_SKILL,
 )
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
@@ -51,12 +53,16 @@ from daimon.adapters.slack.agent_setup.state import (
     encode_panel_metadata,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMAState,
@@ -950,3 +956,105 @@ async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert (policy.isolated_channel_ids, policy.sealed_channel_ids) == ((), ()), "all lifted"
     assert "team-alpha" not in policy.agent_channel_pins, "the copy's pin is lifted"
+
+
+async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member may add to an agent that answers nowhere, not to the workspace default."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
+    agent["metadata"]["daimon_account"] = str(uuid.uuid4())
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([agent]))
+    click = _action_payload(
+        ACTION_ADD_SKILL,
+        meta=_meta(view="details", agent_name=_OTHER_AGENT),
+        value=_OTHER_AGENT,
+        view_id="V_DETAILS",
+    )
+    mock = fake_slack_web_client.mock
+
+    await handle_agent_setup_action(runtime, click)
+    (pushed,) = _sent(mock, _VIEWS_PUSH_KEY)
+    assert pushed["view"]["callback_id"] == CALLBACK_ADD_SKILL
+    meta = decode_panel_metadata(pushed["view"]["private_metadata"])
+    assert meta is not None and (meta.agent_name, meta.root_view_id) == (_OTHER_AGENT, "V_DETAILS")
+
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
+    await handle_agent_setup_action(runtime, click)
+    assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "the refused click pushes nothing"
+    (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    assert "changing its skills needs a workspace admin" in refusal["text"]
+
+
+async def test_add_skill_on_a_pinned_agent_opens_only_inside_its_channels(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The panel's channel is the place: outside the pin a member's click is refused."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={_OTHER_AGENT: ("C_ELSEWHERE",)}),
+    )
+    await db_session.commit()
+    agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
+    agent["metadata"]["daimon_account"] = str(uuid.uuid4())
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([agent]))
+    mock = fake_slack_web_client.mock
+
+    def click(channel_id: str) -> dict[str, Any]:
+        return _action_payload(
+            ACTION_ADD_SKILL,
+            meta=_meta(view="details", agent_name=_OTHER_AGENT, channel_id=channel_id),
+            value=_OTHER_AGENT,
+            view_id="V_DETAILS",
+        )
+
+    await handle_agent_setup_action(runtime, click(_CHANNEL_ID))
+    assert _sent(mock, _VIEWS_PUSH_KEY) == [], "refused outside the pin"
+    (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    assert refusal["text"] == PIN_WRITE_REFUSAL
+
+    await handle_agent_setup_action(runtime, click("C_ELSEWHERE"))
+    assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "opens inside the pin"
+
+
+async def test_add_skill_ignores_the_members_own_conversations_with_the_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member's own live session is not someone else's use, as on Discord and in chat."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    principal = await get_or_create_platform_principal(
+        db_session, platform="slack", external_id=_USER_ID, tenant_id=tenant_id
+    )
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        thread_id="1700000000.000100",
+        account_id=principal.account_id,
+        ma_session_id="sesn_own",
+        ma_agent_id="agent_other",
+    )
+    await db_session.commit()
+    agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
+    agent["metadata"]["daimon_account"] = str(uuid.uuid4())
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([agent]))
+    click = _action_payload(
+        ACTION_ADD_SKILL,
+        meta=_meta(view="details", agent_name=_OTHER_AGENT),
+        value=_OTHER_AGENT,
+        view_id="V_DETAILS",
+    )
+
+    await handle_agent_setup_action(runtime, click)
+
+    assert len(_sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)) == 1, "the form opens"

@@ -35,14 +35,16 @@ __all__ = [
 #: leaves better than half the budget spare.
 PANEL_PAGE_SIZE: Final = 20
 
-PanelViewName = Literal["agents", "details", "routing", "channel_admins", "new_agent", "creating"]
+PanelViewName = Literal[
+    "agents", "details", "routing", "channel_admins", "new_agent", "creating", "add_skill"
+]
 """Which of the panel's screens a view is showing."""
 
 PanelExpansion = Literal["keys", "skills", "connections"]
 """A list the reader has asked to see in full rather than collapsed."""
 
 _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
-    {"agents", "details", "routing", "channel_admins", "new_agent", "creating"}
+    {"agents", "details", "routing", "channel_admins", "new_agent", "creating", "add_skill"}
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")
 
@@ -67,6 +69,8 @@ class PanelMetadata:
     agent_name: str | None = None
     root_view_id: str | None = None
     expanded: PanelExpansion | None = None
+    skill_hash: str | None = None
+    """On the Add skill form, the hash of the skill it last previewed."""
 
     def with_page(self, page: int) -> PanelMetadata:
         """Same view, a different page. Negative pages clamp to the first."""
@@ -95,6 +99,7 @@ class PanelMetadata:
             agent_name=agent_name,
             root_view_id=root_view_id,
             expanded=self.expanded if agent_name == self.agent_name else None,
+            skill_hash=None,
         )
 
     def toggled(self, expansion: PanelExpansion) -> PanelMetadata:
@@ -118,6 +123,8 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
         payload["r"] = meta.root_view_id
     if meta.expanded is not None:
         payload["x"] = meta.expanded
+    if meta.skill_hash is not None:
+        payload["h"] = meta.skill_hash
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > MAX_PRIVATE_METADATA_CHARS:
         raise ValueError(
@@ -170,6 +177,9 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
         expanded = next((name for name in _PANEL_EXPANSIONS if name in raw_expanded), None)
     elif raw_expanded is not None:
         return None
+    skill_hash = payload.get("h")
+    if skill_hash is not None and not isinstance(skill_hash, str):
+        return None
     return PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,
@@ -178,6 +188,7 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
         agent_name=agent_name,
         root_view_id=root_view_id,
         expanded=expanded,
+        skill_hash=skill_hash,
     )
 
 

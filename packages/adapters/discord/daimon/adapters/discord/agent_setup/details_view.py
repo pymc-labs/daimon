@@ -2,8 +2,8 @@
 
 The card answers "what can I use, and how do I change it?" without teaching
 anybody the configuration structure: what the agent is for, where a mention
-actually reaches it, what it is wired to, and the two ways to act on it — talk
-to Daimon about it, or drive it from a coding tool.
+actually reaches it, what it is wired to, and the ways to act on it — talk
+to Daimon about it, drive it from a coding tool, or add a skill.
 
 ``build_details_container`` is pure: it folds an `AgentDetails` into a
 container and never reads a clock, a session or a credential. ``DetailsView``
@@ -16,12 +16,19 @@ from __future__ import annotations
 import functools
 from urllib.parse import quote
 
+import anthropic
 import structlog
+from daimon.adapters.discord.agent_setup.add_skill import (
+    ADD_SKILL_LABEL,
+    AddSkillModal,
+    skill_change_refusal,
+)
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_detail_lists import (
@@ -30,6 +37,7 @@ from daimon.core.agent_detail_lists import (
     format_detail_lists,
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
+from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace
@@ -269,7 +277,7 @@ def _toggle_buttons(
 
 
 class DetailsView(PanelViewBase):
-    """The Details screen: one agent, two actions, and the way back.
+    """The Details screen: one agent, its actions, and the way back.
 
     Rebuilt from ``state`` on every render, so expanding a configuration list or coming
     back from a setup conversation costs no refetch.
@@ -315,6 +323,12 @@ class DetailsView(PanelViewBase):
         )
         coding_button.callback = self._on_coding_tools  # type: ignore[method-assign]  # per-instance callback
         action_row.add_item(coding_button)
+        if self.agent is not None:
+            add_skill_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=ADD_SKILL_LABEL, style=discord.ButtonStyle.secondary
+            )
+            add_skill_button.callback = self._on_add_skill  # type: ignore[method-assign]  # per-instance callback
+            action_row.add_item(add_skill_button)
         container.add_item(action_row)
 
         nav_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
@@ -349,6 +363,27 @@ class DetailsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
             agent=self.agent,
         )
+
+    async def _on_add_skill(self, interaction: discord.Interaction) -> None:
+        """Open the Add skill form for a caller who may change this agent's skills now."""
+        agent = self.agent
+        if agent is None:
+            return
+        try:
+            refusal = await skill_change_refusal(
+                interaction, runtime=self.runtime, state=self.state, agent=agent
+            )
+        except (DaimonError, anthropic.APIError) as exc:
+            request_id = generate_request_id()
+            log.exception("agent_setup.add_skill.check_failed", request_id=request_id)
+            await interaction.response.send_message(
+                render_error(exc, request_id=request_id), ephemeral=True
+            )
+            return
+        if refusal is not None:
+            await interaction.response.send_message(refusal, ephemeral=True)
+            return
+        await interaction.response.send_modal(AddSkillModal(self, agent))
 
     async def _on_toggle_detail(
         self, interaction: discord.Interaction, *, name: DetailListName

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 104 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 105 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -285,6 +285,14 @@ Authenticated turn origins and identity-pinned configuration targets.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_setup_target` | all callers | Switch this setup conversation to an explicitly selected MA agent identity. |
+
+## `skill_uploads`
+
+add_skill: add one pasted, attached or GitHub skill to one agent, after a preview.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `add_skill` | all callers | Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in this chat, or one folder of a GitHub repository. |
 
 ## `skills`
 

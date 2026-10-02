@@ -324,6 +324,13 @@ async def _process_one(
             name=pending.name,
         )
 
+    if existing is not None and existing.source == "upload":
+        # Pushing this repo's copy would overwrite the skill someone added by
+        # hand, and the next upload would overwrite it back.
+        raise DefaultsError(
+            f"skill name {pending.name!r} was added to this agent by hand; rename the "
+            f"repo's copy (e.g. {pending.name}-2) or remove the added one, then re-sync."
+        )
     if (
         existing is not None
         and existing.content_hash == new_hash
@@ -818,8 +825,14 @@ async def sync_agent_skills(
             principal_id=ledger_principal_id,
             agent_name=agent_name,
         )
-
-    if not any(row.anthropic_id is not None for row in current_rows):
+    # A skill added by hand is attached by its add alone: once detached, by
+    # whatever path, a sync must not bring it back.
+    row_ids: list[str] = [
+        row.anthropic_id
+        for row in current_rows
+        if row.anthropic_id is not None and row.source != "upload"
+    ]
+    if not row_ids:
         return report
 
     agent = await _get_sync_target_agent(
@@ -843,7 +856,6 @@ async def sync_agent_skills(
     # Pre-check using the initially-fetched agent for a cheap no-op early return.
     # A concurrent change is exactly what the retry below covers — if the initial
     # check passes, proceed; the closure will recompute from the fresh agent.
-    row_ids: list[str] = [row.anthropic_id for row in current_rows if row.anthropic_id is not None]
     if _compute_skills_union_list(agent.skills, row_ids) is None:
         _log.info(
             "skill_sync.attach_noop",

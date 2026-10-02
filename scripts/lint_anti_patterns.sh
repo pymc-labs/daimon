@@ -151,6 +151,7 @@ ALLOWLIST_T8=(
   "defaults/reconcile_skills.py"
   "skill_sync/orchestrator.py"
   "skills/sync.py"
+  "skills/add.py"
   "mcp/tools/skills.py"
   "cli/commands/skills.py"
 )

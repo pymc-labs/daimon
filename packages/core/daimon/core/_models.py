@@ -610,6 +610,9 @@ class UserSkill(Base):
     - agent_name is a free-form Text string with NO FK — agents are not in the local DB
       (migration 0003 dropped the agents cache table; MA is source of truth). Two principals
       can hold the same (agent_name, name) without colliding because principal_id is in the PK.
+    - source is `repo` for a skill-repo sync and `upload` for one skill added by hand.
+      An upload keeps `source_repo_url` empty so repo orphan and removal passes never
+      touch it; `origin` says where it came from instead.
     """
 
     __tablename__ = "user_skills"
@@ -621,6 +624,13 @@ class UserSkill(Base):
             "name",
             name="pk_user_skills",
         ),
+        ForeignKeyConstraint(
+            ["added_by_account_id"],
+            ["accounts.id"],
+            ondelete="SET NULL",
+            name="fk_user_skills_added_by_account_id",
+        ),
+        CheckConstraint("source IN ('repo', 'upload')", name="ck_user_skills_source"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -637,6 +647,9 @@ class UserSkill(Base):
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     anthropic_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     anthropic_latest_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="repo")
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

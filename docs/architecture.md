@@ -539,6 +539,47 @@ channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default.
 
+**Skill uploads.** One skill can be added to one agent by hand
+(`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
+it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
+or a GitHub folder read through the skill-repo fetch. Archives refuse links,
+absolute or `..` paths, encryption and the repo sync's size caps; the
+frontmatter needs a lowercase name and a bounded description. The skill is
+uploaded under the agent-scoped title, never the shared library. A name a
+shared or built-in skill already holds, or one that would load under the same
+folder as an attached skill, is refused. A fork drops agent-scoped skills
+(`copy_agent`), but one attached by id or kept by an older fork may still be
+shared, so a skill another agent also has attached is never versioned; the
+upload must take a new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
+origin is `owner/repo/path@branch`, never the URL as typed) and the adding
+account, so no repo sync replaces, deletes or re-attaches it, and removing the
+skill forgets it. `add_skill` previews first and adds only when called again
+with the preview's hash, which is bound to the target agent, and only after the
+person presses Approve on the confirmation card (below). The server checks the
+card can exist: the confirm needs a verified origin whose live session runs the
+origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
+as MA reports the session or, when it reports the agent's own tools, as the
+bind recorded sending them. Without that, as with tool safety off, an
+`agent_chat` session or one whose tools have not caught up yet, a chat
+confirm adds nothing and points to Add skill in
+the setup panels' Details (Discord takes a paste or a file, Slack a paste),
+where the person's own submit is the approval. The `skill_add` and
+`skill_remove` operations follow the shared-agent rule
+(`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
+admins on any other, channel admins on agents local to their channels, anyone
+on agents nobody else uses. Sharing is read as widely as a key change
+(`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
+default, or another member's routine or live session. A pinned agent takes a
+chat add only from a verified origin in its channels (`require_pin_write_access`
+with the card's origin), and a panel add only from its channels' panels
+(`pin_refusal` with the panel's channel and thread) at the button, the submit
+and the Add; `remove_skill`, like the other direct configuration tools, passes
+none. Pins and sharing are checked again on the fresh agent just before the
+upload and the attach, and refusals never name another agent. The target resolves from the turn's channel, so an
+isolated channel's setup thread reaches only its own agents and nothing outside
+reaches them. Their uploads are hidden outside it like its other agent-scoped
+skills, keyed by the upload row's agent.
+
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP
@@ -612,7 +653,14 @@ shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), but only as the deployment's verified
+their `operation_policy` checks), except `add_skill`: its confirming call, the
+one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
+the same card in chat and is always refused in a routine, whatever
+`unattended_writes` allows. Each bind compares a reused session's tools with
+the gated ones a new session would get and updates them in place, so a
+session started before tool safety was turned on is gated from its next turn,
+and a tools change never writes the agent's own `always_allow` back. The
+exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the

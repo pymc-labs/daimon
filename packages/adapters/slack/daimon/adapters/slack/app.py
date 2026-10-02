@@ -29,12 +29,20 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
+from daimon.adapters.slack.agent_setup.add_skill import (
+    AddSkillDecision,
+    evaluate_add_skill_submission,
+    run_add_skill_submission,
+)
 from daimon.adapters.slack.agent_setup.channel_admins import (
     ChannelAdminsSubmission,
     evaluate_channel_admins_submission,
     run_channel_admins_submission,
 )
-from daimon.adapters.slack.agent_setup.panel_views import CALLBACK_CHANNEL_ADMINS
+from daimon.adapters.slack.agent_setup.panel_views import (
+    CALLBACK_ADD_SKILL,
+    CALLBACK_CHANNEL_ADMINS,
+)
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
     evaluate_new_agent_submission,
@@ -792,6 +800,29 @@ class SlackApp:
                             )
 
                     self._spawn(_run_channel_admins())
+            elif cb_id == CALLBACK_ADD_SKILL:
+                # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
+                _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_as.response_payload)
+                )
+                if _as.proceed:
+                    _as_team: dict[str, Any] = payload.get("team") or {}
+                    _as_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_add_skill(
+                        *,
+                        _t: str = str(_as_team.get("id") or ""),
+                        _u: str = str(_as_user.get("id") or ""),
+                        _d: AddSkillDecision = _as,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_add_skill_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
+                            )
+
+                    self._spawn(_run_add_skill())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)

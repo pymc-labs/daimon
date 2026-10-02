@@ -45,6 +45,7 @@ from daimon.core.stores.domain import (
     UnsavedWorkChoice,
 )
 from daimon.core.stores.thread_sessions import record_snapshot
+from daimon.core.tool_safety import ToolSafetyPolicy
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -242,6 +243,8 @@ async def desired_snapshot_for(
     agent_uuid: uuid.UUID,
     account_id: uuid.UUID,
     recorded: SessionSnapshot | None,
+    tool_safety: ToolSafetyPolicy,
+    public_url: str | None,
     memory_read_only: bool = False,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
@@ -295,4 +298,6 @@ async def desired_snapshot_for(
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,
         repo_token_issued_at=None if recorded is None else recorded.repo_token_issued_at,
+        tool_safety=tool_safety,
+        public_url=public_url,
     )

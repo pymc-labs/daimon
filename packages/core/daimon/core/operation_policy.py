@@ -15,12 +15,17 @@ Slack ephemeral) differ.
 
 There are three rule families, each a fixed short-circuit order:
 
-- **spec** (`agent_spec_edit`): a spec edit never stamps the defaults
-  reconciler's spec hash, so a defaults-managed agent refuses the edit even
-  for an admin — an admin bypass here would leave permanent, silent drift
-  against the repo defaults that reconcile never notices. Order: managed ->
+- **spec** (`agent_spec_edit`, `skill_add`, `skill_remove`): a spec edit
+  never stamps the defaults reconciler's spec hash, so a defaults-managed
+  agent refuses the edit even for an admin — an admin bypass here would leave
+  permanent, silent drift against the repo defaults that reconcile never
+  notices. Order: managed ->
   `managed_agent` (admin included); admin -> `allow`; reachable ->
-  `needs_admin`; else `allow`.
+  `needs_admin`; else `allow`. Adding or removing one of an agent's skills
+  changes what it does, so it follows the same order: a managed agent is
+  refused, and anyone may change an agent nobody else uses. Skill files
+  reach every place keys do, so both kinds read sharing as wide as a key
+  change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
 
 - **attachment** (`key_replace`, `key_remove`, `mcp_replace`, `mcp_remove`,
   `repo_bind`, `skill_repo_connect`): attachments never enter the agent
@@ -71,11 +76,15 @@ OperationKind = Literal[
     "repo_bind",
     "skill_repo_connect",
     "agent_spec_edit",
+    "skill_add",
+    "skill_remove",
 ]
 
 PolicyOutcome = Literal["allow", "needs_admin", "managed_agent"]
 
-_SPEC_OPERATIONS: frozenset[OperationKind] = frozenset({"agent_spec_edit"})
+_SPEC_OPERATIONS: frozenset[OperationKind] = frozenset(
+    {"agent_spec_edit", "skill_add", "skill_remove"}
+)
 
 _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
     {"key_replace", "key_remove", "mcp_replace", "mcp_remove", "repo_bind", "skill_repo_connect"}

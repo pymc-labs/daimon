@@ -64,7 +64,15 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
-    {"key_replace", "key_remove", "mcp_replace", "mcp_remove", "skill_repo_connect"}
+    {
+        "key_replace",
+        "key_remove",
+        "mcp_replace",
+        "mcp_remove",
+        "skill_repo_connect",
+        "skill_add",
+        "skill_remove",
+    }
 )
 """Read as shared by `is_agent_shared_for_key_changes`: the keys, servers and skills
 also reach routines and live sessions. Spec edits and repo binds read the cascade only."""

@@ -106,20 +106,24 @@ def parse_skill_frontmatter(path: Path) -> tuple[SkillSpec, str]:
     Returns (SkillSpec, body_markdown). Raises DefaultsError on missing/invalid
     frontmatter.
     """
-    content = path.read_text()
+    return parse_skill_markdown(path.read_text(), source=str(path))
+
+
+def parse_skill_markdown(content: str, *, source: str) -> tuple[SkillSpec, str]:
+    """`parse_skill_frontmatter` for text already in hand; `source` names it in errors."""
     match = _FRONTMATTER_RE.match(content)
     if match is None:
-        raise DefaultsError(f"{path}: missing YAML frontmatter (expected leading '---')")
+        raise DefaultsError(f"{source}: missing YAML frontmatter (expected leading '---')")
     try:
         frontmatter = yaml.safe_load(match.group("frontmatter"))
     except yaml.YAMLError as err:
-        raise DefaultsError(f"{path}: frontmatter YAML parse error: {err}") from err
+        raise DefaultsError(f"{source}: frontmatter YAML parse error: {err}") from err
     if not isinstance(frontmatter, dict):
-        raise DefaultsError(f"{path}: frontmatter must be a mapping")
+        raise DefaultsError(f"{source}: frontmatter must be a mapping")
     try:
         spec = SkillSpec.model_validate(frontmatter)
     except ValidationError as err:
-        raise DefaultsError(f"{path}: {err}") from err
+        raise DefaultsError(f"{source}: {err}") from err
     return spec, match.group("body")
 
 

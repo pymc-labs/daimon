@@ -23,7 +23,11 @@ Three questions, each a total function of its arguments:
   "Daimon's own" is verified, not a name match: see `trusted_servers_for`
   and `heal_reserved_server`.
   `session_tools_for_policy` applies it to a session's tool list, which
-  `create_session` sends as a per-session override.
+  `create_session` sends as a per-session override. One daimon tool still
+  asks: `add_skill`, once its input names the reviewed `content_hash`
+  (`CONFIRMED_DAIMON_TOOLS`), since it puts new files in front of everyone
+  the agent answers. A run nobody watches never confirms one, whatever
+  `unattended_writes` allows.
 
 With `enabled=False` (the default) nothing changes: every toolset stays
 `always_allow` and every call is allowed, which is the behaviour before this
@@ -43,6 +47,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "CONFIRMED_DAIMON_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
     "PermissionPolicyType",
@@ -54,6 +59,7 @@ __all__ = [
     "VerdictReason",
     "classify_tool",
     "decide_tool_call",
+    "has_confirmation_gate",
     "heal_reserved_server",
     "session_tools_for_policy",
     "toolset_permission_policy",
@@ -87,6 +93,11 @@ DAIMON_SERVER_NAME: Final[str] = "daimon-mcp"
 
 #: `unattended_writes` entry that allows every write in unattended runs.
 ANY_KEY: Final[str] = "*"
+
+#: Daimon's own tools that wait for the card like a third-party write, keyed
+#: to the input field whose presence makes the call the write. Without it the
+#: call only previews, and runs. With it, an unattended run is always refused.
+CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {"add_skill": "content_hash"}
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -236,7 +247,8 @@ class ToolSafetyPolicy(BaseModel):
         default=(),
         description=(
             "Servers or server/tool pairs whose writes may run in routines and other "
-            'unattended runs, e.g. ["linear/create_issue"]. "*" allows every write there.'
+            'unattended runs, e.g. ["linear/create_issue"]. "*" allows every write there. '
+            "Daimon's own add_skill never confirms unattended."
         ),
     )
 
@@ -331,6 +343,15 @@ def _gated(server_name: str | None, trusted_servers: frozenset[str]) -> bool:
     return server_name is not None and server_name not in trusted_servers
 
 
+def _confirmed_daimon_write(call: ToolCall) -> bool:
+    field = CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
+    return (
+        call.server_name == DAIMON_SERVER_NAME
+        and field is not None
+        and call.input.get(field) is not None
+    )
+
+
 def trusted_servers_for(public_url: str | None) -> frozenset[str]:
     """The servers exempt from gating in a session: the built-in daimon server,
     and only when this deployment runs one (`public_url` set).
@@ -387,22 +408,30 @@ def decide_tool_call(
     `attended` is whether a person started this turn and can answer a card
     (chat) or not (routines, wakes, smoke runs). `trusted_servers` is
     `trusted_servers_for(public_url)`; empty (the default) gates every server.
+    A trusted server's call is a write only when `CONFIRMED_DAIMON_TOOLS` says so.
     """
     if not policy.enabled:
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
-    if call.server_name is None or not _gated(call.server_name, trusted_servers):
+    if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
-    effect = classify_tool(
-        policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
-    )
+    effect: ToolEffect
+    if _gated(call.server_name, trusted_servers):
+        effect = classify_tool(
+            policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
+        )
+    elif _confirmed_daimon_write(call):
+        effect = "write"
+    else:
+        return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
     if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
         return ToolVerdict(outcome="deny", effect=effect, reason="denied_by_operator")
     if effect == "read":
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
-    if ANY_KEY in policy.unattended_writes or _listed(
-        policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name
+    if not _confirmed_daimon_write(call) and (
+        ANY_KEY in policy.unattended_writes
+        or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
     ):
         return ToolVerdict(outcome="allow", effect=effect, reason="unattended_write_allowed")
     return ToolVerdict(outcome="deny", effect=effect, reason="unattended_write")
@@ -435,9 +464,12 @@ def session_tools_for_policy(
 
     `None` means nothing needs to change: enforcement is off, or every toolset
     already carries the policy this deployment wants. Otherwise each gated
-    toolset gets `always_ask` as its default, and any per-tool
-    `permission_policy` under it is dropped, since a per-tool `always_allow`
-    would let that one tool skip the pause.
+    toolset gets `always_ask` as its default and on every per-tool config
+    under it, since a per-tool `always_allow` would let that one tool skip
+    the pause. Daimon's own trusted toolset stays `always_allow` except for
+    its `CONFIRMED_DAIMON_TOOLS`, which ask. Every config written here is
+    complete (`enabled` and `permission_policy`), so the session reports back
+    exactly what was sent and its tools hash the same on the next bind.
 
     The session carries this, not the agent: `create_session` sends it as an
     `agent_with_overrides`, so however the agent was written (panel, chat
@@ -464,9 +496,55 @@ def session_tools_for_policy(
             if wanted["type"] == "always_ask" and entry.get("configs"):
                 configs: list[dict[str, Any]] = []
                 for config in entry["configs"]:
-                    trimmed = {k: v for k, v in dict(config).items() if k != "permission_policy"}
-                    changed = changed or len(trimmed) != len(config)
-                    configs.append(trimmed)
+                    changed = changed or config.get("permission_policy") != wanted
+                    configs.append({**config, "permission_policy": wanted})
+                entry["configs"] = configs
+            elif server_name == DAIMON_SERVER_NAME and server_name in trusted_servers:
+                configs, asked = _ask_for_confirmed_tools(
+                    entry.get("configs") or [], enabled=default_config.get("enabled", True)
+                )
+                changed = changed or asked
                 entry["configs"] = configs
         out.append(entry)
     return out if changed else None
+
+
+def _ask_for_confirmed_tools(
+    configs: Sequence[Mapping[str, Any]], *, enabled: bool
+) -> tuple[list[dict[str, Any]], bool]:
+    """The trusted toolset's per-tool configs with each `CONFIRMED_DAIMON_TOOLS` on `always_ask`.
+
+    A config added here takes the toolset's own `enabled`, as an omitted one would.
+    """
+    ask: dict[str, PermissionPolicyType] = {"type": "always_ask"}
+    out = [dict(config) for config in configs]
+    changed = False
+    for name in CONFIRMED_DAIMON_TOOLS:
+        config = next((c for c in out if c.get("name") == name), None)
+        if config is None:
+            out.append({"name": name, "enabled": enabled, "permission_policy": ask})
+            changed = True
+        elif config.get("permission_policy") != ask:
+            config["permission_policy"] = ask
+            changed = True
+    return out, changed
+
+
+def has_confirmation_gate(tools: Sequence[Mapping[str, Any]], *, tool_name: str) -> bool:
+    """Whether a session's tool list makes daimon's `tool_name` wait for a person.
+
+    `tools` is the session's own frozen agent (`sessions.retrieve`), dumped:
+    the per-tool `permission_policy` wins, else the toolset's default. A
+    session created before the gate, or without tool safety, answers False.
+    """
+    for entry in tools:
+        if entry.get("type") != "mcp_toolset" or entry.get("mcp_server_name") != DAIMON_SERVER_NAME:
+            continue
+        configs: Sequence[Mapping[str, Any]] = entry.get("configs") or []
+        config = next((c for c in configs if c.get("name") == tool_name), None)
+        default: Mapping[str, Any] = entry.get("default_config") or {}
+        policy: Mapping[str, Any] = (
+            (config or {}).get("permission_policy") or default.get("permission_policy") or {}
+        )
+        return policy.get("type") == "always_ask"
+    return False

@@ -771,7 +771,7 @@ async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
 
 
 @pytest.mark.parametrize("reach", ["personal_default", "thread_binding", "routine", "live_session"])
-async def test_a_skill_repo_connect_reads_sharing_as_wide_as_a_key_change(
+async def test_skill_changes_read_sharing_as_wide_as_a_key_change(
     db_session: AsyncSession, reach: str
 ) -> None:
     """Skills reach every place keys do, so another member's use makes the agent shared."""
@@ -832,5 +832,8 @@ async def test_a_skill_repo_connect_reads_sharing_as_wide_as_a_key_change(
         return facts.is_reachable_in_tenant
 
     assert await shared("skill_repo_connect") and await shared("key_replace"), reach
+    assert await shared("skill_add") and await shared("skill_remove"), (
+        f"{reach}: a skill upload or removal reaches every place a key does"
+    )
     if reach in ("routine", "live_session"):
         assert not await shared("repo_bind"), "a repo bind keeps the cascade-only read"

@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). `DAIMON_CRYPTO__KEYS` now also accepts the raw `Fernet.generate_key()` output or a comma-separated list; before this, only a JSON list parsed and a bare key stopped every service at boot. After setting keys and restarting **every** process with them, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - Agents whose keys hold shell metacharacters get a re-quoted `.env` once, so those sessions pick up a fresh mount on their next turn. Keys already stored under a hard-denied or non-identifier name stop being exported (an admin-set `DATABASE_URL` still mounts — only tool-control names are dropped); each skipped name is logged as `credential_env.row_skipped` and still shows in `list_agent_keys` so it can be removed or re-added under another name. If you suspect a name like `TAR_OPTIONS` or `LD_PRELOAD` was set on a shared agent before this release, refresh that agent's sessions and rotate any credential the agent could have reached.
 - Audit what members set up before the cross-agent fixes: `list_routines` as an admin for routines whose agent is not the one their destination channel answers with, and thread handoff bindings to agents from other projects. These keep working until removed.
+- `add_skill` from chat waits on a confirmation card, which only tool safety shows, so with it off a chat add points to the setup panel's Add skill. A session started before this release, or before tool safety was turned on, picks up the card on its next message. Routines and other unattended runs never add a skill.
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 - Teams: run migration `0038_teams_parity` before deploying. The MCP server finds a team once the bot sees activity there, so a team the bot joined earlier is readable by channel tools after its next message.
@@ -242,6 +243,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notice now points at the panel instead of the operator. With no channel or
   workspace environment set, nothing changes; see the upgrade notes for
   routines where one already is.
+- **Skill uploads.** Add one skill to one agent from a pasted SKILL.md, a
+  `.md` or `.zip` attached on Discord or Slack, or a GitHub folder, with
+  `add_skill` or Add skill on the setup panel's agent details (Slack takes a
+  paste; attach files in chat). Each add previews the name, description, files
+  and any runnable scripts first. The skill becomes that agent's own copy and
+  never touches shared or built-in skills, or one another agent shares;
+  archives are unpacked safely and size-capped. A chat add lands only when the
+  person presses Approve on a confirmation card, so it needs tool safety;
+  without it the panel's Add skill is the way in. Built-in agents are refused;
+  otherwise server admins, channel admins on agents local to their channels,
+  and anyone on agents nobody else uses, read as widely as a key change.
+  `remove_skill` follows it too. A pinned agent takes an add, in chat or on the
+  panel, only from its own channels, and an isolated channel's agents add and list skills only
+  inside it. Nothing changes until someone adds a skill.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
@@ -468,6 +483,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tool safety keeps asking after a thread's first turn.** On the next turn,
+  a session created with tool safety on was compared with the agent's own
+  `always_allow` tools, so it read as changed and the in-place update wrote
+  `always_allow` back onto it: third-party writes stopped showing a
+  confirmation card after the first turn. The bind and the update now gate the
+  tools the way session create does, so an unchanged session is left alone and
+  a real tools change keeps `always_ask`. A session that already lost its
+  cards gets them back on its next turn.
 - **Teams posts nothing but its answer.** A file it could not read, an oversize output and a declined file offer each sent a status message of its own under the answer. The agent is now told what it could not open and why, and the rest is only logged, as on Slack and Discord. Cards and file offers still post.
 - **Teams channel files without Graph Explorer.** When a channel file is refused, a daimon admin gets an Enable files card: one sign-in by a SharePoint or global admin grants the bot that team's site. It needs `DAIMON_TEAMS__PUBLIC_URL` and a redirect URI on the app (see `docs/teams.md`).
 - **The MCP endpoint is stateless.** It kept MCP sessions in one process's

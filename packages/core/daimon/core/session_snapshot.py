@@ -52,7 +52,14 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
-from pydantic import BaseModel, ConfigDict
+from daimon.core.tool_safety import (
+    OPEN_TOOL_SAFETY,
+    ToolSafetyPolicy,
+    heal_reserved_server,
+    session_tools_for_policy,
+    trusted_servers_for,
+)
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
@@ -63,6 +70,10 @@ type MaTool = (
 )
 
 _ENV_MOUNT_SUFFIX = ".env"
+_TOOLS: TypeAdapter[list[MaTool]] = TypeAdapter(list[MaTool])
+_MCP_SERVERS: TypeAdapter[list[BetaManagedAgentsMCPServerURLDefinition]] = TypeAdapter(
+    list[BetaManagedAgentsMCPServerURLDefinition]
+)
 
 _IDENTITY_FIELDS = (
     "schema_version",
@@ -274,6 +285,44 @@ def _snapshot_from_session(
     )
 
 
+def session_tools(
+    agent: BetaManagedAgentsAgent,
+    hidden_mcp_server_names: frozenset[str],
+    *,
+    tool_safety: ToolSafetyPolicy,
+    public_url: str | None,
+) -> Sequence[MaTool]:
+    """The tools a session for this caller runs: the visible ones, tool safety applied.
+
+    The one definition `create_session`, the bind-time drift check and the
+    in-place update all use. Hashing or pushing the agent's raw tools instead
+    read every gated session as drifted and wrote `always_allow` back onto it
+    on its next turn, so third-party writes stopped asking after the first.
+    """
+    visible = visible_tools(agent, hidden_mcp_server_names)
+    gated = session_tools_for_policy(
+        tool_safety,
+        [tool.model_dump(mode="json") for tool in visible],
+        trusted_servers=trusted_servers_for(public_url),
+    )
+    return visible if gated is None else _TOOLS.validate_python(gated)
+
+
+def session_mcp_servers(
+    agent: BetaManagedAgentsAgent,
+    hidden_mcp_server_names: frozenset[str],
+    *,
+    tool_safety: ToolSafetyPolicy,
+    public_url: str | None,
+) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
+    """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed."""
+    visible = visible_mcp_servers(agent, hidden_mcp_server_names)
+    healed = heal_reserved_server(
+        tool_safety, [server.model_dump(mode="json") for server in visible], public_url=public_url
+    )
+    return visible if healed is None else _MCP_SERVERS.validate_python(healed)
+
+
 def desired_snapshot(
     agent: BetaManagedAgentsAgent,
     *,
@@ -288,6 +337,8 @@ def desired_snapshot(
     memory_read_only: bool = False,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    public_url: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -299,7 +350,9 @@ def desired_snapshot(
     caller's session — the servers only somebody else's OAuth grant can
     authenticate. Both arrays are hashed after that cut, or a session created
     with those overrides reads as drifted on every turn and has the hidden
-    servers pushed straight back onto it.
+    servers pushed straight back onto it. `tool_safety` and `public_url` are
+    the deployment's, for the same reason: both arrays are hashed as
+    `create_session` gates them (`session_tools`).
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
@@ -314,8 +367,16 @@ def desired_snapshot(
         # provisioning outage does not cause a replacement on every turn.
         memory_read_only=memory_read_only and memory_store_id is not None,
         vault_id=vault_id,
-        tools_sha256=hash_tools(visible_tools(agent, hidden_mcp_server_names)),
-        mcp_servers_sha256=hash_mcp_servers(visible_mcp_servers(agent, hidden_mcp_server_names)),
+        tools_sha256=hash_tools(
+            session_tools(
+                agent, hidden_mcp_server_names, tool_safety=tool_safety, public_url=public_url
+            )
+        ),
+        mcp_servers_sha256=hash_mcp_servers(
+            session_mcp_servers(
+                agent, hidden_mcp_server_names, tool_safety=tool_safety, public_url=public_url
+            )
+        ),
         env_sha256=env_sha256,
         env_file_id=env_file_id,
         env_resource_id=None,

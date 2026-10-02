@@ -63,6 +63,8 @@ Deliberate carve-outs:
   deleted as part of purge, but the uploaded file content inside Anthropic's
   Managed Agents is retained — guild-shared agents may still reference the
   underlying skill and the MA workspace is not under our delete authority.
+  A skill added by hand is keyed by its agent, not the person who added it;
+  erasure only nulls its `added_by_account_id`, through ON DELETE SET NULL.
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
   from our own DB.

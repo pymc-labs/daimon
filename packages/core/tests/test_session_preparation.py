@@ -8,6 +8,7 @@ the same wiring `bind_session` builds. Nothing is stubbed at a seam daimon owns.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -55,6 +56,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     set_pending_unsaved_work,
 )
+from daimon.core.tool_safety import ToolSafetyPolicy, has_confirmation_gate
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
@@ -146,6 +148,7 @@ class _Transport:
     def __init__(self) -> None:
         self.state = FakeSessionsState(ma=FakeMAState())
         self.calls: list[tuple[str, str]] = []
+        self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
         _register(self.state, _agent())
 
@@ -159,6 +162,13 @@ class _Transport:
     def client(self) -> AsyncAnthropic:
         def _record(request: httpx.Request) -> httpx.Response:
             self.calls.append((request.method, request.url.path))
+            path = request.url.path
+            if (
+                request.method == "POST"
+                and path.startswith("/v1/sessions/")
+                and path.count("/") == 3
+            ):
+                self.updates.append(json.loads(request.content))
             if self.fail_session_create and (request.method, request.url.path) == (
                 "POST",
                 "/v1/sessions",
@@ -200,6 +210,140 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport)
         github_app_private_key=None,
         public_url=None,
     )
+
+
+_PUBLIC_URL = "https://daimon.example/mcp"
+
+
+def _gated_deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
+    """A deployment with tool safety on and its own MCP server, as production runs it."""
+    return replace(
+        _deps(sessionmaker, transport),
+        mcp=McpSettings(public_url=_PUBLIC_URL),  # pyright: ignore[reportArgumentType]
+        public_url=_PUBLIC_URL,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+
+
+def _toolset(server: str, *configs: str) -> dict[str, Any]:
+    allow = {"type": "always_allow"}
+    return {
+        "type": "mcp_toolset",
+        "mcp_server_name": server,
+        "default_config": {"enabled": True, "permission_policy": allow},
+        "configs": [
+            {"name": name, "enabled": True, "permission_policy": allow} for name in configs
+        ],
+    }
+
+
+def _agent_with_servers(*extra: BetaManagedAgentsCustomTool) -> BetaManagedAgentsAgent:
+    """Daimon's own server and a third-party one, both stored `always_allow` on the agent."""
+    return ma_agent(
+        id=_AGENT_ID,
+        name="daimon",
+        model=_MODEL,
+        created_at=_NOW,
+        mcp_servers=[
+            {"type": "url", "name": "daimon-mcp", "url": _PUBLIC_URL},
+            {"type": "url", "name": "linear", "url": "https://linear.example/mcp"},
+        ],
+        tools=[_toolset("daimon-mcp"), _toolset("linear", "create_issue"), *extra],
+    )
+
+
+def _gate(tools: list[dict[str, Any]]) -> tuple[bool, str, list[str]]:
+    """Whether add_skill asks, and the third-party toolset's default and per-tool policies."""
+    linear = next(tool for tool in tools if tool.get("mcp_server_name") == "linear")
+    return (
+        has_confirmation_gate(tools, tool_name="add_skill"),
+        linear["default_config"]["permission_policy"]["type"],
+        [config["permission_policy"]["type"] for config in linear["configs"]],
+    )
+
+
+def _session_gate(transport: _Transport, session_id: str) -> tuple[bool, str, list[str]]:
+    agent = transport.state.sessions[session_id].agent
+    return _gate([tool.model_dump(mode="json") for tool in agent.tools])
+
+
+_GATED = (True, "always_ask", ["always_ask"])
+
+
+async def test_a_tool_safety_session_is_not_drifted_on_its_next_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bind compares the session against the arrays create_session sent, gated."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    agent = _agent_with_servers()
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+
+    first = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    assert _session_gate(transport, first.ma_session_id) == _GATED, (
+        "the created session asks before add_skill and before a third-party write"
+    )
+
+    second = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id
+    assert second.continuity == ContinuityOutcome(), "an unchanged agent is not a tools change"
+    assert transport.updates == [], "and nothing writes the agent's always_allow over the session"
+    assert _session_gate(transport, first.ma_session_id) == _GATED
+
+
+async def test_an_in_place_tools_update_keeps_the_tool_safety_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A real tools change is pushed gated, then reads as current on the turn after."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    _register(transport.state, _agent_with_servers())
+    deps = _gated_deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        _admission(account=account, agent=_agent_with_servers()),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+
+    search = BetaManagedAgentsCustomTool(
+        description="search the corpus",
+        input_schema=BetaManagedAgentsCustomToolInputSchema(type="object"),
+        name="search",
+        type="custom",
+    )
+    changed = _agent_with_servers(search)
+    _register(transport.state, changed)
+    second = await _prepare(
+        deps, _admission(account=account, agent=changed), tenant=tenant, account=account
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity.applied == ("tools",)
+    assert [_gate(update["agent"]["tools"]) for update in transport.updates] == [_GATED], (
+        "the update carries add_skill's always_ask and the third-party toolset's"
+    )
+    third = await _prepare(
+        deps, _admission(account=account, agent=changed), tenant=tenant, account=account
+    )
+    assert isinstance(third, PreparedTurn)
+    assert third.continuity == ContinuityOutcome(), "the recorded tools are the gated ones"
+    assert len(transport.updates) == 1, "so the update is not repeated every turn"
 
 
 _OPS = SessionOps(

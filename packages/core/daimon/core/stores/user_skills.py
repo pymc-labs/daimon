@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from daimon.core._models import UserSkill
-from daimon.core.stores.domain import UserSkillRow
+from daimon.core.stores.domain import UserSkillRow, UserSkillSource
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,7 +67,16 @@ async def upsert_user_skill(
     content_hash: str,
     anthropic_id: str | None,
     anthropic_latest_version: str | None,
+    source: UserSkillSource = "repo",
+    origin: str = "",
+    added_by_account_id: uuid.UUID | None = None,
 ) -> UserSkillRow:
+    """Insert or replace one row. A repo sync passes only the repo fields.
+
+    An upload passes ``source="upload"``, an ``origin`` and the adding account.
+    A conflicting row takes the new source, so the caller refuses first when an
+    upload would take over a repo-synced name.
+    """
     now = datetime.now(tz=UTC)
     stmt = (
         pg_insert(UserSkill)
@@ -82,6 +91,9 @@ async def upsert_user_skill(
             content_hash=content_hash,
             anthropic_id=anthropic_id,
             anthropic_latest_version=anthropic_latest_version,
+            source=source,
+            origin=origin,
+            added_by_account_id=added_by_account_id,
             updated_at=now,
         )
         .on_conflict_do_update(
@@ -93,6 +105,9 @@ async def upsert_user_skill(
                 "content_hash": content_hash,
                 "anthropic_id": anthropic_id,
                 "anthropic_latest_version": anthropic_latest_version,
+                "source": source,
+                "origin": origin,
+                "added_by_account_id": added_by_account_id,
                 "updated_at": now,
             },
         )
@@ -178,6 +193,29 @@ async def delete_user_skills_for_repo(
             UserSkill.tenant_id == tenant_id,
             UserSkill.agent_name == agent_name,
             UserSkill.source_repo_url == source_repo_url,
+        )
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def delete_uploaded_user_skills(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    anthropic_id: str,
+) -> int:
+    """Forget a skill added by hand once it is detached, so no later sync re-attaches it.
+
+    Principal-agnostic like :func:`delete_user_skills_for_repo`. Repo rows are
+    left alone: the repo still names them, and its next sync decides.
+    """
+    result = await session.execute(
+        delete(UserSkill).where(
+            UserSkill.tenant_id == tenant_id,
+            UserSkill.agent_name == agent_name,
+            UserSkill.anthropic_id == anthropic_id,
+            UserSkill.source == "upload",
         )
     )
     return cast(CursorResult[Any], result).rowcount
