@@ -55,6 +55,7 @@ from daimon.core.stores.scoped_config_read import (
     resolve,
 )
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
+from daimon.core.stores.thread_sessions import recorded_thread_parents
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -384,11 +385,16 @@ async def authorize_environment_pick(
     default, which then decides the network rule; a missing default counts
     as open. A set looks its environment up once, after the admin check, and
     one that doesn't exist is `missing`. `thread_id` is a thread under
-    `channel_id` the pick names, so a seal on that thread counts. A pick only
-    a server admin may make, an open network in a sealed channel, `needs_confirm`;
-    so is a workspace default that moves a sealed channel onto one.
+    `channel_id` the pick names, so a seal on that thread counts; without one, a
+    sealed thread a session ran in under `channel_id` counts. A pick only a server
+    admin may make, an open network in a sealed channel, `needs_confirm`; so is a
+    workspace default that moves a sealed channel or thread onto one.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
+    if channel_id is not None and thread_id is None and not holds_seal(policy, channel_id):
+        thread_id = await _sealed_thread_under(
+            session, policy, tenant_id=tenant_id, channel_id=channel_id
+        )
     place = Place(
         channel_id=thread_id or channel_id,
         parent_channel_id=channel_id if thread_id is not None else None,
@@ -456,18 +462,15 @@ class _Picks:
     channels: dict[str, str]
     workspace: str | None
 
-    def runs(self, seal_id: str, default: DeploymentDefault) -> str:
-        """The environment a turn under `seal_id` runs in.
-
-        A Slack thread key (``channel:ts``) follows its channel. A Discord
-        thread's channel isn't known here, so it counts as following the
-        workspace default, as a direct pick counts only a thread it names.
-        """
-        own = self.channels.get(seal_id) or next(
-            (name for channel, name in self.channels.items() if seal_id.startswith(f"{channel}:")),
-            None,
+    def runs(self, seal_id: str, parent: str | None, default: DeploymentDefault) -> str:
+        """The environment a turn under `seal_id`, in `parent` if a thread, runs in."""
+        return (
+            self.channels.get(seal_id)
+            or (self.channels.get(parent) if parent is not None else None)
+            or self.workspace
+            or default.environment_name
+            or "default"
         )
-        return own or self.workspace or default.environment_name or "default"
 
     def without(self, environment_name: str) -> _Picks:
         """The picks once every pick of `environment_name` is cleared."""
@@ -479,6 +482,39 @@ class _Picks:
 
 def _workspace(environment_name: str | None) -> Callable[[_Picks], _Picks]:
     return lambda picks: replace(picks, workspace=environment_name)
+
+
+def _thread_of(seal: str, channels: Iterable[str]) -> str | None:
+    """The channel a Slack (``channel:ts``) or Teams (``channel;messageid=``) thread names."""
+    return next((c for c in channels if seal.startswith((f"{c}:", f"{c};"))), None)
+
+
+async def _seal_parents(
+    session: AsyncSession, *, tenant_id: uuid.UUID, seals: Iterable[str], channels: Iterable[str]
+) -> dict[str, tuple[str | None, ...]]:
+    """Each sealed id with the channels it runs under (None: none, or itself one).
+
+    A Discord thread is placed by the sessions run in it; until one has, it counts
+    as following the workspace default.
+    """
+    seals, channels = tuple(seals), tuple(channels)
+    parents = await recorded_thread_parents(
+        session, tenant_id=tenant_id, thread_ids=[s for s in seals if s.isdigit()]
+    )
+    placed: dict[str, tuple[str | None, ...]] = {}
+    for seal in seals:
+        named = _thread_of(seal, channels)
+        placed[seal] = (named,) if named else tuple(sorted(parents.get(seal, ()))) or (None,)
+    return placed
+
+
+async def _sealed_thread_under(
+    session: AsyncSession, policy: TenantAccessPolicy, *, tenant_id: uuid.UUID, channel_id: str
+) -> str | None:
+    """A sealed thread under `channel_id`, if a Teams one names it or a session placed one."""
+    seals = sealed_ids(policy)
+    places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=(channel_id,))
+    return next((seal for seal in sorted(places) if channel_id in places[seal]), None)
 
 
 async def _load_picks(session: AsyncSession, *, tenant_id: uuid.UUID) -> _Picks:
@@ -497,16 +533,20 @@ async def _sealed_moves(
     default: DeploymentDefault,
     change: Callable[[_Picks], _Picks],
 ) -> frozenset[str]:
-    """The environments `change` moves sealed channels onto."""
+    """The environments `change` moves sealed channels or threads onto."""
     seals = sealed_ids(policy)
     if not seals:
         return frozenset()
     before = await _load_picks(session, tenant_id=tenant_id)
     after = change(before)
+    places = await _seal_parents(
+        session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
+    )
     return frozenset(
-        after.runs(seal, default)
-        for seal in seals
-        if after.runs(seal, default) != before.runs(seal, default)
+        after.runs(seal, parent, default)
+        for seal, parents in places.items()
+        for parent in parents
+        if after.runs(seal, parent, default) != before.runs(seal, parent, default)
     )
 
 
@@ -548,7 +588,12 @@ async def update_needs_confirm(
         return False
     seals = sealed_ids(await load_access_policy(session, tenant_id=tenant_id))
     picks = await _load_picks(session, tenant_id=tenant_id)
-    return any(picks.runs(seal, default) == name for seal in seals)
+    places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=picks.channels)
+    return any(
+        picks.runs(seal, parent, default) == name
+        for seal, parents in places.items()
+        for parent in parents
+    )
 
 
 async def archive_needs_confirm(

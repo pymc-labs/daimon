@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sealed channels without their own pick follow, for `update_environment`
   opening the network of an environment a sealed channel runs in, and for
   `archive_environment` dropping one onto an open fallback; both tools take
-  `confirm_open_network`.
+  `confirm_open_network`. A sealed Discord thread counts under the channel
+  its sessions ran in, also for a pick made on that channel directly.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to

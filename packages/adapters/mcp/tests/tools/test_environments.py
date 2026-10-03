@@ -24,7 +24,7 @@ from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -486,3 +486,50 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
     assert writes[2:] == ["/v1/environments/env_closed", "/v1/environments/env_closed/archive"], (
         "confirmed, both go through"
     )
+
+
+async def test_a_sealed_thread_counts_under_the_channel_a_session_ran_it_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Discord thread runs in its channel's environment, which a session there places."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="100"),
+            tenant_id=tenant.id,
+            environment_name="closed",
+        )
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(sealed_channel_ids=("200",))
+        )
+
+    def env(name: str) -> dict[str, Any]:
+        config = {**_ma_env().config.model_dump(mode="json"), "networking": _CLOSED_NETWORK}
+        metadata = {"daimon_tenant": str(tenant.id), "daimon_name": name}
+        return _ma_env(id=f"env_{name}", name=name, config=config, metadata=metadata).model_dump(
+            mode="json"
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/environments", lambda _req, _m: list_response([env("closed")]))
+    router.add(
+        "POST",
+        r"/v1/environments/([^/]+)",
+        lambda _req, m: httpx.Response(200, json=_ma_env(id=m.group(1)).model_dump(mode="json")),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+    unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
+
+    await _update_environment_impl(
+        runtime, auth, name="closed", config=unrestricted, description=None
+    )
+    async with committing_sessionmaker.begin() as session:
+        await make_thread_session(session, tenant=tenant, thread_id="200", channel_id="100")
+    with pytest.raises(ToolError, match="Sealed channels would run in the closed.*confirm_open"):
+        await _update_environment_impl(
+            runtime, auth, name="closed", config=unrestricted, description=None
+        )

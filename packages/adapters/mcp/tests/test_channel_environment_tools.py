@@ -31,7 +31,7 @@ from daimon.core.stores.channel_admins import list_administered_channel_ids
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -648,6 +648,40 @@ async def test_a_sealed_discord_thread_keeps_its_channel_network_closed(
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=THREAD
         )
+
+
+async def test_a_channel_pick_counts_a_sealed_thread_a_session_ran_under_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pick on the channel itself, not from the thread, still guards the sealed thread."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await make_thread_session(
+            session, tenant=tenant, account=account, thread_id=THREAD, channel_id=CHANNEL
+        )
+    runtime = _runtime(committing_sessionmaker, tenant.id, "open", limited=("closed",))
+    admin = _auth(tenant.id, account.id, admin=True)
+    await _grant(runtime, tenant.id, account.id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant.id, THREAD)
+    member = await _verified(runtime, _auth(tenant.id, account.id))
+
+    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="open", channel_id=CHANNEL
+        )
+    with pytest.raises(ToolError, match="confirm_open_network"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="open", channel_id=CHANNEL
+        )
+    closed = await _set_channel_environment_impl(
+        runtime, member, environment_name="closed", channel_id=CHANNEL
+    )
+    assert closed.changed, "a limited network stays the channel admin's pick"
+    other = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=OTHER_CHANNEL
+    )
+    assert other.changed, "a channel with no sealed thread needs no confirmation"
 
 
 async def test_an_operator_token_needs_channels_write_and_a_channel(

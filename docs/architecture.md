@@ -625,8 +625,9 @@ environment in the tenant, looked up once so the network rule and the write
 judge the same one; conversations pick it up from their next message, keeping
 their files and their seal, and `explain_agent_resolution` reports each tier's
 environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
-sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
-Discord thread the pick names), an environment with unrestricted
+sealed channel, or one holding a sealed thread (a Slack `channel:ts`, a
+Teams `channel;messageid=`, or a Discord thread the pick names or a session
+ran in under it), an environment with unrestricted
 networking (any network beyond package managers and MCP servers: anything but
 a cloud environment on limited networking with no allowed hosts) needs a
 server admin, and so does clearing a pick onto a default that has one. Even a
@@ -638,7 +639,8 @@ the same when they move a sealed channel onto such a network: a workspace
 default that sealed channels without a pick of their own follow, an
 `update_environment` that opens the network of an environment a sealed channel
 runs in, and an `archive_environment` whose cleared picks fall through onto
-one; both tools take `confirm_open_network` too. A pick
+one; both tools take `confirm_open_network` too. A sealed Discord thread no
+session has run in yet counts as following the workspace default. A pick
 made before the seal never met that rule, so sealing a channel or marking it confidential
 whose own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's
