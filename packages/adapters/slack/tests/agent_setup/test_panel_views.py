@@ -51,13 +51,13 @@ from daimon.adapters.slack.modal_limits import (
     MAX_PRIVATE_METADATA_CHARS,
     MAX_TITLE_CHARS,
 )
-from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
 from daimon.core.access_policy import ChannelRule
+from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
 from daimon.core.answering_map import AnsweringMap, build_answering_map
+from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.github_repo_auth import RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
-from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import (
