@@ -23,6 +23,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.turn.bookkeeping import reconcile_found_card
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -251,41 +252,48 @@ async def reconcile_turn_card_intent(
         )
         if result.state in (TurnCardSearchState.FOUND, TurnCardSearchState.MULTIPLE):
             message_ids = set(result.message_ids)
-            if intent.message_id is None:
-                recorded_message_id = str(min(message_ids))
+
+            async def record(message_id: str) -> bool:
                 try:
                     async with sessionmaker() as session:
                         recorded = await record_turn_card_message(
-                            session,
-                            id=intent.id,
-                            message_id=recorded_message_id,
+                            session, id=intent.id, message_id=message_id
                         )
                         if not recorded:
-                            return
+                            return False
                         await session.commit()
+                    return True
                 except SQLAlchemyError:
                     log.warning(
                         "turn.card_intent_recovered_id_failed",
                         intent_id=str(intent.id),
-                        message_id=recorded_message_id,
+                        message_id=message_id,
                         exc_info=True,
                     )
-                    return
-            else:
-                recorded_message_id = intent.message_id
+                    return False
 
-            if not await _reconcile_matching_messages(
-                thread,
-                intent_id=intent.id,
-                message_ids=message_ids,
-                known_message_id=intent.message_id,
-                sleep=sleep,
-            ):
-                return
-            await retire_terminal_turn_card(
-                sessionmaker,
-                intent_id=intent.id,
-                expected_message_id=recorded_message_id,
+            async def edit(message_ids: set[int] = message_ids) -> bool:
+                return await _reconcile_matching_messages(
+                    thread,
+                    intent_id=intent.id,
+                    message_ids=message_ids,
+                    known_message_id=intent.message_id,
+                    sleep=sleep,
+                )
+
+            async def retire(message_id: str) -> None:
+                await retire_terminal_turn_card(
+                    sessionmaker, intent_id=intent.id, expected_message_id=message_id
+                )
+
+            await reconcile_found_card(
+                expected_message_id=intent.message_id,
+                recovered_message_id=(
+                    str(min(message_ids)) if intent.message_id is None else intent.message_id
+                ),
+                record=record,
+                edit=edit,
+                retire=retire,
             )
             return
         if result.state is TurnCardSearchState.NOT_FOUND and intent.message_id is not None:

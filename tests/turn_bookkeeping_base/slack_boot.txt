@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None:
+    async with runtime.sessionmaker() as session:
+        orphans = await list_orphaned_turns(session, platform='slack')
+    if not orphans:
+        return
+    log.info('slack.turn.orphans_found', count=len(orphans))
+    tenants = await list_tenants_by_platform(runtime.sessionmaker, platform='slack')
+    team_id_by_tenant = {t.id: t.external_id for t in tenants}
+    by_tenant: dict[uuid.UUID, list[ThreadSessionRow]] = {}
+    for row in orphans:
+        by_tenant.setdefault(row.tenant_id, []).append(row)
+    for (tenant_id, rows) in by_tenant.items():
+        client: AsyncWebClient | None = None
+        team_id = team_id_by_tenant.get(tenant_id)
+        if team_id is not None:
+            try:
+                client = await resolve_web_client(runtime, team_id=team_id)
+            except (InvalidToken, SQLAlchemyError) as err:
+                log.warning('slack.turn.orphan_token_unusable', tenant_id=str(tenant_id), error=str(err))
+        if client is None:
+            log.info('slack.turn.orphan_tenant_unreachable', tenant_id=str(tenant_id), rows=len(rows))
+        for row in rows:
+            message_id = row.active_turn_message_id
+            if message_id is None:
+                continue
+            channel_id = row.active_turn_channel_id
+            if client is not None and channel_id is not None:
+                try:
+                    await client.chat_update(channel=channel_id, ts=message_id, blocks=to_interrupted_blocks(), text=_INTERRUPTED_FALLBACK_TEXT)
+                    log.info('slack.turn.orphan_retired', thread_id=row.thread_id, channel_id=row.active_turn_channel_id, status_ts=row.active_turn_message_id, frozen_for_s=(now - row.active_turn_started_at).total_seconds() if row.active_turn_started_at is not None else None)
+                except _SLACK_UPDATE_ERRORS as err:
+                    log.warning('slack.turn.orphan_retire_failed', thread_id=row.thread_id, error=str(err))
+            async with runtime.sessionmaker() as session:
+                cleared = await clear_active_turn_if_message_id(session, id=row.id, expected_message_id=message_id)
+                await session.commit()
+            if cleared:
+                await interrupt_orphaned_session(runtime.anthropic, session_id=row.ma_session_id)
+            else:
+                log.info('slack.turn.orphan_marker_moved', thread_id=row.thread_id, message_id=message_id)
+
+async def recover_slack_card_intents(runtime: SlackRuntime, intents: Sequence[TurnCardIntentRow], *, sleep: Callable[[float], Awaitable[None]]=asyncio.sleep, now: Callable[[], datetime]=lambda : datetime.now(dt.UTC), monotonic: Callable[[], float]=time.monotonic) -> None:
+    if not intents:
+        return
+    deadline = monotonic() + _CARD_RECOVERY_WINDOW_SECONDS
+    no_match_at: dict[uuid.UUID, float] = {}
+    last_lookup_at: dict[uuid.UUID, float] = {}
+    next_delay: dict[uuid.UUID, float] = {}
+    tenants = await list_tenants_by_platform(runtime.sessionmaker, platform='slack')
+    team_id_by_tenant = {tenant.id: tenant.external_id for tenant in tenants}
+    clients: dict[uuid.UUID, AsyncWebClient | None] = {}
+    try:
+        for intent in intents:
+            tenant_id = intent.tenant_id
+            team_id = team_id_by_tenant.get(tenant_id)
+            if team_id is None:
+                log.info('slack.turn_card_intent_tenant_unavailable', intent_id=str(intent.id))
+                continue
+            if tenant_id not in clients:
+                try:
+                    client = await resolve_web_client(runtime, team_id=team_id)
+                except (InvalidToken, SQLAlchemyError) as error:
+                    log.warning('slack.turn_card_intent_client_unavailable', tenant_id=str(tenant_id), error=str(error))
+                    client = None
+                if client is not None:
+                    client.retry_handlers = [handler for handler in client.retry_handlers if not isinstance(handler, AsyncRateLimitErrorRetryHandler)]
+                clients[tenant_id] = client
+            client = clients[tenant_id]
+            if client is None:
+                continue
+            if intent.channel_id is None:
+                log.warning('slack.turn_card_intent_channel_missing', intent_id=str(intent.id))
+                continue
+            for _attempt in range(_CARD_RECOVERY_MAX_ATTEMPTS):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    log.info('slack.turn_card_recovery_budget_exhausted')
+                    return
+                previous_lookup_at = last_lookup_at.get(tenant_id)
+                if previous_lookup_at is not None:
+                    elapsed = monotonic() - previous_lookup_at
+                    delay = max(_CARD_RECOVERY_RETRY_DELAY_SECONDS, next_delay.get(tenant_id, 0.0))
+                    if elapsed < delay:
+                        await sleep(min(delay - elapsed, remaining))
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    log.info('slack.turn_card_recovery_budget_exhausted')
+                    return
+                try:
+                    time_window: tuple[datetime, datetime] | None = None
+                    if intent.message_id is not None:
+                        try:
+                            known_message_time = datetime.fromtimestamp(float(intent.message_id), tz=dt.UTC)
+                        except (ValueError, OverflowError, OSError):
+                            log.warning('slack.turn_card_intent_timestamp_invalid', intent_id=str(intent.id))
+                            break
+                        time_window = (known_message_time - dt.timedelta(seconds=60), known_message_time + dt.timedelta(seconds=300))
+                    async with asyncio.timeout(remaining):
+                        lookup = await find_turn_card_by_key(client, channel=intent.channel_id, thread_ts=intent.thread_id, cancel_key=intent.id.hex, intent_created_at=intent.created_at, sleep=sleep, now=now(), time_window=time_window)
+                except TimeoutError:
+                    log.info('slack.turn_card_recovery_budget_exhausted', intent_id=str(intent.id))
+                    return
+                last_lookup_at[tenant_id] = monotonic()
+                next_delay[tenant_id] = lookup.retry_after_seconds or 0.0
+                if lookup.status in (CardLookupStatus.FOUND, CardLookupStatus.MULTIPLE):
+                    timestamps = lookup.message_timestamps or ((lookup.message_ts,) if lookup.message_ts is not None else ())
+                    if not timestamps:
+                        break
+                    expected_message_id = intent.message_id
+                    if expected_message_id is None:
+                        recorded = await _record_card_intent_message(runtime, intent, message_id=timestamps[0])
+                        if not recorded:
+                            break
+                        expected_message_id = timestamps[0]
+                    edits_succeeded = True
+                    for message_ts in timestamps:
+                        try:
+                            await client.chat_update(channel=intent.channel_id, ts=message_ts, blocks=to_interrupted_blocks(), text=_INTERRUPTED_FALLBACK_TEXT)
+                        except _SLACK_UPDATE_ERRORS as error:
+                            edits_succeeded = False
+                            log.warning('slack.turn_card_recovery_edit_failed', intent_id=str(intent.id), message_ts=message_ts, error=str(error))
+                    if edits_succeeded:
+                        await _retire_card_intent(runtime, intent, expected_message_id=expected_message_id)
+                    break
+                if lookup.status is CardLookupStatus.NOT_FOUND:
+                    if intent.message_id is not None:
+                        await _retire_card_intent(runtime, intent, expected_message_id=intent.message_id)
+                        break
+                    first_no_match = no_match_at.get(intent.id)
+                    if first_no_match is not None and monotonic() - first_no_match >= _CARD_RECOVERY_RETRY_DELAY_SECONDS:
+                        await _retire_card_intent(runtime, intent, expected_message_id=None)
+                        break
+                    no_match_at.setdefault(intent.id, monotonic())
+                    continue
+                if lookup.retry_after_seconds is not None:
+                    next_delay[tenant_id] = max(_CARD_RECOVERY_RETRY_DELAY_SECONDS, lookup.retry_after_seconds)
+    finally:
+        for client in clients.values():
+            if client is not None:
+                session = client.session
+                if session is not None:
+                    await session.close()

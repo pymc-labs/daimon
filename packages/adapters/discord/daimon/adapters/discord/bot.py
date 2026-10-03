@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Final, Literal
 
 import anthropic as _anthropic
@@ -96,6 +97,7 @@ from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.bookkeeping import recover_orphan_marker
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
@@ -1001,20 +1003,13 @@ class DaimonBot(commands.Bot):
                     message_id=row.active_turn_message_id,
                     error=str(err),
                 )
-            async with self.runtime.sessionmaker() as session:
-                cleared = await clear_active_turn_if_message_id(
-                    session, id=row.id, expected_message_id=row.active_turn_message_id
-                )
-                await session.commit()
-            if cleared:
-                # Stop the turn MA is still running for this orphan, so it
-                # stops billing and the next mention's message is not sent
-                # into a running session (which MA ignores). A moved marker
-                # belongs to a live turn and is never interrupted.
-                await interrupt_orphaned_session(
-                    self.runtime.anthropic, session_id=row.ma_session_id
-                )
-            else:
+            cleared = await recover_orphan_marker(
+                self.runtime.sessionmaker,
+                row,
+                clear=clear_active_turn_if_message_id,
+                interrupt=partial(interrupt_orphaned_session, self.runtime.anthropic),
+            )
+            if not cleared:
                 log.info(
                     "turn.orphan_marker_moved",
                     thread_id=row.thread_id,

@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+async def _retire_orphaned_turns_once(self) -> None:
+    if self._orphans_retired:
+        return
+    async with self.runtime.sessionmaker() as session:
+        if self._boot_turn_card_intents is None:
+            self._boot_turn_card_intents = await list_recoverable_turn_card_intents(session, platform='discord')
+        orphans = await list_orphaned_turns(session, platform='discord')
+    if not orphans:
+        self._orphans_retired = True
+        self._start_turn_card_recovery()
+        return
+    log.info('turn.orphans_found', count=len(orphans))
+    for row in orphans:
+        if row.active_turn_message_id is None:
+            continue
+        try:
+            channel = self.get_channel(int(row.thread_id)) or await self.fetch_channel(int(row.thread_id))
+            if isinstance(channel, discord.abc.Messageable):
+                message = await channel.fetch_message(int(row.active_turn_message_id))
+                await message.edit(embed=discord.Embed(color=theme.COLOR_RED, description='❌ This turn was interrupted by a restart and cannot be resumed. Nothing was lost on your side — mention me again to retry.'), view=None)
+                log.info('turn.orphan_retired', thread_id=row.thread_id, message_id=row.active_turn_message_id, frozen_for_s=(datetime.now(UTC) - row.active_turn_started_at).total_seconds() if row.active_turn_started_at is not None else None)
+        except (discord.HTTPException, discord.ClientException, ValueError) as err:
+            log.warning('turn.orphan_retire_failed', thread_id=row.thread_id, message_id=row.active_turn_message_id, error=str(err))
+        async with self.runtime.sessionmaker() as session:
+            cleared = await clear_active_turn_if_message_id(session, id=row.id, expected_message_id=row.active_turn_message_id)
+            await session.commit()
+        if cleared:
+            await interrupt_orphaned_session(self.runtime.anthropic, session_id=row.ma_session_id)
+        else:
+            log.info('turn.orphan_marker_moved', thread_id=row.thread_id, message_id=row.active_turn_message_id)
+    self._orphans_retired = True
+    self._start_turn_card_recovery()

@@ -41,6 +41,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import aiohttp
@@ -69,6 +70,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.turn.bookkeeping import reconcile_found_card, recover_orphan_marker
 from slack_sdk.errors import SlackApiError
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.web.async_client import AsyncWebClient
@@ -364,39 +366,47 @@ async def recover_slack_card_intents(
                     )
                     if not timestamps:
                         break
-                    expected_message_id = intent.message_id
-                    if expected_message_id is None:
-                        recorded = await _record_card_intent_message(
-                            runtime,
-                            intent,
-                            message_id=timestamps[0],
+
+                    async def record(message_id: str, intent: TurnCardIntentRow = intent) -> bool:
+                        return await _record_card_intent_message(
+                            runtime, intent, message_id=message_id
                         )
-                        if not recorded:
-                            break
-                        expected_message_id = timestamps[0]
-                    edits_succeeded = True
-                    for message_ts in timestamps:
-                        try:
-                            await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-                                channel=intent.channel_id,
-                                ts=message_ts,
-                                blocks=to_interrupted_blocks(),
-                                text=_INTERRUPTED_FALLBACK_TEXT,
-                            )
-                        except _SLACK_UPDATE_ERRORS as error:
-                            edits_succeeded = False
-                            log.warning(
-                                "slack.turn_card_recovery_edit_failed",
-                                intent_id=str(intent.id),
-                                message_ts=message_ts,
-                                error=str(error),
-                            )
-                    if edits_succeeded:
-                        await _retire_card_intent(
-                            runtime,
-                            intent,
-                            expected_message_id=expected_message_id,
-                        )
+
+                    async def edit(
+                        intent: TurnCardIntentRow = intent,
+                        timestamps: tuple[str, ...] = timestamps,
+                        client: AsyncWebClient = client,
+                        channel_id: str = intent.channel_id,
+                    ) -> bool:
+                        edits_succeeded = True
+                        for message_ts in timestamps:
+                            try:
+                                await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                                    channel=channel_id,
+                                    ts=message_ts,
+                                    blocks=to_interrupted_blocks(),
+                                    text=_INTERRUPTED_FALLBACK_TEXT,
+                                )
+                            except _SLACK_UPDATE_ERRORS as error:
+                                edits_succeeded = False
+                                log.warning(
+                                    "slack.turn_card_recovery_edit_failed",
+                                    intent_id=str(intent.id),
+                                    message_ts=message_ts,
+                                    error=str(error),
+                                )
+                        return edits_succeeded
+
+                    async def retire(message_id: str, intent: TurnCardIntentRow = intent) -> None:
+                        await _retire_card_intent(runtime, intent, expected_message_id=message_id)
+
+                    await reconcile_found_card(
+                        expected_message_id=intent.message_id,
+                        recovered_message_id=timestamps[0],
+                        record=record,
+                        edit=edit,
+                        retire=retire,
+                    )
                     break
 
                 if lookup.status is CardLookupStatus.NOT_FOUND:
@@ -604,23 +614,13 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
                     log.warning(
                         "slack.turn.orphan_retire_failed", thread_id=row.thread_id, error=str(err)
                     )
-            async with runtime.sessionmaker() as session:
-                cleared = await clear_active_turn_if_message_id(
-                    session, id=row.id, expected_message_id=message_id
-                )
-                await session.commit()
-            if cleared:
-                # The row really was orphaned: stop the turn MA is still
-                # running for it, so it stops billing and the next mention's
-                # message is not sent into a running session (and ignored).
-                # Only a cleared row -- a moved marker belongs to a live turn.
-                await interrupt_orphaned_session(runtime.anthropic, session_id=row.ma_session_id)
-            else:
-                # The marker moved between this sweep's read and this row's
-                # clear -- a live process wrote it after the read, so it owns
-                # the row now and will clear it on its own terminal path, or
-                # crash and be picked up by the next boot's sweep. Not a
-                # warning: this is the compare-and-clear working as intended.
+            cleared = await recover_orphan_marker(
+                runtime.sessionmaker,
+                row,
+                clear=clear_active_turn_if_message_id,
+                interrupt=partial(interrupt_orphaned_session, runtime.anthropic),
+            )
+            if not cleared:
                 log.info(
                     "slack.turn.orphan_marker_moved",
                     thread_id=row.thread_id,

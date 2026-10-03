@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+async def reconcile_turn_card_intent(sessionmaker: async_sessionmaker[AsyncSession], *, intent: TurnCardIntentRow, thread: discord.Thread, sleep: Callable[[float], Awaitable[None]]=asyncio.sleep, now: Callable[[], datetime]=lambda : datetime.now(UTC), monotonic: Callable[[], float]=time.monotonic) -> None:
+    complete_miss_at: float | None = None
+    incomplete_attempts = 0
+    while incomplete_attempts < 3:
+        current_time = now()
+        search_before = min(current_time, intent.created_at + timedelta(minutes=10))
+        result = await find_turn_card_message(thread, turn_id=intent.id, created_after=intent.created_at, before=search_before)
+        if result.state in (TurnCardSearchState.FOUND, TurnCardSearchState.MULTIPLE):
+            message_ids = set(result.message_ids)
+            if intent.message_id is None:
+                recorded_message_id = str(min(message_ids))
+                try:
+                    async with sessionmaker() as session:
+                        recorded = await record_turn_card_message(session, id=intent.id, message_id=recorded_message_id)
+                        if not recorded:
+                            return
+                        await session.commit()
+                except SQLAlchemyError:
+                    log.warning('turn.card_intent_recovered_id_failed', intent_id=str(intent.id), message_id=recorded_message_id, exc_info=True)
+                    return
+            else:
+                recorded_message_id = intent.message_id
+            if not await _reconcile_matching_messages(thread, intent_id=intent.id, message_ids=message_ids, known_message_id=intent.message_id, sleep=sleep):
+                return
+            await retire_terminal_turn_card(sessionmaker, intent_id=intent.id, expected_message_id=recorded_message_id)
+            return
+        if result.state is TurnCardSearchState.NOT_FOUND and intent.message_id is not None:
+            if not await _reconcile_matching_messages(thread, intent_id=intent.id, message_ids=set(), known_message_id=intent.message_id, sleep=sleep):
+                return
+            await retire_terminal_turn_card(sessionmaker, intent_id=intent.id, expected_message_id=intent.message_id)
+            return
+        if result.state is TurnCardSearchState.NOT_FOUND:
+            if complete_miss_at is None:
+                complete_miss_at = monotonic()
+                await sleep(60.0)
+                continue
+            seconds_since_miss = monotonic() - complete_miss_at
+            if seconds_since_miss < 60.0:
+                await sleep(60.0 - seconds_since_miss)
+                continue
+            await retire_terminal_turn_card(sessionmaker, intent_id=intent.id, expected_message_id=None, allow_prepared_without_message=True)
+            return
+        incomplete_attempts += 1
+        if incomplete_attempts < 3:
+            await sleep(5.0)
+    log.warning('turn.card_intent_recovery_exhausted', intent_id=str(intent.id))
