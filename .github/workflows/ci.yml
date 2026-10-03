@@ -81,6 +81,8 @@ jobs:
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Credential equivalence tests import the fixed base commit.
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
