@@ -136,6 +136,7 @@ def test_with_agent_rule_pins_and_unpins_one_name() -> None:
     policy = TenantAccessPolicy(agent_channel_pins={"x": ("a",), "y": ("b",)})
     pinned = with_agent_rule(policy, "x", AgentRule(runs_in=()))
     assert pinned.agent_channel_pins == {"x": (), "y": ("b",)}, "x now runs nowhere"
+    assert list(pinned.agent_channel_pins) == ["x", "y"], "x keeps its place"
     unpinned = with_agent_rule(pinned, "x", AgentRule())
     assert unpinned.agent_channel_pins == {"y": ("b",)}, "x unpinned, y kept"
 
@@ -186,44 +187,33 @@ def test_rules_rebuild_every_policy() -> None:
 
 
 # What each preset limits, as docs/permissions.md lists it, for a channel "c"
-# with a free agent "f" and, when confidential, an own agent "o".
+# and a thread under it: (free agent "f", own agent "o" when confidential).
 _LIMITS: dict[ChannelPreset, dict[str, object]] = {
-    "open": {"answers": "any", "keeps_content": False, "lists": "any", "memory": (True, None)},
-    "protected": {
-        "answers": "none",
-        "keeps_content": False,
-        "lists": "any",
-        "memory": (True, None),
-    },
-    "sealed": {"answers": "any", "keeps_content": False, "lists": "any", "memory": (False, None)},
-    "confidential": {
-        "answers": "own",
-        "keeps_content": True,
-        "lists": "own",
-        "memory": (False, True),
-    },
+    "open": {"keeps_content": False, "runs": (True, None), "memory": (True, None)},
+    "protected": {"keeps_content": False, "runs": (True, None), "memory": (True, None)},
+    "sealed": {"keeps_content": False, "runs": (True, None), "memory": (False, None)},
+    "confidential": {"keeps_content": True, "runs": (False, True), "memory": (False, True)},
 }
 
 
 @pytest.mark.parametrize("preset", list(_LIMITS))
 def test_each_preset_limits_what_the_docs_say(preset: ChannelPreset) -> None:
-    """Who answers, whether content stays, who is listed and whose memory is writable."""
+    """Whether content stays, which agents run and whose memory is writable.
+
+    Protection stops the turn (`writers`), not the agent."""
     policy = with_channel_rule(OPEN_ACCESS_POLICY, "c", CHANNEL_PRESETS[preset])
+    agents = [agent_permissions(policy, ("f",))]
     if preset == "confidential":
         policy = with_agent_rule(policy, "o", AgentRule(runs_in=("c",)))
+        agents = [agent_permissions(policy, ("f",)), agent_permissions(policy, ("o",))]
     for place in (("c", None), ("t", "c")):
         here = channel_permissions(policy, channel_id=place[0], parent_channel_id=place[1])
-        free = memory_writable(agent_permissions(policy, ("f",)), here)
-        own = (
-            memory_writable(agent_permissions(policy, ("o",)), here)
-            if preset == "confidential"
-            else None
-        )
+        runs = [runs_at(agent, here) for agent in agents]
+        memory = [memory_writable(agent, here) for agent in agents]
         got = {
-            "answers": here.answers,
             "keeps_content": here.keeps_content,
-            "lists": here.lists,
-            "memory": (free, own),
+            "runs": (*runs, None) if len(agents) == 1 else tuple(runs),
+            "memory": (*memory, None) if len(agents) == 1 else tuple(memory),
         }
         assert got == _LIMITS[preset], f"{preset} at {place}: {got}"
 
@@ -232,10 +222,11 @@ def test_unknown_parent_fails_closed_only_while_something_is_confidential() -> N
     """A thread whose channel is unknown may lie in a confidential channel."""
     confidential = TenantAccessPolicy(sealed_channel_ids=("c",), isolated_channel_ids=("c",))
     for policy, closed in ((OPEN_ACCESS_POLICY, False), (confidential, True)):
-        here = channel_permissions(policy, channel_id="t", parent_unresolved=True)
-        assert here.keeps_content == closed, f"content kept under {policy}"
-        free = agent_permissions(policy, ("f",))
-        assert runs_at(free, here) != closed, f"free agent runs under {policy}"
+        for thread in ("t", None):
+            here = channel_permissions(policy, channel_id=thread, parent_unresolved=True)
+            assert here.keeps_content == closed, f"content kept at {thread} under {policy}"
+            free = agent_permissions(policy, ("f",))
+            assert runs_at(free, here) != closed, f"free agent runs at {thread} under {policy}"
 
 
 def test_channel_permissions_match_authorize() -> None:
@@ -301,7 +292,7 @@ def test_agent_permissions_match_authorize() -> None:
         own_dm = authorize(
             policy, subject=_MEMBER, action=Action.POST, agent=agent, place=Place(own_dm=True)
         )
-        assert bool(own_dm) == view.posts_to_requester_dm, f"{names} own DM under {policy}"
+        assert bool(own_dm) == (view.kind != "own"), f"{names} own DM under {policy}"
         to_requester, to_other = (
             authorize(
                 policy,
@@ -313,13 +304,13 @@ def test_agent_permissions_match_authorize() -> None:
             for recipient in ("u1", "u2")
         )
         expected = {"any": (True, True), "requester": (True, False), "none": (False, False)}
-        assert (bool(to_requester), bool(to_other)) == expected[view.direct_messages], (
+        assert (bool(to_requester), bool(to_other)) == expected[view.direct_messages()], (
             f"{names} direct messages under {policy}"
         )
         published = authorize(policy, subject=_MEMBER, action=Action.PUBLISH, agent=agent)
-        assert bool(published) == view.publishes, f"{names} publish under {policy}"
+        assert bool(published) == view.publishes(), f"{names} publish under {policy}"
         created = authorize(policy, subject=_MEMBER, action=Action.CREATE_AGENT, agent=agent)
-        assert bool(created) == view.creates_agents, f"{names} create under {policy}"
+        assert bool(created) == view.creates_agents(), f"{names} create under {policy}"
         forked = authorize(
             policy, subject=_ADMIN, action=Action.FORK, surface=Surface.HUB, agent=agent
         )
@@ -333,7 +324,7 @@ def test_agent_permissions_match_authorize() -> None:
 
 def test_a_turn_inside_a_confidential_channel_keeps_its_content() -> None:
     """From a turn whose place keeps content, whatever agent runs posts, messages,
-    publishes and creates agents only as `held_to` and `posts_at` say."""
+    publishes and creates agents exactly as the agent's permissions from there say."""
     for policy, names in itertools.product(_policies(), _AGENTS):
         view = agent_permissions(policy, names)
         agent = AgentRef.of(*names)
@@ -346,11 +337,22 @@ def test_a_turn_inside_a_confidential_channel_keeps_its_content() -> None:
             assert held == (at.keeps_content or view.own_channel is not None), (
                 f"{names} held from {origin} under {policy}"
             )
-            for action in (Action.DIRECT_MESSAGE, Action.CREATE_AGENT, Action.PUBLISH):
+            allowed = {
+                Action.DIRECT_MESSAGE: view.direct_messages(at) != "none",
+                Action.CREATE_AGENT: view.creates_agents(at),
+                Action.PUBLISH: view.publishes(at),
+            }
+            for action, expected in allowed.items():
                 decided = authorize(
-                    policy, subject=_MEMBER, action=action, agent=agent, origin=origin
+                    policy,
+                    subject=_MEMBER,
+                    action=action,
+                    agent=agent,
+                    origin=origin,
+                    recipient_id=_MEMBER.platform_user_id,
                 )
-                assert not (held and decided), f"{names} {action} from {origin} under {policy}"
+                assert bool(decided) == expected, f"{names} {action} from {origin} under {policy}"
+                assert not (held and decided), f"{names} {action} held from {origin}"
             for place in _TURN_PLACES:
                 assert place.channel_id is not None, "every turn place names a channel"
                 here = channel_permissions(

@@ -197,8 +197,9 @@ def isolate(policy: TenantAccessPolicy, *, channel_id: str, agent_name: str) -> 
 def end_isolation(
     policy: TenantAccessPolicy, *, channel_id: str, drop_seal_and_pins: bool
 ) -> TenantAccessPolicy:
-    """`policy` with the channel sealed, no longer confidential; with
-    `drop_seal_and_pins`, open, and every pin naming it alone gone. Pure."""
+    """`policy` with the channel no longer confidential, its protection kept: sealed
+    if it was confidential; with `drop_seal_and_pins`, unsealed, and every pin
+    naming it alone gone. Pure."""
     current = channel_rule(policy, channel_id)
     readers = (
         "any" if drop_seal_and_pins else "inside" if current.readers == "own" else current.readers

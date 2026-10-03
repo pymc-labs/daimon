@@ -1,7 +1,8 @@
 """Channel isolation: the confidential preset of `daimon.core.permissions`.
 
 A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`):
-its rule becomes ``readers: own, writers: own``, and its *own agents* are those
+its rule becomes ``readers: own`` with ``writers: own`` (``none`` while it is
+protected), and its *own agents* are those
 pinned to C alone (`AgentPermissions.own_channel`). What that means is defined
 in `daimon.core.permissions` and decided by `daimon.core.authz.authorize`
 (`channel_isolated`). This module holds what the agent and setup surfaces show

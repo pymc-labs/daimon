@@ -25,7 +25,10 @@ policy. Two limits to check when adding a rule:
   unpinned agents has to remove the matching short-circuit.
 - Facts derived from the policy alone (`Place.permissions`,
   `AgentRef.permissions`, from `daimon.core.permissions`) are filled in by
-  `authorize` itself, so every re-check sees them as the policy is now.
+  `authorize` itself, so every re-check sees them as the policy is now. Where
+  an agent runs and posts, whom it messages, and whether it publishes, creates
+  agents or is copied are that model's (`run_refusal`, `post_refusal`,
+  `AgentPermissions`); this module adds who is asking.
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
@@ -148,12 +151,15 @@ from daimon.core.defaults.metadata import (
 from daimon.core.permissions import (
     AgentPermissions,
     ChannelPermissions,
+    Refusal,
     agent_permissions,
     channel_permissions,
     crosses_confidential,
     held_to,
     outside_pins,
+    post_refusal,
     readable_from,
+    run_refusal,
     sealed_under,
     session_confidential_channels,
     session_readable_from,
@@ -477,21 +483,19 @@ def _pin_administered(
     return agent_permissions(policy, agent.names).pinned_within(administered_channel_ids)
 
 
+def _origin_permissions(req: Request) -> ChannelPermissions | None:
+    return req.origin.permissions if req.origin is not None else None
+
+
 def _held_to(agent: AgentRef, origin: Place | None) -> str | None:
     return held_to(agent.permissions, origin.permissions if origin is not None else None)
 
 
-def _crosses_isolation(agent: AgentRef, place: Place, origin: Place | None = None) -> bool:
-    """`crosses_confidential` for a present agent, letting the agent of C's setup
-    thread act in C when its verified origin is that thread."""
-    if not agent.present:
-        return False
-    return crosses_confidential(
-        agent.permissions,
-        place.permissions,
-        origin.permissions if origin is not None else None,
-        setup_origin=origin is not None and origin.setup_thread,
-    )
+_REFUSALS: dict[Refusal, DenyReason] = {
+    "protected": "channel_protected",
+    "pinned_elsewhere": "agent_pinned_elsewhere",
+    "confidential": "channel_isolated",
+}
 
 
 def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
@@ -712,13 +716,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             if place.permissions.confidential_channel is not None and not place.setup_thread:
                 return _deny("channel_isolated")
             return _deny("agent_unresolved") if policy.agent_channel_pins else ALLOW
-        if _outside_pin(agent, place):
-            return _deny("agent_pinned_elsewhere")
-        if place.permissions.confidential_unknown:
-            return _deny("channel_isolated")
-        if not place.setup_thread and _crosses_isolation(agent, place):
-            return _deny("channel_isolated")
-        return ALLOW
+        refusal = run_refusal(agent.permissions, place.permissions, setup_thread=place.setup_thread)
+        return ALLOW if refusal is None else _deny(_REFUSALS[refusal])
 
     if req.action is Action.SAVE_ROUTINE:
         here = place.permissions.confidential_channel
@@ -754,7 +753,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.BIND_CHANNEL_DEFAULT:
         if _outside_pin(agent, place):
             return _deny("agent_pinned_elsewhere")
-        if _crosses_isolation(agent, place):
+        if agent.present and crosses_confidential(agent.permissions, place.permissions):
             return _deny("channel_isolated")
         # A channel admin's binding carries `reach`; the handoff rule decides it.
         if req.reach is not None and not _channel_admin_binds(req.reach):
@@ -808,32 +807,38 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.POST:
-        if _protected(place):
+        # A caller with no agent (the CLI, an operator token) is input: only
+        # protection stops it.
+        if not agent.present:
+            return _deny("channel_protected") if _protected(place) else ALLOW
+        origin = req.origin
+        refusal = post_refusal(
+            agent.permissions,
+            place.permissions,
+            origin.permissions if origin is not None else None,
+            setup_origin=origin is not None and origin.setup_thread,
+        )
+        if refusal == "protected":
             return _deny("channel_protected")
-        if agent.present and (
-            _crosses_isolation(agent, place, req.origin) or place.permissions.confidential_unknown
-        ):
-            if not agent.resolved:
-                return _deny("agent_unresolved")
-            return _deny("channel_isolated")
-        if place.own_dm or not policy.agent_channel_pins or not agent.present:
+        if refusal == "confidential":
+            return _deny("channel_isolated" if agent.resolved else "agent_unresolved")
+        if place.own_dm or not policy.agent_channel_pins:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
-        if _outside_pin(agent, place):
-            return _deny("agent_pinned_elsewhere")
-        return ALLOW
+        return ALLOW if refusal is None else _deny(_REFUSALS[refusal])
 
     if req.action is Action.DIRECT_MESSAGE:
-        if agent.present and _held_to(agent, req.origin) is not None:
+        if not agent.present:
+            return ALLOW
+        recipients = agent.permissions.direct_messages(_origin_permissions(req))
+        if recipients == "none":
             return _deny("channel_isolated")
-        if not agent.present or not policy.agent_channel_pins:
+        if not policy.agent_channel_pins:
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
-        if not agent.permissions.pins:
-            return ALLOW
-        if req.recipient_id != subject.platform_user_id:
+        if recipients == "requester" and req.recipient_id != subject.platform_user_id:
             return _deny("dm_recipient_not_requester")
         return ALLOW
 
@@ -842,7 +847,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # answer outside C. An unresolved agent may be C's own, so it fails closed.
         if not agent.resolved and policy.isolated_channel_ids:
             return _deny("agent_unresolved")
-        if _held_to(agent, req.origin) is not None:
+        if not agent.permissions.creates_agents(_origin_permissions(req)):
             return _deny("channel_isolated")
         return ALLOW
 
@@ -851,10 +856,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # link is read by whoever holds it, never only the acting admin.
         if not agent.resolved and (policy.agent_channel_pins or policy.isolated_channel_ids):
             return _deny("agent_unresolved")
-        if _held_to(agent, req.origin) is not None:
-            return _deny("channel_isolated")
-        if agent.permissions.pins:
-            return _deny("agent_pinned")
+        if not agent.permissions.publishes(_origin_permissions(req)):
+            held = _held_to(agent, req.origin) is not None
+            return _deny("channel_isolated" if held else "agent_pinned")
         return ALLOW
 
     if req.action is Action.CHANGE_SHARED_AGENT:
@@ -866,7 +870,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.FORK:
         if not subject.is_admin or subject.via_agent_key:
             return _deny("admin_required")
-        if agent.permissions.pins:
+        if not agent.permissions.may_be_copied:
             return _deny("agent_pinned")
         return ALLOW
 

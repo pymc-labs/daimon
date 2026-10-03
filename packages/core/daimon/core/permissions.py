@@ -10,11 +10,12 @@ names that channel alone.
 
 Every other limit follows from the two rules and is defined here once: what
 holds at a place (`ChannelPermissions`), what an agent may do
-(`AgentPermissions`), and the checks between them (`runs_at`, `posts_at`,
-`memory_writable`, `listed_at`, `readable_from`, ...).
-`daimon.core.authz.authorize` decides every action from these and adds who is
-asking. The stored policy keeps its shape: rules are read from its lists and
-written back through them (`with_channel_rule`, `with_agent_rule`). Pure.
+(`AgentPermissions`), and the checks between them (`run_refusal`,
+`post_refusal`, `memory_writable`, `listed_at`, `readable_from`, ...).
+`daimon.core.authz.authorize` decides through these and adds who is asking:
+admin exemptions and agents it couldn't resolve. The stored policy keeps its
+shape: rules are read from its lists and written back through them
+(`with_channel_rule`, `with_agent_rule`). Pure.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from daimon.core.access_policy import (
     isolated_channel_of,
     isolation_owner,
 )
+from daimon.core.errors import DaimonError
 from pydantic import BaseModel, ConfigDict, model_validator
 
 ChannelReaders = Literal["any", "inside", "own"]
@@ -48,7 +50,15 @@ AgentKind = Literal["free", "pinned", "own"]
 
 Recipients = Literal["any", "requester", "none"]
 
+Refusal = Literal["protected", "pinned_elsewhere", "confidential"]
+"""Why an agent may not run or post at a place: the channel is protected, a
+pin names elsewhere, or a confidential channel's line would be crossed."""
+
 _SLACK_THREAD_KEY = re.compile(r"[CGD][A-Z0-9]+:\d+\.\d+")
+
+
+class RuleRefused(DaimonError, ValueError):
+    """A rule no turn could be held to; the message is person-facing."""
 
 
 class ChannelRule(BaseModel):
@@ -137,16 +147,11 @@ def with_channel_rule(
     """The policy with `rule` on `channel_id`; every other id keeps its rule.
 
     This sets the channel's rule only: making it confidential pins no agent to
-    it (`with_agent_rule`, or `daimon.core.channel_isolation_setup`). A Discord
-    thread takes its channel's confidentiality. A Slack thread
-    (``channel:ts``) can only be sealed: a turn there is protected or kept
-    inside by its channel.
+    it (`with_agent_rule`, or `daimon.core.channel_isolation_setup`).
+    Confidential is meant for channels; their threads follow them. Raise
+    `RuleRefused` for a rule `check_channel_rule` refuses.
     """
-    if _SLACK_THREAD_KEY.fullmatch(channel_id) and rule not in (
-        CHANNEL_PRESETS["open"],
-        CHANNEL_PRESETS["sealed"],
-    ):
-        raise ValueError("a Slack thread can only be sealed; protect or isolate its channel")
+    check_channel_rule(channel_id, rule)
     return _rebuilt(
         policy,
         protected_channel_ids=_toggled(
@@ -161,12 +166,28 @@ def with_channel_rule(
     )
 
 
+def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
+    """Raise `RuleRefused` for a rule nothing would enforce at `channel_id`.
+
+    A Slack thread (``channel:ts``) can only be sealed: a turn there is
+    protected or kept inside by its channel.
+    """
+    if _SLACK_THREAD_KEY.fullmatch(channel_id) and rule not in (
+        CHANNEL_PRESETS["open"],
+        CHANNEL_PRESETS["sealed"],
+    ):
+        raise RuleRefused(
+            f"{channel_id} is a Slack thread, which can only be sealed; "
+            "protect or isolate its channel instead"
+        )
+
+
 def with_category_rule(
     policy: TenantAccessPolicy, category_id: str, rule: ChannelRule
 ) -> TenantAccessPolicy:
     """The policy with `rule` on a Discord category. Only open and protected apply."""
     if rule not in (CHANNEL_PRESETS["open"], CHANNEL_PRESETS["protected"]):
-        raise ValueError("a category can only be open or protected")
+        raise RuleRefused("a category can only be open or protected")
     return _rebuilt(
         policy,
         protected_category_ids=_toggled(
@@ -178,9 +199,11 @@ def with_category_rule(
 def with_agent_rule(
     policy: TenantAccessPolicy, agent_name: str, rule: AgentRule
 ) -> TenantAccessPolicy:
-    """The policy with `rule` on one agent name; other names keep theirs."""
-    pins = {name: pin for name, pin in policy.agent_channel_pins.items() if name != agent_name}
-    if rule.runs_in is not None:
+    """The policy with `rule` on one agent name; other names keep theirs, in order."""
+    pins = dict(policy.agent_channel_pins)
+    if rule.runs_in is None:
+        pins.pop(agent_name, None)
+    else:
         pins[agent_name] = rule.runs_in
     return _rebuilt(policy, agent_channel_pins=pins)
 
@@ -211,27 +234,10 @@ class ChannelPermissions:
     may lie in one, so it is treated as one with no own agents."""
 
     @property
-    def answers(self) -> Literal["any", "own", "none"]:
-        """Which agents answer turns, take routines and become the default here.
-
-        Each agent's own pins still apply. A confidential channel's setup thread
-        also answers as the built-in agent.
-        """
-        if self.writers == "none":
-            return "none"
-        return "own" if self.readers == "own" or self.confidential_unknown else "any"
-
-    @property
     def keeps_content(self) -> bool:
         """Whether whatever a turn here writes stays here: posts, direct messages,
-        publishing, new agents and routine results."""
+        publishing, new agents and routine results (`held_to`)."""
         return self.readers == "own" or self.confidential_unknown
-
-    @property
-    def lists(self) -> Literal["any", "own"]:
-        """Which agents a turn here sees listed: its own agents, or every agent
-        but the confidential channels' own."""
-        return "own" if self.readers == "own" else "any"
 
 
 def channel_permissions(
@@ -248,7 +254,7 @@ def channel_permissions(
     `parent_unresolved` marks a thread whose channel isn't known: while any
     channel is confidential it fails closed (`confidential_unknown`).
     """
-    if channel_id is None and parent_channel_id is None:
+    if channel_id is None and parent_channel_id is None and not parent_unresolved:
         return ChannelPermissions()
     confidential = isolated_channel_of(policy, channel_id, parent_channel_id)
     ids = {channel_id, parent_channel_id}
@@ -262,8 +268,9 @@ def channel_permissions(
         category_id=category_id,
         category_unresolved=category_unresolved,
     )
-    readers: ChannelReaders = "own" if confidential else "inside" if sealed else "any"
-    writers: ChannelWriters = "none" if protected else "own" if confidential else "any"
+    own = confidential is not None
+    readers: ChannelReaders = "own" if own else "inside" if sealed else "any"
+    writers: ChannelWriters = "none" if protected else "own" if own else "any"
     return ChannelPermissions(
         channel_id=channel_id,
         parent_channel_id=parent_channel_id,
@@ -294,26 +301,24 @@ class AgentPermissions:
 
     @property
     def kind(self) -> AgentKind:
-        return "own" if self.own_channel else "pinned" if self.pins else "free"
+        if self.own_channel is not None:
+            return "own"
+        return "pinned" if self.pins else "free"
 
-    @property
-    def direct_messages(self) -> Recipients:
-        """Whom it may send a direct message to."""
-        return "none" if self.own_channel else "requester" if self.pins else "any"
+    def direct_messages(self, origin: ChannelPermissions | None = None) -> Recipients:
+        """Whom a call running as it, from a turn at `origin`, may send a direct message."""
+        if held_to(self, origin) is not None:
+            return "none"
+        return "requester" if self.pins else "any"
 
-    @property
-    def posts_to_requester_dm(self) -> bool:
-        return self.own_channel is None
+    def publishes(self, origin: ChannelPermissions | None = None) -> bool:
+        """Whether such a call may publish (a report, an upload URL, daimon's display
+        identity), which anyone holding the link reads."""
+        return held_to(self, origin) is None and not self.pins
 
-    @property
-    def publishes(self) -> bool:
-        """Whether it may publish a report, notebook or blog, read outside every channel."""
-        return not self.pins
-
-    @property
-    def creates_agents(self) -> bool:
-        """Whether a call running as it may create an agent, which would answer elsewhere."""
-        return self.own_channel is None
+    def creates_agents(self, origin: ChannelPermissions | None = None) -> bool:
+        """Whether such a call may create an agent, which would answer elsewhere."""
+        return held_to(self, origin) is None
 
     @property
     def may_be_copied(self) -> bool:
@@ -358,15 +363,27 @@ def outside_pins(
     return any(not (place & pin) for pin in agent.pins)
 
 
-def runs_at(agent: AgentPermissions, here: ChannelPermissions) -> bool:
-    """Whether a member's turn may run the agent here.
+def run_refusal(
+    agent: AgentPermissions, here: ChannelPermissions, *, setup_thread: bool = False
+) -> Refusal | None:
+    """Why a member's turn may not run the agent here; None when it may.
 
     Inside every pin, and inside a confidential channel only as one of its own
-    agents. Protection stops the turn, not the agent.
+    agents, or in its setup thread. Protection stops the turn, not the agent.
     """
     if outside_pins(agent, here.channel_id, here.parent_channel_id):
-        return False
-    return agent.own_channel == here.confidential_channel and not here.confidential_unknown
+        return "pinned_elsewhere"
+    if here.confidential_unknown:
+        return "confidential"
+    if not setup_thread and agent.own_channel != here.confidential_channel:
+        return "confidential"
+    return None
+
+
+def runs_at(
+    agent: AgentPermissions, here: ChannelPermissions, *, setup_thread: bool = False
+) -> bool:
+    return run_refusal(agent, here, setup_thread=setup_thread) is None
 
 
 def held_to(agent: AgentPermissions, origin: ChannelPermissions | None = None) -> str | None:
@@ -395,15 +412,37 @@ def crosses_confidential(
     return held is not None and agent.own_channel != held and not setup_origin
 
 
+def post_refusal(
+    agent: AgentPermissions,
+    here: ChannelPermissions,
+    origin: ChannelPermissions | None = None,
+    *,
+    setup_origin: bool = False,
+) -> Refusal | None:
+    """Why the agent may not post here from a turn at `origin` (None: no turn place).
+
+    The requester's own DM is outside every pin, but a pinned agent posts
+    there; `daimon.core.authz` lets it.
+    """
+    if here.writers == "none":
+        return "protected"
+    if here.confidential_unknown or crosses_confidential(
+        agent, here, origin, setup_origin=setup_origin
+    ):
+        return "confidential"
+    if outside_pins(agent, here.channel_id, here.parent_channel_id):
+        return "pinned_elsewhere"
+    return None
+
+
 def posts_at(
-    agent: AgentPermissions, here: ChannelPermissions, origin: ChannelPermissions | None = None
+    agent: AgentPermissions,
+    here: ChannelPermissions,
+    origin: ChannelPermissions | None = None,
+    *,
+    setup_origin: bool = False,
 ) -> bool:
-    """Whether the agent may post here from a turn at `origin` (None: no turn place)."""
-    if here.writers == "none" or here.confidential_unknown:
-        return False
-    return not crosses_confidential(agent, here, origin) and not outside_pins(
-        agent, here.channel_id, here.parent_channel_id
-    )
+    return post_refusal(agent, here, origin, setup_origin=setup_origin) is None
 
 
 def at_home(agent: AgentPermissions, here: ChannelPermissions) -> bool:
@@ -494,7 +533,7 @@ def sealed_under(policy: TenantAccessPolicy, channel: str, thread_ids: Iterable[
     sealed = policy.sealed_channel_ids
     if channel in sealed or any(key.startswith(f"{channel}:") for key in sealed):
         return True
-    return any(thread in sealed for thread in thread_ids)
+    return any(thread and thread in sealed for thread in thread_ids)
 
 
 __all__ = [
@@ -508,6 +547,8 @@ __all__ = [
     "ChannelRule",
     "ChannelWriters",
     "Recipients",
+    "Refusal",
+    "RuleRefused",
     "agent_permissions",
     "agent_rules",
     "at_home",
@@ -515,15 +556,18 @@ __all__ = [
     "channel_permissions",
     "channel_rule",
     "channel_rules",
+    "check_channel_rule",
     "crosses_confidential",
     "held_to",
     "listed_at",
     "memory_writable",
     "outside_pins",
     "pinned_alone",
+    "post_refusal",
     "posts_at",
     "preset_of",
     "readable_from",
+    "run_refusal",
     "runs_at",
     "sealed_under",
     "session_confidential_channels",
