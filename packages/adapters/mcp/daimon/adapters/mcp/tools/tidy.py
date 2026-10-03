@@ -1,7 +1,7 @@
 """Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 
 Registered beside the channel tools, with the same per-platform dispatch.
-Discord and Slack only. Rules: ``tools/_tidy.py``.
+Teams has edit_message and delete_message only. Rules: ``tools/_tidy.py``.
 """
 
 from __future__ import annotations
@@ -20,16 +20,16 @@ from daimon.adapters.mcp.tools.slack._tidy import (
     _slack_delete_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.teams._tidy import (
+    _teams_delete_message_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 
-def _teams_unsupported(tool_name: str) -> ToolError:
-    return ToolError(f"{tool_name} is not supported on Teams yet")
-
-
 def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def edit_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -43,7 +43,8 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Only your own posts: a person's message, another agent's, another
         bot's, or your normal chat replies are refused. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
-        Slack: the channel id, and message_id is the message ts). Pass this
+        Slack: the channel id, and message_id is the message ts; Teams: the
+        conversation_id and activity_id send_message returned). Pass this
         turn's origin_context_id. Limited to 10 edits or deletes per turn and
         40 per hour. Refused in protected channels, channels you may not post
         in, sealed channels outside their own conversations and the support
@@ -51,7 +52,14 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
-            raise _teams_unsupported("edit_message")
+            return await _teams_edit_message_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                content=content,
+                origin_context_id=origin_context_id,
+            )
         if auth.platform == "slack":
             return await _slack_edit_message_impl(
                 runtime,
@@ -70,7 +78,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def delete_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -85,7 +93,13 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
-            raise _teams_unsupported("delete_message")
+            return await _teams_delete_message_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                origin_context_id=origin_context_id,
+            )
         if auth.platform == "slack":
             return await _slack_delete_message_impl(
                 runtime,
@@ -138,7 +152,10 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
-            raise _teams_unsupported("delete_thread")
+            raise ToolError(
+                "delete_thread is not supported on Teams; delete your own posts there "
+                "with delete_message"
+            )
         if auth.platform == "slack":
             return await _slack_delete_thread_impl(
                 runtime, auth, thread_id=thread_id, origin_context_id=origin_context_id

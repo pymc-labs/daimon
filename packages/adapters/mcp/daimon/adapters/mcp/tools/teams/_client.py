@@ -193,6 +193,15 @@ class TeamsBotClient:
         body = {**_card_message(card), "id": activity_id}
         await self._request("PUT", f"/{conversation_id}/activities/{activity_id}", body)
 
+    async def update_text(self, conversation_id: str, activity_id: str, text: str) -> None:
+        """Replace the text of a message the bot posted."""
+        body = {**_message(text), "id": activity_id}
+        await self._request("PUT", f"/{_id(conversation_id)}/activities/{_id(activity_id)}", body)
+
+    async def delete_activity(self, conversation_id: str, activity_id: str) -> None:
+        """Delete a message the bot posted."""
+        await self._request("DELETE", f"/{_id(conversation_id)}/activities/{_id(activity_id)}")
+
     async def create_thread(self, channel_id: str, text: str) -> tuple[str, str]:
         """Start a new post in a channel; returns (thread conversation id, activity id)."""
         return await self.create_thread_with(channel_id, _message(text))

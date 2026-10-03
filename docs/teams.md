@@ -300,17 +300,18 @@ registration:
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
   channel whose site is granted they are saved to its Files tab and linked; in
-  a 1:1 chat they are offered with a file consent card.
+  a 1:1 chat they are offered with a file consent card. An agent can edit or
+  delete what it posted (`edit_message`, `delete_message`); closing a thread
+  (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and daimon, named by Entra object ID.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
   `cancel_timer`), routines that post to a channel or thread (below),
-  `bind_public_repo` and the GitHub App install link. A handoff is asked of
-  the agent; the Hand over button that Discord and Slack show when a channel's
-  agent changed under a thread is not on Teams, where the notice says to start
-  a new conversation.
+  `bind_public_repo` and the GitHub App install link. When a channel's agent
+  changed under a conversation, its notice carries a Hand over button, as on
+  Discord and Slack; a refused click is answered only to the clicker.
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can

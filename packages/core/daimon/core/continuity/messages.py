@@ -550,7 +550,7 @@ def render_responder_changed_without_handoff(
     """Tell the person a new responder answers here, but the task still belongs to `owner`.
 
     `offer_button` is set where the notice carries the hand-over button
-    (Discord, Slack). No turn runs in this thread until the work is handed
+    (Discord, Slack, Teams). No turn runs in this thread until the work is handed
     over, so without the button the only way on is a new conversation.
     """
     first = (

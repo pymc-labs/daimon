@@ -31,7 +31,7 @@ from daimon.core.stores.channel_admins import list_administered_channel_ids
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -517,10 +517,10 @@ async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
     await _grant(runtime, tenant_id, account_id, user_ids=[USER])
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
     member = await _verified(runtime, _auth(tenant_id, account_id))
-    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
     await _set_channel_environment_impl(
         runtime, admin, environment_name="closed", channel_id=CHANNEL
     )
+    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
 
     with pytest.raises(ToolError, match="sealed.*the default it would fall back to"):
         await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
@@ -552,6 +552,49 @@ async def test_a_server_admin_confirms_clearing_a_sealed_channel_onto_an_open_de
         runtime, admin, environment_name="open", channel_id=OTHER_CHANNEL
     )
     assert unsealed.changed, "outside a seal an open network needs no confirmation"
+
+
+async def test_a_workspace_default_sealed_channels_follow_onto_an_open_network_is_confirmed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Sealed channels with no environment of their own run the workspace default, so
+    moving it onto an open network is the same call as picking one in each of them."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open", "default", limited=("closed",))
+    admin = _auth(tenant_id, account_id, admin=True)
+    await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+
+    with pytest.raises(ToolError, match="Sealed channels would run in the open.*confirm_open"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="open", channel_id=None
+        )
+    with pytest.raises(ToolError, match="the environment they would fall back to.*confirm_open"):
+        await _clear_channel_environment_impl(runtime, admin, channel_id=None)
+    row = await _workspace_row(committing_sessionmaker, tenant_id)
+    assert row == "closed", "unconfirmed, the workspace default stays"
+
+    await _set_channel_environment_impl(
+        runtime, admin, environment_name="closed", channel_id=CHANNEL
+    )
+    moved = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=None
+    )
+    assert moved.changed, "a sealed channel with its own pick doesn't follow the default"
+    await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
+    await _clear_channel_environment_impl(runtime, admin, channel_id=CHANNEL)
+    confirmed = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=None, confirm_open_network=True
+    )
+    assert confirmed.changed, "confirmed, the default moves"
+
+
+async def _workspace_row(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> str | None:
+    async with sessionmaker() as session:
+        row = await get_scope(session, scope=TenantScopeRef(tenant_id=tenant_id))
+    return row.environment_name if row is not None else None
 
 
 async def test_a_channel_admin_pick_looks_its_environment_up_once(
@@ -605,6 +648,40 @@ async def test_a_sealed_discord_thread_keeps_its_channel_network_closed(
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=THREAD
         )
+
+
+async def test_a_channel_pick_counts_a_sealed_thread_a_session_ran_under_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pick on the channel itself, not from the thread, still guards the sealed thread."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await make_thread_session(
+            session, tenant=tenant, account=account, thread_id=THREAD, channel_id=CHANNEL
+        )
+    runtime = _runtime(committing_sessionmaker, tenant.id, "open", limited=("closed",))
+    admin = _auth(tenant.id, account.id, admin=True)
+    await _grant(runtime, tenant.id, account.id, user_ids=[USER])
+    await _seal(committing_sessionmaker, tenant.id, THREAD)
+    member = await _verified(runtime, _auth(tenant.id, account.id))
+
+    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+        await _set_channel_environment_impl(
+            runtime, member, environment_name="open", channel_id=CHANNEL
+        )
+    with pytest.raises(ToolError, match="confirm_open_network"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="open", channel_id=CHANNEL
+        )
+    closed = await _set_channel_environment_impl(
+        runtime, member, environment_name="closed", channel_id=CHANNEL
+    )
+    assert closed.changed, "a limited network stays the channel admin's pick"
+    other = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=OTHER_CHANNEL
+    )
+    assert other.changed, "a channel with no sealed thread needs no confirmation"
 
 
 async def test_an_operator_token_needs_channels_write_and_a_channel(

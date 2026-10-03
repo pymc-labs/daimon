@@ -47,6 +47,7 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -231,6 +232,7 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
             platform="discord",
             channel_id=await self._origin_channel_id(bot),
             requester_id=str(interaction.user.id),
+            members=member_roles(self._runtime, bot, self._guild_id),
         )
         if not tiers:
             return False

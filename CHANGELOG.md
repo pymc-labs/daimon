@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord and Slack). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
-- Agents can tidy their own posts on Discord and Slack. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
+- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows. The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
+- Agents can tidy their own posts on Discord, Slack and Teams. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` (Discord, Slack) close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
 - Channel security is one permissions model (`docs/permissions.md`). A channel rule says which agents may read a channel (`any`, `inside`, `own`) and which may write in it (`any`, `own`, `none`); protected, sealed and confidential (isolated) are its presets. An agent rule says where an agent runs, and makes it free, pinned, or the own agent of one confidential channel. Every protection, seal, pin and isolation limit is derived from these rules and decided as before. `daimon tenants access-policy rules PLATFORM WORKSPACE_ID [--json]` lists the rules, each channel's preset and each pinned name's kind. Panels, CLI help, notices, tool descriptions and docs now call an isolated channel confidential (Mark confidential, Unmark confidential); commands, tool names and stored fields keep their names.
 
 ### Fixed
@@ -50,7 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment pick or clear that leaves a sealed channel on unrestricted
   networking now waits for `confirm_open_network` on
   `set_channel_environment` and `clear_channel_environment`; the panels write
-  nothing and point to chat.
+  nothing and point to chat. The same holds for a workspace default that
+  sealed channels without their own pick follow, for `update_environment`
+  opening the network of an environment a sealed channel runs in, and for
+  `archive_environment` dropping one onto an open fallback; both tools take
+  `confirm_open_network`. A sealed Discord thread counts under the channel
+  its sessions ran in, also for a pick made on that channel directly.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to
@@ -164,6 +169,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A Discord role taken away ends channel admin rights at once.** Outside a
+  chat turn (MCP calls, the hub, a connector sign-in, budget notices and ask a
+  human DMs), a channel admin matched by a stored Discord role counts only
+  while Discord still lists the role on them, read per member and cached for a
+  minute. A failed read grants nothing. Before, the stored role stood until
+  their next turn.
 - **Agents that only routines or threads run count as shared.** Editing an
   agent's prompt or setup, or binding a repo to it, now reads sharing as
   widely as a key change: a bound thread, someone's personal default, or

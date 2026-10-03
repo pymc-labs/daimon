@@ -392,11 +392,17 @@
         Archive the MA environment and delete from the tenant pool.
         
         Channels and the workspace default that picked it are cleared, so they
-        fall through to the next tier; read ``note`` back to the user.
+        fall through to the next tier; read ``note`` back to the user. When that
+        leaves a sealed channel on an environment with unrestricted networking,
+        pass ``confirm_open_network=true`` only after the caller confirms it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'name': dict({
             'type': 'string',
           }),
@@ -786,7 +792,9 @@
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
         default has unrestricted networking; then a server admin must confirm it, as
-        for ``set_channel_environment``. A thread id resolves to its parent channel.
+        for ``set_channel_environment``, and as when clearing the workspace default
+        leaves sealed channels on such a default. A thread id resolves to its parent
+        channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2378,7 +2386,8 @@
         Only your own posts: a person's message, another agent's, another
         bot's, or your normal chat replies are refused. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
-        Slack: the channel id, and message_id is the message ts). Pass this
+        Slack: the channel id, and message_id is the message ts; Teams: the
+        conversation_id and activity_id send_message returned). Pass this
         turn's origin_context_id. Limited to 10 edits or deletes per turn and
         40 per hour. Refused in protected channels, channels you may not post
         in, sealed channels outside their own conversations and the support
@@ -5007,7 +5016,8 @@
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation: pass
+        a sealed channel, which needs a server admin and their confirmation, as does a
+        workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
         
         Pass the parent channel's id: Discord
@@ -5978,7 +5988,13 @@
       }),
     }),
     'update_environment': dict({
-      'description': 'Patch-update an environment. Omitted (None) fields are preserved.',
+      'description': '''
+        Patch-update an environment. Omitted (None) fields are preserved.
+        
+        Opening the network of an environment a sealed channel runs in needs the
+        caller's confirmation: pass ``confirm_open_network=true`` only after they
+        confirm it.
+      ''',
       'parameters': dict({
         '$defs': dict({
           'BetaCloudConfigParams': dict({
@@ -6191,6 +6207,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
           }),
           'description': dict({
             'anyOf': list([

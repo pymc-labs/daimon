@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -40,6 +40,7 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
+from microsoft_teams.cards import ExecuteAction
 from pydantic import SecretStr
 
 log = structlog.get_logger()
@@ -143,7 +144,7 @@ class TeamsTurnLifecycle:
         # Each answer message as on screen, id -> (text, is_last), for later edits.
         self._shown: dict[str, tuple[str, bool]] = {}
         # Shown messages that are notice cards, not answers: edited as cards.
-        self._notices: set[str] = set()
+        self._notices: dict[str, tuple[ExecuteAction, ...]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -204,7 +205,7 @@ class TeamsTurnLifecycle:
         self._last_flush = now
         await self._send(self._status(), message_id=self._message_id)
 
-    async def close_with_notice(self, text: str) -> None:
+    async def close_with_notice(self, text: str, *, actions: Sequence[ExecuteAction] = ()) -> None:
         """Terminal render for adapter-side bailouts. Never raises on a send error."""
         if self._terminal:
             return
@@ -213,17 +214,18 @@ class TeamsTurnLifecycle:
             log.info("teams.turn.unprompted_notice_dropped")
             return
         try:
-            await self._close(text)
+            await self._close(text, actions=tuple(actions))
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
-    async def _close(self, text: str) -> None:
+    async def _close(self, text: str, *, actions: tuple[ExecuteAction, ...] = ()) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
-        self._message_id = message_id = await self._edit(card.notice_card(text), self._message_id)
+        notice = card.notice_card(text, actions=actions)
+        self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices.add(message_id)
+        self._notices[message_id] = actions
         self._shown[message_id] = (text, True)
 
     def _answer_text(self, state: TurnState) -> str:
@@ -339,7 +341,7 @@ class TeamsTurnLifecycle:
             if len(updated) > card.TEAMS_LIMIT:
                 return False
             if message_id in self._notices:
-                rendered = card.notice_card(updated)
+                rendered = card.notice_card(updated, actions=self._notices[message_id])
             else:
                 mention = self._requester if message_id == self._answer_id else None
                 rendered = card.answer_message(updated, is_last=shown[1], mention=mention)
