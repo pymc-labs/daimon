@@ -21,7 +21,11 @@ from daimon.adapters.mcp.tools.task_continuity import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.security_audit import capture_decision
 from daimon.core.session_snapshot import SessionSnapshot
@@ -66,7 +70,9 @@ def _runtime(
     )
 
 
-def _destination(tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID) -> dict[str, object]:
+def _destination(
+    tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID, managed: bool = False
+) -> dict[str, object]:
     agent = ma_agent(
         id=agent_id,
         name=_DESTINATION_NAME,
@@ -74,7 +80,8 @@ def _destination(tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID) -> di
         metadata={
             MA_METADATA_KEY_TENANT: str(tenant_id),
             MA_METADATA_KEY_NAME: _DESTINATION_NAME,
-        },
+        }
+        | ({MA_METADATA_KEY_MANAGED: "true"} if managed else {}),
     )
     return agent.model_dump(mode="json")
 
@@ -1254,12 +1261,14 @@ async def _switch_as(
     policy: TenantAccessPolicy | None,
     channel_admin: bool = False,
     administers_acme: bool = False,
+    managed: bool = False,
 ) -> tuple[uuid.UUID, ToolError | None]:
     """A member (optionally a channel admin of C_PARENT) hands T_THREAD to research-bot.
 
     research-bot was made for C_ACME and answers there, not in C_PARENT, so it is
     reachable but not the agent this channel answers with. `administers_acme`
-    makes the caller a channel admin of C_ACME too, so research-bot is theirs.
+    makes the caller a channel admin of C_ACME too, so research-bot is theirs;
+    `managed` makes it a defaults-managed agent.
     """
     from daimon.core.stores.agent_creation_channels import record_creation_channel
     from daimon.core.stores.channel_admins import set_channel_admins
@@ -1295,7 +1304,9 @@ async def _switch_as(
         )
     await db_session.commit()
     runtime = _runtime(
-        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+        committing_sessionmaker,
+        _client([_destination(tenant.id, managed=managed)]),
+        default_agent_name="daimon",
     )
     auth = AuthIdentity(
         account_id=caller.id,
@@ -1374,6 +1385,19 @@ async def test_a_channel_admin_hands_the_thread_only_to_an_agent_of_theirs(
             "another channel's own agent needs a server admin"
         )
         assert await _bound_to(committing_sessionmaker, tenant_id) is None, "nothing switched"
+
+
+async def test_a_channel_admin_hands_the_thread_to_a_defaults_managed_agent(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The MA metadata marks research-bot defaults-managed, so it is shared by design
+    and C_PARENT's channel admin may bring it in though it was made for C_ACME."""
+    tenant_id, error = await _switch_as(
+        db_session, committing_sessionmaker, policy=None, channel_admin=True, managed=True
+    )
+    assert error is None, "a managed agent is a channel admin's to hand a thread to"
+    assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
 
 
 @pytest.mark.parametrize(

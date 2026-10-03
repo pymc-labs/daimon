@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,7 +31,7 @@ from daimon.core.authz import (
 )
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_SEALED
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -199,6 +200,7 @@ async def _switch(
     tenant_id: uuid.UUID,
     caller: HandoffCaller | None = None,
     recorded: tuple[RecordedSession, ...] | None = None,
+    destination: HandoffDestination = _RESEARCH,
 ) -> ThreadAgentBindingRow:
     return await hand_over_thread(
         session,
@@ -207,7 +209,7 @@ async def _switch(
         parent_channel_id="C1",
         thread_id="T1",
         caller=caller or _caller(),
-        destination=_RESEARCH,
+        destination=destination,
         current_responder_ma_agent_id="agt_daimon",
         default=_DEFAULT,
         now=_NOW,
@@ -538,6 +540,41 @@ async def test_a_channel_admin_hands_a_thread_only_to_an_agent_they_could_bind_h
             await switch()
         assert refused.value.refusal.reason == "admin_required", "a server admin's call"
         assert await _binding(db_session_factory, tenant_id) is None, "nothing was switched"
+
+
+@pytest.mark.parametrize("shared", ["managed", "tenant-default"])
+async def test_a_channel_admin_hands_a_thread_to_an_agent_shared_by_design(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], shared: str
+) -> None:
+    """research-bot was made for C2, which U2 administers. A defaults-managed agent
+    or the tenant default is shared by design, so U1 of C1 may bring it in."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    await _grant(db_session_factory, tenant_id, "C2", "U2")
+    await _research_made_for_c2(db_session_factory, tenant_id)
+    destination = _RESEARCH
+    if shared == "managed":
+        destination = replace(_RESEARCH, is_daimon_managed=True)
+    else:
+        # C1 answers with its own agent, so research-bot does not answer here.
+        async with db_session_factory.begin() as session:
+            await set_fields(
+                session,
+                scope=TenantScopeRef(tenant_id=tenant_id),
+                tenant_id=tenant_id,
+                agent_name="research-bot",
+            )
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C1"),
+                tenant_id=tenant_id,
+                agent_name="helper",
+            )
+    async with db_session_factory.begin() as session:
+        await _switch(
+            session, tenant_id, _channel_admin_of_c1(), recorded=(), destination=destination
+        )
+    assert await _binding(db_session_factory, tenant_id) is not None, f"{shared}: shared"
 
 
 @pytest.mark.parametrize("r2_holds_c3", [False, True], ids=["theirs-alone", "split-grants"])
