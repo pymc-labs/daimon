@@ -6,9 +6,9 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import isolation_owner
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.permissions import agent_permissions
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.discord_agent_roles import delete_role, list_roles, save_role
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -40,7 +40,8 @@ async def sync_agent_roles(
         eligible = {
             agent.id: agent
             for agent in agents
-            if isolation_owner(policy, agent_pin_names(agent.name, agent.metadata)) is None
+            if agent_permissions(policy, agent_pin_names(agent.name, agent.metadata)).own_channel
+            is None
         }
         for agent_id, row in stored.items():
             if agent_id in eligible:
