@@ -6,7 +6,7 @@ import re
 import unicodedata
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import typer
 from daimon.adapters.cli.errors import run_cli
@@ -28,6 +28,13 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import (
+    ChannelRule,
+    agent_rules,
+    category_rules,
+    channel_rules,
+    preset_of,
+)
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -47,7 +54,7 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -547,6 +554,83 @@ async def tenants_access_policy_get(
     async with rt.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     _print_policy(console, label=f"{platform}:{external_id}", policy=policy, as_json=as_json)
+
+
+class PermissionRuleRow(BaseModel):
+    """One rule of a tenant's access policy, in the permissions vocabulary."""
+
+    kind: Literal["channel", "category", "agent"]
+    id: str
+    preset: str
+    readers: str
+    writers: str
+    runs_in: str
+
+
+def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
+    """The policy as channel, category and agent rules (`daimon.core.permissions`)."""
+    places: list[tuple[Literal["channel", "category"], dict[str, ChannelRule]]] = [
+        ("channel", channel_rules(policy)),
+        ("category", category_rules(policy)),
+    ]
+    rows = [
+        PermissionRuleRow(
+            kind=kind,
+            id=place_id,
+            preset=preset_of(rule) or "custom",
+            readers=rule.readers,
+            writers=rule.writers,
+            runs_in="-",
+        )
+        for kind, rules in places
+        for place_id, rule in rules.items()
+    ]
+    rows.extend(
+        PermissionRuleRow(
+            kind="agent",
+            id=name,
+            preset="pinned",
+            readers="-",
+            writers="-",
+            runs_in=", ".join(rule.runs_in or ()) or "nowhere",
+        )
+        for name, rule in sorted(agent_rules(policy).items())
+    )
+    return rows
+
+
+@access_policy_app.command("rules")
+def tenants_access_policy_rules_command(
+    platform: str, external_id: str, as_json: Annotated[bool, JSON_OPTION] = False
+) -> None:
+    """Show a tenant's access policy as channel and agent rules.
+
+    Protected, sealed and confidential (isolated) are channel presets: who may
+    read the channel and who may write in it. A pin is an agent rule: where it runs.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_access_policy_rules(
+                rt=rt, console=console, platform=platform, external_id=external_id, as_json=as_json
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_access_policy_rules(
+    *, rt: CliRuntime, console: Console, platform: str, external_id: str, as_json: bool
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    async with rt.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    rows = permission_rule_rows(policy)
+    if not rows and not as_json:
+        console.print(f"{platform}:{external_id}: every channel open, no agent pinned")
+        return
+    emit_rows(console, rows, columns=list(PermissionRuleRow.model_fields), as_json=as_json)
 
 
 @access_policy_app.command("set")
