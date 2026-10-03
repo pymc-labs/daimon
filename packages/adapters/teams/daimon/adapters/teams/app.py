@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import anthropic
+import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
@@ -1309,8 +1310,7 @@ class TeamsApp:
                     await retire_turn_card_intent(
                         session, id=intent_id, expected_message_id=message_id
                     )
-                for marker_id in markers:
-                    await clear_active_turn(session, id=marker_id)
+                await turn_bookkeeping.clear_turn_markers(session, markers, clear=clear_active_turn)
         except SQLAlchemyError:
             log.exception("teams.turn.settle_failed", intent_id=str(intent_id))
 
