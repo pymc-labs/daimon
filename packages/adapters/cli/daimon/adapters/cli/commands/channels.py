@@ -873,7 +873,10 @@ def channels_rule_set_command(
     workspace_id: str,
     channel_id: Annotated[
         str,
-        typer.Argument(help="The channel's id, or a Slack thread's channel_id:thread_ts."),
+        typer.Argument(
+            help="The channel's id, or a Slack thread's channel_id:thread_ts; "
+            "a Teams thread id names its channel."
+        ),
     ],
     readers: Annotated[
         str | None,

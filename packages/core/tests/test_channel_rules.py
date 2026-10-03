@@ -793,12 +793,12 @@ async def test_only_admins_set_rules_and_a_slack_thread_takes_readers_inside_onl
     assert inside.changed
 
 
-def test_a_thread_id_keeps_a_rule_of_its_own_only_on_slack() -> None:
+def test_only_a_slack_thread_id_keeps_a_rule_of_its_own() -> None:
     assert thread_rule_key("slack", " C01AB:1700000000.000200 ") == "C01AB:1700000000.000200"
     assert thread_rule_key("slack", "C01AB") is None and thread_rule_key("discord", "1") is None
-    for platform, raw in (("slack", "C01AB:x"), ("teams", "19:a@thread.tacv2;messageid=1")):
-        with pytest.raises(RuleRefused):
-            thread_rule_key(platform, raw)  # never silently its channel's rule
+    assert thread_rule_key("teams", "19:a@thread.tacv2;messageid=1") is None, "names its channel"
+    with pytest.raises(RuleRefused):
+        thread_rule_key("slack", "C01AB:x")  # never silently its channel's rule
 
 
 async def test_a_category_takes_writers_none_only(

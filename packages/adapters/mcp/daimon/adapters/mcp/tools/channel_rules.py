@@ -235,7 +235,8 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent, without credentials, as the channel's default. To make agent X the only
         agent in a channel, set the channel's default to X first. ``release_agents``
         drops the rules of the agents kept to the channel, once readers aren't ``own``.
-        ``channel_id`` is the channel's id, or a Slack thread's ``channel:ts`` (readers only).
+        ``channel_id`` is the channel's id, or a Slack thread's ``channel:ts`` (readers only);
+        a Teams thread id names its channel.
         """
         return await _set_channel_rule_impl(
             runtime,

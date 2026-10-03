@@ -475,7 +475,7 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
     assert "another channel's own agent" in await run("set", "channel:elsewhere", "local")
     assert "another channel's own agent" in await run("set", "tenant", "local")
     assert "own agents answer here" in await run("set", "channel:room", "shared")
-    assert "keeps an agent of its own" in await run("unset", "channel:room")
+    assert "so its default stays one of them" in await run("unset", "channel:room")
     assert "belongs to another" in await run("propagate", "channel:elsewhere", "channel:room")
     row = await get_scope(db_session, scope=room)
     assert row is not None and row.agent_name == "local", "every refusal writes nothing"

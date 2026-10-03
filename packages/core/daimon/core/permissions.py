@@ -81,17 +81,15 @@ def with_channel_rule(
 
 def thread_rule_key(platform: str, raw: str) -> str | None:
     """`raw` when it names a Slack thread (``channel:ts``), which keeps a rule of
-    its own; None for any other id. Raise `RuleRefused` for a thread id that
-    would otherwise fall to its channel: a Teams thread, or a malformed Slack one.
+    its own; None for any other id (a Teams thread id names its channel). Raise
+    `RuleRefused` for a malformed Slack one rather than setting its channel.
     """
     value = raw.strip()
-    if platform == "slack" and ":" in value:
-        if _SLACK_THREAD_KEY.fullmatch(value):
-            return value
-        raise RuleRefused(f"{value} is not a Slack channel id or channel:thread_ts")
-    if platform == "teams" and ";messageid=" in value:
-        raise RuleRefused("a Teams thread has no rule of its own; set the rule on its channel")
-    return None
+    if platform != "slack" or ":" not in value:
+        return None
+    if _SLACK_THREAD_KEY.fullmatch(value):
+        return value
+    raise RuleRefused(f"{value} is not a Slack channel id or channel:thread_ts")
 
 
 def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
