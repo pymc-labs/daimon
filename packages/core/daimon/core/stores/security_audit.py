@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import Account, SecurityAuditEvent, Tenant
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,13 @@ class SecurityAuditEntry(BaseModel):
     token_jti: uuid.UUID | None = None
     scope: str | None = None
     """The operator-token scope the call was checked against."""
+    target_channel_id: str | None = None
+    """Channel tidy tools only: the channel of the message edited or deleted."""
+    target_message_id: str | None = None
+    content_hmac: str | None = None
+    """Keyed HMAC-SHA256 of the text an edit or delete replaced; never the text."""
+    turn_ref: str | None = None
+    """The turn a tidy action ran in: ``origin:<id>`` or ``token:<jti>``."""
 
 
 class SecurityAuditRow(SecurityAuditEntry):
@@ -56,6 +63,10 @@ async def append_event(
     token_kind: str | None = None,
     token_jti: uuid.UUID | None = None,
     scope: str | None = None,
+    target_channel_id: str | None = None,
+    target_message_id: str | None = None,
+    content_hmac: str | None = None,
+    turn_ref: str | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
         raise ValueError("occurred_at must include a timezone")
@@ -89,6 +100,10 @@ async def append_event(
         token_kind=token_kind,
         token_jti=token_jti,
         scope=scope,
+        target_channel_id=target_channel_id,
+        target_message_id=target_message_id,
+        content_hmac=content_hmac,
+        turn_ref=turn_ref,
     )
     session.add(event)
     await session.flush()
@@ -122,6 +137,38 @@ async def list_events(
     return [SecurityAuditRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
 
 
+async def count_tidy_events(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    outcome: Literal["allowed", "denied", "error"],
+    since: datetime,
+    turn_ref: str | None = None,
+) -> int:
+    """Channel tidy rows for one agent since a time, optionally in one turn.
+
+    Only tidy rows carry `turn_ref`, so the partial index `ix_security_audit_tidy`
+    serves this count and `since` bounds it.
+    """
+    if since.utcoffset() is None:
+        raise ValueError("since must include a timezone")
+    stmt = (
+        select(func.count())
+        .select_from(SecurityAuditEvent)
+        .where(
+            SecurityAuditEvent.tenant_id == tenant_id,
+            SecurityAuditEvent.agent_id == agent_id,
+            SecurityAuditEvent.occurred_at >= since,
+            SecurityAuditEvent.turn_ref.is_not(None),
+            SecurityAuditEvent.outcome == outcome,
+        )
+    )
+    if turn_ref is not None:
+        stmt = stmt.where(SecurityAuditEvent.turn_ref == turn_ref)
+    return int(await session.scalar(stmt) or 0)
+
+
 @asynccontextmanager
 async def _maintenance(session: AsyncSession) -> AsyncIterator[None]:
     # A savepoint restores the GUC even if the operation fails and PostgreSQL
@@ -135,7 +182,8 @@ async def _maintenance(session: AsyncSession) -> AsyncIterator[None]:
 async def erase_account(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> int:
-    """Remove this account's personal identifiers within one tenant."""
+    """Remove this account's personal identifiers within one tenant, and the
+    tidy content HMACs on its rows."""
     async with _maintenance(session):
         result = await session.execute(
             update(SecurityAuditEvent)
@@ -143,7 +191,7 @@ async def erase_account(
                 SecurityAuditEvent.tenant_id == tenant_id,
                 SecurityAuditEvent.account_id == account_id,
             )
-            .values(account_id=None, platform_user_id=None)
+            .values(account_id=None, platform_user_id=None, content_hmac=None)
         )
     return cast(CursorResult[Any], result).rowcount
 

@@ -21,6 +21,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.teams import credential_requests as module
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core import credential_submit
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.credential_requests import ENV_FILE_TARGET, build_skill_repo_target
@@ -455,7 +456,7 @@ async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     row = await _request(db_session_factory, account_id, target="GITHUB_TOKEN")
-    real = module.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -473,7 +474,7 @@ async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
         )
         return await real(session, **kw)
 
-    with patch.object(module, "list_turn_key_names", first_read_misses_the_alias):
+    with patch.object(credential_submit, "list_turn_key_names", first_read_misses_the_alias):
         async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
@@ -509,13 +510,13 @@ async def test_concurrent_submits_of_two_alias_names_store_only_one(
         account = (await make_account(session, tenant=tenant)).id
     first = await _request(committing, account, target="GH_TOKEN")
     second = await _request(committing, account, target="GITHUB_TOKEN")
-    real = module.put_agent_file_if_unchanged
+    real = credential_submit.put_agent_file_if_unchanged
 
     async def slow_insert(session: AsyncSession, **kw: Any) -> Any:
         await asyncio.sleep(0.3)
         return await real(session, **kw)
 
-    with patch.object(module, "put_agent_file_if_unchanged", slow_insert):
+    with patch.object(credential_submit, "put_agent_file_if_unchanged", slow_insert):
         async with _running(TeamsApiFake(), _runtime(committing)) as (service, _):
             await asyncio.gather(
                 post_activity(service, _submit(first.token)),
@@ -644,7 +645,7 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     row = await _request(
         db_session_factory, account_id, target="AWS_SECRET_ACCESS_KEY", replaces=stamp
     )
-    real = module.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -661,7 +662,7 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
             )
         return await real(session, **kw)
 
-    with patch.object(module, "list_turn_key_names", family_changes_after_the_gate):
+    with patch.object(credential_submit, "list_turn_key_names", family_changes_after_the_gate):
         async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
             await post_activity(service, _submit(row.token, secret="new-secret"))
             await service.turns.drain(5)

@@ -27,7 +27,9 @@ from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import ThreadSession, UsageEvent
+from daimon.core.errors import SessionRetired
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import CursorResult
@@ -66,6 +68,34 @@ async def get_live_thread_session(
     if orm is None:
         return None
     return ThreadSessionRow.model_validate(orm)
+
+
+async def list_live_thread_sessions(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> list[ThreadSessionRow]:
+    """Every caller's live row in one thread, newest first.
+
+    For a decision about the thread itself (who may hand it over), never to
+    bind or resume a session: that stays caller-scoped (`get_live_thread_session`).
+    """
+    rows = (
+        await session.execute(
+            select(ThreadSession)
+            .execution_options(populate_existing=True)
+            .where(
+                ThreadSession.tenant_id == tenant_id,
+                ThreadSession.platform == platform,
+                ThreadSession.thread_id == thread_id,
+                ThreadSession.status == "live",
+            )
+            .order_by(ThreadSession.created_at.desc())
+        )
+    ).scalars()
+    return [ThreadSessionRow.model_validate(row) for row in rows]
 
 
 async def get_thread_session_at(
@@ -195,6 +225,7 @@ async def create_thread_session(
     predecessor_id: _uuid.UUID | None = None,
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
+    seal_ids: frozenset[str] | None = None,
 ) -> ThreadSessionRow:
     """Insert a new thread-session mapping row and return the Pydantic domain type.
 
@@ -212,7 +243,9 @@ async def create_thread_session(
     `predecessor_id`, `transfer_file_id` and `transfer_kind` are set only when
     this row replaces an earlier session and carries its work forward.
     """
+    await lock_access_policy(session, tenant_id=tenant_id)
     kwargs: dict[str, object] = {
+        "seal_ids": None if seal_ids is None else sorted(seal_ids),
         "tenant_id": tenant_id,
         "platform": platform,
         "thread_id": thread_id,
@@ -510,3 +543,71 @@ async def thread_ids_for_sessions(
         )
     )
     return {ma_session_id: thread_id for ma_session_id, thread_id in rows.all()}
+
+
+async def record_session_seals(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID | None,
+    ma_session_id: str,
+    seals: frozenset[str],
+    channel_id: str | None = None,
+) -> None:
+    """Publish restrictions before MA stamping; union prevents a stale read relaxing them."""
+    if tenant_id is None:
+        tenant_id = (
+            await session.execute(
+                select(ThreadSession.tenant_id)
+                .where(ThreadSession.ma_session_id == ma_session_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if tenant_id is None:
+            return
+    await lock_access_policy(session, tenant_id=tenant_id)
+    rows = (
+        await session.execute(
+            select(ThreadSession)
+            .where(
+                ThreadSession.tenant_id == tenant_id, ThreadSession.ma_session_id == ma_session_id
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalars()
+    for row in rows:
+        row.seal_ids = sorted(set(row.seal_ids or ()) | seals)
+        if row.channel_id is None and channel_id is not None:
+            row.channel_id = channel_id
+    await session.flush()
+
+
+async def require_writable_session(db: AsyncSession, session_id: str) -> None:
+    rows = (
+        await db.execute(
+            select(ThreadSession.id, ThreadSession.status).where(
+                ThreadSession.ma_session_id == session_id
+            )
+        )
+    ).all()
+    for mapping_id, status in rows:
+        successor = (
+            await db.execute(
+                select(ThreadSession.id).where(ThreadSession.predecessor_id == mapping_id).limit(1)
+            )
+        ).first()
+        if status != "live" or successor is not None:
+            raise SessionRetired("This session was replaced. Continue in its successor.")
+
+
+async def read_session_seals(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, ma_session_id: str
+) -> frozenset[str]:
+    """Monotone facts published before MA stamps; NULL has no known ids."""
+    values = (
+        await session.execute(
+            select(ThreadSession.seal_ids).where(
+                ThreadSession.tenant_id == tenant_id, ThreadSession.ma_session_id == ma_session_id
+            )
+        )
+    ).scalars()
+    return frozenset(seal for value in values for seal in value or ())

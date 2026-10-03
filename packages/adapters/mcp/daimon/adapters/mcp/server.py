@@ -78,6 +78,7 @@ from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_too
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
+from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
@@ -386,6 +387,8 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
+        if effective_settings.discord is not None or effective_settings.slack is not None:
+            register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:
         log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools

@@ -125,6 +125,20 @@ async def demote_unlisted_admins(
     return result.rowcount
 
 
+async def key_share_lock_account(session: AsyncSession, *, account_id: uuid.UUID) -> None:
+    """Hold the account row FOR KEY SHARE to the end of the caller's transaction.
+
+    Taken before any row that references the account, so an account purge
+    (which takes the row FOR UPDATE first) is waited for here rather than
+    while this transaction holds those rows.
+    """
+    await session.execute(
+        select(Account.id)
+        .where(Account.id == account_id)
+        .with_for_update(read=True, key_share=True)
+    )
+
+
 async def account_exists(session: AsyncSession, *, account_id: uuid.UUID) -> bool:
     """Return True iff the accounts row exists. Read-only."""
     stmt = select(func.count()).select_from(Account).where(Account.id == account_id)

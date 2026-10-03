@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 110 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 114 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -357,6 +357,17 @@ Thread-participation tools: follow a thread (or a channel, or the workspace).
 | --- | --- | --- |
 | `get_thread_participation` | all callers | Report whether you follow a thread or channel, and which tier decided it. |
 | `set_thread_participation` | all callers | Start or stop replying in a thread without being addressed each time. |
+
+## `tidy`
+
+Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `archive_thread` | Discord callers | Archive a Discord thread you opened with create_thread. |
+| `delete_message` | Discord callers, Slack callers | Delete one message you posted with send_message or create_thread. |
+| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened with create_thread. |
+| `edit_message` | Discord callers, Slack callers | Replace the text of a message you posted with send_message or create_thread. |
 
 ## `time`
 

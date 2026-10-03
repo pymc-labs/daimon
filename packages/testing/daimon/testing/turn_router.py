@@ -29,7 +29,13 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
     BetaManagedAgentsTextBlock,
 )
 from daimon.testing.ma import MARouter, json_body, list_response, send_events_response, sse_response
-from daimon.testing.ma_models import DEFAULT_MODEL_ID, ma_agent, ma_environment, ma_model_usage
+from daimon.testing.ma_models import (
+    DEFAULT_MODEL_ID,
+    ma_agent,
+    ma_environment,
+    ma_model_usage,
+    ma_session,
+)
 
 AGENT_TEXT = "Hello from the agent!"
 AGENT_ID = "ag_parity_test"
@@ -96,6 +102,7 @@ def build_turn_router(
     input_tokens: int = 100,
     output_tokens: int = 50,
     session_id: str | None = None,
+    replacement_session_ids: tuple[str, ...] = (),
     fresh_event_ids: bool = False,
     send_events_data: list[dict[str, Any]] | None = None,
     sent_event_bodies: list[dict[str, Any]] | None = None,
@@ -120,6 +127,7 @@ def build_turn_router(
       `session_id`        -- scope the two event routes to that session id
                              only, so a turn run anywhere else has no route
                              and fails loudly (proves which session ran).
+      `replacement_session_ids` -- idle sessions with retrieve and archive routes for replacements.
       `fresh_event_ids`   -- each stream open mints new event ids, for
                              scenarios running several turns on one session.
       `send_events_data`  -- the `data` echoed by `POST .../events`.
@@ -166,6 +174,10 @@ def build_turn_router(
     target.add("GET", r"/v1/agents/[^/]+", lambda _r, _m: httpx.Response(200, json=agent_item))
     target.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_item]))
     target.add("GET", r"/v1/environments/[^/]+", lambda _r, _m: httpx.Response(200, json=env_item))
+    for retrieve_id in replacement_session_ids:
+        target.add_session(
+            ma_session(id=retrieve_id, agent_id=agent_id, environment_id=env_id), with_archive=True
+        )
     target.add("POST", rf"/v1/sessions/(?P<session_id>{session_re})/events", _send_events)
     target.add("GET", rf"/v1/sessions/(?P<session_id>{session_re})/events/stream", _stream)
     return target

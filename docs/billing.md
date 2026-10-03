@@ -549,7 +549,7 @@ reason: `admission_balance_depleted`, `admission_cap_exceeded`,
 `admission_agent_pinned_elsewhere`, `admission_channel_isolated` and
 `admission_concurrency_shed`. `admission_denied` covers the invoker allowlist,
 an unreadable access policy and any other gate; rows written before
-`0044_admission_refusal_reasons` record every protection, pin and isolation
+`0046_admission_refusal_reasons` record every protection, pin and isolation
 refusal under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in

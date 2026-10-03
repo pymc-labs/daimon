@@ -31,6 +31,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
 from anthropic.types.beta.session_create_params import Resource
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -50,7 +51,6 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.tool_safety import ToolSafetyPolicy
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -150,15 +150,13 @@ async def lock_preparation(
 ) -> None:
     """Serialize preparation for one caller's thread session, for this transaction.
 
-    Blocking, like the vault bootstrap it copies: the second concurrent mention
-    must WAIT and then re-read the row, or both would decide "replace" against
-    the same live row and create two sessions for one task. Hashed inside
+    Nonblocking: a contending caller releases its transaction and permit,
+    retries, then re-reads the row. Racing mentions must decide against the
+    latest row under this fence so they create one successor. Hashed inside
     Postgres (`hashtextextended`), never with Python's salted `hash()`.
     """
     key = f"{LOCK_NAMESPACE}:{tenant_id}:{platform}:{thread_id}:{account_id}"
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
-    )
+    await try_fence(session, key)
 
 
 def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:

@@ -59,20 +59,22 @@ from daimon.core.credential_requests import (
     availability_for_request,
     split_skill_repo_target,
 )
+from daimon.core.credential_submit import (
+    apply_env_file_submit,
+    apply_env_submit,
+    prepare_env_submit,
+)
+from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
-    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_alias_shadowed,
     env_collision_line,
-    env_import_collisions,
     env_name_problem,
-    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -96,7 +98,6 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
-    CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
@@ -104,15 +105,11 @@ from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
-    list_agent_files,
-    lock_agent_keys,
-    put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
-from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -377,19 +374,6 @@ async def _validate_submission(
     return row, agent
 
 
-def _env_name_refusal(name: str, problem: str) -> str:
-    """One-line refusal for a key name the submitter may not store."""
-    if problem == "bad_name":
-        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
-    if problem == "reserved_name":
-        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
-    return (
-        f"{name} is not a secret name a member can add. Use a name ending in "
-        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
-        "and URL names."
-    )
-
-
 async def run_env_credential_submission(
     runtime: SlackRuntime,
     *,
@@ -433,30 +417,13 @@ async def run_env_credential_submission(
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
 
-    # Decided before the transaction opens: this check needs Slack and MA, and
-    # whether the request is a replacement at all was fixed at mint and cannot
-    # change underneath it.
-    # A new name that a tool reads as a key already held (GH_TOKEN beside
-    # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same gate.
-    #
-    # Snapshot the related credentials (aliases and family members) before the
-    # transaction, for every submit. Under the lock the write proceeds only if
-    # that set is unchanged: a related key added or removed after the gate was
-    # decided was never put to it. An unchanged set — rotating
-    # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
-    async with runtime.sessionmaker() as session:
-        held_names = await list_turn_key_names(
-            session, tenant_id=request.tenant_id, agent_id=request.agent_id
-        )
-    related_before = env_related_held(request.target, held_names)
-    shadowed = (
-        env_alias_shadowed(request.target, held_names)
-        if request.replaces_updated_at is None
-        else None
+    async def replacement_refused() -> bool:
+        return await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
+
+    plan = await prepare_env_submit(
+        runtime.sessionmaker, row=request, replacement_refused=replacement_refused
     )
-    refuse_replacement = (request.replaces_updated_at is not None or shadowed is not None) and (
-        await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
-    )
+    shadowed = plan.shadowed
 
     # The name a member may store is re-checked against the submitter's live
     # role. `key_add` needs no gate, but the NAME does: a tool-control or
@@ -473,58 +440,17 @@ async def run_env_credential_submission(
         )
         return
 
-    now = datetime.now(UTC)
-    state: CardState = "applied"
-    queued = False
     try:
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            # Re-read under the write, holding the agent's key-set lock: an
-            # alias that appeared after the gate above was decided was never
-            # put to it, and one a concurrent writer is adding waits.
-            if consumed is not None:
-                await lock_agent_keys(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                )
-            appeared = (
-                consumed is not None
-                and env_related_held(
-                    consumed.target,
-                    await list_turn_key_names(
-                        session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                    ),
-                )
-                != related_before
-            )
-            if consumed is not None and refuse_replacement:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="write_failed"
-                )
-                state = "refused"
-            elif consumed is not None and appeared:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="stale_replacement"
-                )
-                state = "superseded"
-            elif consumed is not None:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=consumed.target,
-                    content=value,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=consumed.replaces_updated_at,
-                )
-                await credential_requests_store.set_credential_request_outcome(
-                    session,
-                    token=token,
-                    outcome="applied" if written is not None else "stale_replacement",
-                )
-                if written is None:
-                    state = "superseded"
-                else:
-                    queued = await record_input_continuation(session, consumed, platform="slack")
+        result = await apply_env_submit(
+            runtime.sessionmaker,
+            row=request,
+            agent=agent,
+            platform="slack",
+            value=value,
+            plan=plan,
+            now=datetime.now(UTC),
+        )
+        consumed, state, queued = result.consumed, result.state, result.queued
     except FormPinRefused as refused:
         # Decided with the consume: rolled back, nothing stored.
         await post_ephemeral(
@@ -628,19 +554,6 @@ def _download_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_FILE_DOWNLOAD_TIMEOUT_SECONDS)
 
 
-class _KeyAppearedMidWrite(Exception):
-    """A key the read found absent existed by the time it was written.
-
-    Raised inside the write transaction purely to roll it back: a whole-file
-    import is all-or-nothing, so one failed precondition has to undo the
-    entries already written beside it — and the consume with them.
-    """
-
-    def __init__(self, entry: EnvEntry) -> None:
-        super().__init__(entry.name)
-        self.entry = entry
-
-
 def _collision_lines(collisions: tuple[EnvEntry, ...], held: frozenset[str]) -> tuple[str, ...]:
     """Name the keys that already exist: names and line numbers, no values.
 
@@ -674,54 +587,9 @@ async def _apply_env_file_entries(
     someone is using. The continuation the request owes is queued in the same
     transaction as the keys, and only on the path that actually wrote them.
     """
-    try:
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            if consumed is None:
-                return None, (), False, frozenset()
-            # Held across the read below and the writes after it, so a
-            # concurrent writer of another alias name cannot interleave.
-            await lock_agent_keys(session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id)
-            existing = {
-                row.key
-                for row in await list_agent_files(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                )
-            }
-            collisions = env_import_collisions(entries, existing)
-            if collisions:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=request.token, outcome="stale_replacement"
-                )
-                return consumed, collisions, False, frozenset(existing)
-            for entry in entries:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=entry.name,
-                    content=entry.value,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=None,
-                )
-                if written is None:
-                    raise _KeyAppearedMidWrite(entry)
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=request.token, outcome="applied"
-            )
-            queued = await record_input_continuation(session, consumed, platform="slack")
-            return consumed, (), queued, frozenset()
-    except _KeyAppearedMidWrite as err:
-        # The rollback took the consume with it, so the request is live again:
-        # spend it here and answer exactly as a read-time collision answers.
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            if consumed is None:
-                return None, (), False, frozenset()
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=request.token, outcome="stale_replacement"
-            )
-            return consumed, (err.entry,), False, frozenset({err.entry.name})
+    return await apply_env_file_submit(
+        runtime.sessionmaker, row=request, agent=agent, platform="slack", entries=entries, now=now
+    )
 
 
 async def run_env_file_credential_submission(

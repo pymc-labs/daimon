@@ -41,6 +41,8 @@ from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefau
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
+    lock_policy_writes_exclusive,
+    policy_write_transaction,
     set_access_policy,
 )
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
@@ -325,6 +327,7 @@ async def _write_isolation(
     known: Mapping[str, BetaManagedAgentsAgent | None],
 ) -> tuple[_ChannelAgent, bool]:
     """Under the policy lock: isolate with the channel's default agent if it may be its own."""
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
     found = await _channel_agent(
@@ -422,7 +425,8 @@ async def set_channel_isolation(
     (`_archive_unused_copy`).
     """
     if not isolated:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             policy = await load_access_policy(session, tenant_id=tenant_id)
             updated = end_isolation(
@@ -441,7 +445,7 @@ async def set_channel_isolation(
     known = await _lookup_channel_agent(
         anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id
     )
-    async with sessionmaker.begin() as session:
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         found, changed = await _write_isolation(
             anthropic,
             session,
@@ -481,7 +485,8 @@ async def set_channel_isolation(
         extra_metadata={MA_METADATA_KEY_ISOLATION_COPY: channel_id},
     )
     try:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             await set_fields(
                 session,

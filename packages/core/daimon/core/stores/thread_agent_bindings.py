@@ -75,6 +75,34 @@ async def get_binding(
     return ThreadAgentBindingRow.model_validate(binding) if binding is not None else None
 
 
+async def lock_binding(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+) -> ThreadAgentBindingRow | None:
+    """`get_binding` under `FOR UPDATE`, held to the end of the caller's transaction.
+
+    A thread with no binding row locks nothing; a switch that will insert
+    one is serialized by the tenant policy lock it already holds.
+    """
+    binding = (
+        await session.execute(
+            select(ThreadAgentBinding)
+            .where(
+                ThreadAgentBinding.tenant_id == tenant_id,
+                ThreadAgentBinding.platform == platform,
+                ThreadAgentBinding.parent_channel_id == parent_channel_id,
+                ThreadAgentBinding.thread_id == thread_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    return ThreadAgentBindingRow.model_validate(binding) if binding is not None else None
+
+
 async def get_binding_by_id(
     session: AsyncSession, *, id: uuid.UUID
 ) -> ThreadAgentBindingRow | None:

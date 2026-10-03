@@ -44,6 +44,7 @@ import contextlib
 import dataclasses
 import functools
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
@@ -400,6 +401,7 @@ async def run_turn(
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
+    send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -474,10 +476,11 @@ async def run_turn(
                 "content": list(system_blocks),
             }
             batch.append(system_event)
-        if before_send is not None:
-            # A last check by the caller, after the stream is open (`run_prepared_turn`).
-            await before_send()
-        await anthropic.beta.sessions.events.send(session_id, events=batch)
+        async with send_guard() if send_guard is not None else contextlib.nullcontext():
+            if before_send is not None:
+                # A last check by the caller, after the stream is open (`run_prepared_turn`).
+                await before_send()
+            await anthropic.beta.sessions.events.send(session_id, events=batch)
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:

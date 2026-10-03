@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0044_admission_refusal_reasons"
-down_revision: str | None = "0043_agent_admin_standing"
+revision: str = "0046_admission_refusal_reasons"
+down_revision: str | None = "0045_agent_admin_standing"
 branch_labels: str | None = None
 depends_on: str | None = None
 

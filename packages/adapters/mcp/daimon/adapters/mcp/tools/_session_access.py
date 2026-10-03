@@ -20,10 +20,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
-    MA_METADATA_KEY_THREAD,
     is_private_routine_stamp,
 )
-from daimon.core.session_seal import seal_ids
+from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
 
@@ -107,30 +106,13 @@ def _hub_request(auth: AuthIdentity) -> tuple[Subject, Surface, Action]:
     return access.subject, Surface.HUB, action
 
 
-def _is_private_session(metadata: Mapping[str, str]) -> bool:
-    return (
-        MA_METADATA_KEY_PRIVATE_DM in metadata
-        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_CHANNEL) or ""))
-        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
-    )
-
-
 def _session_facts(
     metadata: Mapping[str, str],
     *,
     owned: bool,
     legacy_thread_id: str | None = None,
 ) -> SessionFacts:
-    channel = metadata.get(MA_METADATA_KEY_CHANNEL)
-    return SessionFacts(
-        channel=channel,
-        thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
-        seal_ids=frozenset(seal_ids(metadata)),
-        legacy_thread_id=legacy_thread_id,
-        owned=owned,
-        private=_is_private_session(metadata)
-        or (legacy_thread_id is not None and _is_private_conversation(legacy_thread_id)),
-    )
+    return session_facts(metadata, owned=owned, legacy_thread_id=legacy_thread_id)
 
 
 def _hub_reads_as_anyone(
@@ -202,17 +184,6 @@ async def admin_readable_legacy_sessions(
         for sid, thread in mapped.items()
         if _admin_may_read_other(by_id[sid], legacy_thread_id=thread)
     }
-
-
-def _is_private_conversation(conversation_id: str) -> bool:
-    """A DM scope, a Slack IM (``D…``) or a Teams personal chat (``a:…``).
-
-    Sessions that ran there are private even without the private-DM stamp
-    (sessions created before every DM turn was stamped).
-    """
-    # Discord ids are numeric and Teams channels start "19:", so a leading
-    # "D" is only ever a Slack IM.
-    return conversation_id.startswith(("dm:", "a:", "D"))
 
 
 def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:

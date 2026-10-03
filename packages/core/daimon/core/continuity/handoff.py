@@ -10,31 +10,34 @@ The refusals are ordered, and the order is the point:
 1. `setup_thread` — a setup conversation must always answer as the built-in
    Daimon, so nothing can be handed over inside one. Nothing else matters
    once the location is a setup thread.
-2. `pinned_elsewhere` — an operator pinned the destination to other
-   channels, so it must not be brought into this one. Checked before
-   reachability: a pinned agent is reachable (it answers in its own
+2. The access policy, as `authorize(HAND_OFF)` decided it: `channel_protected`,
+   `invoker_not_allowed`, `pinned_elsewhere` and `channel_isolated`. Checked
+   before reachability: a pinned agent is reachable (it answers in its own
    channels), and that is exactly what must not carry it here.
 3. `unreachable` — an agent nobody can reach through the channel/workspace
    cascade cannot be handed a task, because the person could never talk to
    it afterwards.
 4. `same_agent` — the destination already answers here; there is nothing to
    hand over.
-5. `admin_required` — the destination is not the agent this channel answers
-   with, and the caller is not an admin. Every agent reachable anywhere in the
-   workspace is reachable here, and a handed-off thread runs as the
-   destination, with its repo, keys, connectors and memory. Bringing another
-   project's agent into a channel is therefore an admin's call; a member may
-   still hand a thread back to the channel's own agent.
+5. `admin_required` / `sealed` — the destination is not scoped to this
+   channel, and the caller may not bring it in (`authorize` says who may). A
+   handed-off thread runs as the destination, with its repo, keys, connectors
+   and memory, so bringing another project's agent into a channel is an
+   admin's call.
 
 Pure module — no I/O, no clock, no randomness.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from daimon.core.errors import DaimonError
 from pydantic import BaseModel, ConfigDict
+
+if TYPE_CHECKING:
+    # Annotation only: authz imports the stores, which import this module.
+    from daimon.core.authz import Decision
 
 __all__ = [
     "HandoffAllowed",
@@ -46,8 +49,25 @@ __all__ = [
 ]
 
 HandoffRefusalReason = Literal[
-    "unreachable", "setup_thread", "same_agent", "pinned_elsewhere", "admin_required"
+    "unreachable",
+    "setup_thread",
+    "same_agent",
+    "pinned_elsewhere",
+    "admin_required",
+    "channel_protected",
+    "invoker_not_allowed",
+    "channel_isolated",
+    "sealed",
 ]
+
+# `authorize(HAND_OFF)` denials that refuse before reachability is looked at.
+_POLICY_REFUSALS: dict[str, HandoffRefusalReason] = {
+    "channel_protected": "channel_protected",
+    "invoker_not_allowed": "invoker_not_allowed",
+    "agent_pinned_elsewhere": "pinned_elsewhere",
+    "agent_unresolved": "unreachable",
+    "channel_isolated": "channel_isolated",
+}
 
 
 class HandoffRefusedInSetupThread(DaimonError):
@@ -86,10 +106,8 @@ def decide_handoff(
     destination_name: str,
     destination_reachable: bool,
     existing_binding_kind: Literal["setup", "handoff"] | None,
-    origin_responder_ma_agent_id: str,
-    destination_pinned_elsewhere: bool = False,
-    destination_answers_channel: bool,
-    caller_is_admin: bool,
+    origin_responder_ma_agent_id: str | None,
+    access: Decision,
 ) -> HandoffDecision:
     """Decide whether this task may move to `destination_ma_agent_id`.
 
@@ -97,27 +115,29 @@ def decide_handoff(
     the tenant's live agents by exact id, so a recreated namesake is a
     different destination and never silently inherits a handoff.
 
-    `destination_pinned_elsewhere` is True when the tenant's access policy
-    pins the destination to channels that don't include this thread's.
-
-    `destination_answers_channel` is True when the channel/workspace cascade
-    already sends this thread's parent channel to the destination; unless it
-    is, only a `caller_is_admin` caller may hand the thread over.
+    `access` is `authorize(HAND_OFF)` for the destination at this thread, from
+    a policy read under the tenant's policy lock.
 
     `existing_binding_kind` is the kind of binding the thread already carries
     (None when it carries none). A `handoff` binding is replaceable — a task
-    can move on again — a `setup` one is not.
+    can move on again — a `setup` one is not. `origin_responder_ma_agent_id`
+    is who answers now; None skips the same-agent check (a switch out of a
+    session the new responder can't use yet).
     """
     if existing_binding_kind == "setup":
         return HandoffRefused(reason="setup_thread", destination_name=destination_name)
-    if destination_pinned_elsewhere:
-        return HandoffRefused(reason="pinned_elsewhere", destination_name=destination_name)
+    denied = None if access.allowed else access.reason
+    if denied is not None and denied in _POLICY_REFUSALS:
+        return HandoffRefused(reason=_POLICY_REFUSALS[denied], destination_name=destination_name)
     if not destination_reachable:
         return HandoffRefused(reason="unreachable", destination_name=destination_name)
     if destination_ma_agent_id == origin_responder_ma_agent_id:
         return HandoffRefused(reason="same_agent", destination_name=destination_name)
-    if not destination_answers_channel and not caller_is_admin:
-        return HandoffRefused(reason="admin_required", destination_name=destination_name)
+    if denied is not None:
+        return HandoffRefused(
+            reason="sealed" if denied == "sealed" else "admin_required",
+            destination_name=destination_name,
+        )
     return HandoffAllowed(
         destination_ma_agent_id=destination_ma_agent_id, destination_name=destination_name
     )
