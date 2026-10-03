@@ -4,15 +4,22 @@ Covers:
 - do_propagate persists agent_name at the scope (set_fields); second call returns prior name
 - do_unpropagate clears the agent_name (unset_fields)
 - mask_tail covers the full-length and short-string cases
+- delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup import write as write_mod
 from daimon.adapters.slack.agent_setup.write import (
@@ -20,12 +27,25 @@ from daimon.adapters.slack.agent_setup.write import (
     do_propagate,
     do_unpropagate,
     load_agent_inline_pat,
+    owner_repo_from_url,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.errors import DaimonError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import (
+    FakeMemoryStoreState,
+    NotHandled,
+    build_fake_anthropic,
+    combine_handlers,
+    make_archive_agent_handler,
+    make_fake_ma_handler,
+    make_fake_memory_store_handler,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -35,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _TEAM_ID = "T_WRITE_TESTS"
 _AGENT_NAME = "my-agent"
 _OTHER_AGENT_NAME = "other-agent"
+_CHANNEL_ID = "C_WRITE_TESTS"
 
 
 async def _seed_tenant(session: AsyncSession, team_id: str = _TEAM_ID) -> uuid.UUID:
@@ -52,7 +73,7 @@ async def _seed_account(session: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUI
 
 
 # ---------------------------------------------------------------------------
-# load_agent_inline_pat
+# load_agent_inline_pat / owner_repo_from_url
 # ---------------------------------------------------------------------------
 
 
@@ -143,7 +164,38 @@ async def test_load_agent_inline_pat_returns_none_for_agent_with_no_token_even_w
     )
 
 
-# Repository-normalization tests were removed with the unused helper.
+def test_owner_repo_from_url_collapses_scheme_host_and_git_variants() -> None:
+    canonical = "acme-org/widgets"
+    variants = [
+        "https://github.com/acme-org/widgets",
+        "http://github.com/acme-org/widgets",
+        "github.com/acme-org/widgets",
+        "https://github.com/acme-org/widgets.git",
+        "https://github.com/acme-org/widgets/",
+        "acme-org/widgets",
+    ]
+    for variant in variants:
+        assert owner_repo_from_url(variant) == canonical, (
+            f"owner_repo_from_url({variant!r}) must canonicalize to {canonical!r}"
+        )
+
+
+def test_owner_repo_from_url_matches_store_normalization() -> None:
+    """Must stay byte-identical to the store's own normalization — a probe run
+    against a differently-canonicalized string would verify a different repo
+    than the one the binding actually records."""
+    from daimon.core.stores.agent_repo_binding import (
+        _normalize_owner_repo,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    for url in [
+        "https://github.com/acme-org/widgets.git",
+        "github.com/acme-org/widgets/",
+        "acme-org/widgets",
+    ]:
+        assert owner_repo_from_url(url) == _normalize_owner_repo(url), (
+            "owner_repo_from_url must stay byte-identical to the store's normalization"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,4 +313,276 @@ async def test_do_unpropagate_clears_agent_name_at_scope(
 # ---------------------------------------------------------------------------
 
 
-# Legacy deletion is covered by the core lifecycle tests.
+def _agent_dict(
+    *,
+    id_: str,
+    name: str,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+) -> dict[str, Any]:
+    """Build a real BetaManagedAgentsAgent and dump to JSON for the MockTransport."""
+    metadata: dict[str, str] = {
+        "daimon_tenant": str(tenant_id),
+        "daimon_name": name,
+    }
+    if account_id is not None:
+        metadata["daimon_account"] = str(account_id)
+    return BetaManagedAgentsAgent(
+        id=id_,
+        type="agent",
+        name=name,
+        model={"id": "claude-sonnet-4-6"},  # type: ignore[arg-type]
+        metadata=metadata,
+        description=None,
+        archived_at=None,
+        created_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
+        updated_at="2026-05-01T00:00:00Z",  # type: ignore[arg-type]
+        version=1,
+        mcp_servers=[],
+        skills=[],
+        tools=[],
+        system=None,
+    ).model_dump(mode="json")
+
+
+async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_MEM")
+    mem_state = FakeMemoryStoreState()
+    client = build_fake_anthropic(
+        combine_handlers(
+            make_archive_agent_handler(),
+            make_fake_memory_store_handler(mem_state),
+            make_fake_ma_handler(),
+        )
+    )
+
+    agent = await client.beta.agents.create(
+        name="doomed",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "doomed"},
+    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(agent.id))
+    store = await client.beta.memory_stores.create(name="m", description="d")
+
+    from daimon.core.stores.agent_memory_stores import get_memory_store_id, insert_memory_store
+
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id=store.id
+    )
+    await db_session.commit()
+
+    runtime = MagicMock(spec=SlackRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    await write_mod.delete_agent(runtime, tenant_id=tenant.id, name="doomed")
+
+    assert mem_state.stores[store.id]["archived_at"] is not None
+    async with db_session_factory() as s:
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid) is None
+
+
+def _make_failing_store_archive_handler() -> Callable[[httpx.Request], httpx.Response]:
+    """500 on memory-store archive — simulates a transient MA outage."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and re.fullmatch(
+            r"/v1/memory_stores/[^/]+/archive", request.url.path
+        ):
+            return httpx.Response(
+                500,
+                json={"type": "error", "error": {"type": "api_error", "message": "boom"}},
+            )
+        raise NotHandled
+
+    return handler
+
+
+async def test_delete_agent_succeeds_when_store_archive_fails(
+    db_session, db_session_factory
+) -> None:
+    """Transient store-archive failure must not fail agent deletion (best-effort degrade)."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_FAIL")
+    mem_state = FakeMemoryStoreState()
+    client = build_fake_anthropic(
+        combine_handlers(
+            make_archive_agent_handler(),
+            _make_failing_store_archive_handler(),
+            make_fake_memory_store_handler(mem_state),
+            make_fake_ma_handler(),
+        )
+    )
+
+    agent = await client.beta.agents.create(
+        name="doomed",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "doomed"},
+    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(agent.id))
+    store = await client.beta.memory_stores.create(name="m", description="d")
+
+    from daimon.core.stores.agent_memory_stores import get_memory_store_id, insert_memory_store
+
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id=store.id
+    )
+    await db_session.commit()
+
+    runtime = MagicMock(spec=SlackRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    # Must not raise despite the 500 from the store archive.
+    await write_mod.delete_agent(runtime, tenant_id=tenant.id, name="doomed")
+
+    assert mem_state.stores[store.id]["archived_at"] is None
+    async with db_session_factory() as s:
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid) == store.id
+
+
+async def test_delete_agent_clears_tenant_default_naming_the_agent(
+    db_session, db_session_factory
+) -> None:
+    """Deleting the workspace default must not leave a tenant row naming a dead agent.
+
+    A tenant_config row pointing at an archived agent breaks resolution for the
+    whole install until an admin re-scopes by hand.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_SCOPE")
+    scope = TenantScopeRef(tenant_id=tenant.id)
+    await set_fields(db_session, scope=scope, tenant_id=tenant.id, agent_name="doomed")
+    await db_session.commit()
+
+    client = build_fake_anthropic(
+        combine_handlers(
+            make_archive_agent_handler(),
+            make_fake_memory_store_handler(FakeMemoryStoreState()),
+            make_fake_ma_handler(),
+        )
+    )
+    await client.beta.agents.create(
+        name="doomed",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "doomed"},
+    )
+
+    runtime = MagicMock(spec=SlackRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    await write_mod.delete_agent(runtime, tenant_id=tenant.id, name="doomed")
+
+    async with db_session_factory() as s:
+        assert await get_scope(s, scope=scope) is None, (
+            "the tenant row naming the deleted agent must be gone so resolution "
+            "falls through to the deployment default"
+        )
+
+
+# ---------------------------------------------------------------------------
+# delete_agent — server-side refusal for defaults-managed ("system") agents
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_archive_handler(
+    archived_ids: list[str],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Archive handler that records which agent ids MA was actually asked to archive.
+
+    Lets a test assert the guard fired *before* the archive call, not merely
+    that `delete_agent` raised.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        m = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
+        if request.method != "POST" or not m:
+            raise NotHandled
+        archived_ids.append(m.group("id"))
+        now = datetime.now(UTC)
+        return httpx.Response(
+            200,
+            json=BetaManagedAgentsAgent(
+                id=m.group("id"),
+                type="agent",
+                name="doomed",
+                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+                metadata={},
+                description=None,
+                archived_at=now,
+                created_at=now,
+                updated_at=now,
+                version=2,
+                mcp_servers=[],
+                skills=[],
+                tools=[],
+                system=None,
+            ).model_dump(mode="json"),
+        )
+
+    return handler
+
+
+async def test_delete_agent_refuses_defaults_managed_agent(db_session, db_session_factory) -> None:
+    """A workspace admin must not be able to archive the deployment's built-in agent.
+
+    The Slack roster carries no is_system flag, so the panel offers Delete for
+    seeded agents — the refusal has to live server-side or the deployment's
+    agent (and its memory store) go away in two clicks.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_MANAGED")
+    archived_ids: list[str] = []
+    client = build_fake_anthropic(
+        combine_handlers(
+            _make_recording_archive_handler(archived_ids),
+            make_fake_memory_store_handler(FakeMemoryStoreState()),
+            make_fake_ma_handler(),
+        )
+    )
+    await client.beta.agents.create(
+        name="daimon",
+        model="claude-sonnet-4-6",
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_name": "daimon",
+            "daimon_managed": "true",
+        },
+    )
+
+    runtime = MagicMock(spec=SlackRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    with pytest.raises(DaimonError, match="built-in agent"):
+        await write_mod.delete_agent(runtime, tenant_id=tenant.id, name="daimon")
+
+    assert archived_ids == [], (
+        "delete_agent must refuse a daimon_managed agent before calling agents.archive"
+    )
+
+
+async def test_delete_agent_still_archives_unmanaged_agent(db_session, db_session_factory) -> None:
+    """The managed guard must not over-block: user forks still delete normally."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_UNMANAGED")
+    archived_ids: list[str] = []
+    client = build_fake_anthropic(
+        combine_handlers(
+            _make_recording_archive_handler(archived_ids),
+            make_fake_memory_store_handler(FakeMemoryStoreState()),
+            make_fake_ma_handler(),
+        )
+    )
+    agent = await client.beta.agents.create(
+        name="my-fork",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "my-fork"},
+    )
+
+    runtime = MagicMock(spec=SlackRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    await write_mod.delete_agent(runtime, tenant_id=tenant.id, name="my-fork")
+
+    assert archived_ids == [agent.id], (
+        "an agent without the daimon_managed marker must still be archived"
+    )
