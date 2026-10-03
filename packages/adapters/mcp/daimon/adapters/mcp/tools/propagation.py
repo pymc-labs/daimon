@@ -38,7 +38,7 @@ from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_pinned, confidential_channel_of
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
@@ -120,7 +120,7 @@ async def _set_agent_default_impl(
     if channel_id is not None:
         if runtime.settings.routing.channel_defaults == "confidential_only":
             policy = await load_isolation(runtime, auth.tenant_id)
-            if channel_id not in policy.isolated_channel_ids:
+            if confidential_channel_of(policy, channel_id) is None:
                 raise ToolError(
                     "Channel defaults are available only in confidential channels. "
                     "Name the agent in a mention or mark this channel confidential."
