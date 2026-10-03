@@ -11,14 +11,10 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.agent_pins import agent_pin_names, consume_form_unless_pinned
-from daimon.core.agent_reach import load_target_facts
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.credential_requests import CredentialRequestOutcome
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
@@ -26,14 +22,7 @@ from daimon.core.env_file import (
     env_import_collisions,
     env_related_held,
 )
-from daimon.core.operation_policy import (
-    PolicyOutcome,
-    TargetFacts,
-    decide_operation,
-    needs_reachability_read,
-)
 from daimon.core.posted_controls import CardState
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     list_agent_files,
@@ -41,7 +30,6 @@ from daimon.core.stores.agent_files import (
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.domain import ChatPlatform, CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.turn_keys import list_turn_key_names
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -57,81 +45,6 @@ def env_name_refusal(name: str, problem: str) -> str:
         f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
         "and URL names."
     )
-
-
-async def decide_env_key_replacement(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    row: CredentialRequestRow,
-    platform: ChatPlatform,
-    is_admin: bool,
-    load_agent: Callable[[], Awaitable[BetaManagedAgentsAgent | None]],
-    caller: Callable[[], ChannelAdminCaller],
-    default: DeploymentDefault,
-) -> PolicyOutcome:
-    """Read fresh replace facts with each adapter's existing policy and audit order.
-
-    Discord returns immediately for an admin. Slack and Teams annotate the
-    operation decision even for admins. Teams retains its reachability-only
-    facts; Discord and Slack also consult channel admin locality.
-    """
-    if platform == "discord" and is_admin:
-        return "allow"
-    facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
-    if not is_admin:
-        agent = await load_agent()
-        if agent is None:
-            if platform == "slack":
-                structlog.get_logger().warning(
-                    "credential_request.replacement_agent_gone",
-                    tenant_id=str(row.tenant_id),
-                    agent_id=str(row.agent_id),
-                )
-            return "needs_admin"
-        managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        needs_read = needs_reachability_read(
-            "key_replace", is_admin=False, is_daimon_managed=managed
-        )
-        if platform == "teams":
-            reachable = False
-            if needs_read:
-                async with session_factory() as session:
-                    reachable = await is_agent_shared_for_key_changes(
-                        session,
-                        tenant_id=row.tenant_id,
-                        agent_names=(
-                            agent.name,
-                            str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
-                        ),
-                        ma_agent_id=str(agent.id),
-                        default=default,
-                        caller_account_id=row.account_id,
-                        caller_platform_user_id=row.requester_platform_user_id,
-                    )
-            facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
-        elif platform == "discord" or needs_read:
-            caller_facts = caller()
-            async with session_factory() as session:
-                facts = await load_target_facts(
-                    session,
-                    "key_replace",
-                    tenant_id=row.tenant_id,
-                    platform=platform,
-                    agent_names=agent_pin_names(agent.name, agent.metadata),
-                    ma_agent_id=str(agent.id),
-                    default=default,
-                    caller=caller_facts,
-                    is_daimon_managed=managed,
-                    caller_account_id=row.account_id,
-                    caller_platform_user_id=(
-                        row.requester_platform_user_id
-                        if platform == "discord"
-                        else caller_facts.platform_user_id
-                    ),
-                )
-        else:
-            facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=False)
-    return decide_operation("key_replace", is_admin=is_admin, target=facts)
 
 
 @dataclass(frozen=True)

@@ -51,12 +51,11 @@ from daimon.core.credential_requests import availability_for_request, split_skil
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
-    decide_env_key_replacement,
     env_name_refusal,
     prepare_env_submit,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.report import Action
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
@@ -84,7 +83,9 @@ from daimon.core.mcp_token_connect import (
 )
 from daimon.core.operation_policy import (
     OperationKind,
+    TargetFacts,
     decide_operation,
+    needs_reachability_read,
 )
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
@@ -110,6 +111,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
@@ -565,20 +567,25 @@ class TeamsCredentialRequests:
         self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, *, is_admin: bool
     ) -> bool:
         """Re-decide a replacement's role check against whoever submitted (Slack's rule)."""
-
-        async def load_agent() -> BetaManagedAgentsAgent | None:
-            return agent
-
-        outcome = await decide_env_key_replacement(
-            self._runtime.sessionmaker,
-            row=row,
-            platform="teams",
-            is_admin=is_admin,
-            load_agent=load_agent,
-            caller=lambda: ChannelAdminCaller(platform_user_id=row.requester_platform_user_id),
-            default=self._runtime.deployment_default,
-        )
-        return outcome != "allow"
+        managed = reachable = False
+        if not is_admin:
+            managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+            if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=managed):
+                async with self._runtime.sessionmaker() as session:
+                    reachable = await is_agent_shared_for_key_changes(
+                        session,
+                        tenant_id=row.tenant_id,
+                        agent_names=(
+                            agent.name,
+                            str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
+                        ),
+                        ma_agent_id=str(agent.id),
+                        default=self._runtime.deployment_default,
+                        caller_account_id=row.account_id,
+                        caller_platform_user_id=row.requester_platform_user_id,
+                    )
+        facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
+        return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
 
     async def _save_env(
         self,

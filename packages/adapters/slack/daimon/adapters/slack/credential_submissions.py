@@ -34,6 +34,7 @@ from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAge
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_policy import (
     AGENT_GONE_MESSAGE,
+    gather_target_facts,
     refuse_unless_allowed,
 )
 from daimon.adapters.slack.agent_setup.write import (
@@ -46,6 +47,7 @@ from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import (
     FormPinRefused,
+    agent_pin_names,
     consume_form_unless_pinned,
     request_pin_refusal,
 )
@@ -60,7 +62,6 @@ from daimon.core.credential_requests import (
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
-    decide_env_key_replacement,
     prepare_env_submit,
 )
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
@@ -94,6 +95,7 @@ from daimon.core.mcp_token_connect import (
     connect_mcp_server_with_token,
 )
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
 )
@@ -242,21 +244,30 @@ async def _replacement_refused_at_submit(
     family answers `allow` for an admin before anything else is consulted — and
     a target that can no longer be resolved fails closed.
     """
-
-    async def load_agent() -> BetaManagedAgentsAgent | None:
-        return await find_agent_by_derived_uuid(
+    is_admin = await resolve_is_admin(client, user_id=user_id)
+    facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
+    if not is_admin:
+        agent = await find_agent_by_derived_uuid(
             runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )
-
-    outcome = await decide_env_key_replacement(
-        runtime.sessionmaker,
-        row=row,
-        platform="slack",
-        is_admin=await resolve_is_admin(client, user_id=user_id),
-        load_agent=load_agent,
-        caller=lambda: ChannelAdminCaller(platform_user_id=user_id),
-        default=runtime.deployment_default,
-    )
+        if agent is None:
+            log.warning(
+                "credential_request.replacement_agent_gone",
+                tenant_id=str(row.tenant_id),
+                agent_id=str(row.agent_id),
+            )
+            return True
+        facts = await gather_target_facts(
+            runtime,
+            operation="key_replace",
+            tenant_id=row.tenant_id,
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            caller=ChannelAdminCaller(platform_user_id=user_id),
+            caller_account_id=row.account_id,
+        )
+    outcome = decide_operation("key_replace", is_admin=is_admin, target=facts)
     return outcome != "allow"
 
 

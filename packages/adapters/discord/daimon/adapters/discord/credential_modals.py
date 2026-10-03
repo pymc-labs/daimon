@@ -109,7 +109,8 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import FormPinRefused, consume_form_unless_pinned
+from daimon.core.agent_pins import FormPinRefused, agent_pin_names, consume_form_unless_pinned
+from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
@@ -124,7 +125,6 @@ from daimon.core.credential_requests import (
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
-    decide_env_key_replacement,
     prepare_env_submit,
 )
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
@@ -157,7 +157,7 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
-from daimon.core.operation_policy import PolicyOutcome
+from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
@@ -376,20 +376,34 @@ async def _decide_key_replacement(
     the consume's transaction opens, so no row lock is ever held across an
     MA listing.
     """
-
-    async def load_agent() -> BetaManagedAgentsAgent | None:
-        return await resolve_ma_agent_for_uuid(
-            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+        return "allow"
+    agent = await resolve_ma_agent_for_uuid(
+        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+    )
+    if agent is None:
+        # Fail closed: the target this replacement was authorized against is
+        # gone, so nothing can establish that it is not shared.
+        return "needs_admin"
+    is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    async with runtime.sessionmaker() as session:
+        facts = await load_target_facts(
+            session,
+            "key_replace",
+            tenant_id=row.tenant_id,
+            platform="discord",
+            agent_names=agent_pin_names(agent.name, agent.metadata),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(interaction.user),
+            is_daimon_managed=is_daimon_managed,
+            caller_account_id=row.account_id,
+            caller_platform_user_id=row.requester_platform_user_id,
         )
-
-    return await decide_env_key_replacement(
-        runtime.sessionmaker,
-        row=row,
-        platform="discord",
-        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
-        load_agent=load_agent,
-        caller=lambda: channel_admin_caller(interaction.user),
-        default=runtime.deployment_default,
+    return decide_operation(
+        "key_replace",
+        is_admin=False,
+        target=facts,
     )
 
 
