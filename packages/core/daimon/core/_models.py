@@ -1029,6 +1029,23 @@ class AgentCreationChannel(Base):
     )
 
 
+class DiscordAgentRole(Base):
+    """A role created by this bot for one tenant agent; role names are not identity."""
+
+    __tablename__ = "discord_agent_roles"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "ma_agent_id", name="pk_discord_agent_roles"),
+        UniqueConstraint("tenant_id", "role_id", name="uq_discord_agent_roles_role"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    ma_agent_id: Mapped[str] = mapped_column(Text)
+    role_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ChannelBudget(Base):
     """A spend limit on one channel. No row = no limit.
 

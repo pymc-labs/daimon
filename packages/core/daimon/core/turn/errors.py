@@ -118,6 +118,10 @@ class SessionBusyError(DaimonError):
         self.retry_after: datetime = retry_after
 
 
+class NamedAgentRefused(DaimonError):
+    """A named request would switch an existing thread or leave its private room."""
+
+
 class SessionAgentMismatch(DaimonError):
     """An existing workspace belongs to a different responder; leave it intact."""
 
