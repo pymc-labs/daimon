@@ -65,18 +65,34 @@ async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
 
     rows = {(row["kind"], row["id"]): row for row in json.loads(_output(console))}
     expected = {
-        ("channel", "700"): ("protected", "anyone", "nobody", "-"),
-        ("channel", "800"): ("custom", "inside", "nobody", "-"),
-        ("channel", "600"): ("confidential", "own_agents", "own_agents", "-"),
-        ("category", "900"): ("protected", "anyone", "nobody", "-"),
-        ("agent", "client"): ("pinned", "-", "-", "600"),
-        ("agent", "parked"): ("pinned", "-", "-", "nowhere"),
+        ("channel", "700"): ("protected", "anyone", "nobody", None, None),
+        ("channel", "800"): ("mix", "inside", "nobody", None, None),
+        ("channel", "600"): ("confidential", "own_agents", "own_agents", None, None),
+        ("category", "900"): ("protected", "anyone", "nobody", None, None),
+        ("agent", "client"): (None, None, None, ["600"], "600"),
+        ("agent", "parked"): (None, None, None, [], None),
     }
     got = {
-        key: (row["preset"], row["readers"], row["writers"], row["runs_in"])
+        key: (
+            row["preset"],
+            row["readers"],
+            row["writers"],
+            row["runs_in"],
+            row["confidential_channel"],
+        )
         for key, row in rows.items()
     }
     assert got == expected, f"rules differ: {got}"
+
+    table = _console()
+    await tenants_access_policy_rules(
+        rt=rt, console=table, platform="discord", external_id="guild-rules", as_json=False
+    )
+    lines = _output(table).splitlines()
+    parked = next(line for line in lines if "parked" in line)
+    assert "nowhere" in parked, f"an empty pin reads as nowhere: {parked}"
+    confidential = next(line for line in lines if " 600 " in line and "channel" in line)
+    assert "confidential" in confidential, f"the isolated channel reads as confidential: {lines}"
 
 
 async def test_rules_report_a_tenant_without_a_policy_as_open(

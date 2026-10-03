@@ -11,7 +11,7 @@ from typing import Annotated, Literal, cast
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
-from daimon.adapters.cli.output import emit_rows
+from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
@@ -29,7 +29,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import (
+    ChannelPreset,
+    ChannelReaders,
     ChannelRule,
+    ChannelWriters,
+    agent_permissions,
     agent_rules,
     category_rules,
     channel_rules,
@@ -57,6 +61,7 @@ from daimon.core.stores.tenants import (
 from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.markup import escape
+from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
@@ -561,10 +566,12 @@ class PermissionRuleRow(BaseModel):
 
     kind: Literal["channel", "category", "agent"]
     id: str
-    preset: str
-    readers: str
-    writers: str
-    runs_in: str
+    preset: ChannelPreset | Literal["mix"] | None
+    readers: ChannelReaders | None
+    writers: ChannelWriters | None
+    runs_in: list[str] | None
+    # An agent's confidential channel, judged by this name alone.
+    confidential_channel: str | None
 
 
 def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
@@ -577,10 +584,11 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
         PermissionRuleRow(
             kind=kind,
             id=place_id,
-            preset=preset_of(rule) or "custom",
+            preset=preset_of(rule) or "mix",
             readers=rule.readers,
             writers=rule.writers,
-            runs_in="-",
+            runs_in=None,
+            confidential_channel=None,
         )
         for kind, rules in places
         for place_id, rule in rules.items()
@@ -589,14 +597,26 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
         PermissionRuleRow(
             kind="agent",
             id=name,
-            preset="pinned",
-            readers="-",
-            writers="-",
-            runs_in=", ".join(rule.runs_in or ()) or "nowhere",
+            preset=None,
+            readers=None,
+            writers=None,
+            runs_in=list(rule.runs_in or ()),
+            confidential_channel=agent_permissions(policy, (name,)).confidential_channel,
         )
         for name, rule in sorted(agent_rules(policy).items())
     )
     return rows
+
+
+def _print_rule_rows(console: Console, rows: list[PermissionRuleRow]) -> None:
+    table = Table(show_header=True, header_style="bold")
+    for column in PermissionRuleRow.model_fields:
+        table.add_column(column)
+    for row in rows:
+        runs_in = "-" if row.runs_in is None else ", ".join(row.runs_in) or "nowhere"
+        cells = (row.kind, row.id, row.preset, row.readers, row.writers, runs_in)
+        table.add_row(*(escape(cell or "-") for cell in (*cells, row.confidential_channel)))
+    console.print(table)
 
 
 @access_policy_app.command("rules")
@@ -630,7 +650,10 @@ async def tenants_access_policy_rules(
     if not rows and not as_json:
         console.print(f"{platform}:{external_id}: every channel open, no agent pinned")
         return
-    emit_rows(console, rows, columns=list(PermissionRuleRow.model_fields), as_json=as_json)
+    if as_json:
+        render_json(console, rows)
+    else:
+        _print_rule_rows(console, rows)
 
 
 @access_policy_app.command("set")
