@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 import typer
@@ -10,6 +11,7 @@ from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
+from daimon.core.access_policy import isolated_channel_of
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -17,6 +19,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import (
+    ChannelConfigRow,
     ChannelScopeRef,
     ConfigField,
     DeploymentDefault,
@@ -28,7 +31,7 @@ from daimon.core.scope import (
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.scoped_config_read import get_scope, resolve
+from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant, resolve
 from daimon.core.stores.scoped_config_write import (
     propagate,
     set_fields,
@@ -138,6 +141,11 @@ class _EffectiveRow(BaseModel):
 class _RawRow(BaseModel):
     field: str
     value: str | None
+
+
+class _IgnoredDefaultRow(BaseModel):
+    channel_id: str
+    agent_name: str
 
 
 @config_app.command("get")
@@ -313,6 +321,67 @@ async def _refuse_breaking_home(
         raise typer.Exit(1)
 
 
+async def _refuse_shared_channel_default(
+    session: AsyncSession,
+    *,
+    console: Console,
+    scope: ScopeRef,
+    channel_defaults: str,
+) -> None:
+    if channel_defaults != "confidential_only" or not isinstance(scope, ChannelScopeRef):
+        return
+    policy = await load_access_policy(session, tenant_id=scope.tenant_id)
+    if isolated_channel_of(policy, scope.channel_id) is None:
+        console.print(
+            "[red]Channel defaults are available only in confidential channels. "
+            "Name the agent in a mention or mark the channel confidential.[/red]"
+        )
+        raise typer.Exit(1)
+
+
+@config_app.command("ignored-defaults")
+def config_ignored_defaults_command(ctx: typer.Context) -> None:
+    """List channel agent defaults retained but ignored by confidential-only routing."""
+    settings = load_settings()
+    console = Console(highlight=False)
+    run_cli(
+        _config_ignored_defaults_entry(settings, console=console, selector=ctx.obj),
+        console=console,
+    )
+
+
+async def _config_ignored_defaults_entry(
+    settings: Settings, *, console: Console, selector: TenantSelector | None
+) -> None:
+    async with build_runtime(settings) as rt, rt.sessionmaker() as session:
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        _, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        rows = _ignored_default_rows(
+            channels,
+            isolated_channel_ids=policy.isolated_channel_ids,
+            channel_defaults=rt.settings.routing.channel_defaults,
+        )
+        emit_rows(console, rows, columns=("channel_id", "agent_name"), as_json=False)
+
+
+def _ignored_default_rows(
+    channels: Sequence[ChannelConfigRow],
+    *,
+    isolated_channel_ids: Sequence[str],
+    channel_defaults: str,
+) -> list[_IgnoredDefaultRow]:
+    if channel_defaults == "legacy":
+        return []
+    isolated = set(isolated_channel_ids)
+    return [
+        _IgnoredDefaultRow(channel_id=row.channel_id, agent_name=row.agent_name)
+        for row in channels
+        if row.agent_name and row.mode == "agent" and row.channel_id not in isolated
+    ]
+
+
 # -- set -------------------------------------------------------------------
 
 
@@ -359,6 +428,7 @@ async def _config_set_command_entry(
             value=value,
             scope_str=scope_str,
             anthropic=rt.anthropic,
+            channel_defaults=rt.settings.routing.channel_defaults,
         )
 
 
@@ -372,6 +442,7 @@ async def _config_set_entry(
     value: str,
     scope_str: str,
     anthropic: AsyncAnthropic | None = None,
+    channel_defaults: str = "legacy",
 ) -> None:
     # deployment is read-only; handled before _parse_scope
     if scope_str == "deployment":
@@ -382,6 +453,9 @@ async def _config_set_entry(
         raise typer.Exit(1)
     scope = _parse_scope(scope_str, tenant_id=tenant_id, account_id=account_id)
     if key == "agent_name":
+        await _refuse_shared_channel_default(
+            session, console=console, scope=scope, channel_defaults=channel_defaults
+        )
         await _refuse_breaking_home(
             session,
             console=console,
@@ -528,6 +602,7 @@ async def _config_propagate_command_entry(
             fields_str=fields_str,
             reset=reset,
             anthropic=rt.anthropic,
+            channel_defaults=rt.settings.routing.channel_defaults,
         )
 
 
@@ -542,6 +617,7 @@ async def _config_propagate_entry(
     fields_str: str | None,
     reset: bool,
     anthropic: AsyncAnthropic | None = None,
+    channel_defaults: str = "legacy",
 ) -> None:
     source = _parse_scope(from_str, tenant_id=tenant_id, account_id=account_id)
     targets = [_parse_scope(t, tenant_id=tenant_id, account_id=account_id) for t in to_strs]
@@ -555,6 +631,13 @@ async def _config_propagate_entry(
         agent_name = source_row.agent_name if source_row is not None else None
         if reset or agent_name is not None:
             for target in targets:
+                if not reset:
+                    await _refuse_shared_channel_default(
+                        session,
+                        console=console,
+                        scope=target,
+                        channel_defaults=channel_defaults,
+                    )
                 await _refuse_breaking_home(
                     session,
                     console=console,

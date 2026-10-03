@@ -29,7 +29,7 @@ from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRe
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE
+from daimon.core.routing_facts import PRECEDENCE_LINE, precedence_line
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
@@ -301,7 +301,9 @@ def test_the_rule_sentence_reaches_both_roles_in_their_own_voice(
     )
     sentence = build_routing_sentence(state, answering_map)
 
-    assert sentence.startswith(PRECEDENCE_LINE), "the precedence rule leads"
+    assert sentence.startswith(precedence_line(answering_map.channel_defaults)), (
+        "the precedence rule leads"
+    )
     assert expected_lead in sentence, "only the voice differs between the two roles"
     assert "Make churn-explorer answer in #growth." in sentence, (
         "the example names an agent nothing routes to, in the channel the reader is standing in"
@@ -326,9 +328,17 @@ def test_the_rule_sentence_is_the_bare_rule_when_there_is_no_agent_to_name(
 ) -> None:
     answering_map = _map(deployment_default=None)
     state = _state(answering_map, account_id=account_id)
-    assert build_routing_sentence(state, answering_map) == PRECEDENCE_LINE, (
-        "an empty roster gets the rule and no invented example"
+    assert build_routing_sentence(state, answering_map) == precedence_line(
+        answering_map.channel_defaults
+    ), "an empty roster gets the rule and no invented example"
+
+
+def test_confidential_only_panel_states_the_new_cascade(account_id: uuid.UUID) -> None:
+    answering_map = _map(deployment_default="daimon").model_copy(
+        update={"channel_defaults": "confidential_only"}
     )
+    state = _state(answering_map, account_id=account_id)
+    assert build_routing_sentence(state, answering_map).startswith(PRECEDENCE_LINE)
 
 
 # ---------------------------------------------------------------------------

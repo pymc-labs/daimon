@@ -92,6 +92,7 @@ class PanelState:
     cascade_view: tuple[TenantConfigRow | None, list[ChannelConfigRow]] = dataclasses.field(
         default_factory=lambda: (None, [])
     )
+    isolated_channel_ids: tuple[str, ...] = ()
     # Deployment-level default injected from the runtime (config.yaml); not from DB.
     deployment_default: DeploymentDefault = dataclasses.field(default_factory=DeploymentDefault)
     # Render generation of the single /agent-setup ephemeral. Bumped by
@@ -166,7 +167,9 @@ class PanelState:
         tenant_row, channel_rows = cascade_view if cascade_view is not None else (None, [])
         channel_row = next((row for row in channel_rows if row.channel_id == str(channel_id)), None)
         responder_name, _ = pick_agent(
-            channel_row, tenant_row, deployment_default or DeploymentDefault()
+            channel_row,
+            tenant_row,
+            deployment_default or DeploymentDefault(),
         )
         state = cls(
             roster=roster,

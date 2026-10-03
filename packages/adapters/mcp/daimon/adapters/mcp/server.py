@@ -346,7 +346,9 @@ def create_mcp_app(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
 
-    deployment_default = parse_deployment_default(effective_settings.defaults_root)
+    deployment_default = parse_deployment_default(effective_settings.defaults_root).model_copy(
+        update={"channel_defaults": effective_settings.routing.channel_defaults}
+    )
     artifact_store = (
         build_artifact_store(effective_settings.artifacts)
         if effective_settings.artifacts is not None

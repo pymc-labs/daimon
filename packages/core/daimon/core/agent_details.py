@@ -40,10 +40,12 @@ from daimon.core.scope import (
     ResolvedConfig,
     ScopeContext,
     TenantConfigRow,
+    active_agent_channels,
     answering_places,
 )
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores import agent_files, agent_repo_binding, scoped_config_read
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, Platform
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -220,7 +222,10 @@ def build_agent_details(
         applies_note=f"Changes to {agent.name} apply from the next message to it.",
         unrouted_note=(
             build_unrouted_note(
-                agent_name=agent.name, channel_label=channel_label, is_admin=is_admin
+                agent_name=agent.name,
+                channel_label=channel_label,
+                is_admin=is_admin,
+                channel_defaults=default.channel_defaults,
             )
             if not places
             else None
@@ -267,6 +272,11 @@ async def load_agent_details(
     tenant_row, channel_rows = await scoped_config_read.list_propagations_for_tenant(
         session, tenant_id=tenant_id
     )
+    if deployment_default.channel_defaults == "confidential_only":
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        channel_rows = active_agent_channels(
+            channel_rows, deployment_default, policy.isolated_channel_ids
+        )
     resolved_here: ResolvedConfig | None = None
     if channel_id is not None:
         resolved_here = await scoped_config_read.resolve(

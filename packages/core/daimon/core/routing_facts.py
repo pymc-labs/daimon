@@ -50,18 +50,29 @@ def build_clear_default_note(*, scope_label: str, cleared: bool) -> str:
     )
 
 
-def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_id: str) -> str:
+def build_resolution_note(
+    *,
+    agent_name: str | None,
+    tier: str | None,
+    channel_id: str,
+    ignored_channel_default: bool = False,
+) -> str:
     """Explain which agent answers in ``channel_id`` and which tier decided it.
 
     The tier is the whole point: "daimon answers here" is not actionable, but
     "daimon answers here because the workspace default says so, and this channel
     has no setting of its own" tells the caller exactly where to change it.
     """
+    ignored = (
+        " A stored channel default is ignored because this channel is not confidential."
+        if ignored_channel_default
+        else ""
+    )
     if agent_name is None:
         return (
             f"No agent resolves for channel {channel_id} — the channel, the "
             f"workspace, and the deployment default are all unset, so a mention "
-            f"there has nothing to answer it."
+            f"there has nothing to answer it.{ignored}"
         )
     where = {
         "channel": f"this channel's own default (channel {channel_id})",
@@ -73,7 +84,7 @@ def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_i
     return (
         f"{agent_name} answers in channel {channel_id}, from {where}. Members "
         f"reach it only by @mentioning the bot there — there is one bot for the "
-        f"whole workspace, not one bot per agent."
+        f"whole workspace, not one bot per agent.{ignored}"
     )
 
 
@@ -83,7 +94,16 @@ def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_i
 # concrete request instead of the generic one.
 UNROUTED_LINE: Final = "Not answering in any channel yet."
 UNROUTED_NEXT_STEP: Final = "An admin can ask Daimon to make it answer in a channel."
-PRECEDENCE_LINE: Final = "A channel's own choice beats the workspace default."
+PRECEDENCE_LINE: Final = (
+    "Threads keep their agent. Confidential channels use their own default; "
+    "other channels use the workspace default."
+)
+
+
+def precedence_line(channel_defaults: str) -> str:
+    if channel_defaults == "legacy":
+        return "A channel's own choice beats the workspace default."
+    return PRECEDENCE_LINE
 
 
 def build_routing_request(*, agent_name: str, channel_label: str) -> str:
@@ -95,7 +115,20 @@ def build_routing_request(*, agent_name: str, channel_label: str) -> str:
     return f"Make {agent_name} answer in {channel_label}."
 
 
-def build_unrouted_note(*, agent_name: str, channel_label: str | None, is_admin: bool) -> str:
+def build_named_request(*, agent_name: str, channel_label: str) -> str:
+    return (
+        f"To reach {agent_name} in {channel_label}, mention the bot and write "
+        f"{agent_name}: your request."
+    )
+
+
+def build_unrouted_note(
+    *,
+    agent_name: str,
+    channel_label: str | None,
+    is_admin: bool,
+    channel_defaults: str = "legacy",
+) -> str:
     """State that ``agent_name`` is routed nowhere, plus the next step.
 
     With ``channel_label`` known the next step is the exact request to make,
@@ -103,6 +136,11 @@ def build_unrouted_note(*, agent_name: str, channel_label: str | None, is_admin:
     ask one. With no channel in hand there is nothing concrete to name, so the
     generic next step stands in.
     """
+    if channel_defaults == "confidential_only":
+        return (
+            f"No channel has {agent_name} as its default. "
+            f"Mention the bot and write {agent_name}: your request to reach it."
+        )
     if channel_label is None:
         return f"{UNROUTED_LINE}\n{UNROUTED_NEXT_STEP}"
     lead = "Tell Daimon" if is_admin else "An admin can tell Daimon"

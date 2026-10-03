@@ -49,8 +49,9 @@ from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.roster import Page, Roster, RosterAgent
 from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
+    build_named_request,
     build_routing_request,
+    precedence_line,
 )
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
@@ -1178,11 +1179,17 @@ def _routing_request_line(
     unrouted_agent_name: str | None,
 ) -> str:
     agent_name = unrouted_agent_name or _answering_name(answering_map, channel_id=channel_id)
+    precedence = precedence_line(answering_map.channel_defaults)
+    if answering_map.channel_defaults == "confidential_only":
+        return f"{precedence} " + build_named_request(
+            agent_name=escape_mrkdwn(agent_name or "an agent"),
+            channel_label=f"<#{channel_id}>",
+        )
     lead = "Tell Daimon: " if is_admin else "An admin can tell Daimon: "
     request = build_routing_request(
         agent_name=escape_mrkdwn(agent_name or "an agent"), channel_label=f"<#{channel_id}>"
     )
-    return f"{PRECEDENCE_LINE} {lead}{request}"
+    return f"{precedence} {lead}{request}"
 
 
 # ---------------------------------------------------------------------------

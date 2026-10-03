@@ -10,7 +10,7 @@ The environment resolves over the same tiers but on its own (a channel may
 keep the tenant's agent and run it in another environment), so it is laid out
 beside the agents rather than folded into them.
 
-`build_answering_map` is pure. `load_answering_map` is its shell: two store
+`build_answering_map` is pure. `load_answering_map` is its shell: store
 reads, no decisions of its own.
 """
 
@@ -22,6 +22,7 @@ from datetime import datetime
 
 from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.thread_agent_bindings import list_active_setup_bindings_for_tenant
@@ -81,6 +82,7 @@ class AnsweringMap(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True)
+    channel_defaults: str = "legacy"
 
     channel_overrides: tuple[ChannelAnswer, ...] = ()
     tenant_default: TenantAnswer | None = None
@@ -111,6 +113,7 @@ def build_answering_map(
     default: DeploymentDefault,
     setup_threads: Sequence[ThreadAgentBindingRow],
     setup_threads_truncated: bool,
+    isolated_channel_ids: tuple[str, ...] = (),
 ) -> AnsweringMap:
     """Fold config rows and live setup conversations into one readable map.
 
@@ -130,7 +133,9 @@ def build_answering_map(
             set_at=row.agent_name_set_at,
         )
         for row in sorted(channels, key=lambda row: row.channel_id)
-        if row.mode == "agent" and row.agent_name
+        if row.mode == "agent"
+        and row.agent_name
+        and (default.channel_defaults == "legacy" or row.channel_id in isolated_channel_ids)
     )
     tenant_default: TenantAnswer | None = None
     if tenant is not None and tenant.mode == "agent" and tenant.agent_name:
@@ -140,6 +145,7 @@ def build_answering_map(
             set_at=tenant.agent_name_set_at,
         )
     return AnsweringMap(
+        channel_defaults=default.channel_defaults,
         channel_overrides=overrides,
         tenant_default=tenant_default,
         deployment_default=default.agent_name,
@@ -223,6 +229,7 @@ async def load_answering_map(
     `viewer` hides what an isolated channel keeps from the caller.
     """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    policy = await load_access_policy(session, tenant_id=tenant_id)
     setup_threads, truncated = await list_active_setup_bindings_for_tenant(
         session, tenant_id=tenant_id, platform=platform
     )
@@ -232,5 +239,6 @@ async def load_answering_map(
         default=default,
         setup_threads=setup_threads,
         setup_threads_truncated=truncated,
+        isolated_channel_ids=policy.isolated_channel_ids,
     )
     return answering if viewer is None else hide_across_homes(answering, viewer)
