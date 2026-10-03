@@ -39,8 +39,10 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import can_manage_routine, panel_rows
 from daimon.core.stores import routines as store
+from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -111,23 +113,39 @@ class RoutinesPanel:
                 return toast(GONE)
             tenant_id = actor.tenant_id
             async with self._runtime.sessionmaker.begin() as session:
-                row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
-                if row is None:
-                    return toast(GONE)
-                if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
-                    return toast(NOT_OWNER)
-                if op == "output":
-                    return replace_card(output_card(row))
-                if op == "delete":
-                    return replace_card(confirm_delete_card(row))
-                if op == "pause":
-                    await store.pause_routine(session, routine_id, tenant_id=tenant_id)
-                elif op == "resume":
-                    now = datetime.now(UTC)
-                    await store.resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
-                elif op == "confirm_delete":
-                    await store.delete_routine(session, routine_id, tenant_id=tenant_id)
-                    notice = "🗑️ Routine deleted."
+                if op in ("pause", "resume"):
+
+                    async def allowed(row: RoutineRow) -> bool:
+                        return can_manage_routine(
+                            row, user_id=actor.user_id, is_admin=actor.is_admin
+                        )
+
+                    result = await apply_routine_action(
+                        session,
+                        routine_id,
+                        tenant_id=tenant_id,
+                        op=op,
+                        allowed=allowed,
+                        load=store.get_routine,
+                        pause=store.pause_routine,
+                        resume=store.resume_routine,
+                        now=lambda: datetime.now(UTC),
+                    )
+                    if result != "changed":
+                        return toast(GONE if result == "gone" else NOT_OWNER)
+                else:
+                    row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
+                    if row is None:
+                        return toast(GONE)
+                    if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
+                        return toast(NOT_OWNER)
+                    if op == "output":
+                        return replace_card(output_card(row))
+                    if op == "delete":
+                        return replace_card(confirm_delete_card(row))
+                    if op == "confirm_delete":
+                        await store.delete_routine(session, routine_id, tenant_id=tenant_id)
+                        notice = "🗑️ Routine deleted."
         card = await self._panel(
             actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin, notice=notice
         )

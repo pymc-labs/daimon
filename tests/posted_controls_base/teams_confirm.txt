@@ -1,0 +1,73 @@
+class TeamsConfirmationCards:
+    """Posted confirmation cards awaiting a click, keyed by token."""
+
+    def __init__(self, sender: TeamsSender) -> None:
+        self._sender = sender
+        self._pending = PendingConfirmations()
+        self._cards: dict[str, _PostedCard] = {}
+
+    def hook(self, *, conversation_id: str, service_url: str | None) -> ConfirmationHook:
+        """A hook that posts each prompt's card into the turn's conversation."""
+
+        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+            token, future = self._pending.open()
+            card = build_confirmation_card(prompt, state="pending", token=token)
+            message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
+            try:
+                sent = await self._sender.send(conversation_id, message, service_url=service_url)
+            except TEAMS_SEND_ERRORS:
+                self._pending.discard(token)
+                raise
+            self._cards[token] = _PostedCard(prompt, conversation_id, service_url, sent.id)
+            timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
+            try:
+                answer = await self._pending.wait(token, future, timeout_s=timeout_s)
+            except BaseException:
+                # The turn was stopped while the card was up: retire it.
+                if (posted := self._cards.pop(token, None)) is not None:
+                    await self._edit(posted, "denied")
+                raise
+            posted = self._cards.pop(token, None)
+            if answer == "expired" and posted is not None:
+                await self._edit(posted, "expired")
+            return answer
+
+        return _confirm
+
+    async def on_action(
+        self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
+    ) -> AdaptiveCardInvokeResponse:
+        """Approve/Deny click: only the requester's first click answers."""
+        activity = ctx.activity
+        data = submitted_fields(activity.value.action.data)
+        token = str(data.get("token") or "")
+        answer = _ANSWERS.get(str(data.get("op") or ""))
+        posted = self._cards.get(token)
+        if posted is None or answer is None:
+            return toast(NO_LONGER_PENDING_MESSAGE)
+        clicker = canonical_uuid(activity.from_.aad_object_id)
+        if clicker != posted.prompt.requester_platform_user_id:
+            return toast(NOT_YOURS_MESSAGE)
+        self._cards.pop(token, None)
+        if not self._pending.resolve(token, answer):
+            return toast(NO_LONGER_PENDING_MESSAGE)
+        card = build_confirmation_card(
+            posted.prompt, state=answer, answered_by_platform_user_id=clicker
+        )
+        name = activity.from_.name
+        return replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
+
+    async def _edit(self, posted: _PostedCard, state: ConfirmationAnswer) -> None:
+        card = build_confirmation_card(posted.prompt, state=state)
+        edit = MessageActivityInput(id=posted.message_id).add_card(
+            confirmation_adaptive_card(card, posted.prompt)
+        )
+        try:
+            # Bounded: this also runs while a turn is being stopped or timed
+            # out, and a slow Teams must not hold that up.
+            await asyncio.wait_for(
+                self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
+                EDIT_TIMEOUT_S,
+            )
+        except TEAMS_SEND_ERRORS as err:
+            log.warning("teams.tool_confirmation.edit_failed", error=str(err) or type(err).__name__)

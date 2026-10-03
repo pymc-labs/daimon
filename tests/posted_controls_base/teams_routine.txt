@@ -1,0 +1,35 @@
+async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
+    actor = await card_actor(self._runtime, activity)
+    if actor is None:
+        return toast(DENIED)
+    data = activity.value.action.data
+    op = data.get("op")
+    notice: str | None = None
+    if op != "refresh":
+        try:
+            routine_id = uuid.UUID(str(data.get("routine")))
+        except ValueError:
+            return toast(GONE)
+        tenant_id = actor.tenant_id
+        async with self._runtime.sessionmaker.begin() as session:
+            row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
+            if row is None:
+                return toast(GONE)
+            if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
+                return toast(NOT_OWNER)
+            if op == "output":
+                return replace_card(output_card(row))
+            if op == "delete":
+                return replace_card(confirm_delete_card(row))
+            if op == "pause":
+                await store.pause_routine(session, routine_id, tenant_id=tenant_id)
+            elif op == "resume":
+                now = datetime.now(UTC)
+                await store.resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
+            elif op == "confirm_delete":
+                await store.delete_routine(session, routine_id, tenant_id=tenant_id)
+                notice = "🗑️ Routine deleted."
+    card = await self._panel(
+        actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin, notice=notice
+    )
+    return replace_card(card)

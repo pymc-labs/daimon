@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 
 import structlog
 from daimon.adapters.teams.card_actions import (
@@ -25,15 +25,14 @@ from daimon.core.confirmation import (
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
-    PendingConfirmations,
 )
 from daimon.core.posted_controls.confirmation import (
     NO_LONGER_PENDING_MESSAGE,
-    NOT_YOURS_MESSAGE,
     ConfirmationCard,
     build_confirmation_card,
     confirmation_card_text,
 )
+from daimon.core.posted_controls.lifecycle import PostedConfirmations
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -103,34 +102,21 @@ class TeamsConfirmationCards:
 
     def __init__(self, sender: TeamsSender) -> None:
         self._sender = sender
-        self._pending = PendingConfirmations()
-        self._cards: dict[str, _PostedCard] = {}
+        self._controls = PostedConfirmations[_PostedCard]()
 
     def hook(self, *, conversation_id: str, service_url: str | None) -> ConfirmationHook:
         """A hook that posts each prompt's card into the turn's conversation."""
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
-            token, future = self._pending.open()
-            card = build_confirmation_card(prompt, state="pending", token=token)
-            message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
-            try:
+            async def post(token: str) -> _PostedCard:
+                card = build_confirmation_card(prompt, state="pending", token=token)
+                message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
-            except TEAMS_SEND_ERRORS:
-                self._pending.discard(token)
-                raise
-            self._cards[token] = _PostedCard(prompt, conversation_id, service_url, sent.id)
-            timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
-            try:
-                answer = await self._pending.wait(token, future, timeout_s=timeout_s)
-            except BaseException:
-                # The turn was stopped while the card was up: retire it.
-                if (posted := self._cards.pop(token, None)) is not None:
-                    await self._edit(posted, "denied")
-                raise
-            posted = self._cards.pop(token, None)
-            if answer == "expired" and posted is not None:
-                await self._edit(posted, "expired")
-            return answer
+                return _PostedCard(prompt, conversation_id, service_url, sent.id)
+
+            return await self._controls.confirm(
+                prompt, post=post, retire=self._edit, post_errors=TEAMS_SEND_ERRORS
+            )
 
         return _confirm
 
@@ -142,15 +128,12 @@ class TeamsConfirmationCards:
         data = submitted_fields(activity.value.action.data)
         token = str(data.get("token") or "")
         answer = _ANSWERS.get(str(data.get("op") or ""))
-        posted = self._cards.get(token)
+        posted = self._controls.cards.get(token)
         if posted is None or answer is None:
             return toast(NO_LONGER_PENDING_MESSAGE)
         clicker = canonical_uuid(activity.from_.aad_object_id)
-        if clicker != posted.prompt.requester_platform_user_id:
-            return toast(NOT_YOURS_MESSAGE)
-        self._cards.pop(token, None)
-        if not self._pending.resolve(token, answer):
-            return toast(NO_LONGER_PENDING_MESSAGE)
+        if refusal := self._controls.claim(token, clicker, answer):
+            return toast(refusal)
         card = build_confirmation_card(
             posted.prompt, state=answer, answered_by_platform_user_id=clicker
         )
