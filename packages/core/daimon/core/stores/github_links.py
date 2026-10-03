@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import AccountGitHubLink, GitHubUserLink
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,55 @@ class AccountLink(BaseModel):
 
 async def get_user(session: AsyncSession, *, github_user_id: int) -> GitHubUser | None:
     row = await session.get(GitHubUserLink, github_user_id)
+    return GitHubUser.model_validate(row) if row is not None else None
+
+
+async def get_user_for_update(session: AsyncSession, *, github_user_id: int) -> GitHubUser | None:
+    row = await session.get(GitHubUserLink, github_user_id, with_for_update=True)
+    return GitHubUser.model_validate(row) if row is not None else None
+
+
+async def rotate_user_tokens(
+    session: AsyncSession,
+    *,
+    github_user_id: int,
+    expected_generation: int,
+    encrypted_access_token: bytes,
+    encrypted_refresh_token: bytes,
+    access_expires_at: datetime,
+    refresh_expires_at: datetime,
+) -> bool:
+    result = await session.execute(
+        update(GitHubUserLink)
+        .where(
+            GitHubUserLink.github_user_id == github_user_id,
+            GitHubUserLink.token_generation == expected_generation,
+            GitHubUserLink.status == "active",
+        )
+        .values(
+            encrypted_access_token=encrypted_access_token,
+            encrypted_refresh_token=encrypted_refresh_token,
+            access_expires_at=access_expires_at,
+            refresh_expires_at=refresh_expires_at,
+            token_generation=GitHubUserLink.token_generation + 1,
+        )
+    )
+    return cast(CursorResult[Any], result).rowcount == 1
+
+
+async def bump_link_generation(
+    session: AsyncSession, *, github_user_id: int, broken: bool = False
+) -> GitHubUser | None:
+    """Invalidate derived tokens; the inventory stale-token query sees the new generation."""
+    row = await session.scalar(
+        update(GitHubUserLink)
+        .where(GitHubUserLink.github_user_id == github_user_id)
+        .values(
+            link_generation=GitHubUserLink.link_generation + 1,
+            **({"status": "broken"} if broken else {}),
+        )
+        .returning(GitHubUserLink)
+    )
     return GitHubUser.model_validate(row) if row is not None else None
 
 
