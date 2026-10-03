@@ -77,11 +77,11 @@ def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
 
         Lists every channel with its own agent or environment setting, a
-        spending budget, channel admins or isolation, with the agent and environment that
+        spending budget, channel admins or confidential status, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one), and the
         live timed promo credit with when each grant ends. Money is a decimal
-        string. Agent and environment names this conversation's channel
-        isolation keeps from it read as null.
+        string. Agent and environment names a confidential channel keeps from
+        this conversation read as null.
         """
         return await _get_tenant_summary_impl(runtime, await _auth(ctx))

@@ -85,7 +85,7 @@ CHANNELS_NEED_ADMIN: Final = (
     "Changing a channel's settings needs a server admin or an admin of that channel."
 )
 SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can isolate a channel or name its admins. Nothing changed."
+    "Only a server admin can mark a channel confidential or name its admins. Nothing changed."
 )
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
@@ -342,7 +342,7 @@ class ChannelSettingsDialog:
         """A server admin's isolation change, as Slack's buttons make it."""
         choice = str(data.get("isolation") or "")
         if choice not in cards.ISOLATION_CHOICES:
-            return "Pick an isolation change. Nothing changed."
+            return "Pick a change under Confidential. Nothing changed."
         copy = choice == "copy"
         public_url = self._runtime.settings.mcp.public_url
         label = (await self._listed(actor.tenant_id)).get(channel_id) if copy else None
@@ -373,11 +373,11 @@ class ChannelSettingsDialog:
             return f"{exc} Nothing changed."
         await self._audit(actor, "isolation", outcome="allowed", reason="completed")
         if not change.isolated:
-            return f"The channel is no longer isolated. {change.end_warning}"
-        said = f"The channel is isolated. {change.agent_name} answers only there."
+            return f"The channel is no longer confidential. {change.end_warning}"
+        said = f"The channel is now confidential. {change.agent_name} answers only there."
         if change.forked_from is not None:
             said = (
-                f"The channel is isolated. {change.agent_name}, a copy of "
+                f"The channel is now confidential. {change.agent_name}, a copy of "
                 f"{change.forked_from}, answers only there."
             )
         notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)

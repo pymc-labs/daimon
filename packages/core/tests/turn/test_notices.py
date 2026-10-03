@@ -219,13 +219,13 @@ def test_every_admission_refusal_is_a_sentence_not_a_code(
         ),
         (
             "channel_isolated",
-            "This channel is isolated and the agent that would answer isn't one of its own. "
+            "This channel is confidential and the agent that would answer isn't one of its own. "
             "A server admin must set the channel's agent.",
         ),
         ("channel_protected", "This channel is protected, so the agent can't answer in it."),
         (
             "external_participant",
-            "People from another organisation can use this agent only in its isolated channel.",
+            "People from another organisation can use this agent only in its confidential channel.",
         ),
     ],
 )
@@ -251,7 +251,7 @@ def test_admission_refusal_without_a_bot_name_reads_naturally() -> None:
     ("reason", "word"),
     [
         ("agent_pinned_elsewhere", "pinned"),
-        ("channel_isolated", "isolated"),
+        ("channel_isolated", "confidential"),
         ("channel_protected", "protected"),
         ("external_participant", "organisation"),
     ],

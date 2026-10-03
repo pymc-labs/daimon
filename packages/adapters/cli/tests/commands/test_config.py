@@ -472,8 +472,10 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
                 )
         return cast(StringIO, console.file).getvalue()
 
-    assert "belongs to another isolated channel" in await run("set", "channel:elsewhere", "local")
-    assert "belongs to another isolated channel" in await run("set", "tenant", "local")
+    assert "belongs to another confidential channel" in await run(
+        "set", "channel:elsewhere", "local"
+    )
+    assert "belongs to another confidential channel" in await run("set", "tenant", "local")
     assert "only its own agents answer here" in await run("set", "channel:room", "shared")
     assert "keeps an agent of its own" in await run("unset", "channel:room")
     assert "belongs to another" in await run("propagate", "channel:elsewhere", "channel:room")

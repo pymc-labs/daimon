@@ -72,7 +72,7 @@ tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access 
 access_policy_app = typer.Typer(
     help=(
         "A tenant's access policy: who may invoke the agent, protected, sealed and "
-        "isolated channels."
+        "confidential channels."
     )
 )
 tenants_app.add_typer(access_policy_app, name="access-policy")
@@ -482,14 +482,14 @@ async def _require_isolatable(
             console.print(
                 f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
                 "alone in the same command, or use daimon channels isolate, the setup "
-                "panel's Isolate or set_channel_isolation, which do both. Nothing was "
+                "panel's Mark confidential or set_channel_isolation, which do both. Nothing was "
                 "changed.[/red]"
             )
         else:
             console.print(
-                f"[red]{channel_id} is isolated, and this change would break it: "
-                f"{escape(str(refused))} Keep its own agent pinned to it alone, or end its "
-                "isolation first (drop it from --isolated-channel). Nothing was changed.[/red]"
+                f"[red]{channel_id} is confidential, and this change would break it: "
+                f"{escape(str(refused))} Keep its own agent pinned to it alone, or unmark it "
+                "confidential first (drop it from --isolated-channel). Nothing was changed.[/red]"
             )
         raise typer.Exit(1)
 
@@ -512,7 +512,7 @@ def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAcc
     console = Console(stderr=True, highlight=False)
     for channel_id in ended:
         warning = escape(_ended_isolation_warning(policy, channel_id))
-        console.print(f"[yellow]Isolation ended for {channel_id}. {warning}[/yellow]")
+        console.print(f"[yellow]{channel_id} is no longer confidential. {warning}[/yellow]")
 
 
 async def _warn_sealed_open_network(
@@ -698,9 +698,10 @@ def tenants_access_policy_set_command(
         list[str] | None,
         typer.Option(
             help=(
-                "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
-                "and its default agent pinned to it alone, answering nowhere else. Ending one "
-                "keeps its seal and pins. A Teams id names the whole channel, never a thread."
+                "Confidential channel id: its own agents stay inside it (repeatable). Each must be "
+                "sealed and its default agent pinned to it alone, answering nowhere else. "
+                "Unmarking one keeps its seal and pins. A Teams id names the whole channel, "
+                "never a thread."
             )
         ),
     ] = None,

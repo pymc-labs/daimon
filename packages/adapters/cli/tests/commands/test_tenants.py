@@ -1115,7 +1115,7 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
     )
     policy = await _policy(db_session_factory, workspace_id="iso")
     assert policy.isolated_channel_ids == (local,), "its own agent answers only there"
-    assert "Isolation ended" not in capsys.readouterr().err
+    assert "no longer confidential" not in capsys.readouterr().err
 
     await tenants_access_policy_set(
         rt=rt,
@@ -1126,7 +1126,7 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
         replace_pins=True,
     )
     err = " ".join(capsys.readouterr().err.split())
-    assert f"Isolation ended for {local}" in err, "ending it warns"
+    assert f"{local} is no longer confidential" in err, "ending it warns"
     assert "no longer private" in err, "clearing everything leaves no seal or pin behind"
 
 
@@ -1180,7 +1180,7 @@ async def test_access_policy_refuses_a_pin_edit_that_breaks_an_isolation(
                 rt=rt, console=console, platform="discord", external_id="iso2", **flags
             )
         output = " ".join(_output(console).split())
-        assert f"{local} is isolated, and this change would break it" in output, output
+        assert f"{local} is confidential, and this change would break it" in output, output
         assert "Nothing was changed" in output
         assert await _policy(db_session_factory, workspace_id="iso2") == isolated, (
             "a refused edit writes nothing"

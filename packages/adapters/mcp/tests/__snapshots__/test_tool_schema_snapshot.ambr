@@ -409,7 +409,7 @@
     }),
     'archive_isolation_copy': dict({
       'description': '''
-        Archive the agent copied for an isolated channel, when that channel closes.
+        Archive the agent copied for a confidential channel, when that channel closes.
         For example, retire #client-acme's agent once the engagement ends. Requires a
         server or workspace admin.
         
@@ -898,7 +898,7 @@
         
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
-        without it is refused while a channel in the workspace is isolated, and with
+        without it is refused while a channel in the workspace is confidential, and with
         it a channel admin creating the agent for their channel may set it up there.
       ''',
       'parameters': dict({
@@ -1787,8 +1787,8 @@
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
         
-        Pass this turn's origin_context_id. A pinned agent, or a turn in an
-        isolated channel, publishes nothing.
+        Pass this turn's origin_context_id. A pinned agent, or a turn in a
+        confidential channel, publishes nothing.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2828,12 +2828,12 @@
         Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
         
         Lists every channel with its own agent or environment setting, a
-        spending budget, channel admins or isolation, with the agent and environment that
+        spending budget, channel admins or confidential status, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one), and the
         live timed promo credit with when each grant ends. Money is a decimal
-        string. Agent and environment names this conversation's channel
-        isolation keeps from it read as null.
+        string. Agent and environment names a confidential channel keeps from
+        this conversation read as null.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3107,7 +3107,7 @@
       'description': '''
         List channels in this server/workspace that you can view.
         
-        From inside an isolated channel (its own agent, or origin_context_id
+        From inside a confidential channel (its own agent, or origin_context_id
         placing this turn there) only that channel is listed. Teams: the
         channels of every team daimon is in that you belong to, with each
         channel's team. A team appears once daimon has seen activity in it
@@ -3738,8 +3738,8 @@
         agent).
         
         Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
-        an isolated channel, publishes nothing: a link reaches whoever holds
-        it. An isolated channel's own agent never answers a report. When the
+        a confidential channel, publishes nothing: a link reaches whoever holds
+        it. A confidential channel's own agent never answers a report. When the
         answering agent is pinned to channels, a non-admin may only publish
         its reader from inside them.
         
@@ -5045,10 +5045,10 @@
     }),
     'set_channel_isolation': dict({
       'description': '''
-        Isolate one channel, or end its isolation. For example, give #team-alpha an
+        Mark one channel confidential, or unmark it. For example, give #team-alpha an
         agent nobody outside it can see or reach. Requires a server or workspace admin.
         
-        Isolating seals the channel and pins its own agent to it: its default agent,
+        Marking it confidential seals the channel and pins its own agent to it: its default agent,
         answering nowhere else, pinned nowhere else and not built in. If it has none, pass
         ``fork_from`` (an agent
         name, usually the one answering there now): that agent is copied under a name
@@ -5056,10 +5056,10 @@
         credentials, and an agent pinned to channels can't be copied. Without it the call
         is refused and says why. Repeating the call copies nothing again.
         
-        While isolated, the channel's own agents can't be set as the default anywhere
+        While confidential, the channel's own agents can't be set as the default anywhere
         else, don't appear in agent, skill or routine lists outside it, and can't be
         handed tasks from elsewhere; inside it only they appear. Its messages are
-        readable only from inside it. Ending isolation keeps the seal and the pins; a
+        readable only from inside it. Unmarking it keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
         ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
         thread id names its channel.
@@ -5101,7 +5101,7 @@
         ``protected`` stops every post into the channel and its threads, replies
         included. ``sealed`` makes its messages and conversations readable only from
         inside it. Requires a server admin; a channel's own admins can't change either.
-        An isolated channel stays sealed until its isolation ends
+        A confidential channel stays sealed until it is unmarked confidential
         (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
         Teams thread id names its channel.
       ''',
@@ -5154,7 +5154,7 @@
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
         server admin. Pass this turn's origin_context_id: a pinned agent, or a
-        turn in an isolated channel, can't change it. Discord-only.
+        turn in a confidential channel, can't change it. Discord-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,

@@ -98,18 +98,18 @@ def render_isolation_refusal(
     match reason:
         case "no_channel_agent":
             return (
-                "This channel has no agent of its own, so it can't be isolated yet. "
-                "Isolate it with a copy of the agent answering here instead."
+                "This channel has no agent of its own, so it can't be marked confidential yet. "
+                "Mark it confidential with a copy of the agent answering here instead."
             )
         case "shared_channel_agent":
             return (
                 f"{name} also answers outside this channel, so it can't belong to this one. "
-                f"Isolate the channel with a copy of {name} instead."
+                f"Mark the channel confidential with a copy of {name} instead."
             )
         case "managed_channel_agent":
             return (
                 f"{name} is built in, so it can't belong to one channel. "
-                f"Isolate the channel with a copy of {name} instead."
+                f"Mark the channel confidential with a copy of {name} instead."
             )
         case "pinned_shared_channel_agent":
             # A pinned agent can't be copied (`authorize(FORK)`), so no copy is offered.
@@ -124,11 +124,11 @@ def render_isolation_refusal(
             )
         case "channel_needs_own_agent":
             return (
-                f"This channel is isolated, so only its own agents answer here, and {name} "
+                f"This channel is confidential, so only its own agents answer here, and {name} "
                 f"is not one of them. Use a copy of {name} instead."
             )
         case "agent_confined":
-            return f"{name} belongs to another isolated channel, so it can't be used here."
+            return f"{name} belongs to another confidential channel, so it can't be used here."
         case "agent_pinned":
             return (
                 f"{name} is pinned to other channels, so it would refuse every turn here. "
@@ -136,8 +136,8 @@ def render_isolation_refusal(
             )
         case "channel_isolated":
             return (
-                "This channel is isolated, so it keeps an agent of its own. Set another agent "
-                "of its own, or end its isolation first."
+                "This channel is confidential, so it keeps an agent of its own. Set another agent "
+                "of its own, or unmark it confidential first."
             )
 
 

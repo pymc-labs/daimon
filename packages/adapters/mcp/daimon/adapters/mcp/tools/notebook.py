@@ -173,8 +173,8 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
 
-        Pass this turn's origin_context_id. A pinned agent, or a turn in an
-        isolated channel, publishes nothing.
+        Pass this turn's origin_context_id. A pinned agent, or a turn in a
+        confidential channel, publishes nothing.
         """
         auth = await _auth(ctx)
         await require_publishable(runtime, auth, origin_context_id=origin_context_id)

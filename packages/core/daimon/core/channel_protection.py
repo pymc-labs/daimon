@@ -30,7 +30,7 @@ ProtectionRefusal = Literal["admin_required", "isolated"]
 
 _REFUSALS: dict[ProtectionRefusal, str] = {
     "admin_required": "Protecting or sealing a channel needs a server admin.",
-    "isolated": "This channel is isolated, so it stays sealed: end its isolation first.",
+    "isolated": "This channel is confidential, so it stays sealed: unmark it confidential first.",
 }
 
 

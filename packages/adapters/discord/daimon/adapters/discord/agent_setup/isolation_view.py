@@ -37,21 +37,21 @@ import discord
 
 log = structlog.get_logger()
 
-ISOLATION_LABEL: Final = "Isolation"
-ISOLATE_LABEL: Final = "Isolate"
-ISOLATE_COPY_LABEL: Final = "Isolate with a copy"
-END_LABEL: Final = "End isolation"
+ISOLATION_LABEL: Final = "Confidential"
+ISOLATE_LABEL: Final = "Mark confidential"
+ISOLATE_COPY_LABEL: Final = "Mark confidential with a copy"
+END_LABEL: Final = "Unmark confidential"
 LIFT_LABEL: Final = "Lift seal and pins"
 BACK_LABEL: Final = "◀ Back"
 EXPLAINER: Final = (
-    "-# Isolating makes this channel private, so its messages read only from inside it, "
-    "gives it a dedicated agent pinned to it alone, so that agent answers only here, and "
-    "hides that agent everywhere else, while inside only the channel's own agents show. "
-    "It needs an agent that answers only here; **Isolate with a copy** makes one from the "
-    "agent answering now."
+    "-# Marking this channel confidential makes it private, so its messages read only from "
+    "inside it, gives it a dedicated agent pinned to it alone, so that agent answers only "
+    "here, and hides that agent everywhere else, while inside only the channel's own agents "
+    f"show. It needs an agent that answers only here; **{ISOLATE_COPY_LABEL}** makes one "
+    "from the agent answering now."
 )
 LIFT_NOTE: Final = (
-    f"-# **{LIFT_LABEL}** also ends isolation, makes the channel's messages readable from "
+    f"-# **{LIFT_LABEL}** also unmarks it confidential, makes its messages readable from "
     "elsewhere and unpins its dedicated agents, so they can answer elsewhere, bringing what "
     "they remembered here."
 )
@@ -60,11 +60,11 @@ _Callback = Callable[[discord.Interaction], Awaitable[None]]
 
 
 def status_line(status: ChannelIsolationStatus) -> str:
-    """Private, dedicated agent and hidden, on one line. Pure."""
+    """Private, dedicated agent and confidential, on one line. Pure."""
     dedicated = ", ".join(f"**{name}**" for name in status.dedicated_agent_names) or "none"
     return (
         f"-# Private: {'yes' if status.is_private else 'no'} · Dedicated agent: {dedicated} · "
-        f"Hidden: {'yes' if status.is_hidden else 'no'}"
+        f"Confidential: {'yes' if status.is_hidden else 'no'}"
     )
 
 
@@ -73,7 +73,7 @@ def build_isolation_container(
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """The isolation card. Pure — no I/O."""
     label = f"#{channel_name}" if channel_name else "This channel"
-    line = f"{label} is isolated." if status.is_hidden else f"{label} is not isolated."
+    line = f"{label} is confidential." if status.is_hidden else f"{label} is not confidential."
     line += f"\n{status_line(status)}"
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(header(ISOLATION_LABEL))
@@ -81,7 +81,7 @@ def build_isolation_container(
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(EXPLAINER))
     if status.is_hidden:
-        container.add_item(discord.ui.TextDisplay(f"-# Ending isolation: {END_ISOLATION_WARNING}"))
+        container.add_item(discord.ui.TextDisplay(f"-# **{END_LABEL}**: {END_ISOLATION_WARNING}"))
     if status.is_liftable:
         container.add_item(discord.ui.TextDisplay(LIFT_NOTE))
     return container

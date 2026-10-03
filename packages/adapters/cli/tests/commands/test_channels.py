@@ -417,7 +417,7 @@ async def test_isolate_copies_an_agent_seals_and_pins_it_then_ends(
     assert policy.isolated_channel_ids == (CHANNEL,), "the channel is isolated"
     assert policy.sealed_channel_ids == (CHANNEL,), "and sealed in the same write"
     assert policy.agent_channel_pins == {name: (CHANNEL,)}, "the copy is pinned to it alone"
-    assert f"isolated; its own agent is {name}, copied from shared" in _out(console)
+    assert f"marked confidential; its own agent is {name}, copied from shared" in _out(console)
 
     await channels_isolate(**where, channel_id=CHANNEL, end=True)
     async with db_session_factory() as s:
@@ -578,7 +578,9 @@ async def test_isolate_refuses_bad_flag_mixes(
     base = {"rt": rt, "console": _console(), "workspace_id": "w", "channel_id": CHANNEL}
     with pytest.raises(typer.BadParameter, match="unsupported platform"):
         await channels_isolate(**base, platform="cli")
-    with pytest.raises(typer.BadParameter, match="only applies when isolating"):
+    with pytest.raises(
+        typer.BadParameter, match="only applies when marking a channel confidential"
+    ):
         await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
     with pytest.raises(typer.BadParameter, match="only applies with --end"):
         await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)
@@ -618,7 +620,7 @@ async def test_protect_toggles_a_teams_channel_and_keeps_an_isolated_seal(
         await channels_protect(
             **args, console=console, channel_id=TEAMS_CHANNEL, protect=False, seal=False
         )
-    assert "end its isolation first" in _out(console), _out(console)
+    assert "unmark it confidential first" in _out(console), _out(console)
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
     assert (policy.protected_channel_ids, policy.sealed_channel_ids) == (

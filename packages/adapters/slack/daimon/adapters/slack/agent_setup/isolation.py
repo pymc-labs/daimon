@@ -25,7 +25,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 IsolationChoice = Literal["isolate", "copy", "end", "lift"]
 """`lift` ends isolation and lifts the channel's seal and dedicated pins too."""
 
-ISOLATION_NEED_ADMIN_MESSAGE = "Only a workspace admin can isolate a channel. Nothing changed."
+ISOLATION_NEED_ADMIN_MESSAGE = (
+    "Only a workspace admin can mark a channel confidential. Nothing changed."
+)
 
 
 async def _channel_name(client: AsyncWebClient, channel_id: str) -> str | None:
@@ -94,12 +96,14 @@ async def change_isolation(
         return f"{exc} Nothing changed."
     await audit(outcome="allowed", reason="completed")
     if not change.isolated:
-        return f"<#{channel}> is no longer isolated. {change.end_warning}"
+        return f"<#{channel}> is no longer confidential. {change.end_warning}"
     name = escape_mrkdwn(change.agent_name or "")
     if change.forked_from is not None:
         source = escape_mrkdwn(change.forked_from)
-        said = f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
+        said = (
+            f"<#{channel}> is now confidential. *{name}*, a copy of *{source}*, answers only there."
+        )
     else:
-        said = f"<#{channel}> is isolated. *{name}* answers only there."
+        said = f"<#{channel}> is now confidential. *{name}* answers only there."
     notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)
     return " ".join([said, *(escape_mrkdwn(note) for note in notes if note)])

@@ -57,7 +57,7 @@ _REFUSALS: dict[ArchiveRefusal, str] = {
     "not_found": "There is no agent by that name.",
     "ambiguous": "More than one agent has that name, or it changed: list the agents again.",
     "not_isolation_copy": (
-        "That agent wasn't made as an isolated channel's copy, so this tool doesn't archive it."
+        "That agent wasn't made as a confidential channel's copy, so this tool doesn't archive it."
     ),
     "other_channel": "That agent was made for another channel.",
     "default_agent": "That agent is a workspace or deployment default.",

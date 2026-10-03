@@ -189,7 +189,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             )
             if agent is None and viewer is not None and viewer.inside_channel_id is not None:
                 raise DaimonError(
-                    f"**{new_name}** was created. This channel is isolated, so it shows here "
+                    f"**{new_name}** was created. This channel is confidential, so it shows here "
                     "once it is set as the channel's agent."
                 )
             if agent is None:

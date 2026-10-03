@@ -246,14 +246,14 @@ OPERATOR_TOKENS_NOTE: Final = (
 )
 LIFT_ISOLATION_LABEL: Final = "Lift seal and pins"
 ISOLATION_NOTE: Final = (
-    "Isolating makes this channel private, so its messages read only from inside it, gives "
-    "it a dedicated agent pinned to it alone, so that agent answers only here, and hides "
-    "that agent everywhere else, while inside only the channel's own agents show. It needs "
-    "an agent that answers only here; *Isolate with a copy* makes one from the agent "
-    "answering now."
+    "Marking this channel confidential makes it private, so its messages read only from "
+    "inside it, gives it a dedicated agent pinned to it alone, so that agent answers only "
+    "here, and hides that agent everywhere else, while inside only the channel's own agents "
+    "show. It needs an agent that answers only here; *Mark confidential with a copy* makes "
+    "one from the agent answering now."
 )
 LIFT_ISOLATION_NOTE: Final = (
-    f"*{LIFT_ISOLATION_LABEL}* also ends isolation, makes the channel's messages readable "
+    f"*{LIFT_ISOLATION_LABEL}* also unmarks it confidential, makes its messages readable "
     "from elsewhere and unpins its dedicated agents, so they can answer elsewhere, bringing "
     "what they remembered here."
 )
@@ -829,34 +829,34 @@ def _channel_skills_blocks(
 
 
 def isolation_status_line(status: ChannelIsolationStatus) -> str:
-    """Private, dedicated agent and hidden, on one line. Pure."""
+    """Private, dedicated agent and confidential, on one line. Pure."""
     dedicated = ", ".join(f"*{escape_mrkdwn(name)}*" for name in status.dedicated_agent_names)
     return (
         f"Private: {'yes' if status.is_private else 'no'} · Dedicated agent: "
-        f"{dedicated or 'none'} · Hidden: {'yes' if status.is_hidden else 'no'}"
+        f"{dedicated or 'none'} · Confidential: {'yes' if status.is_hidden else 'no'}"
     )
 
 
 def _isolation_blocks(*, channel_id: str, status: ChannelIsolationStatus) -> list[dict[str, Any]]:
-    state = "is isolated" if status.is_hidden else "is not isolated"
+    state = "is confidential" if status.is_hidden else "is not confidential"
     buttons = (
-        [_button(action_id=ACTION_END_ISOLATION, label="End isolation", style="danger")]
+        [_button(action_id=ACTION_END_ISOLATION, label="Unmark confidential", style="danger")]
         if status.is_hidden
         else [
-            _button(action_id=ACTION_ISOLATE, label="Isolate", style="primary"),
-            _button(action_id=ACTION_ISOLATE_COPY, label="Isolate with a copy"),
+            _button(action_id=ACTION_ISOLATE, label="Mark confidential", style="primary"),
+            _button(action_id=ACTION_ISOLATE_COPY, label="Mark confidential with a copy"),
         ]
     )
     notes = [ISOLATION_NOTE]
     if status.is_hidden:
-        notes.append(f"Ending isolation: {END_ISOLATION_WARNING}")
+        notes.append(f"*Unmark confidential*: {END_ISOLATION_WARNING}")
     if status.is_liftable:
         buttons.append(
             _button(action_id=ACTION_LIFT_ISOLATION, label=LIFT_ISOLATION_LABEL, style="danger")
         )
         notes.append(LIFT_ISOLATION_NOTE)
     return [
-        _section(f"*Isolation*\n<#{channel_id}> {state}.\n{isolation_status_line(status)}"),
+        _section(f"*Confidential*\n<#{channel_id}> {state}.\n{isolation_status_line(status)}"),
         {"type": "actions", "elements": buttons},
         _context(" ".join(notes)),
         {"type": "divider"},
@@ -1237,7 +1237,7 @@ def build_created_view(
     """What the placeholder becomes when the new agent can't be shown to its creator here."""
     name = escape_mrkdwn(agent_name)
     text = (
-        f"*{name}* was created. This channel is isolated, so it shows here once it is set "
+        f"*{name}* was created. This channel is confidential, so it shows here once it is set "
         "as the channel's agent."
         if isolated_here
         else f"*{name}* was created but is not listed yet. Reopen setup to see it."

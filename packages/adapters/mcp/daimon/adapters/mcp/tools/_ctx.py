@@ -174,7 +174,7 @@ async def _policy_gate(
         refused(denial_termination_reason(decision.reason))
         if decision.reason == "channel_isolated":
             raise ToolError(
-                "TERMINAL ERROR: This agent's key is bound to an isolated channel that "
+                "TERMINAL ERROR: This agent's key is bound to a confidential channel that "
                 "only that channel's own agents answer in, so it can't run here."
             )
         raise ToolError(

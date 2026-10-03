@@ -267,13 +267,13 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
 
 
 _ACROSS_LINE_MSG = (
-    "{place} is across an isolated channel's line from this conversation, so its "
+    "{place} is across a confidential channel's line from this conversation, so its "
     "routing can't be shown here."
 )
 
 
 _NO_OWN_AGENT_NOTE = (
-    "None of this isolated channel's own agents answers here, so a mention is refused "
+    "None of this confidential channel's own agents answers here, so a mention is refused "
     "until an admin sets the channel's agent."
 )
 

@@ -175,7 +175,7 @@ Two things work differently from Discord and Slack:
 - **One deployment serves one organisation.** The bot answers only people in
   the Microsoft 365 organisation it is registered in, and turns away
   messages from anywhere else, except from people of another organisation
-  (external participants and guests) inside an isolated channel (below).
+  (external participants and guests) inside a confidential channel (below).
 
 What the bot does once it is running (1:1 chats, channel threads, commands,
 files and its limits) is in [`teams.md`](teams.md).
@@ -428,7 +428,7 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    participants don't use guest accounts, but guest access must be enabled
    to invite them. The SharePoint and Microsoft 365 Groups guest settings
    must stay on too (the default).
-4. Create the shared channel, make it isolated in daimon (the setup panel's
+4. Create the shared channel, mark it confidential in daimon (the setup panel's
    Channel settings, `set_channel_isolation` or `daimon channels isolate`),
    then add the other organisation's people as channel members. Guests,
    including guests converted to members, can't be added to a shared

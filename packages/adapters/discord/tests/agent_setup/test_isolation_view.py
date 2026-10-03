@@ -115,7 +115,7 @@ def test_screen_offers_isolating_ending_or_lifting_it(account_id: uuid.UUID) -> 
     }, "an open channel can be isolated, with or without a copy"
     isolated = _view(runtime, account_id, isolated=True)
     assert _labels(isolated) == {"◀ Back", END_LABEL, LIFT_LABEL, "Done"}
-    assert "Private: yes · Dedicated agent: **alpha** · Hidden: yes" in _text(isolated), (
+    assert "Private: yes · Dedicated agent: **alpha** · Confidential: yes" in _text(isolated), (
         "the screen shows each of isolation's controls"
     )
     ended = _view(runtime, account_id, isolated=False, private=True)

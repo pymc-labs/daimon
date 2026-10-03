@@ -399,11 +399,11 @@ def _check_agent_pin(
             policy, origin.channel_id, origin.parent_channel_id
         ):
             raise ToolError(
-                "This conversation is in an isolated channel, so its routines post only "
+                "This conversation is in a confidential channel, so its routines post only "
                 "into that channel. Nothing was saved."
             )
         raise ToolError(
-            "That channel is isolated, so only its own agents post there. Nothing was saved."
+            "That channel is confidential, so only its own agents post there. Nothing was saved."
         )
     if not decision:
         raise ToolError(

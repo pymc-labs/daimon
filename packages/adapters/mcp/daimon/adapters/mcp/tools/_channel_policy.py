@@ -60,10 +60,10 @@ _PROTECTED_MSG = (
     "Tell the caller and offer to post somewhere else. Do not retry."
 )
 _ISOLATED_WRITE_MSG = (
-    "this channel is isolated: only its own agents post in it. Tell the caller. Do not retry."
+    "this channel is confidential: only its own agents post in it. Tell the caller. Do not retry."
 )
 _HELD_SEND_MSG = (
-    "this conversation is in an isolated channel, so nothing said here is posted or sent "
+    "this conversation is in a confidential channel, so nothing said here is posted or sent "
     "outside it. Tell the caller. Do not retry."
 )
 _PINNED_SEND_MSG = (
@@ -80,15 +80,15 @@ _SEALED_MSG = (
     "otherwise tell the caller. Do not retry."
 )
 _HELD_READ_MSG = (
-    "this conversation is in an isolated channel, so nothing outside it is read here. "
+    "this conversation is in a confidential channel, so nothing outside it is read here. "
     "Tell the caller. Do not retry."
 )
 _OWN_AGENTS_MSG = (
-    "this channel is isolated: only its own agents read it, so nothing was read. "
+    "this channel is confidential: only its own agents read it, so nothing was read. "
     "Tell the caller. Do not retry."
 )
 _AMBIGUOUS_HOLD_MSG = (
-    "this agent is answering in more than one isolated channel at once, so daimon "
+    "this agent is answering in more than one confidential channel at once, so daimon "
     "can't tell which one this call belongs to and did nothing. Tell the caller to "
     "try again once one of those answers is done."
 )
@@ -241,7 +241,7 @@ async def require_dm_recipient_allowed(
         raise ToolError(_PINNED_SEND_MSG)
     if decision.reason == "channel_isolated":
         raise ToolError(
-            "this agent is held to an isolated channel, so it sends no direct messages: "
+            "this agent is held to a confidential channel, so it sends no direct messages: "
             "what it knows stays in that channel. Tell the caller. Do not retry."
         )
     if not decision:
@@ -264,13 +264,13 @@ async def require_agent_creatable(
     if refusal == "origin_missing":
         raise ToolError(
             "create_agent needs a verified origin_context_id from a chat turn while a "
-            "channel in this workspace is isolated, and this call has none. Nothing was "
+            "channel in this workspace is confidential, and this call has none. Nothing was "
             "created. Tell the caller to create the agent from a chat conversation. "
             "Do not retry."
         )
     if refusal is not None:
         raise ToolError(
-            "this conversation is held to an isolated channel, so it creates no agents: a "
+            "this conversation is held to a confidential channel, so it creates no agents: a "
             "new agent would answer outside it. Tell the caller to create it from a "
             "conversation outside that channel. Nothing was created. Do not retry."
         )
@@ -308,7 +308,7 @@ async def require_reader_source_publishable(
     if decision.reason == "channel_isolated":
         record_authz_denial(Action.PUBLISH, decision.reason)
         raise ToolError(
-            f"'{source.name}' is an isolated channel's own agent, so its reader can't be "
+            f"'{source.name}' is a confidential channel's own agent, so its reader can't be "
             "published: a link reaches whoever holds it. Tell the caller. Nothing was "
             "published. Do not retry."
         )
@@ -346,7 +346,7 @@ async def _require_unheld(
     if refusal == "origin_missing":
         raise ToolError(
             f"{what} needs this turn's origin_context_id while a channel in this "
-            f"workspace is isolated, and this call has none. {nothing} Pass it and retry once."
+            f"workspace is confidential, and this call has none. {nothing} Pass it and retry once."
         )
     if refusal == "agent_pinned":
         raise ToolError(
@@ -360,7 +360,7 @@ async def _require_unheld(
         )
     if refusal is not None:
         raise ToolError(
-            f"this conversation is held to an isolated channel, so {what} is refused: it "
+            f"this conversation is held to a confidential channel, so {what} is refused: it "
             f"would carry the channel outside. Tell the caller. {nothing} Do not retry."
         )
 

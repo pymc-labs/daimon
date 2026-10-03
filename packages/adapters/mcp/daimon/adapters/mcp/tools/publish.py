@@ -186,8 +186,8 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent).
 
         Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
-        an isolated channel, publishes nothing: a link reaches whoever holds
-        it. An isolated channel's own agent never answers a report. When the
+        a confidential channel, publishes nothing: a link reaches whoever holds
+        it. A confidential channel's own agent never answers a report. When the
         answering agent is pinned to channels, a non-admin may only publish
         its reader from inside them.
 

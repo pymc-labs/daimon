@@ -48,7 +48,7 @@ class TenantAccessPolicy(BaseModel):
         # Isolation adds to a seal; it never stands without one.
         unsealed = sorted(set(self.isolated_channel_ids) - set(self.sealed_channel_ids))
         if unsealed:
-            raise ValueError(f"isolated channels must also be sealed: {', '.join(unsealed)}")
+            raise ValueError(f"confidential channels must also be sealed: {', '.join(unsealed)}")
         return self
 
 

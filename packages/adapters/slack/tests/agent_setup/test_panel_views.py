@@ -1196,7 +1196,7 @@ def test_routing_view_offers_isolation_to_admins_by_state() -> None:
     isolated = _routing(channel_admins=[], isolation=_ISOLATED)
     assert {ACTION_END_ISOLATION, ACTION_LIFT_ISOLATION} <= set(_action_ids(isolated))
     assert any(
-        "Private: yes · Dedicated agent: *alpha* · Hidden: yes" in t for t in _texts(isolated)
+        "Private: yes · Dedicated agent: *alpha* · Confidential: yes" in t for t in _texts(isolated)
     ), "the panel shows each of isolation's controls"
     ended = set(_action_ids(_routing(channel_admins=[], isolation=_ENDED)))
     assert ACTION_LIFT_ISOLATION in ended and ACTION_END_ISOLATION not in ended, (

@@ -266,7 +266,7 @@ What a budget does not cover:
   `continue_turn` are gated by that channel's budget, and the sessions it
   opens carry `daimon_budget_channel`, so their spend is attributed there.
   Every other key, the hub and bearer tokens record no channel and are not
-  gated, except on an isolated channel's own agent: every run of it, an
+  gated, except on a confidential channel's own agent: every run of it, an
   admin's or that channel's admin's from the hub or a DM included, is gated
   by and charged to that channel. Its routines can only post there, so they
   already are. A media tool call without a live `origin_context_id` is not
@@ -539,7 +539,7 @@ reason: `admission_balance_depleted`, `admission_cap_exceeded`,
 `admission_agent_pinned_elsewhere`, `admission_channel_isolated` and
 `admission_concurrency_shed`. `admission_denied` covers the invoker allowlist,
 an unreadable access policy and any other gate; rows written before
-`0045_admission_refusal_reasons` record every protection, pin and isolation
+`0045_admission_refusal_reasons` record every protection, pin and confidential-channel
 refusal under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in

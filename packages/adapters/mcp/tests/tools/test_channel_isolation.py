@@ -268,9 +268,9 @@ async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
     admin = world.auth()
-    with pytest.raises(ToolError, match="isolated"):
+    with pytest.raises(ToolError, match="confidential"):
         await _set_agent_default_impl(runtime, admin, "shared", ROOM, "agent_shared")
-    with pytest.raises(ToolError, match="isolated"):
+    with pytest.raises(ToolError, match="confidential"):
         await _clear_agent_default_impl(runtime, admin, ROOM)
     with pytest.raises(ToolError, match="missing"):
         await _set_agent_default_impl(runtime, admin, "local", OTHER, "agent_local")
@@ -412,9 +412,9 @@ async def test_explain_agent_resolution_stays_on_the_callers_side(
     )
     outside, inside = world.auth(), world.auth(executing="agent_local")
 
-    with pytest.raises(ToolError, match="across an isolated channel's line"):
+    with pytest.raises(ToolError, match="across a confidential channel's line"):
         await _explain_agent_resolution_impl(runtime, outside, ROOM)
-    with pytest.raises(ToolError, match="across an isolated channel's line"):
+    with pytest.raises(ToolError, match="across a confidential channel's line"):
         await _explain_agent_resolution_impl(runtime, inside, OTHER)
     here = await _explain_agent_resolution_impl(runtime, inside, ROOM)
     assert (here.effective_agent_name, here.deployment_default) == ("local", None), (
@@ -597,7 +597,7 @@ async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
         "Tell the caller to create the agent from a chat conversation. Do not retry."
     ), "nothing to retry with, so the model must not loop"
     await _setup_thread_origin(committing_sessionmaker, world)
-    with pytest.raises(ToolError, match="held to an isolated channel"):
+    with pytest.raises(ToolError, match="held to a confidential channel"):
         await _create_agent_impl(runtime, builtin, spec, origin_id)
 
     names = {str(agent["name"]) for agent in world.state.agents.values()}
@@ -703,7 +703,7 @@ async def test_an_own_agent_publishes_and_renames_daimon_nowhere(
     """A link, or daimon's server nickname, shows outside C: refused for every caller."""
     world, runtime = await _world(committing_sessionmaker)
     for auth in _own_agent_callers(world).values():
-        with pytest.raises(ToolError, match="isolated channel, so publishing is refused"):
+        with pytest.raises(ToolError, match="confidential channel, so publishing is refused"):
             await require_publishable(runtime, auth, origin_context_id=None)
         with pytest.raises(ToolError, match="server-wide name or avatar is refused"):
             await require_identity_changeable(runtime, auth, origin_context_id=None)
@@ -723,7 +723,7 @@ async def test_publishing_is_held_by_the_turns_origin(
     await require_publishable(runtime, builtin, origin_context_id=outside)
     inside = await _setup_thread_origin(committing_sessionmaker, world)
     for named in (inside, outside):
-        with pytest.raises(ToolError, match="isolated channel"):
+        with pytest.raises(ToolError, match="confidential channel"):
             await require_publishable(runtime, builtin, origin_context_id=named)
     await require_publishable(runtime, world.auth(), origin_context_id=None)
 
@@ -831,7 +831,7 @@ async def test_no_one_publishes_an_own_agents_reader(
         ma_agent(id=f"agent_{name}", name=name, tenant_id=world.tenant_id)
         for name in ("local", "shared")
     )
-    with pytest.raises(ToolError, match="isolated channel's own agent"):
+    with pytest.raises(ToolError, match="confidential channel's own agent"):
         await require_reader_source_publishable(runtime, world.auth(), own)
     await require_reader_source_publishable(runtime, world.auth(), shared)
 
@@ -990,7 +990,7 @@ async def test_turns_running_in_two_isolated_channels_refuse_an_unnamed_call(
         )
     origin_id = await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=False, executing="agent_shared")
-    with pytest.raises(ToolError, match="more than one isolated channel"):
+    with pytest.raises(ToolError, match="more than one confidential channel"):
         await load_read_policy(runtime, builtin, origin_context_id=None)
     named = await load_read_policy(runtime, builtin, origin_context_id=origin_id)
     with pytest.raises(ToolError, match="nothing outside it is read"):

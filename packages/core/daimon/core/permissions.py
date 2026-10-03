@@ -181,7 +181,7 @@ def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
     ):
         raise RuleRefused(
             f"{channel_id} is a Slack thread, which can only be sealed; "
-            "protect or isolate its channel instead"
+            "protect its channel or mark it confidential instead"
         )
 
 
