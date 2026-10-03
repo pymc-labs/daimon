@@ -1578,10 +1578,19 @@ class SlackApp:
                         thread_ts=thread_id,
                     )
 
+        async def on_cancel(groups: list[list[dict[str, Any]]]) -> None:
+            await self._notify_undrained_mentions(
+                [group[0] for group in groups],
+                channel=channel,
+                web_client=web_client,
+                thread_id=thread_id,
+            )
+
         await self._thread_queue.drain(
             thread_id,
             compose=lambda queued: group_by_author(queued, author),
             run=run,
+            on_cancel=on_cancel,
         )
 
     async def _notify_undrained_mentions(

@@ -4,6 +4,7 @@ These views use the adapters' existing collections. Admission fences, tenant and
 process slots, durable dedupe and turn execution remain with their callers.
 """
 
+from asyncio import CancelledError
 from collections.abc import Awaitable, Callable, Hashable
 
 
@@ -39,17 +40,25 @@ class ThreadQueue[Key: Hashable, Message]:
         *,
         compose: Callable[[list[Message]], list[Turn]],
         run: Callable[[Turn], Awaitable[None]],
+        on_cancel: Callable[[list[Turn]], Awaitable[None]],
         initial: list[Turn] | None = None,
     ) -> None:
         """Finish each popped batch before inspecting arrivals during its turns.
 
         The run callback owns the platform's error boundary and turn tail. An
-        escaping error or cancellation leaves only later batches in pending.
+        escaping error leaves only later batches in pending. Cancellation
+        reports unstarted groups from the popped batch before propagating;
+        the interrupted turn is never retried. Later batches stay in pending
+        for the owner's existing cleanup.
         """
         turns = initial if initial is not None else compose(self.pending.pop(key, []))
         while turns:
-            for turn in turns:
-                await run(turn)
+            for index, turn in enumerate(turns):
+                try:
+                    await run(turn)
+                except CancelledError:
+                    await on_cancel(turns[index + 1 :])
+                    raise
             turns = compose(self.pending.pop(key, []))
 
 
