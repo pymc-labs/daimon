@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Compose `init` runs migrations and applies defaults before services start. Local CLI setup no longer requires a public MCP URL; set `DAIMON_MCP__PUBLIC_URL` when exposing MCP through a public origin.
+- Compose `init` now calls the installed `alembic` command directly. The local CLI-only path no longer requires `DAIMON_MCP__PUBLIC_URL`; set it before starting MCP or scheduler services.
 - **Turn outcomes tell protection, pin and isolation refusals apart.** A turn
   refused because its channel is protected, its agent is pinned to other
   channels, or the channel is isolated and the agent is not one of its own was
