@@ -263,7 +263,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The Teams app can be added to private and shared channels.** The
   manifest template moves to version 1.25 with `supportsChannelFeatures:
-  tier1` (package version 0.4.0). Adding the app to a team does not add it to
+  tier1` (package version 0.4.1). Adding the app to a team does not add it to
   these channels: each one's owner adds it from the channel. Rebuild the
   package and upload it again to use them.
 - **People from another organisation in Teams.** A shared channel's external

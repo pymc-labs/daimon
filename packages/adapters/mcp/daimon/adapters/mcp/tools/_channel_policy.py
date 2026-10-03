@@ -112,7 +112,8 @@ async def require_channel_writable(
     """Raise ToolError when the tenant policy forbids this post (`authorize(POST)`).
 
     Tidy supplies a policy loaded under the shared policy-write lock and agent facts
-    resolved before locking; supplying both avoids network I/O in the guard.
+    resolved before locking; supplying both avoids platform lookups in the guard (a
+    running turn's hold is still read from the database).
 
     Every channel send path (messages, replies, thread and post creation, file
     and card posts) calls this. Besides channel protection it holds a pinned
