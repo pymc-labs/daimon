@@ -38,15 +38,16 @@ MAX_CHANNEL_CHOICES: Final = 100
 ChannelOp = Literal["pick", "environment", "isolation", "admins"]
 IsolationChoice = Literal["isolate", "copy", "end", "lift"]
 ISOLATION_CHOICES: Final[Mapping[IsolationChoice, str]] = {
-    "isolate": "Isolate",
-    "copy": "Isolate with a copy",
-    "end": "End isolation",
+    "isolate": "Mark confidential",
+    "copy": "Mark confidential with a copy",
+    "end": "Unmark confidential",
     "lift": "Lift seal and pins",
 }
 ISOLATION_NOTE: Final = (
-    "Isolating makes the channel private, gives it an agent pinned to it alone and hides that "
-    "agent everywhere else. Isolate with a copy makes that agent from the one answering now. "
-    "Lift seal and pins also ends isolation and lets its agents answer elsewhere."
+    "Marking the channel confidential makes it private, gives it an agent pinned to it alone "
+    "and hides that agent everywhere else. Mark confidential with a copy makes that agent "
+    "from the one answering now. Lift seal and pins also unmarks it confidential and lets "
+    "its agents answer elsewhere."
 )
 CHANNEL_ADMINS_NOTE: Final = (
     "Channel admins pick their channels' environment and default agent. Server admins run "
@@ -130,16 +131,16 @@ def _environment_section(settings: ChannelSettings) -> tuple[list[CardElement], 
 
 def _isolation_section(status: ChannelIsolationStatus) -> list[CardElement]:
     dedicated = ", ".join(status.dedicated_agent_names) or "none"
-    state = "is isolated" if status.is_hidden else "is not isolated"
+    state = "is confidential" if status.is_hidden else "is not confidential"
     offered: list[IsolationChoice] = ["end"] if status.is_hidden else ["isolate", "copy"]
     if status.is_liftable:
         offered.append("lift")
     notes = [ISOLATION_NOTE]
     if status.is_hidden:
-        notes.append(f"Ending isolation: {END_ISOLATION_WARNING}")
+        notes.append(f"Unmark confidential: {END_ISOLATION_WARNING}")
     return [
         _text(
-            f"**Isolation**\n\nThe channel {state}. Private: "
+            f"**Confidential**\n\nThe channel {state}. Private: "
             f"{'yes' if status.is_private else 'no'} · Dedicated agent: {dedicated}"
         ),
         ChoiceSetInput(
@@ -161,7 +162,7 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
     channel = settings.channel_id
     if settings.isolation is not None:
         body += _isolation_section(settings.isolation)
-        actions.append(_submit("Apply isolation", "isolation", channel))
+        actions.append(_submit("Apply confidential change", "isolation", channel))
     if settings.admin_user_ids is not None:
         body += [
             _text("**Channel admins**"),

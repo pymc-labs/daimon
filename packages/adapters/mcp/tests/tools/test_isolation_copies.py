@@ -140,9 +140,9 @@ async def test_only_an_isolation_copy_is_archived_and_never_a_default(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _isolated_copy(committing_sessionmaker)
-    with pytest.raises(ToolError, match="wasn't made as an isolated channel's copy"):
+    with pytest.raises(ToolError, match="wasn't made as a confidential channel's copy"):
         await _archive_isolation_copy_impl(runtime, world.auth(), name="shared")
-    with pytest.raises(ToolError, match="wasn't made as an isolated channel's copy"):
+    with pytest.raises(ToolError, match="wasn't made as a confidential channel's copy"):
         await _archive_isolation_copy_impl(runtime, world.auth(), name="daimon")
     with pytest.raises(ToolError, match="no agent by that name"):
         await _archive_isolation_copy_impl(runtime, world.auth(), name="missing")

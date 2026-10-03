@@ -110,7 +110,7 @@ def register_channel_protection_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         ``protected`` stops every post into the channel and its threads, replies
         included. ``sealed`` makes its messages and conversations readable only from
         inside it. Requires a server admin; a channel's own admins can't change either.
-        An isolated channel stays sealed until its isolation ends
+        A confidential channel stays sealed until it is unmarked confidential
         (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
         Teams thread id names its channel.
         """

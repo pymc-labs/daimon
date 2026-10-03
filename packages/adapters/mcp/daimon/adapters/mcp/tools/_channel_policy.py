@@ -30,7 +30,6 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
-    isolated_channel_of,
 )
 from daimon.core.authz import (
     Action,
@@ -44,6 +43,12 @@ from daimon.core.authz import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import (
+    any_confidential,
+    any_pinned,
+    any_sealed,
+    confidential_channel_of,
+)
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
@@ -55,10 +60,10 @@ _PROTECTED_MSG = (
     "Tell the caller and offer to post somewhere else. Do not retry."
 )
 _ISOLATED_WRITE_MSG = (
-    "this channel is isolated: only its own agents post in it. Tell the caller. Do not retry."
+    "this channel is confidential: only its own agents post in it. Tell the caller. Do not retry."
 )
 _HELD_SEND_MSG = (
-    "this conversation is in an isolated channel, so nothing said here is posted or sent "
+    "this conversation is in a confidential channel, so nothing said here is posted or sent "
     "outside it. Tell the caller. Do not retry."
 )
 _PINNED_SEND_MSG = (
@@ -75,15 +80,15 @@ _SEALED_MSG = (
     "otherwise tell the caller. Do not retry."
 )
 _HELD_READ_MSG = (
-    "this conversation is in an isolated channel, so nothing outside it is read here. "
+    "this conversation is in a confidential channel, so nothing outside it is read here. "
     "Tell the caller. Do not retry."
 )
 _OWN_AGENTS_MSG = (
-    "this channel is isolated: only its own agents read it, so nothing was read. "
+    "this channel is confidential: only its own agents read it, so nothing was read. "
     "Tell the caller. Do not retry."
 )
 _AMBIGUOUS_HOLD_MSG = (
-    "this agent is answering in more than one isolated channel at once, so daimon "
+    "this agent is answering in more than one confidential channel at once, so daimon "
     "can't tell which one this call belongs to and did nothing. Tell the caller to "
     "try again once one of those answers is done."
 )
@@ -141,13 +146,13 @@ async def require_channel_writable(
     if first.reason == "channel_protected":
         record_authz_denial(Action.POST, first.reason)
         raise ToolError(_PROTECTED_MSG)
-    if not policy.isolated_channel_ids and (place.own_dm or not policy.agent_channel_pins):
+    if not any_confidential(policy) and (place.own_dm or not any_pinned(policy)):
         return
     agent = agent if agent is not None else await _executing_agent(runtime, auth, policy)
     # A running turn's hold only narrows: it never grants what `origin` would not.
     running = await _held_origin(runtime, auth, policy, agent, None)
     hold = isolation_hold(policy, agent, turn_origin_place(running)) if running else None
-    if hold is not None and isolated_channel_of(policy, channel_id, parent_channel_id) != hold:
+    if hold is not None and confidential_channel_of(policy, channel_id, parent_channel_id) != hold:
         record_authz_denial(Action.POST, "channel_isolated")
         raise ToolError(_HELD_SEND_MSG)
     decision = authorize(
@@ -156,7 +161,7 @@ async def require_channel_writable(
     if not decision:
         record_authz_denial(Action.POST, decision.reason)
     if decision.reason == "channel_isolated":
-        if isolated_channel_of(policy, channel_id, parent_channel_id):
+        if confidential_channel_of(policy, channel_id, parent_channel_id):
             raise ToolError(_ISOLATED_WRITE_MSG)
         if _origin_isolated(policy, origin):
             raise ToolError(_HELD_SEND_MSG)
@@ -166,7 +171,7 @@ async def require_channel_writable(
 
 def _origin_isolated(policy: TenantAccessPolicy, origin: Place | None) -> bool:
     return origin is not None and (
-        isolated_channel_of(policy, origin.channel_id, origin.parent_channel_id) is not None
+        confidential_channel_of(policy, origin.channel_id, origin.parent_channel_id) is not None
     )
 
 
@@ -200,7 +205,7 @@ async def _executing_agent(
     fails closed while pins exist.
     """
     executing = auth.chat_agent_id or auth.agent_id
-    if executing is None or not (policy.agent_channel_pins or policy.isolated_channel_ids):
+    if executing is None or not (any_pinned(policy) or any_confidential(policy)):
         return AgentRef.none()
     agent = await find_agent_by_derived_uuid(
         runtime.client, tenant_id=auth.tenant_id, agent_id=executing
@@ -236,7 +241,7 @@ async def require_dm_recipient_allowed(
         raise ToolError(_PINNED_SEND_MSG)
     if decision.reason == "channel_isolated":
         raise ToolError(
-            "this agent is held to an isolated channel, so it sends no direct messages: "
+            "this agent is held to a confidential channel, so it sends no direct messages: "
             "what it knows stays in that channel. Tell the caller. Do not retry."
         )
     if not decision:
@@ -259,13 +264,13 @@ async def require_agent_creatable(
     if refusal == "origin_missing":
         raise ToolError(
             "create_agent needs a verified origin_context_id from a chat turn while a "
-            "channel in this workspace is isolated, and this call has none. Nothing was "
+            "channel in this workspace is confidential, and this call has none. Nothing was "
             "created. Tell the caller to create the agent from a chat conversation. "
             "Do not retry."
         )
     if refusal is not None:
         raise ToolError(
-            "this conversation is held to an isolated channel, so it creates no agents: a "
+            "this conversation is held to a confidential channel, so it creates no agents: a "
             "new agent would answer outside it. Tell the caller to create it from a "
             "conversation outside that channel. Nothing was created. Do not retry."
         )
@@ -292,7 +297,7 @@ async def require_reader_source_publishable(
     so an isolated channel's own agent's reader is refused, admins included. A
     pinned source is the pin write rule's (`require_pin_write_access`)."""
     policy = await load_channel_policy(runtime, auth)
-    if not policy.isolated_channel_ids:
+    if not any_confidential(policy):
         return
     decision = authorize(
         policy,
@@ -303,7 +308,7 @@ async def require_reader_source_publishable(
     if decision.reason == "channel_isolated":
         record_authz_denial(Action.PUBLISH, decision.reason)
         raise ToolError(
-            f"'{source.name}' is an isolated channel's own agent, so its reader can't be "
+            f"'{source.name}' is a confidential channel's own agent, so its reader can't be "
             "published: a link reaches whoever holds it. Tell the caller. Nothing was "
             "published. Do not retry."
         )
@@ -341,7 +346,7 @@ async def _require_unheld(
     if refusal == "origin_missing":
         raise ToolError(
             f"{what} needs this turn's origin_context_id while a channel in this "
-            f"workspace is isolated, and this call has none. {nothing} Pass it and retry once."
+            f"workspace is confidential, and this call has none. {nothing} Pass it and retry once."
         )
     if refusal == "agent_pinned":
         raise ToolError(
@@ -355,7 +360,7 @@ async def _require_unheld(
         )
     if refusal is not None:
         raise ToolError(
-            f"this conversation is held to an isolated channel, so {what} is refused: it "
+            f"this conversation is held to a confidential channel, so {what} is refused: it "
             f"would carry the channel outside. Tell the caller. {nothing} Do not retry."
         )
 
@@ -370,7 +375,7 @@ async def _held_refusal(
     if auth.chat_agent_id is None and auth.agent_id is None:
         return None
     policy = await load_channel_policy(runtime, auth)
-    if not (policy.isolated_channel_ids or policy.agent_channel_pins):
+    if not (any_confidential(policy) or any_pinned(policy)):
         return None
     agent = await _executing_agent(runtime, auth, policy)
     decision = authorize(
@@ -385,7 +390,7 @@ async def _held_refusal(
     if not decision:
         record_authz_denial(action, decision.reason)
         return decision.reason
-    if policy.isolated_channel_ids and auth.agent_id is None and origin is None:
+    if any_confidential(policy) and auth.agent_id is None and origin is None:
         record_authz_denial(action, "origin_missing")
         return "origin_missing"
     return None
@@ -431,7 +436,7 @@ class ChannelReadPolicy:
         """Whether a channel list may name this channel: a call held to an isolated
         channel names only it. A seal hides messages, not the name."""
         held = isolation_hold(self.policy, self.agent, self.origin_place)
-        return held is None or held == isolated_channel_of(
+        return held is None or held == confidential_channel_of(
             self.policy, channel_id, parent_channel_id
         )
 
@@ -479,7 +484,7 @@ async def load_read_policy(
     policy = await load_channel_policy(runtime, auth)
     agent = (
         await _executing_agent(runtime, auth, policy)
-        if policy.isolated_channel_ids
+        if any_confidential(policy)
         else AgentRef.none()
     )
     bound = token_channel_id(auth)
@@ -488,7 +493,7 @@ async def load_read_policy(
             policy, frozenset({bound}), agent, origin_place=Place(channel_id=bound)
         )
     # Every isolated channel is sealed, so an origin that holds a call is resolved.
-    if not (policy.sealed_channel_ids or resolve_without_seals):
+    if not (any_sealed(policy) or resolve_without_seals):
         return ChannelReadPolicy(policy, agent=agent)
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     origin = await _held_origin(runtime, auth, policy, agent, origin)
@@ -541,7 +546,7 @@ async def _held_origin(
     different ones refuse it.
     """
     if (
-        not policy.isolated_channel_ids
+        not any_confidential(policy)
         or auth.chat_agent_id is None
         or auth.agent_id is not None
         or auth.platform is None

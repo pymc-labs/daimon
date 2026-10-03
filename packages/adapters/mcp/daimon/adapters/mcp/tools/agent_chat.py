@@ -84,13 +84,13 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
-from daimon.core.access_policy import is_own_isolated_agent, isolation_owner
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
@@ -275,16 +275,17 @@ async def _bound_posture(
     """A channel-bound key's seal now, and whether its session's memory is read-only.
 
     Memory is read-only under the seal unless the agent is the isolated
-    channel's own, the same rule chat admission applies (`is_own_isolated_agent`).
+    channel's own (`memory_writable`), as at chat admission.
     """
     channel_id = token_channel_id(auth)
     if channel_id is None:
         return frozenset(), False
     policy = await load_channel_policy(runtime, auth)
-    if channel_id not in policy.sealed_channel_ids:
+    here = channel_permissions(policy, channel_id=channel_id)
+    if here.readers == "any":
         return frozenset(), False
-    own = is_own_isolated_agent(policy, agent_names, channel_id=channel_id)
-    return frozenset({channel_id}), not own
+    agent = agent_permissions(policy, agent_names)
+    return frozenset({channel_id}), not memory_writable(agent, here)
 
 
 async def _budget_channel(
@@ -293,7 +294,7 @@ async def _budget_channel(
     """The channel a turn is charged to: the isolated channel whose own agent this
     is, wherever an exempt caller runs it, else a key's bound channel."""
     policy = await load_channel_policy(runtime, auth)
-    return isolation_owner(policy, agent_names) or token_channel_id(auth)
+    return agent_permissions(policy, agent_names).budget_channel or token_channel_id(auth)
 
 
 async def _verify_agent_owns_session(

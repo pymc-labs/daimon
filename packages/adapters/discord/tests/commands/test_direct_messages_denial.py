@@ -29,7 +29,7 @@ def test_a_pinned_agent_says_why_it_cannot_move_to_a_dm() -> None:
 
 def test_an_isolated_channel_says_why_it_cannot_move_to_a_dm() -> None:
     message = _denial_text("channel_isolated")
-    assert "isolated" in message and "DM" in message, message
+    assert "confidential" in message and "DM" in message, message
 
 
 def test_a_dm_refusal_uses_the_server_nouns() -> None:

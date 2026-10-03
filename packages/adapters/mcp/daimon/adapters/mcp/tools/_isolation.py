@@ -21,8 +21,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
-    isolated_channel_of,
-    isolation_owner,
 )
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.channel_environments import load_hidden_environment_names
@@ -31,6 +29,12 @@ from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import skill_owner_candidates
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import (
+    agent_permissions,
+    any_confidential,
+    confidential_channel_of,
+    pinned_names,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
@@ -48,7 +52,7 @@ class CallerIsolation(IsolationViewer):
     def isolated_place(
         self, channel_id: str | None, parent_channel_id: str | None = None
     ) -> str | None:
-        return isolated_channel_of(self.policy, channel_id, parent_channel_id)
+        return confidential_channel_of(self.policy, channel_id, parent_channel_id)
 
     def hides_skill(self, owners: SkillOwners, *, skill_id: str, body: str) -> bool:
         """Whether a tenant skill may belong to an agent this caller can't see."""
@@ -84,7 +88,7 @@ async def load_skill_owners(
     names = {name for agent in agents for name in agent_pin_names(agent.name, agent.metadata)}
     return SkillOwners(
         {row.anthropic_id: row.agent_name for row in rows if row.anthropic_id},
-        frozenset(name for name in names if name) | caller.policy.agent_channel_pins.keys(),
+        frozenset(name for name in names if name) | pinned_names(caller.policy),
     )
 
 
@@ -140,13 +144,13 @@ async def load_caller_isolation(
     refused while any channel is isolated.
     """
     policy = await load_isolation(runtime, auth.tenant_id)
-    if not policy.isolated_channel_ids:
+    if not any_confidential(policy):
         return OPEN_ISOLATION
     if agents is None:
         agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     if auth.agent_id is not None:
         location_channel_id = None
-    inside = isolated_channel_of(policy, location_channel_id) or isolated_channel_of(
+    inside = confidential_channel_of(policy, location_channel_id) or confidential_channel_of(
         policy, token_channel_id(auth)
     )
     if inside is None and auth.chat_agent_id is not None:
@@ -166,7 +170,7 @@ async def load_caller_isolation(
                 "this conversation's agent could not be found, so daimon can't tell "
                 "which channel it is held to. Nothing was done. Tell the caller."
             )
-        inside = isolation_owner(policy, agent_pin_names(agent.name, agent.metadata))
+        inside = agent_permissions(policy, agent_pin_names(agent.name, agent.metadata)).own_channel
     return CallerIsolation(policy, inside, agent_aliases(agents))
 
 

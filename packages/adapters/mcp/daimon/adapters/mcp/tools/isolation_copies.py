@@ -1,4 +1,4 @@
-"""Isolation copy archive tool: retire the copy a closing isolated channel was given.
+"""Confidential copy tool: retire a closing confidential channel's copy.
 
 ``register_isolation_copy_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closure; it delegates to ``_archive_isolation_copy_impl``, which tests call
@@ -29,7 +29,7 @@ from fastmcp.exceptions import ToolError
 
 _NOTE = (
     "The agent is archived and its pin and default are gone. A channel it was closed "
-    "with stays sealed and isolated, so nothing answers there."
+    "with stays sealed and confidential, so nothing answers there."
 )
 
 
@@ -104,7 +104,7 @@ def register_isolation_copy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> ArchiveIsolationCopyResult:
-        """Archive the agent copied for an isolated channel, when that channel closes.
+        """Archive the agent copied for a confidential channel, when that channel closes.
         For example, retire #client-acme's agent once the engagement ends. Requires a
         server or workspace admin.
 

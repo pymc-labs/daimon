@@ -112,11 +112,11 @@ Channel environment tools: which environment a channel's turns run in.
 
 ## `channel_isolation`
 
-Channel isolation tool: keep a channel's own agents inside it.
+Confidential channel tool: keep a channel's own agents inside it.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
+| `set_channel_isolation` | admin only, operator tokens with channels:write | Mark one channel confidential, or unmark it. |
 
 ## `channel_protection`
 
@@ -197,11 +197,11 @@ GitHub App install-link tool: post_github_app_install_link.
 
 ## `isolation_copies`
 
-Isolation copy archive tool: retire the copy a closing isolated channel was given.
+Confidential copy tool: retire a closing confidential channel's copy.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for an isolated channel, when that channel closes. |
+| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for a confidential channel, when that channel closes. |
 
 ## `media`
 

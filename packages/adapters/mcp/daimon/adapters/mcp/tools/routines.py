@@ -51,12 +51,13 @@ from daimon.adapters.mcp.tools.teams._directory import (
     require_client,
     split_thread,
 )
-from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_isolation import routine_destination_channel
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import any_confidential, any_pinned, confidential_channel_of
 from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial
@@ -394,15 +395,15 @@ def _check_agent_pin(
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
     if decision.reason == "channel_isolated":
-        if origin is not None and isolated_channel_of(
+        if origin is not None and confidential_channel_of(
             policy, origin.channel_id, origin.parent_channel_id
         ):
             raise ToolError(
-                "This conversation is in an isolated channel, so its routines post only "
+                "This conversation is in a confidential channel, so its routines post only "
                 "into that channel. Nothing was saved."
             )
         raise ToolError(
-            "That channel is isolated, so only its own agents post there. Nothing was saved."
+            "That channel is confidential, so only its own agents post there. Nothing was saved."
         )
     if not decision:
         raise ToolError(
@@ -641,7 +642,7 @@ async def _update_routine_impl(
             if match is None:
                 raise ToolError(f"no agent named {agent_name!r} found for this tenant")
             new_agent_id = match.id
-        if update_policy.agent_channel_pins or update_policy.isolated_channel_ids:
+        if any_pinned(update_policy) or any_confidential(update_policy):
             # Check the agent the routine will run, by all its names.
             effective_id_ma = new_agent_id or row.agent_id
             effective_agent = next(

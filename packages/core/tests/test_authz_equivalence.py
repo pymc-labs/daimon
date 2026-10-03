@@ -29,8 +29,8 @@ from daimon.core.authz import (
     Subject,
     Surface,
     authorize,
-    channel_readable,
 )
+from daimon.core.permissions import readable_from
 
 # --- the grid -----------------------------------------------------------------
 
@@ -472,7 +472,7 @@ def test_channel_reads_match() -> None:
     ):
         assert channel is not None
         old = _old_channel_allows(policy, origin, channel, parent)
-        new = channel_readable(policy, origin, channel, parent) and bool(
+        new = readable_from(policy, origin, channel, parent) and bool(
             authorize(
                 policy,
                 subject=Subject(),

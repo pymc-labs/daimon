@@ -1019,7 +1019,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
-        without it is refused while a channel in the workspace is isolated, and with
+        without it is refused while a channel in the workspace is confidential, and with
         it a channel admin creating the agent for their channel may set it up there.
         """
         spec = _build_create_spec(

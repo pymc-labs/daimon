@@ -141,7 +141,7 @@ async def require_bindable_as_channel_default(
             record_authz_denial(Action.BIND_CHANNEL_DEFAULT, decision.reason)
         if decision.reason == "channel_isolated":
             raise ToolError(
-                "This channel is isolated, so only its own agents (pinned to it alone) can be "
+                "This channel is confidential, so only its own agents (pinned to it alone) can be "
                 f"its default, and '{agent_name}' is not one. Nothing was changed. Pick one of "
                 "its own agents, or ask a server admin. Do not retry."
             )

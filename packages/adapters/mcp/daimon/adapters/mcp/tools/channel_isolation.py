@@ -1,4 +1,4 @@
-"""Channel isolation tool: keep a channel's own agents inside it.
+"""Confidential channel tool: keep a channel's own agents inside it.
 
 ``register_channel_isolation_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closure; it delegates to ``_set_channel_isolation_impl``, which tests call
@@ -97,7 +97,7 @@ async def _set_channel_isolation_impl(
     require_scope(auth, "channels:write")
     _require_admin(auth)
     if auth.platform not in ("discord", "slack", "teams"):
-        raise ToolError("Channel isolation exists only on Discord, Slack and Teams.")
+        raise ToolError("Confidential channels exist only on Discord, Slack and Teams.")
     try:
         channel, _, _ = normalize_channel_admin_ids(
             auth.platform,
@@ -136,7 +136,7 @@ async def _set_channel_isolation_impl(
         changed=change.changed,
         note=" ".join(filter(None, [_NOTE, change.dropped_skills_note, change.network_warning]))
         if change.isolated
-        else f"Isolation ended. {END_ISOLATION_WARNING} {_LIFT_HINT}",
+        else f"The channel is no longer confidential. {END_ISOLATION_WARNING} {_LIFT_HINT}",
     )
 
 
@@ -148,10 +148,10 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         isolated: bool,
         fork_from: str | None = None,
     ) -> SetChannelIsolationResult:
-        """Isolate one channel, or end its isolation. For example, give #team-alpha an
+        """Mark one channel confidential, or unmark it. For example, give #team-alpha an
         agent nobody outside it can see or reach. Requires a server or workspace admin.
 
-        Isolating seals the channel and pins its own agent to it: its default agent,
+        Marking it confidential seals the channel and pins its own agent to it: its default agent,
         answering nowhere else, pinned nowhere else and not built in. If it has none, pass
         ``fork_from`` (an agent
         name, usually the one answering there now): that agent is copied under a name
@@ -159,10 +159,10 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         credentials, and an agent pinned to channels can't be copied. Without it the call
         is refused and says why. Repeating the call copies nothing again.
 
-        While isolated, the channel's own agents can't be set as the default anywhere
+        While confidential, the channel's own agents can't be set as the default anywhere
         else, don't appear in agent, skill or routine lists outside it, and can't be
         handed tasks from elsewhere; inside it only they appear. Its messages are
-        readable only from inside it. Ending isolation keeps the seal and the pins; a
+        readable only from inside it. Unmarking it keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
         ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
         thread id names its channel.

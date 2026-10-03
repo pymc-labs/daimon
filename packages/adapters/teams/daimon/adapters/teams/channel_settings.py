@@ -59,6 +59,7 @@ from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.channel_isolation_setup import ChannelIsolationRefused, set_channel_isolation
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
+from daimon.core.permissions import confidential_channels
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import (
@@ -84,7 +85,7 @@ CHANNELS_NEED_ADMIN: Final = (
     "Changing a channel's settings needs a server admin or an admin of that channel."
 )
 SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can isolate a channel or name its admins. Nothing changed."
+    "Only a server admin can mark a channel confidential or name its admins. Nothing changed."
 )
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
@@ -161,7 +162,7 @@ class ChannelSettingsDialog:
                     session, tenant_id=actor.tenant_id, platform="teams"
                 )
             # Channels already set up stay reachable when their team can't be listed.
-            extra = [*policy.isolated_channel_ids, *(grant.channel_id for grant in grants)]
+            extra = [*confidential_channels(policy), *(grant.channel_id for grant in grants)]
             channels = cards.visible_channels(listed, extra)
         else:
             mine = sorted(subject.administered_channel_ids)
@@ -341,7 +342,7 @@ class ChannelSettingsDialog:
         """A server admin's isolation change, as Slack's buttons make it."""
         choice = str(data.get("isolation") or "")
         if choice not in cards.ISOLATION_CHOICES:
-            return "Pick an isolation change. Nothing changed."
+            return "Pick a change under Confidential. Nothing changed."
         copy = choice == "copy"
         public_url = self._runtime.settings.mcp.public_url
         label = (await self._listed(actor.tenant_id)).get(channel_id) if copy else None
@@ -372,11 +373,11 @@ class ChannelSettingsDialog:
             return f"{exc} Nothing changed."
         await self._audit(actor, "isolation", outcome="allowed", reason="completed")
         if not change.isolated:
-            return f"The channel is no longer isolated. {change.end_warning}"
-        said = f"The channel is isolated. {change.agent_name} answers only there."
+            return f"The channel is no longer confidential. {change.end_warning}"
+        said = f"The channel is now confidential. {change.agent_name} answers only there."
         if change.forked_from is not None:
             said = (
-                f"The channel is isolated. {change.agent_name}, a copy of "
+                f"The channel is now confidential. {change.agent_name}, a copy of "
                 f"{change.forked_from}, answers only there."
             )
         notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)

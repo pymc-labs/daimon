@@ -6,12 +6,12 @@ import re
 import unicodedata
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
-from daimon.adapters.cli.output import emit_rows
+from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
@@ -28,6 +28,21 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import (
+    AgentKind,
+    ChannelPreset,
+    ChannelReaders,
+    ChannelRule,
+    ChannelWriters,
+    agent_permissions,
+    agent_rules,
+    any_confidential,
+    category_rules,
+    channel_rules,
+    confidential_channels,
+    preset_of,
+    sealed_ids,
+)
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -47,16 +62,17 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.markup import escape
+from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
     help=(
         "A tenant's access policy: who may invoke the agent, protected, sealed and "
-        "isolated channels."
+        "confidential channels."
     )
 )
 tenants_app.add_typer(access_policy_app, name="access-policy")
@@ -436,10 +452,10 @@ async def _require_isolatable(
     every turn there, while the agent carries what it remembered there out.
     Run under the policy lock, in the transaction that writes.
     """
-    added = [c for c in policy.isolated_channel_ids if c not in current.isolated_channel_ids]
-    rechecks = (
-        policy.agent_channel_pins != current.agent_channel_pins
-        or policy.sealed_channel_ids != current.sealed_channel_ids
+    confidential = confidential_channels(policy)
+    added = [c for c in confidential if c not in confidential_channels(current)]
+    rechecks = agent_rules(policy) != agent_rules(current) or sealed_ids(policy) != sealed_ids(
+        current
     )
 
     async def refusal(channel_id: str, under: TenantAccessPolicy) -> ChannelIsolationRefused | None:
@@ -453,7 +469,7 @@ async def _require_isolatable(
             default=rt.deployment_default,
         )
 
-    for channel_id in policy.isolated_channel_ids:
+    for channel_id in confidential:
         if channel_id not in added and not rechecks:
             continue
         refused = await refusal(channel_id, policy)
@@ -466,14 +482,14 @@ async def _require_isolatable(
             console.print(
                 f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
                 "alone in the same command, or use daimon channels isolate, the setup "
-                "panel's Isolate or set_channel_isolation, which do both. Nothing was "
+                "panel's Mark confidential or set_channel_isolation, which do both. Nothing was "
                 "changed.[/red]"
             )
         else:
             console.print(
-                f"[red]{channel_id} is isolated, and this change would break it: "
-                f"{escape(str(refused))} Keep its own agent pinned to it alone, or end its "
-                "isolation first (drop it from --isolated-channel). Nothing was changed.[/red]"
+                f"[red]{channel_id} is confidential, and this change would break it: "
+                f"{escape(str(refused))} Keep its own agent pinned to it alone, or unmark it "
+                "confidential first (drop it from --isolated-channel). Nothing was changed.[/red]"
             )
         raise typer.Exit(1)
 
@@ -490,12 +506,13 @@ def _ended_isolation_warning(policy: TenantAccessPolicy, channel_id: str) -> str
 
 def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAccessPolicy) -> None:
     ended = sorted(
-        set(previous.isolated_channel_ids if previous else ()) - set(policy.isolated_channel_ids)
+        set(confidential_channels(previous) if previous else ())
+        - set(confidential_channels(policy))
     )
     console = Console(stderr=True, highlight=False)
     for channel_id in ended:
         warning = escape(_ended_isolation_warning(policy, channel_id))
-        console.print(f"[yellow]Isolation ended for {channel_id}. {warning}[/yellow]")
+        console.print(f"[yellow]{channel_id} is no longer confidential. {warning}[/yellow]")
 
 
 async def _warn_sealed_open_network(
@@ -507,7 +524,7 @@ async def _warn_sealed_open_network(
 ) -> None:
     """Warn of each newly sealed channel whose own pick has an open network: it was
     made before the seal, so its network rule never judged it."""
-    added = set(policy.sealed_channel_ids) - set(previous.sealed_channel_ids if previous else ())
+    added = sealed_ids(policy) - (sealed_ids(previous) if previous else frozenset())
     channels = sorted({seal_id.partition(":")[0] for seal_id in added})
     console = Console(stderr=True, highlight=False)
     async with rt.sessionmaker() as session:
@@ -549,6 +566,107 @@ async def tenants_access_policy_get(
     _print_policy(console, label=f"{platform}:{external_id}", policy=policy, as_json=as_json)
 
 
+class PermissionRuleRow(BaseModel):
+    """One rule of a tenant's access policy, in the permissions vocabulary."""
+
+    kind: Literal["channel", "category", "agent"]
+    id: str
+    preset: ChannelPreset | Literal["mix"] | None
+    readers: ChannelReaders | None
+    writers: ChannelWriters | None
+    runs_in: list[str] | None
+    # Judged by this name alone: free, pinned, or own to `own_channel`.
+    agent: AgentKind | None
+    own_channel: str | None
+
+
+def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
+    """The policy as channel, category and agent rules (`daimon.core.permissions`)."""
+    places: list[tuple[Literal["channel", "category"], dict[str, ChannelRule]]] = [
+        ("channel", channel_rules(policy)),
+        ("category", category_rules(policy)),
+    ]
+    rows = [
+        PermissionRuleRow(
+            kind=kind,
+            id=place_id,
+            preset=preset_of(rule) or "mix",
+            readers=rule.readers,
+            writers=rule.writers,
+            runs_in=None,
+            agent=None,
+            own_channel=None,
+        )
+        for kind, rules in places
+        for place_id, rule in rules.items()
+    ]
+    for name, rule in sorted(agent_rules(policy).items()):
+        agent = agent_permissions(policy, (name,))
+        rows.append(
+            PermissionRuleRow(
+                kind="agent",
+                id=name,
+                preset=None,
+                readers=None,
+                writers=None,
+                runs_in=list(rule.runs_in or ()),
+                agent=agent.kind,
+                own_channel=agent.own_channel,
+            )
+        )
+    return rows
+
+
+def _print_rule_rows(console: Console, rows: list[PermissionRuleRow]) -> None:
+    table = Table(show_header=True, header_style="bold")
+    for column in PermissionRuleRow.model_fields:
+        table.add_column(column)
+    for row in rows:
+        runs_in = "-" if row.runs_in is None else ", ".join(row.runs_in) or "nowhere"
+        cells = (row.kind, row.id, row.preset, row.readers, row.writers, runs_in, row.agent)
+        table.add_row(*(escape(cell or "-") for cell in (*cells, row.own_channel)))
+    console.print(table)
+
+
+@access_policy_app.command("rules")
+def tenants_access_policy_rules_command(
+    platform: str, external_id: str, as_json: Annotated[bool, JSON_OPTION] = False
+) -> None:
+    """Show a tenant's access policy as channel and agent rules.
+
+    Protected, sealed and confidential (isolated) are channel presets: which
+    agents may read the channel and which may write in it. A pin is an agent
+    rule: where it runs. An agent pinned to one confidential channel alone is
+    that channel's own agent.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_access_policy_rules(
+                rt=rt, console=console, platform=platform, external_id=external_id, as_json=as_json
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_access_policy_rules(
+    *, rt: CliRuntime, console: Console, platform: str, external_id: str, as_json: bool
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    async with rt.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    rows = permission_rule_rows(policy)
+    if not rows and not as_json:
+        console.print(f"{platform}:{external_id}: every channel open, no agent pinned")
+        return
+    if as_json:
+        render_json(console, rows)
+    else:
+        _print_rule_rows(console, rows)
+
+
 @access_policy_app.command("set")
 def tenants_access_policy_set_command(
     platform: str,
@@ -580,9 +698,10 @@ def tenants_access_policy_set_command(
         list[str] | None,
         typer.Option(
             help=(
-                "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
-                "and its default agent pinned to it alone, answering nowhere else. Ending one "
-                "keeps its seal and pins. A Teams id names the whole channel, never a thread."
+                "Confidential channel id: its own agents stay inside it (repeatable). Each must be "
+                "sealed and its default agent pinned to it alone, answering nowhere else. "
+                "Unmarking one keeps its seal and pins. A Teams id names the whole channel, "
+                "never a thread."
             )
         ),
     ] = None,
@@ -1000,7 +1119,7 @@ async def tenants_access_policy_set(
             except ValidationError as exc:
                 message = "; ".join(str(error["msg"]) for error in exc.errors())
                 raise typer.BadParameter(f"{message}. Nothing was changed.") from None
-            if policy.isolated_channel_ids:
+            if any_confidential(policy):
                 await _require_isolatable(
                     rt,
                     console,

@@ -75,6 +75,7 @@ from daimon.core.ma_resolver import (
 )
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
+from daimon.core.permissions import any_confidential, any_pinned
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.routine_delivery import (
@@ -366,9 +367,7 @@ async def _build_fire(
         # will actually run, by every name a pin can be keyed by, after
         # self-healing may have picked a replacement: the saved routine name
         # alone can miss a pin on the display name or a rename.
-        if fire_policy is not None and (
-            fire_policy.agent_channel_pins or fire_policy.isolated_channel_ids
-        ):
+        if fire_policy is not None and (any_pinned(fire_policy) or any_confidential(fire_policy)):
             ran = await client.beta.agents.retrieve(resolved_agent_id)
             decision = authorize(
                 fire_policy,

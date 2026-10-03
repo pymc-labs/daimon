@@ -128,7 +128,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> list[ChannelRow] | list[SlackChannelRow] | list[TeamsChannelRow]:
         """List channels in this server/workspace that you can view.
 
-        From inside an isolated channel (its own agent, or origin_context_id
+        From inside a confidential channel (its own agent, or origin_context_id
         placing this turn there) only that channel is listed. Teams: the
         channels of every team daimon is in that you belong to, with each
         channel's team. A team appears once daimon has seen activity in it
@@ -403,7 +403,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
         server admin. Pass this turn's origin_context_id: a pinned agent, or a
-        turn in an isolated channel, can't change it. Discord-only.
+        turn in a confidential channel, can't change it. Discord-only.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":

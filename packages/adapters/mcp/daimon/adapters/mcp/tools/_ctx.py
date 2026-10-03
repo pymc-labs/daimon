@@ -8,10 +8,10 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
-from daimon.core.access_policy import isolation_owner
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.permissions import agent_permissions, any_confidential, any_pinned
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -116,10 +116,10 @@ async def _policy_gate(
         and account.role is Role.ADMIN
     )
     names: tuple[str | None, ...] = ()
-    gated = bool(policy.agent_channel_pins or policy.isolated_channel_ids)
+    gated = any_pinned(policy) or any_confidential(policy)
     # An isolated channel's own agent is charged to that channel, so the
     # names are read for a hub admin too while anything is isolated.
-    if agent_names is not None and gated and (not hub_admin or policy.isolated_channel_ids):
+    if agent_names is not None and gated and (not hub_admin or any_confidential(policy)):
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -137,7 +137,7 @@ async def _policy_gate(
             and account is not None
             and account.role is Role.ADMIN
         )
-        gated = bool(policy.agent_channel_pins or policy.isolated_channel_ids)
+        gated = any_pinned(policy) or any_confidential(policy)
     decision = (
         authorize(
             policy,
@@ -174,7 +174,7 @@ async def _policy_gate(
         refused(denial_termination_reason(decision.reason))
         if decision.reason == "channel_isolated":
             raise ToolError(
-                "TERMINAL ERROR: This agent's key is bound to an isolated channel that "
+                "TERMINAL ERROR: This agent's key is bound to a confidential channel that "
                 "only that channel's own agents answer in, so it can't run here."
             )
         raise ToolError(
@@ -183,7 +183,7 @@ async def _policy_gate(
             "those channels; a question about a shared report can't be answered here."
         )
 
-    owner = isolation_owner(policy, names) if names else None
+    owner = agent_permissions(policy, names).own_channel if names else None
     if auth.platform_user_id is None:
         return owner
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)

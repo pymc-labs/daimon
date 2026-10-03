@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.permissions import any_protected
 from daimon.core.stores.access_policy import load_access_policy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -63,7 +64,7 @@ async def protection_state(
         target = thread_id or channel_id
         if not _may_post(policy, Place(channel_id=target, parent_channel_id=channel_id)):
             return ProtectionState.PROTECTED
-        if resolve_category is None or not policy.protected_category_ids:
+        if resolve_category is None or not any_protected(policy, categories_only=True):
             return ProtectionState.UNPROTECTED
         category_id, category_unresolved = await resolve_category()
         if not _may_post(

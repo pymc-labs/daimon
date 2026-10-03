@@ -172,8 +172,8 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Ask it in one of those channels.",
     ),
     TerminationReason.ADMISSION_CHANNEL_ISOLATED: _Copy(
-        "Channel isolated",
-        "This channel is isolated and the agent that would answer isn't one of its own, "
+        "Confidential channel",
+        "This channel is confidential and the agent that would answer isn't one of its own, "
         "so the turn did not run.",
         _KEPT,
         "An admin must set the channel's agent.",
@@ -246,13 +246,13 @@ _REFUSALS: dict[AdmissionDenialReason, str] = {
         "This agent only runs in the channels an operator pinned it to, so it can't answer here."
     ),
     "channel_isolated": (
-        "This channel is isolated and the agent that would answer isn't one of its own. "
+        "This channel is confidential and the agent that would answer isn't one of its own. "
         "{Admin} must set the channel's agent."
     ),
     "channel_protected": "This channel is protected, so the agent can't answer in it.",
     # Only Teams marks people from another organisation (shared channels).
     "external_participant": (
-        "People from another organisation can use this agent only in its isolated channel."
+        "People from another organisation can use this agent only in its confidential channel."
     ),
 }
 # The place-bound refusals, worded for a conversation moved to or held in a DM.
@@ -262,7 +262,7 @@ _DM_REFUSALS: dict[AdmissionDenialReason, str] = {
         "so it can't continue in a DM."
     ),
     "channel_isolated": (
-        "This channel is isolated, so its conversations stay in it and can't move to a DM."
+        "This channel is confidential, so its conversations stay in it and can't move to a DM."
     ),
     "channel_protected": "This channel is protected, so it can't be moved to a DM.",
     "external_participant": "People from another organisation can't move a conversation to a DM.",

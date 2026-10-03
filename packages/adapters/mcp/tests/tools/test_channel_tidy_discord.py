@@ -633,7 +633,7 @@ async def test_no_other_agent_edits_into_an_isolated_channel(
     message_id = await _post(world, auth)
     await world.set_policy(_isolate(_CHANNEL, own_agent=_OTHER_AGENT))
 
-    with pytest.raises(ToolError, match="this channel is isolated"):
+    with pytest.raises(ToolError, match="this channel is confidential"):
         await _edit_message_impl(
             world.runtime,
             auth,

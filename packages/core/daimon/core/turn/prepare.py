@@ -39,6 +39,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import any_sealed
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
@@ -226,7 +227,7 @@ async def create_ma_session(
             deps.anthropic,
             predecessor_session_id=predecessor_session_id,
             own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
-            tenant_seals_anything=bool(policy.sealed_channel_ids),
+            tenant_seals_anything=any_sealed(policy),
         )
     if predecessor_session_id is not None:
         async with deps.sessionmaker() as db:

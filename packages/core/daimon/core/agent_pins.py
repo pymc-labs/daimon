@@ -28,6 +28,7 @@ from daimon.core.authz import (
     build_agent_ref,
 )
 from daimon.core.channel_admins import load_stored_subject
+from daimon.core.permissions import any_pinned
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -87,7 +88,7 @@ async def pin_refusal(
         policy = await load_access_policy(session, tenant_id=tenant_id)
     except AccessPolicyUnreadable:
         return POLICY_UNREADABLE_REFUSAL
-    if not policy.agent_channel_pins:
+    if not any_pinned(policy):
         return None
     agent = await load_agent()
     decision = authorize(

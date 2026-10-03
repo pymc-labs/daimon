@@ -325,18 +325,18 @@ client's work) stay private. A routine runs with its agent's repo, keys,
 connectors and memory, which is why a member may only schedule the agent they
 are talking to or the one the destination channel answers with.
 
-Channel isolation narrows the MCP tools. A routine of an isolated channel's own
+Confidential channels narrow the MCP tools. A routine of a confidential channel's own
 agent, or one whose `channel_id` is that channel, is visible (list, read,
 update, delete) only from inside it, and `authorize(SAVE_ROUTINE)` creates or
-moves a routine only where its agent may answer: an isolated channel's agent
+moves a routine only where its agent may answer: a confidential channel's agent
 posts only into its channel, and other agents never post there. Routing can
 change after a routine is saved, so each fire asks again: after the agent is
 resolved (self-healing may pick a replacement), the scheduler runs
 `authorize(RUN_AGENT)` on that agent by every name it carries (the saved
 routine name, its MA name and its config name) at the routine's destination,
 and skips a run that would cross the line (`channel_isolated`). A routine of
-an isolated channel never falls back to a DM. See
-[architecture.md](architecture.md) (Channel isolation).
+a confidential channel never falls back to a DM. See
+[architecture.md](architecture.md) (Confidential channels).
 
 ## When a run fails
 
@@ -395,7 +395,7 @@ destination's channel (a thread's parent), the thread, and the seal over
 them at fire time (`channel_isolation.routine_origin`). A routine with no
 destination is stamped with its saved channel: the channel it was made in,
 or for one made in a DM, the channel that DM came from. So a sealed or
-isolated channel's routine transcript is read only from inside that channel,
+confidential channel's routine transcript is read only from inside that channel,
 as its conversations are, by its owner too (a server admin owner still reads
 it from the hub, as with their own DMs). A routine with neither is not
 stamped. Every stamped routine session also carries the private-DM stamp

@@ -25,7 +25,6 @@ from typing import Final
 import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
-from daimon.core.access_policy import isolated_channel_of
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Action, Decision, Place, Subject, authorize, holds_seal
 from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
@@ -34,6 +33,7 @@ from daimon.core.defaults.ma_index import (
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.permissions import confidential_channel_of
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -252,7 +252,7 @@ def hidden_environment_names(
     shown = {tenant.environment_name if tenant is not None else None, default.environment_name}
     for row in channels:
         if row.environment_name:
-            owner = isolated_channel_of(viewer.policy, row.channel_id)
+            owner = confidential_channel_of(viewer.policy, row.channel_id)
             across = owner not in (None, viewer.inside_channel_id)
             (hidden if across else shown).add(row.environment_name)
     return frozenset(hidden - shown)

@@ -52,7 +52,7 @@ from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
 
 channels_app = typer.Typer(
-    help="Channels: a summary, spend budgets, channel admins, isolation and protection."
+    help="Channels: a summary, spend budgets, channel admins, confidential channels and protection."
 )
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
@@ -66,7 +66,7 @@ skills_app = typer.Typer(
     help="A channel's extra skills: added to whatever agent answers there, there only."
 )
 channels_app.add_typer(skills_app, name="skills")
-isolation_app = typer.Typer(help="Isolate a channel with its own agent, or lift isolation.")
+isolation_app = typer.Typer(help="Mark a channel confidential with its own agent, or unmark it.")
 channels_app.add_typer(isolation_app, name="isolation")
 
 _PLATFORMS = ("discord", "slack", "teams")
@@ -85,7 +85,7 @@ def isolation_set_command(
     channel_id: str,
     fork_from: Annotated[str | None, typer.Option("--fork-from")] = None,
 ) -> None:
-    """Alias of `channels isolate`: seal and isolate a channel, copying --fork-from."""
+    """Alias of `channels isolate`: seal a channel and mark it confidential, copying --fork-from."""
     _run_isolate(platform, workspace_id, channel_id, fork_from=fork_from)
 
 
@@ -825,13 +825,13 @@ def channels_isolate_command(
         ),
     ] = None,
     end: Annotated[
-        bool, typer.Option("--end", help="End isolation; the seal and pins stay.")
+        bool, typer.Option("--end", help="Unmark it confidential; the seal and pins stay.")
     ] = False,
     lift_seal_and_pins: Annotated[
         bool, typer.Option("--lift-seal-and-pins", help="With --end, lift the seal and pins too.")
     ] = False,
 ) -> None:
-    """Isolate a channel: seal it and pin its default agent to it alone, in one write."""
+    """Mark a channel confidential: seal it and pin its default agent to it alone, in one write."""
     _run_isolate(
         platform,
         workspace_id,
@@ -945,7 +945,7 @@ async def channels_isolate(
 ) -> None:
     _validate_platform(platform)
     if end and fork_from is not None:
-        raise typer.BadParameter("--fork-from only applies when isolating")
+        raise typer.BadParameter("--fork-from only applies when marking a channel confidential")
     if lift_seal_and_pins and not end:
         raise typer.BadParameter("--lift-seal-and-pins only applies with --end")
     channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
@@ -982,11 +982,11 @@ async def channels_isolate(
     )
     where = f"{platform}:{workspace_id} channel {channel}"
     if not change.isolated:
-        status = "isolation ended" if change.changed else "was not isolated"
+        status = "no longer confidential" if change.changed else "was not confidential"
         console.print(f"{where}: {status}. {change.end_warning}")
         return
     copied = f", copied from {change.forked_from}" if change.forked_from else ""
-    status = "isolated" if change.changed else "already isolated"
+    status = "marked confidential" if change.changed else "already confidential"
     console.print(f"{where}: {status}; its own agent is {change.agent_name}{copied}.")
     for note in (change.dropped_skills_note, change.network_warning):
         if note:
@@ -1011,7 +1011,7 @@ def channels_protect_command(
         ),
     ] = None,
 ) -> None:
-    """Protect or seal one channel, or lift either; an isolated channel stays sealed."""
+    """Protect or seal one channel, or lift either; a confidential channel stays sealed."""
     console = Console(highlight=False)
 
     async def _run() -> None:

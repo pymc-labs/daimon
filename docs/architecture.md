@@ -122,7 +122,7 @@ config). The order is load-bearing and documented as such in the module:
 4. External participant — a caller from another organisation (a Teams shared
    channel's B2B direct connect participant or a guest,
    `admit(external=ExternalFinding(…))`) raises
-   `AdmissionDenied("external_participant")` anywhere but an isolated channel
+   `AdmissionDenied("external_participant")` anywhere but a confidential channel
    or a thread in one, and in its setup thread too. Only a finding on
    positive evidence is stored on `accounts.is_external`; one without holds
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
@@ -145,7 +145,7 @@ config). The order is load-bearing and documented as such in the module:
 10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
-   no budget. An isolated channel's own agent counts toward that channel
+   no budget. A confidential channel's own agent counts toward that channel
    wherever an exempt caller runs it (`isolation_owner`). The channel is
    carried on `Admission.channel_id` so every debit
    for the turn is attributed to it. The window's first refusal also
@@ -239,7 +239,7 @@ conversation ids):
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; the session transcript tools (`list_sessions`, `get_session`, `list_session_events`, agent chat's `list_my_sessions`, `get_my_session`, `list_events`, `continue_turn` and the rest, and the hub's) via `tools/_session_access.py`; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
-| `isolated_channel_ids` | nothing is isolated | `authorize()` (`channel_isolated`), asked by admission and `reauthorize`, the routine save and fire checks, the channel write, read and DM tools and every channel default bind (tools, panels, the CLI's `config` writes); visibility in the agent, skill, routine, routing and handoff MCP tools (`tools/_isolation.py`), the hub, the setup panel for members and `/memory`. See Channel isolation below |
+| `isolated_channel_ids` | nothing is confidential | `authorize()` (`channel_isolated`), asked by admission and `reauthorize`, the routine save and fire checks, the channel write, read and DM tools and every channel default bind (tools, panels, the CLI's `config` writes); visibility in the agent, skill, routine, routing and handoff MCP tools (`tools/_isolation.py`), the hub, the setup panel for members and `/memory`. See Channel isolation below |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 | `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
@@ -363,7 +363,7 @@ it:
 
 - `hand_off_task` and the Hand over button let a member hand a thread only
   to an agent of that channel: the one it answers with, one pinned to it, or
-  one of an isolated channel's own agents. Any other destination needs a
+  one of a confidential channel's own agents. Any other destination needs a
   server admin, or a channel admin of the parent channel when the thread is
   not sealed and they could make the agent its default: the same rule, which
   also refuses a move that would take it out of another channel admin's
@@ -421,8 +421,8 @@ Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
 `C`, `G` or `D`, followed by uppercase letters or digits (a sealed Slack
-thread is `channel_id:thread_ts`; an isolated one is never a `D` DM). A Teams pin or
-isolated channel is a whole `19:…@thread.tacv2` channel, never a thread. CLI ids must be
+thread is `channel_id:thread_ts`; a confidential one is never a `D` DM). A Teams pin or
+confidential channel is a whole `19:…@thread.tacv2` channel, never a thread. CLI ids must be
 non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
@@ -431,8 +431,8 @@ One channel's protection and seal toggle without restating the lists, with
 `set_channel_protection` or `daimon channels protect PLATFORM WORKSPACE_ID
 CHANNEL_ID [--protect/--unprotect] [--seal/--unseal]`
 (`packages/core/daimon/core/channel_protection.py`). Only server admins and
-operator tokens may, never a channel admin, and an isolated channel stays
-sealed until its isolation ends.
+operator tokens may, never a channel admin, and a confidential channel stays
+sealed until it is unmarked confidential.
 
 **Channel admins.** A tenant can name, per channel, groups and members who run
 that channel on top of the server admins (`channel_admins`,
@@ -510,8 +510,8 @@ daimon channels admins set discord GUILD_ID CHANNEL_ID --role ROLE_ID --user USE
 daimon channels admins clear discord GUILD_ID CHANNEL_ID
 ```
 
-**Channel isolation — `packages/core/daimon/core/channel_isolation.py`.** An
-isolated channel C keeps its own agents to itself. The marker
+**Confidential channels — `packages/core/daimon/core/channel_isolation.py`.** A
+confidential channel C keeps its own agents to itself. The marker
 (`isolated_channel_ids`) sits on two existing controls: C must be sealed, and
 C's own agents are those pinned to C alone (`access_policy.isolation_owner`,
 by every name the agent carries). `set_channel_isolation`
@@ -523,11 +523,12 @@ with the reason, unless asked for a copy. Then `fork_from`, or whoever answers
 in C, is copied by `agent_fork.copy_agent` (`authorize(FORK)`: an admin's call,
 never a pinned agent; no credentials, no agent-scoped skills, which the reply
 names) under a name from the channel, made C's default and pinned; a copy the
-locked re-check refuses is archived. Ending isolation drops the marker and
+locked re-check refuses is archived. Unmarking it drops the marker and
 keeps the seal and pins, unless `drop_seal_and_pins` lifts them too.
 
-Enforcement is `authorize()`'s: it fills `AgentRef.confined_to` and
-`Place.isolated_channel` from the policy, so every check and re-check is
+Enforcement is `authorize()`'s: it fills `AgentRef.permissions` and
+`Place.permissions` from the policy ([permissions](permissions.md): the
+confidential preset), so every check and re-check is
 fresh. In C only C's own agents run, post, read, get routines or become the
 default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
@@ -539,7 +540,7 @@ whose prompts would answer outside C. Nor do they publish (`PUBLISH`:
 `publish_report` and the notebook and attachment upload URLs) or change
 daimon's server-wide name or avatar (`set_display_identity`), each seen outside
 C; a pinned agent does neither anywhere, admins included, and a chat turn
-naming no verified origin while a channel is isolated is refused, as for
+naming no verified origin while a channel is confidential is refused, as for
 `CREATE_AGENT`. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
@@ -555,10 +556,10 @@ call also reads only C and the sessions that ran there (`channel_isolated`
 on `READ_CHANNEL`, `READ_SESSION`, `CONTINUE_SESSION`; `isolation_hold`); a
 session with no channel stamp counts as outside C. A chat token names no
 turn, so while one of its turns runs in C a call is held there whatever
-origin it names (`_held_origin`; turns running in two isolated channels
+origin it names (`_held_origin`; turns running in two confidential channels
 refuse it). Held, `list_channels` and the search tools name nothing else, so nothing read
 elsewhere, a prompt planted in C included, is reposted into C. A thread
-routine saved without its parent channel is treated as inside any isolated
+routine saved without its parent channel is treated as inside any confidential
 channel until delivery places it (`Place.parent_unresolved`). Isolation
 constrains agents: a caller with no executing agent (an operator token, the
 CLI) may still post into C, which is input, not a leak; the seal keeps reads
@@ -569,7 +570,7 @@ its verified turn origin is in C, when it carries a channel-bound coding-tool
 token for C, or when its chat turn's agent is one of C's; an agent key is
 never inside by its agent alone. The roster, agent and key tools take the
 turn's `origin_context_id` for this. A chat turn whose agent can't be found is
-refused while a channel is isolated, since it may be one of C's. From outside, C's agents are missing from
+refused while a channel is confidential, since it may be one of C's. From outside, C's agents are missing from
 `list_agents` and every by-name lookup, from handoff destinations,
 `explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines,
 routines posting into C and timers set in C; inside C only C's agents show. For members the
@@ -579,17 +580,17 @@ run; server admins see everything. Server admins are exempt in their own DM
 and hub, and a channel admin of C there too, but C's agents still never post
 outside C. `get_tenant_summary` lists each channel with `isolated`.
 
-Server admins toggle isolation from Who answers where in the setup panel
-(Teams: its Channel settings dialog, `adapters/teams/channel_settings.py`),
+Server admins mark a channel confidential from Who answers where in the setup
+panel (Teams: its Channel settings dialog, `adapters/teams/channel_settings.py`),
 which shows the channel as Private (sealed), Dedicated agent (pinned to it
-alone) and Hidden (isolated), and offers to end isolation or lift the seal
-and pins too; with `set_channel_isolation` (also under `channels:write`) or
+alone) and Confidential, and offers Mark confidential (with a copy), Unmark
+confidential, or lifting the seal and pins too; with `set_channel_isolation` (also under `channels:write`) or
 its CLI twin `daimon channels isolate PLATFORM WORKSPACE_ID CHANNEL_ID
 [--fork-from AGENT] [--end [--lift-seal-and-pins]]`, which `channels
 isolation set` and `isolation lift` (`--end --lift-seal-and-pins`) alias; or
 with `--isolated-channel`, which must seal C and pin its default to it alone
 in the same command; any later `--pin` or `--sealed-channel` change that
-would break an isolated channel is refused. A pinned default is never copied:
+would break a confidential channel is refused. A pinned default is never copied:
 change its pin first. Ending warns that the dedicated agents keep what they
 remembered in C and may carry it elsewhere once unpinned. Limits: tools on
 other MCP servers don't see the policy; an agent created inside C isn't C's
@@ -602,7 +603,7 @@ When C closes, `archive_isolation_copy` (server admins, or the
 `set_channel_isolation` made for it, stamped `daimon_isolation_copy`, with its
 pin and default in C. It archives no other agent and no default, and refuses
 a copy pinned or a default anywhere but the channel named as closing. C stays
-sealed and isolated, so nothing answers there after.
+sealed and confidential, so nothing answers there after.
 
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
@@ -615,7 +616,7 @@ parent. Who answers where in the setup panels lists each channel's
 environment and gives server admins and this channel's admins a select for it
 (on Teams, in the Channel settings dialog, for a channel picked there)
 (`packages/core/daimon/core/channel_environments.py`); `hide_across_isolation`
-drops the rows across an isolation line, and inside an isolated channel the
+drops the rows across an isolation line, and inside a confidential channel the
 workspace and deployment environments too. The name must match an existing
 environment in the tenant, looked up once so the network rule and the write
 judge the same one; conversations pick it up from their next message, keeping
@@ -630,14 +631,14 @@ server admin's such pick waits for a confirmation (`EnvironmentPick.needs_confir
 `set_channel_environment` and `clear_channel_environment` take
 `confirm_open_network`, which the model passes only once the caller confirms,
 and the panels write nothing and point to chat. A pick
-made before the seal never met that rule, so sealing or isolating a channel
+made before the seal never met that rule, so sealing a channel or marking it confidential
 whose own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's
 `channels:write` covers a channel's environment, never the tenant default. An
-environment name only isolated channels across the reader's line pick could
+environment name only confidential channels across the reader's line pick could
 name a client, so `list_environments`, `get_environment`, the
 environment-changing tools and the panel pickers treat it as missing, and
-`get_tenant_summary` blanks it, with other isolated channels' agent names
+`get_tenant_summary` blanks it, with other confidential channels' agent names
 (`hidden_environment_names`); operator tokens, and server admins on the
 panels, see every name. A
 channel with no environment of its own falls through, so nothing changes until
@@ -661,7 +662,7 @@ daimon channels skills remove slack TEAM_ID CHANNEL_ID SKILL
 ```
 
 A channel may add a library skill of its tenant, or one uploaded to the agent
-answering there now, unless that agent is another isolated channel's own.
+answering there now, unless that agent is another confidential channel's own.
 The row (`channel_skills`) pins the latest version at add time; adding it
 again picks up a newer one. Admission reads the rows once per turn
 (`turn_channel_skills`) and drops another agent's upload, a skill the agent
@@ -717,8 +718,8 @@ with the card's origin), and a panel add only from its channels' panels
 (`pin_refusal` with the panel's channel and thread) at the button, the submit
 and the Add; `remove_skill`, like the other direct configuration tools, passes
 none. Pins and sharing are checked again on the fresh agent just before the
-upload and the attach, and refusals never name another agent. The target resolves from the turn's channel, so an
-isolated channel's setup thread reaches only its own agents and nothing outside
+upload and the attach, and refusals never name another agent. The target resolves from the turn's channel, so a
+confidential channel's setup thread reaches only its own agents and nothing outside
 reaches them. Their uploads are hidden outside it like its other agent-scoped
 skills, keyed by the upload row's agent.
 
@@ -872,6 +873,9 @@ paragraph covers them by name ("whatever a tool returns").
 
 ## Trust model
 
+[Permissions](permissions.md) has the rules as one model; this section has
+who is exempt and why.
+
 Admins are trusted; pins and seals protect members and channels. An agent pin
 (`agent_channel_pins`) and a sealed channel (`sealed_channel_ids`) exist to
 keep one client's context away from other people -- members of other
@@ -891,7 +895,7 @@ but them:
 | "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
-| An isolated channel's own agent, or any agent from a turn inside it | runs, posts, reads and lists only in its channel; sends no DMs | the own agent also runs in their own DM and hub (so does a channel admin of that channel), but still posts and reads channels nowhere outside it; the hub's conversation reads above still apply |
+| A confidential channel's own agent, or any agent from a turn inside it | runs, posts, reads and lists only in its channel; sends no DMs | the own agent also runs in their own DM and hub (so does a channel admin of that channel), but still posts and reads channels nowhere outside it; the hub's conversation reads above still apply |
 
 The pin, seal, isolation, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,
@@ -918,7 +922,7 @@ then, where it matters:
 - A published report's reader variant carries its source agent's names
   (`daimon_reader_source`), so a pin on the source holds for the reader, and
   publishing a pinned agent's reader needs an admin or an `origin_context_id`
-  from inside its channels. An isolated channel's own agent's reader is never
+  from inside its channels. A confidential channel's own agent's reader is never
   published (`require_reader_source_publishable`), admins included.
 - An agent-scoped key is never exempt as an admin inside `authorize`,
   whoever minted it, and never holds its minter's channel admin grants
@@ -933,11 +937,11 @@ threads and posts, files and cards on Discord, Slack and Teams) reach only:
 its pinned channels and threads under them; the requester's own 1:1 DM with
 daimon (a Slack IM whose user is the requester, or a Teams personal chat the
 requester is in); and direct messages to the requester. Its context never
-lands in another channel or another person's DM. An isolated channel's own
+lands in another channel or another person's DM. A confidential channel's own
 agent is stricter: it posts only into its channel and the threads under it,
 never the requester's DM, and sends no direct messages.
 
-Isolation constrains agents, not callers. Inside an isolated channel C only
+Isolation constrains agents, not callers. Inside a confidential channel C only
 C's own agents run, post and read; a caller with no executing agent, such as
 an operator token or the CLI, may still post into C. That is input, not a
 leak: the seal keeps C's messages readable only from inside it. A session that ran in a DM
@@ -1110,7 +1114,7 @@ admission before any of this runs.
   drive a session directly. They do not use the chokepoint either; they re-run
   the same balance and cap gates through `_admit` in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py` and create
-  sessions via `daimon.core.sessions.create_session`. A run of an isolated
+  sessions via `daimon.core.sessions.create_session`. A run of a confidential
   channel's own agent, a hub run by an admin or that channel's admin
   included, is gated by and charged to that channel's budget. The billed media tool
   runs the same gates, then the budget of the channel named by the calling
@@ -1431,8 +1435,8 @@ row), it writes a `denied` row under the token's own tenant with tool name
 verifier establishes a tenant cannot be safely attributed and are outside this trail.
 `daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
 row (tool name `cli/<command>`) in the same transaction as their change.
-Admin-tier setup and billing panel writes on Discord, Slack and Teams (channel
-isolation, channel admins, a channel's environment and skills, coding-tool and operator token
+Admin-tier setup and billing panel writes on Discord, Slack and Teams (confidential
+channels, channel admins, a channel's environment and skills, coding-tool and operator token
 mint and revoke, promo redeem) each write their own row through
 `core/panel_audit.py`, allowed or refused, with tool name `panel:<op>`; the clicker
 is named only when they have an account, so privacy erasure can reach the row.
@@ -1522,7 +1526,7 @@ registered and expire too, while older jti-less ones keep working.
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 `get_tenant_summary` lists every channel with a default, a budget, admins or
-isolation, and `channels[].isolated` says whether it is isolated. Its read is
+confidential status, and `channels[].isolated` says whether it is confidential. Its read is
 `daimon.core.tenant_summary`, which `daimon channels list PLATFORM
 WORKSPACE_ID [--json]` prints too, with the same JSON plus each channel's
 `sealed` and `protected`. The MCP tool omits those two keys: no other MCP or

@@ -22,6 +22,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
     is_private_routine_stamp,
 )
+from daimon.core.permissions import any_sealed
 from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
@@ -261,7 +262,7 @@ async def _legacy_threads(
     sessions: Sequence[BetaManagedAgentsSession],
 ) -> dict[str, str]:
     unstamped = [s.id for s in sessions if MA_METADATA_KEY_CHANNEL not in (s.metadata or {})]
-    if not unstamped or not read.policy.sealed_channel_ids:
+    if not unstamped or not any_sealed(read.policy):
         return {}
     async with runtime.session_factory() as db:
         return await thread_ids_for_sessions(db, tenant_id=auth.tenant_id, ma_session_ids=unstamped)

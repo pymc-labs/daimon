@@ -36,6 +36,7 @@ from typing import Final, Literal, cast
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.permissions import any_protected
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
@@ -446,8 +447,8 @@ def placement_unknown_is_unsafe(
     if platform != "discord":
         return False
     if kind == "thread":
-        return bool(policy.protected_channel_ids or policy.protected_category_ids)
-    return bool(policy.protected_category_ids)
+        return any_protected(policy)
+    return any_protected(policy, categories_only=True)
 
 
 @dataclass(frozen=True)

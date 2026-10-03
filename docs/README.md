@@ -16,6 +16,9 @@ pieces fit together.
   default and description. Generated from the settings models.
 - [mcp-tools.md](mcp-tools.md) — every MCP tool the agent can call, grouped by
   module, with who may call it. Generated from the tool registry.
+- [permissions.md](permissions.md) — channel and agent rules: who may read
+  and write a channel, where an agent runs, and the protected, sealed,
+  confidential and pinned presets.
 - [routines.md](routines.md) — scheduled routines: creating one, how the
   scheduler fires it, the timeouts, permissions and what a failure leaves.
 - [billing.md](billing.md) — the credit model: metering, pricing, the balance

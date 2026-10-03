@@ -17,6 +17,7 @@ nav:
   - Self-hosting: self-hosting.md
   - Configuration: configuration.md
   - MCP tools: mcp-tools.md
+  - Permissions: permissions.md
   - Routines: routines.md
   - Billing: billing.md
   - Defaults: defaults.md

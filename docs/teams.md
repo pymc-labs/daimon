@@ -66,7 +66,7 @@ Two kinds of people count as from another organisation: a shared channel's
 external participants, who join through B2B direct connect and stay in their
 home tenant, and guests (Entra B2B guest accounts in ours), who can be in
 standard and private channels and 1:1 chats. daimon answers them only inside
-an isolated channel and its threads. Anywhere else an addressed message gets
+a confidential channel and its threads. Anywhere else an addressed message gets
 one line saying so and runs no turn, and their unmentioned replies are never
 judged for a followed thread. Their turns run as a member (never an admin or
 a channel admin, whatever is configured, a grant naming a team they own
@@ -138,14 +138,14 @@ group ID in `role_ids` to admit that team's owners), channel budgets
 work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and its isolation and admins by Entra object ID
+or that channel's admins), and whether it is confidential and its admins by Entra object ID
 (server admins only).
-Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
+Confidential channels work as on Discord and Slack, with `set_channel_isolation`,
 `daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
-counts as its channel, and the isolated agents send nothing to 1:1 chats. The
+counts as its channel, and the confidential channel's agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
 The setup panel lives in the 1:1 chat, outside every channel, so a member's
-Agents list leaves out each isolated channel's own agents; an admin sees all.
+Agents list leaves out each confidential channel's own agents; an admin sees all.
 
 ### Channel history
 

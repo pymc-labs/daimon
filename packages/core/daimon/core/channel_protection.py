@@ -16,6 +16,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import ChannelRule, channel_rule, with_channel_rule
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -29,7 +30,7 @@ ProtectionRefusal = Literal["admin_required", "isolated"]
 
 _REFUSALS: dict[ProtectionRefusal, str] = {
     "admin_required": "Protecting or sealing a channel needs a server admin.",
-    "isolated": "This channel is isolated, so it stays sealed: end its isolation first.",
+    "isolated": "This channel is confidential, so it stays sealed: unmark it confidential first.",
 }
 
 
@@ -51,28 +52,25 @@ class ProtectionChange:
     """Set when the change sealed a channel whose own environment has an open network."""
 
 
-def _toggled(ids: tuple[str, ...], channel_id: str, on: bool | None) -> tuple[str, ...]:
-    if on is None or (channel_id in ids) == on:
-        return ids
-    return (*ids, channel_id) if on else tuple(i for i in ids if i != channel_id)
-
-
 def toggle_channel(
     policy: TenantAccessPolicy, *, channel_id: str, protected: bool | None, sealed: bool | None
 ) -> TenantAccessPolicy:
     """`policy` with `channel_id` protected and sealed as asked; None keeps that one.
 
-    Raise `ChannelProtectionRefused("isolated")` for unsealing an isolated channel.
+    Protecting sets the channel rule's writers to none, sealing its readers to
+    inside (`daimon.core.permissions`). Raise `ChannelProtectionRefused("isolated")`
+    for unsealing an isolated (confidential) channel.
     """
-    if sealed is False and channel_id in policy.isolated_channel_ids:
-        raise ChannelProtectionRefused("isolated")
-    return TenantAccessPolicy.model_validate(
-        policy.model_dump()
-        | {
-            "protected_channel_ids": _toggled(policy.protected_channel_ids, channel_id, protected),
-            "sealed_channel_ids": _toggled(policy.sealed_channel_ids, channel_id, sealed),
-        }
-    )
+    current = channel_rule(policy, channel_id)
+    if current.readers == "own":
+        if sealed is False:
+            raise ChannelProtectionRefused("isolated")
+        readers = current.readers
+    else:
+        readers = current.readers if sealed is None else "inside" if sealed else "any"
+    unprotected = "own" if readers == "own" else "any"
+    writers = current.writers if protected is None else "none" if protected else unprotected
+    return with_channel_rule(policy, channel_id, ChannelRule(readers=readers, writers=writers))
 
 
 async def set_channel_protection(
@@ -100,9 +98,8 @@ async def set_channel_protection(
         updated = toggle_channel(policy, channel_id=channel_id, protected=protected, sealed=sealed)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-    newly_sealed = channel_id in updated.sealed_channel_ids and (
-        channel_id not in policy.sealed_channel_ids
-    )
+    before, after = channel_rule(policy, channel_id), channel_rule(updated, channel_id)
+    newly_sealed = after.readers != "any" and before.readers == "any"
     warning = None
     if newly_sealed:
         async with sessionmaker() as session:
@@ -111,8 +108,8 @@ async def set_channel_protection(
             )
     return ProtectionChange(
         channel_id=channel_id,
-        protected=channel_id in updated.protected_channel_ids,
-        sealed=channel_id in updated.sealed_channel_ids,
+        protected=after.writers == "none",
+        sealed=after.readers != "any",
         changed=updated != policy,
         network_warning=warning,
     )

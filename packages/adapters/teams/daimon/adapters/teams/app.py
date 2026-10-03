@@ -76,7 +76,6 @@ from daimon.adapters.teams.site_grant import (
 )
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
-from daimon.core.access_policy import isolated_channel_of
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
@@ -92,6 +91,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
+from daimon.core.permissions import confidential_channel_of
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
@@ -557,7 +557,7 @@ class TeamsApp:
                 policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable:
             return False
-        return isolated_channel_of(policy, inbound.thread_id, inbound.channel_id) is not None
+        return confidential_channel_of(policy, inbound.thread_id, inbound.channel_id) is not None
 
     async def _participate(self, trigger: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """The classifier said reply: run one turn as the burst's author, silently shed.

@@ -27,6 +27,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATION_COPY, MA_MET
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.permissions import AgentRule, agent_rules, with_agent_rule
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -56,7 +57,7 @@ _REFUSALS: dict[ArchiveRefusal, str] = {
     "not_found": "There is no agent by that name.",
     "ambiguous": "More than one agent has that name, or it changed: list the agents again.",
     "not_isolation_copy": (
-        "That agent wasn't made as an isolated channel's copy, so this tool doesn't archive it."
+        "That agent wasn't made as a confidential channel's copy, so this tool doesn't archive it."
     ),
     "other_channel": "That agent was made for another channel.",
     "default_agent": "That agent is a workspace or deployment default.",
@@ -105,8 +106,9 @@ def archive_refusal(
     if names & {tenant.agent_name if tenant is not None else None, default.agent_name}:
         return "default_agent"
     closing: set[str] = {closing_channel_id} if closing_channel_id is not None else set()
+    rules = agent_rules(policy)
     for each in names:
-        pin = policy.agent_channel_pins.get(each)
+        pin = rules[each].runs_in if each in rules else None
         if pin is not None and (not closing or set(pin) - closing):
             return "pinned"
     if any(row.agent_name in names and row.channel_id not in closing for row in channels):
@@ -115,8 +117,9 @@ def archive_refusal(
 
 
 def _without_pins(policy: TenantAccessPolicy, names: set[str]) -> TenantAccessPolicy:
-    pins = {n: ids for n, ids in policy.agent_channel_pins.items() if n not in names}
-    return policy.model_copy(update={"agent_channel_pins": pins})
+    for name in names:
+        policy = with_agent_rule(policy, name, AgentRule())
+    return policy
 
 
 async def _find(

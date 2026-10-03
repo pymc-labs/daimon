@@ -128,7 +128,7 @@ async def test_an_isolated_channel_stays_sealed_until_its_isolation_ends(
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     admin = _auth(tenant_id, account_id, admin=True)
-    with pytest.raises(ToolError, match="end its isolation first"):
+    with pytest.raises(ToolError, match="unmark it confidential first"):
         await _set_channel_protection_impl(runtime, admin, channel_id=ISOLATED, sealed=False)
     protected = await _set_channel_protection_impl(
         runtime, admin, channel_id=ISOLATED, protected=True

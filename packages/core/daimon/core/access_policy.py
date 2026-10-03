@@ -48,7 +48,7 @@ class TenantAccessPolicy(BaseModel):
         # Isolation adds to a seal; it never stands without one.
         unsealed = sorted(set(self.isolated_channel_ids) - set(self.sealed_channel_ids))
         if unsealed:
-            raise ValueError(f"isolated channels must also be sealed: {', '.join(unsealed)}")
+            raise ValueError(f"confidential channels must also be sealed: {', '.join(unsealed)}")
         return self
 
 
@@ -131,18 +131,6 @@ def isolation_owner(policy: TenantAccessPolicy, agent_names: tuple[str | None, .
         return None
     (channel,) = channels
     return channel if channel in policy.isolated_channel_ids else None
-
-
-def is_own_isolated_agent(
-    policy: TenantAccessPolicy,
-    agent_names: tuple[str | None, ...],
-    *,
-    channel_id: str | None,
-    parent_channel_id: str | None = None,
-) -> bool:
-    """Whether an isolated channel's own agent is at work in it; its memory stays writable."""
-    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
-    return inside is not None and isolation_owner(policy, agent_names) == inside
 
 
 def source_seal_ids(

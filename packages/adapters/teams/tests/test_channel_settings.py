@@ -139,7 +139,7 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
     assert "Growth" in picker and "Legal" in picker, "a server admin picks any listed channel"
     assert_card_renders(opened["task"]["value"]["card"]["content"])
     form = json.dumps(opened)
-    assert "Isolation" in form and "Entra object ids" in form, "and sees every control"
+    assert "Confidential" in form and "Entra object ids" in form, "and sees every control"
     assert "science environment" in json.dumps(saved)
     assert "a copy of analyst, answers only there" in json.dumps(isolated)
     assert "Channel admins saved." in json.dumps(granted), "a thread id names its channel"
@@ -182,10 +182,10 @@ async def test_a_channel_admin_sets_only_their_own_channels_environment(
 
     assert "Growth" in picker and "Legal" not in picker, "only the channels they run"
     assert "Or a channel id" not in picker, "and no free entry"
-    assert "Environment" in form and "Isolation" not in form and "Entra" not in form
+    assert "Environment" in form and "Confidential" not in form and "Entra" not in form
     assert "science environment" in json.dumps(saved), "their own channel's environment is theirs"
     assert elsewhere["task"]["value"] == channel_settings.CHANNELS_NEED_ADMIN
-    assert "Isolation" not in json.dumps(typed), "a typed id is a server admin's only"
+    assert "Confidential" not in json.dumps(typed), "a typed id is a server admin's only"
     assert isolate["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
     assert grant["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
     async with db_session_factory() as session:
