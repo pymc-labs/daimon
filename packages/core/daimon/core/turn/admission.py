@@ -422,7 +422,7 @@ async def admit_impl(
     # answer as the built-in Daimon (`get_setup_responder` asserts that), while
     # a thread whose task was handed to another agent answers as that agent,
     # which is an ordinary tenant-and-archive-checked retrieve.
-    if config.thread_binding_kind == "handoff":
+    if config.thread_binding_kind in ("handoff", "opened"):
         agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     elif config.thread_binding_id is not None:
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)

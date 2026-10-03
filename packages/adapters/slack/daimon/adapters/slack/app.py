@@ -193,6 +193,7 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
+from daimon.core.stores.thread_agent_bindings import bind_opened_thread
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -1948,6 +1949,19 @@ class SlackApp:
             if lifecycle.status_ts is not None:
                 self._deregister_cancel(lifecycle.status_ts)
             raise
+
+        if event.get("thread_ts") is None:
+            async with self.runtime.sessionmaker.begin() as session:
+                await bind_opened_thread(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    parent_channel_id=channel,
+                    thread_id=thread_id,
+                    responder_ma_agent_id=agent.id,
+                    responder_name=admission.config.agent_name or agent.name,
+                    creator_account_id=admission.account_id,
+                )
 
         # Mapping-row ids the turn marker has been written against, tracked
         # from here rather than built inline in the finally below: unlike

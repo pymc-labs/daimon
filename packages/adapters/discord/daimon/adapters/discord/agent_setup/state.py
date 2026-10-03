@@ -44,7 +44,7 @@ class ThreadContext:
     kind survives as far as the render instead of being flattened to a boolean.
     """
 
-    kind: Literal["setup", "handoff"]
+    kind: Literal["setup", "handoff", "opened"]
     responder_name: str | None
     target_name: str | None
 

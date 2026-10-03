@@ -12,6 +12,7 @@ from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -27,7 +28,7 @@ async def create_binding(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     creator_account_id: uuid.UUID | None = None,
-    kind: Literal["setup", "handoff"] = "setup",
+    kind: Literal["setup", "handoff", "opened"] = "setup",
 ) -> ThreadAgentBindingRow:
     """Bind a thread to a responder.
 
@@ -52,6 +53,34 @@ async def create_binding(
     session.add(binding)
     await session.flush()
     return ThreadAgentBindingRow.model_validate(binding)
+
+
+async def bind_opened_thread(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_ma_agent_id: str,
+    responder_name: str,
+    creator_account_id: uuid.UUID | None = None,
+) -> None:
+    """Keep a thread's first responder; never replace a setup or handoff binding."""
+    await session.execute(
+        insert(ThreadAgentBinding)
+        .values(
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_id=thread_id,
+            kind="opened",
+            responder_ma_agent_id=responder_ma_agent_id,
+            responder_name=responder_name,
+            creator_account_id=creator_account_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_thread_agent_bindings_location")
+    )
 
 
 async def get_binding(
@@ -389,6 +418,7 @@ async def upsert_responder_binding(
             update(ThreadAgentBinding)
             .where(ThreadAgentBinding.id == existing.id)
             .values(
+                kind="handoff",
                 responder_ma_agent_id=responder_ma_agent_id,
                 responder_name=responder_name,
                 configuration_target_ma_agent_id=None,
