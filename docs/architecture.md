@@ -140,6 +140,15 @@ config). The order is load-bearing and documented as such in the module:
    and explicit handoff bindings retain their distinct behavior. Migration
    `0048_opened_thread_bindings` backfills live sessions before new routing
    rules take effect.
+   A direct bot mention may choose a named agent with `<agent-name>:` as the
+   first token after the mention (case-insensitive NFKC match). Discord also
+   accepts a mention of a bot-managed agent role, even without a bot mention.
+   The named choice overrides the unbound default but still enters `admit()`
+   for invoker, pin, isolation and budget checks. A bound thread rejects a
+   different named agent and asks for a new thread or explicit handoff. An
+   isolated channel accepts only its own agent and names that agent in the
+   refusal. Discord reconciles roles on boot and regularly; a missing Manage
+   Roles permission logs a warning while the text form remains available.
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
