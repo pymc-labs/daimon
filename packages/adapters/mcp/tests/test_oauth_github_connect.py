@@ -22,6 +22,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_connect
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -207,6 +208,14 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         repo_admin = True
+        async with sessionmaker.begin() as session:
+            await set_role(session, account_id, Role.USER)
+        demoted = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
+        assert demoted.status_code == 400
+        async with sessionmaker() as session:
+            assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
+        async with sessionmaker.begin() as session:
+            await set_role(session, account_id, Role.ADMIN)
         confirmed = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "101", "access_101": "write"}
         )
@@ -215,6 +224,10 @@ async def test_connection_happy_path_and_rechecks(
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
             assert len(repos) == 1 and repos[0].repo_id == 101
             assert repos[0].installation_id == 77 and repos[0].max_access == "write"
+            events = await list_events(session, tenant_id=tenant_id)
+            assert len(events) == 1
+            assert events[0].operation == "github_connect"
+            assert events[0].github_repo_ids == [101]
         reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
         assert reused.status_code == 400
         async with sessionmaker.begin() as session:

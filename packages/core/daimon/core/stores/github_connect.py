@@ -6,7 +6,7 @@ import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal, cast
 
 from daimon.core._models import (
     Account,
@@ -19,6 +19,7 @@ from daimon.core._models import (
 )
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -117,6 +118,17 @@ async def create_flow(
     await session.flush()
 
 
+async def delete_expired_flows(session: AsyncSession, *, now: datetime, limit: int = 500) -> int:
+    """Remove expired encrypted browser tokens in bounded scheduler batches."""
+    expired = (
+        select(GitHubConnectFlow.state_hash).where(GitHubConnectFlow.expires_at <= now).limit(limit)
+    )
+    result = await session.execute(
+        delete(GitHubConnectFlow).where(GitHubConnectFlow.state_hash.in_(expired))
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def get_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | None:
     if not state or not cookie:
         return None
@@ -130,13 +142,14 @@ async def get_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | 
 
 async def set_user_token(
     session: AsyncSession, *, state: str, encrypted_token: bytes, github_user_id: int
-) -> None:
+) -> bool:
     row = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
-    if row is None or row.expires_at <= datetime.now(UTC):
-        raise ValueError("flow expired")
+    if row is None or row.expires_at <= datetime.now(UTC) or row.encrypted_user_token is not None:
+        return False
     row.encrypted_user_token = encrypted_token
     row.github_user_id = github_user_id
     await session.flush()
+    return True
 
 
 class RepoConfirmation(BaseModel):

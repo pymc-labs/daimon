@@ -96,6 +96,19 @@ async def get_account_link(session: AsyncSession, *, account_id: uuid.UUID) -> A
     return AccountLink.model_validate(row) if row is not None else None
 
 
+async def unlink_account(session: AsyncSession, *, account_id: uuid.UUID) -> int | None:
+    """Remove an account link and invalidate tokens minted from the user's old generation."""
+    row = await session.get(AccountGitHubLink, account_id, with_for_update=True)
+    if row is None:
+        return None
+    user_id = row.github_user_id
+    await bump_link_generation(session, github_user_id=user_id)
+    await session.delete(row)
+    await session.flush()
+    await delete_unlinked_user(session, github_user_id=user_id)
+    return user_id
+
+
 async def list_linked_accounts(session: AsyncSession, *, github_user_id: int) -> list[AccountLink]:
     rows = await session.scalars(
         select(AccountGitHubLink).where(AccountGitHubLink.github_user_id == github_user_id)

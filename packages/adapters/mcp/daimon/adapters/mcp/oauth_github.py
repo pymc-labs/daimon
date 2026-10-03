@@ -242,12 +242,14 @@ def build_oauth_github_routes(
         async with sessionmaker.begin() as session:
             if await github_connect.get_flow(session, state=state, cookie=cookie) is None:
                 return _error()
-            await github_connect.set_user_token(
+            saved = await github_connect.set_user_token(
                 session,
                 state=state,
                 encrypted_token=encrypt_token(fernet, user_token),
                 github_user_id=user_id,
             )
+            if not saved:
+                return _error()
         return RedirectResponse(f"{root}/oauth/github/confirm?{urlencode({'state': state})}")
 
     async def setup(request: Request) -> Response:
