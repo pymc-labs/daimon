@@ -36,7 +36,7 @@ from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.security_audit import append_event, list_events
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
 from daimon.core.thread_handoff import (
@@ -789,3 +789,44 @@ async def test_channel_admin_switch_refuses_legacy_seal_without_a_channel(
     async with db_session_factory() as session:
         unchanged = await get_thread_session_by_id(session, id=row.id)
     assert unchanged is not None and unchanged.seal_ids is None
+
+
+@pytest.mark.parametrize(
+    ("server_admin", "row"),
+    [
+        (True, ("panel:handoff", "allowed", "completed")),
+        (False, ("panel:handoff", "denied", "authz:admin_required")),
+    ],
+    ids=["server-admin-allowed", "channel-admin-refused"],
+)
+async def test_a_hand_over_click_by_an_admin_is_audited(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    server_admin: bool,
+    row: tuple[str, str, str],
+) -> None:
+    """As `hand_off_task`'s trail: a click resting on admin standing, or refused by
+    `authorize`, writes a `panel:handoff` row. research-bot is C2's own agent."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant_id))
+    outcome = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant_id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=ChannelAdminCaller(platform_user_id="U1", is_server_admin=server_admin),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+    )
+    assert outcome.switched is server_admin, "only the server admin may bring it into C1"
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.tool_name, e.outcome, e.reason) for e in events] == [row], (
+        "one panel row per admin-tier click"
+    )

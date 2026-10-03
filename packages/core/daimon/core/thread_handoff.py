@@ -72,6 +72,7 @@ from daimon.core.continuity.handoff import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
+from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_seal import session_facts
 from daimon.core.setup_conversations import get_setup_agent
@@ -499,12 +500,14 @@ async def switch_thread_on_request(
     # is decided without them. Grants are read again under the lock, and a
     # channel admin whose seals weren't read is refused there as sealed.
     recorded: tuple[RecordedSession, ...] | None = None
+    channel_admin = False
     if not caller.is_server_admin:
         async with sessionmaker() as session:
             administered = await load_administered_channel_ids(
                 session, tenant_id=tenant_id, platform=platform, caller=caller
             )
-        if parent_channel_id in administered:
+        channel_admin = parent_channel_id in administered
+        if channel_admin:
             recorded = await recorded_thread_sessions(
                 anthropic,
                 sessionmaker,
@@ -548,6 +551,15 @@ async def switch_thread_on_request(
                 recorded=recorded,
             )
     except ThreadHandoffRefused as refused:
+        if refused.refusal.authz_reason is not None:
+            await _audit_click(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                caller=caller,
+                outcome="denied",
+                reason=f"authz:{refused.refusal.authz_reason}",
+            )
         return SwitchOutcome(
             switched=False, text=render_handoff_refused(refused.refusal, channel=channel)
         )
@@ -559,4 +571,35 @@ async def switch_thread_on_request(
         )
     except AccessPolicyUnreadable as error:
         return SwitchOutcome(switched=False, text=str(error))
+    if caller.is_server_admin or channel_admin:
+        # As `hand_off_task`'s trail: an admin's click may rest on admin standing.
+        await _audit_click(
+            sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            caller=caller,
+            outcome="allowed",
+            reason="completed",
+        )
     return SwitchOutcome(switched=True, text=render_switched(name), destination_name=name)
+
+
+async def _audit_click(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    caller: ChannelAdminCaller,
+    outcome: PanelOutcome,
+    reason: str,
+) -> None:
+    if caller.platform_user_id is not None:
+        await record_panel_write(
+            sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=caller.platform_user_id,
+            op="handoff",
+            outcome=outcome,
+            reason=reason,
+        )

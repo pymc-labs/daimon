@@ -36,6 +36,7 @@ PanelOp = Literal[
     "promo_redeem",
     "operator_token_mint",
     "operator_token_revoke",
+    "handoff",
 ]
 
 PanelOutcome = Literal["allowed", "denied", "error"]
