@@ -109,10 +109,9 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import FormPinRefused, agent_pin_names, consume_form_unless_pinned
+from daimon.core.agent_pins import FormPinRefused, agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
-from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
     ConfigurationChange,
     render_env_import_rejected,
@@ -122,21 +121,29 @@ from daimon.core.credential_requests import (
     availability_for_request,
     split_skill_repo_target,
 )
+from daimon.core.credential_submit import (
+    apply_env_file_submit,
+    apply_env_submit,
+    consume_credential_submit,
+    prepare_env_submit,
+    prepare_mcp_submit,
+    settle_credential_submit,
+    write_mcp_submit,
+    write_repo_submit,
+    write_skill_repo_submit,
+)
+from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
-    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_alias_shadowed,
     env_collision_line,
-    env_import_collisions,
     env_name_problem,
-    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -168,15 +175,9 @@ from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
-    list_agent_files,
-    lock_agent_keys,
-    put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
-from daimon.core.turn_keys import list_turn_key_names
 
 import discord
 
@@ -274,13 +275,13 @@ async def _settle_spent_request(
     that can hold both facts. The two env forms write theirs inside the
     transaction that already carries their value write.
     """
-    async with runtime.sessionmaker.begin() as session:
-        await credential_requests.set_credential_request_outcome(
-            session, token=row.token, outcome=outcome
-        )
-        return await record_input_continuation(
-            session, row, platform="discord", carries_work=carries_work
-        )
+    return await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="discord",
+        outcome=outcome,
+        carries_work=carries_work,
+    )
 
 
 async def _record_refused_outcome(runtime: DiscordRuntime, row: CredentialRequestRow) -> None:
@@ -356,19 +357,6 @@ async def _dispatch_origin_thread(
         bot.dispatch_continuations_in_thread(
             tenant_id=row.tenant_id, thread=thread, guild_id=str(interaction.guild_id)
         )
-    )
-
-
-def _env_name_refusal(name: str, problem: str) -> str:
-    """One-line refusal for a key name the submitter may not store."""
-    if problem == "bad_name":
-        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
-    if problem == "reserved_name":
-        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
-    return (
-        f"{name} is not a secret name a member can add. Use a name ending in "
-        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
-        "and URL names."
     )
 
 
@@ -512,96 +500,32 @@ class EnvCredentialModal(discord.ui.Modal):
                 _env_name_refusal(self._row.target, name_problem), ephemeral=True
             )
             return
-        # A replacement's gate is decided BEFORE the transaction opens: the
-        # decision costs an MA listing and a config read, and neither may be
-        # paid for while holding the request row's lock.
-        # A new name that a tool reads as a key already held (GH_TOKEN beside
-        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
-        # gate, decided for this submitter.
-        #
-        # Snapshot the related credentials (aliases and family members) before the
-        # transaction, for every submit. Under the lock the write proceeds only if
-        # that set is unchanged: a related key added or removed after the gate was
-        # decided was never put to it. An unchanged set — rotating
-        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
-        async with self._runtime.sessionmaker() as session:
-            held_names = await list_turn_key_names(
-                session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
-            )
-        related_before = env_related_held(self._row.target, held_names)
-        shadowed = (
-            env_alias_shadowed(self._row.target, held_names)
-            if self._row.replaces_updated_at is None
-            else None
-        )
-        replacement = (
-            await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
-            if self._row.replaces_updated_at is not None or shadowed is not None
-            else "allow"
-        )
 
-        now = datetime.now(UTC)
-        state: CardState = "applied"
-        is_continuation_queued = False
+        async def replacement_refused() -> bool:
+            return (
+                await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
+            ) != "allow"
+
+        plan = await prepare_env_submit(
+            self._runtime.sessionmaker, row=self._row, replacement_refused=replacement_refused
+        )
+        shadowed = plan.shadowed
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
-                if consumed_row is None:
-                    await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
-                    return
-                outcome: CredentialRequestOutcome = "applied"
-                # Re-read under the write, holding the agent's key-set lock: an
-                # alias that appeared after the gate above was decided was
-                # never put to it, and one a concurrent writer is adding waits.
-                await lock_agent_keys(
-                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
-                )
-                appeared = (
-                    env_related_held(
-                        consumed_row.target,
-                        await list_turn_key_names(
-                            session,
-                            tenant_id=consumed_row.tenant_id,
-                            agent_id=consumed_row.agent_id,
-                        ),
-                    )
-                    != related_before
-                )
-                if replacement != "allow":
-                    # The card promised a replacement this person may no
-                    # longer make. Spend the request, write nothing.
-                    state = "refused"
-                    outcome = "write_failed"
-                elif appeared:
-                    state = "superseded"
-                    outcome = "stale_replacement"
-                else:
-                    # The precondition IS the card's promise: `None` for a
-                    # key the card said was unset, the exact `updated_at` for
-                    # one it offered to replace. A value that moved since
-                    # fails it, and this write must not quietly win a race
-                    # the person was never shown.
-                    written = await put_agent_file_if_unchanged(
-                        session,
-                        tenant_id=consumed_row.tenant_id,
-                        agent_id=consumed_row.agent_id,
-                        key=consumed_row.target,
-                        content=raw_value,
-                        set_by_account_id=consumed_row.account_id,
-                        expected_updated_at=consumed_row.replaces_updated_at,
-                    )
-                    if written is None:
-                        state = "superseded"
-                        outcome = "stale_replacement"
-                    else:
-                        is_continuation_queued = await record_input_continuation(
-                            session, consumed_row, platform="discord"
-                        )
-                await credential_requests.set_credential_request_outcome(
-                    session, token=consumed_row.token, outcome=outcome
-                )
+            result = await apply_env_submit(
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                platform="discord",
+                value=raw_value,
+                plan=plan,
+                now=datetime.now(UTC),
+            )
+            consumed_row = result.consumed
+            if consumed_row is None:
+                await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+                return
+            state, outcome = result.state, result.outcome
+            is_continuation_queued = result.queued
         except FormPinRefused as refused:
             # Decided with the consume: rolled back, nothing stored.
             await interaction.followup.send(refused.refusal, ephemeral=True)
@@ -664,19 +588,6 @@ class EnvCredentialModal(discord.ui.Modal):
         )
         if is_continuation_queued:
             await _dispatch_origin_thread(interaction, consumed_row)
-
-
-class _KeyAlreadySet(Exception):
-    """A key the pre-read did not see appeared between that read and its write.
-
-    Raised inside the savepoint so the whole batch rolls back; it never
-    escapes `EnvFileModal.on_submit`, and it carries the entry only to name
-    it in the refusal — `EnvEntry.value` is never read from it.
-    """
-
-    def __init__(self, entry: EnvEntry) -> None:
-        super().__init__(entry.name)
-        self.entry = entry
 
 
 def _collision_lines(collisions: Sequence[EnvEntry], held: Collection[str]) -> tuple[str, ...]:
@@ -777,62 +688,18 @@ class EnvFileModal(discord.ui.Modal):
         if agent is None:
             return
 
-        now = datetime.now(UTC)
-        collisions: tuple[EnvEntry, ...] = ()
-        held: set[str] = set()
-        is_continuation_queued = False
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
-                if consumed_row is None:
-                    await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
-                    return
-                # Held across the read below and the writes after it, so a
-                # concurrent writer of another alias name cannot interleave.
-                await lock_agent_keys(
-                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
-                )
-                held = {
-                    row.key
-                    for row in await list_agent_files(
-                        session,
-                        tenant_id=consumed_row.tenant_id,
-                        agent_id=consumed_row.agent_id,
-                    )
-                }
-                collisions = env_import_collisions(entries, held)
-                if not collisions:
-                    try:
-                        # A savepoint, not the outer transaction: a key that
-                        # appeared since the read must undo this file's other
-                        # writes while leaving the request spent.
-                        async with session.begin_nested():
-                            for entry in entries:
-                                written = await put_agent_file_if_unchanged(
-                                    session,
-                                    tenant_id=consumed_row.tenant_id,
-                                    agent_id=consumed_row.agent_id,
-                                    key=entry.name,
-                                    content=entry.value,
-                                    set_by_account_id=consumed_row.account_id,
-                                    expected_updated_at=None,
-                                )
-                                if written is None:
-                                    raise _KeyAlreadySet(entry)
-                    except _KeyAlreadySet as appeared:
-                        collisions = (appeared.entry,)
-                        held.add(appeared.entry.name)
-                if not collisions:
-                    is_continuation_queued = await record_input_continuation(
-                        session, consumed_row, platform="discord"
-                    )
-                await credential_requests.set_credential_request_outcome(
-                    session,
-                    token=consumed_row.token,
-                    outcome="stale_replacement" if collisions else "applied",
-                )
+            consumed_row, collisions, is_continuation_queued, held = await apply_env_file_submit(
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                platform="discord",
+                entries=entries,
+                now=datetime.now(UTC),
+            )
+            if consumed_row is None:
+                await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+                return
         except FormPinRefused as refused:
             # Decided with the consume: rolled back, nothing stored.
             await interaction.followup.send(refused.refusal, ephemeral=True)
@@ -959,15 +826,16 @@ class McpCredentialModal(discord.ui.Modal):
         agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
         if agent is None:
             return
-        connect = await _decide_mcp_connect_at_submit(
-            interaction, runtime=self._runtime, row=self._row
+        connect, now = await prepare_mcp_submit(
+            decide=lambda: _decide_mcp_connect_at_submit(
+                interaction, runtime=self._runtime, row=self._row
+            ),
+            clock=lambda: datetime.now(UTC),
         )
-        now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -1006,24 +874,18 @@ class McpCredentialModal(discord.ui.Modal):
             await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
             await interaction.followup.send(rejected_token_message(mcp_server_url), ephemeral=True)
             return
-        # Attach first, publish the agent-wide token only after that authorized
-        # attach, then the submitter's own vault copy: no other session may
-        # ever mirror a token this submission is refused for.
         try:
-            await connect_mcp_server_with_token(
+            await write_mcp_submit(
                 self._runtime.anthropic,
-                sessionmaker=self._runtime.sessionmaker,
+                session_factory=self._runtime.sessionmaker,
+                row=consumed_row,
                 fernet=self._runtime.turn_deps.fernet,
-                tenant_id=consumed_row.tenant_id,
-                agent_id=consumed_row.agent_id,
-                account_id=consumed_row.account_id,
-                server_name=consumed_row.target,
-                mcp_server_url=mcp_server_url,
-                token=token_value,
+                value=token_value,
                 replace_allowed=connect.replace_allowed,
                 jwt_secret=jwt_secret_setting.get_secret_value().encode(),
                 public_url=str(public_url_setting),
                 now=now,
+                connect=connect_mcp_server_with_token,
             )
         except McpServerReplaceRefusedError:
             # A server or token for this URL appeared after the pre-consume check.
@@ -1170,10 +1032,9 @@ class SkillRepoModal(discord.ui.Modal):
             return
         now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -1231,18 +1092,8 @@ class SkillRepoModal(discord.ui.Modal):
                 # every sync falls back to an anonymous 404 that asks for the
                 # credential again.
                 async with self._runtime.sessionmaker.begin() as session:
-                    await set_skill_repo_credential(
-                        session,
-                        tenant_id=consumed_row.tenant_id,
-                        agent_id=consumed_row.agent_id,
-                        repo_url=url,
-                        default_branch=branch,
-                        path=path,
-                        ma_secret_ref=ma_secret_ref,
-                        proof=proof,
-                    )
-                    seeded_skill_names = await list_seeded_skill_names(
-                        session, tenant_id=consumed_row.tenant_id
+                    seeded_skill_names = await write_skill_repo_submit(
+                        session, row=consumed_row, ma_secret_ref=ma_secret_ref, proof=proof
                     )
                 outcomes = await run_skill_sync(
                     self._runtime.anthropic,
@@ -1524,10 +1375,9 @@ class RepoBindModal(discord.ui.Modal):
             return
         now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -1564,14 +1414,12 @@ class RepoBindModal(discord.ui.Modal):
                     now=now,
                 )
             async with self._runtime.sessionmaker.begin() as session:
-                await set_binding(
+                await write_repo_submit(
                     session,
-                    tenant_id=consumed_row.tenant_id,
-                    agent_id=consumed_row.agent_id,
-                    repo_url=repo_url,
-                    default_branch=branch,
+                    row=consumed_row,
                     ma_secret_ref=ma_secret_ref,
                     proof=proof,
+                    write=set_binding,
                 )
         except DaimonError as err:
             # This copy is written for the user -- surface it verbatim, plus

@@ -29,6 +29,7 @@ from daimon.adapters.discord.agent_setup.channel_admins_view import (
 )
 from daimon.adapters.discord.agent_setup.channel_environment import (
     REFUSED_MESSAGE,
+    audit_environment_pick,
     build_environment_select,
     load_environment_picker,
     load_picker_subject,
@@ -36,12 +37,22 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
     panel_tenant_id,
     save_environment_choice,
 )
+from daimon.adapters.discord.agent_setup.channel_skills_view import (
+    CHANNEL_SKILLS_LABEL,
+    ChannelSkillsView,
+    load_channel_skills,
+)
 from daimon.adapters.discord.agent_setup.isolation_view import (
     ISOLATION_LABEL,
     IsolationView,
     load_isolation_status,
 )
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
+from daimon.adapters.discord.agent_setup.operator_tokens_view import (
+    OPERATOR_TOKENS_LABEL,
+    OperatorTokensView,
+    load_operator_tokens,
+)
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
@@ -418,8 +429,21 @@ class RoutingView(PanelViewBase):
                 )
                 isolation_button.callback = self._on_isolation  # type: ignore[method-assign]  # per-instance callback
                 nav_row.add_item(isolation_button)
+            tokens_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=OPERATOR_TOKENS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            tokens_button.callback = self._on_operator_tokens  # type: ignore[method-assign]  # per-instance callback
+            nav_row.add_item(tokens_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
+        if state.is_admin and state.channel_id:
+            skills_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            skills_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=CHANNEL_SKILLS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            skills_button.callback = self._on_channel_skills  # type: ignore[method-assign]  # per-instance callback
+            skills_row.add_item(skills_button)
+            container.add_item(skills_row)
 
         pager = self.page_row(page, on_previous=self._on_previous, on_next=self._on_next)
         if pager is not None:
@@ -468,8 +492,16 @@ class RoutingView(PanelViewBase):
         subject = await load_picker_subject(
             interaction, runtime=self.runtime, state=self.state, live=True
         )
+        user_id = str(interaction.user.id)
         if not await may_pick_environment(subject, runtime=self.runtime, state=self.state):
             await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+            await audit_environment_pick(
+                runtime=self.runtime,
+                state=self.state,
+                user_id=user_id,
+                outcome="denied",
+                reason="needs_admin",
+            )
             return
         await interaction.response.defer()
         # Lazy import: hydrate imports the view modules to type its own returns.
@@ -477,7 +509,11 @@ class RoutingView(PanelViewBase):
 
         try:
             note = await save_environment_choice(
-                runtime=self.runtime, state=self.state, subject=subject, value=select.values[0]
+                runtime=self.runtime,
+                state=self.state,
+                subject=subject,
+                user_id=user_id,
+                value=select.values[0],
             )
             self.state.answering_map = await load_answering_map_for(self.runtime, state=self.state)
             routing = await build_routing_view(
@@ -517,6 +553,32 @@ class RoutingView(PanelViewBase):
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
                 status=status,
+            ),
+        )
+
+    async def _on_channel_skills(self, interaction: discord.Interaction) -> None:
+        """Open this channel's skills screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        rows = await load_channel_skills(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            ChannelSkillsView(
+                self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id, rows=rows
+            ),
+        )
+
+    async def _on_operator_tokens(self, interaction: discord.Interaction) -> None:
+        """Open the operator tokens screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        rows = await load_operator_tokens(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            OperatorTokensView(
+                self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id, rows=rows
             ),
         )
 

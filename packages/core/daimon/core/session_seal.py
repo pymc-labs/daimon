@@ -19,13 +19,22 @@ from collections.abc import Collection, Mapping
 import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.authz import SessionFacts
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_SEALED,
     MA_METADATA_KEY_THREAD,
 )
 
-__all__ = ["format_seal_ids", "inherited_seal_ids", "origin_stamp", "seal_ids"]
+__all__ = [
+    "format_seal_ids",
+    "inherited_seal_ids",
+    "is_private_conversation",
+    "origin_stamp",
+    "seal_ids",
+    "session_facts",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -56,6 +65,39 @@ def seal_ids(metadata: Mapping[str, str | None] | None) -> frozenset[str]:
         else:
             ids.add(part)
     return frozenset(ids) if ids else frozenset({_UNMATCHABLE})
+
+
+def is_private_conversation(conversation_id: str) -> bool:
+    """A DM scope, a Slack IM (``D…``) or a Teams personal chat (``a:…``).
+
+    Sessions that ran there are private even without the private-DM stamp
+    (sessions created before every DM turn was stamped).
+    """
+    # Discord ids are numeric and Teams channels start "19:", so a leading
+    # "D" is only ever a Slack IM.
+    return conversation_id.startswith(("dm:", "a:", "D"))
+
+
+def session_facts(
+    metadata: Mapping[str, str] | None, *, owned: bool, legacy_thread_id: str | None = None
+) -> SessionFacts:
+    """What a session's metadata says about where it ran, for `authorize(READ_SESSION)`."""
+    metadata = metadata or {}
+    channel = metadata.get(MA_METADATA_KEY_CHANNEL)
+    private = (
+        MA_METADATA_KEY_PRIVATE_DM in metadata
+        or is_private_conversation(str(metadata.get(MA_METADATA_KEY_CHANNEL) or ""))
+        or is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
+        or (legacy_thread_id is not None and is_private_conversation(legacy_thread_id))
+    )
+    return SessionFacts(
+        channel=channel,
+        thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
+        seal_ids=seal_ids(metadata),
+        legacy_thread_id=legacy_thread_id,
+        owned=owned,
+        private=private,
+    )
 
 
 def format_seal_ids(ids: Collection[str]) -> str:

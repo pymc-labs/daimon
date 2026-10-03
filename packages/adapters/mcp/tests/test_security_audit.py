@@ -328,3 +328,52 @@ async def test_request_timestamps_preserve_order_when_inserts_finish_in_reverse(
     calls = [row for row in rows if row.tool_name == "attempt"]
     assert [row.outcome for row in calls] == ["allowed", "denied"]
     assert calls[0].occurred_at < calls[1].occurred_at
+
+
+async def test_an_authorize_refusal_a_tool_raises_is_audited_with_its_reason(
+    committing_sessionmaker,
+):
+    """A tool raising on an `authorize` denial lands as a denial naming the action
+    and reason, not as a bare tool error."""
+    from unittest.mock import MagicMock
+
+    from anthropic import AsyncAnthropic
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.domain import Role
+
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+    await seed_identity(committing_sessionmaker, tenant, account)
+    async with committing_sessionmaker() as session, session.begin():
+        await set_access_policy(
+            session, tenant_id=tenant, policy=TenantAccessPolicy(protected_channel_ids=("c1",))
+        )
+    server = make_audited_server(committing_sessionmaker, tenant, account)
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(),
+    )
+    auth = AuthIdentity(account_id=account, tenant_id=tenant, role=Role.USER, platform="discord")
+
+    @server.tool
+    async def post_here() -> str:
+        await require_channel_writable(runtime, auth, channel_id="c1")
+        return "posted"
+
+    async with Client(server) as client:
+        await client.call_tool("post_here", {}, raise_on_error=False)
+    await drain(server)
+    async with committing_sessionmaker() as session:
+        rows = await list_events(session, tenant_id=tenant)
+    [row] = [row for row in rows if row.tool_name == "post_here"]
+    assert (row.outcome, row.operation, row.reason) == (
+        "denied",
+        "post",
+        "authz:channel_protected",
+    ), f"the refusal is audited as a denial; got {row!r}"

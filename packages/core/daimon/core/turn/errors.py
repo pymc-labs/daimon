@@ -23,6 +23,7 @@ AdmissionDenialReason = Literal[
     "channel_protected",
     "agent_pinned_elsewhere",
     "channel_isolated",
+    "external_participant",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

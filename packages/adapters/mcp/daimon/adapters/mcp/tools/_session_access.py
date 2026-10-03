@@ -15,14 +15,14 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, SessionFacts, Subject, Surface, authorize, build_subject
-from daimon.core.channel_admins import load_stored_subject
+from daimon.core.channel_admins import GroupMembers, confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
-    MA_METADATA_KEY_THREAD,
+    is_private_routine_stamp,
 )
-from daimon.core.session_seal import seal_ids
+from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
 
@@ -63,7 +63,9 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
     person's next Discord, Slack or Teams turn in that workspace. Only a
     person's own hub login qualifies: an agent-scoped key, a chat-turn
     credential or a token with no platform user is never an admin here,
-    whatever role its account holds.
+    whatever role its account holds. A stored Slack group or Teams team
+    counts only while a live lookup, run after the session closes, still
+    admits the person.
     """
     if (
         auth.platform_user_id is None
@@ -72,13 +74,25 @@ async def load_hub_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
     ):
         return build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
     async with runtime.session_factory() as db:
-        return await load_stored_subject(
+        stored = await read_stored_admin(
             db,
             tenant_id=auth.tenant_id,
             platform=auth.platform,
             account_id=auth.account_id,
             platform_user_id=auth.platform_user_id,
         )
+    return await confirm_stored_subject(
+        stored, stored_group_members(runtime, auth.platform, auth.external_id)
+    )
+
+
+def stored_group_members(
+    runtime: McpRuntime, platform: str | None, workspace_id: str | None
+) -> GroupMembers | None:
+    """The live re-check for a stored Slack group or Teams team; None checks none."""
+    if runtime.group_lookups is None or platform is None or workspace_id is None:
+        return None
+    return runtime.group_lookups.members(platform, workspace_id)
 
 
 def _hub_request(auth: AuthIdentity) -> tuple[Subject, Surface, Action]:
@@ -92,30 +106,13 @@ def _hub_request(auth: AuthIdentity) -> tuple[Subject, Surface, Action]:
     return access.subject, Surface.HUB, action
 
 
-def _is_private_session(metadata: Mapping[str, str]) -> bool:
-    return (
-        MA_METADATA_KEY_PRIVATE_DM in metadata
-        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_CHANNEL) or ""))
-        or _is_private_conversation(str(metadata.get(MA_METADATA_KEY_THREAD) or ""))
-    )
-
-
 def _session_facts(
     metadata: Mapping[str, str],
     *,
     owned: bool,
     legacy_thread_id: str | None = None,
 ) -> SessionFacts:
-    channel = metadata.get(MA_METADATA_KEY_CHANNEL)
-    return SessionFacts(
-        channel=channel,
-        thread=metadata.get(MA_METADATA_KEY_THREAD) if channel is not None else None,
-        seal_ids=frozenset(seal_ids(metadata)),
-        legacy_thread_id=legacy_thread_id,
-        owned=owned,
-        private=_is_private_session(metadata)
-        or (legacy_thread_id is not None and _is_private_conversation(legacy_thread_id)),
-    )
+    return session_facts(metadata, owned=owned, legacy_thread_id=legacy_thread_id)
 
 
 def _hub_reads_as_anyone(
@@ -189,17 +186,6 @@ async def admin_readable_legacy_sessions(
     }
 
 
-def _is_private_conversation(conversation_id: str) -> bool:
-    """A DM scope, a Slack IM (``D…``) or a Teams personal chat (``a:…``).
-
-    Sessions that ran there are private even without the private-DM stamp
-    (sessions created before every DM turn was stamped).
-    """
-    # Discord ids are numeric and Teams channels start "19:", so a leading
-    # "D" is only ever a Slack IM.
-    return conversation_id.startswith(("dm:", "a:", "D"))
-
-
 def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
     """Private transcripts require the exact verified execution grant, not just an account.
 
@@ -210,13 +196,17 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
     `authorize` read admits another account's channel conversation too.
     Discord private scopes carry
     no execution credential, so all MCP session introspection is denied there.
+    A routine's private stamp is its owner's own: no grant is needed, and no
+    one else's hub read opens it.
     """
     metadata = session.metadata or {}
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
         # Another account's session: only `authorize`'s admin or channel admin
         # hub read opens it (never a private DM, never to continue).
         return _admin_may_read_other(metadata)
-    if MA_METADATA_KEY_PRIVATE_DM not in metadata:
+    private = metadata.get(MA_METADATA_KEY_PRIVATE_DM)
+    if private is None or is_private_routine_stamp(private):
+        # A routine's owner reads its transcript like any of theirs; the seal still applies.
         return True
     return (
         auth.slack_turn_context_id is not None
@@ -242,7 +232,8 @@ def _seal_allows(
     is unknown: while the tenant seals anything it is shown only inside that
     same thread. An unstamped session no thread ran on is a
     headless one and carries no channel content. While a channel is isolated,
-    its sessions are shown only to its own agents (`read.agent`).
+    its sessions are shown only to its own agents (`read.agent`), and a call
+    held to it is shown only its sessions.
     """
     subject, surface, action = hub
     return bool(
@@ -251,9 +242,11 @@ def _seal_allows(
             subject=subject,
             action=action,
             surface=surface,
-            # Only an isolated channel's own agents read its sessions.
+            # Only an isolated channel's own agents read its sessions, and a
+            # call held to one reads only the sessions that ran there.
             agent=read.agent,
             origin_channel_ids=read.origin_channel_ids,
+            origin=read.origin_place,
             session=_session_facts(
                 session.metadata or {}, owned=True, legacy_thread_id=legacy_thread_id
             ),

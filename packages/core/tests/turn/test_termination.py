@@ -33,6 +33,7 @@ from daimon.core.errors import TurnError, TurnKind
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.turn import TerminationReason, run_turn, termination_reason
 from daimon.core.turn.errors import (
+    AdmissionDenialReason,
     AdmissionDenied,
     MissingTurnConfigError,
     SessionAgentMismatch,
@@ -41,6 +42,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import denial_termination_reason
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -275,6 +277,26 @@ _REFUSALS: dict[str, tuple[Callable[[], BaseException | None], TerminationReason
         lambda: AdmissionDenied(reason="cap_exceeded"),
         TerminationReason.ADMISSION_CAP_EXCEEDED,
     ),
+    "channel_budget": (
+        lambda: AdmissionDenied(reason="channel_budget_exceeded"),
+        TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+    ),
+    "protected": (
+        lambda: AdmissionDenied(reason="channel_protected"),
+        TerminationReason.ADMISSION_CHANNEL_PROTECTED,
+    ),
+    "pinned": (
+        lambda: AdmissionDenied(reason="agent_pinned_elsewhere"),
+        TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+    ),
+    "isolated": (
+        lambda: AdmissionDenied(reason="channel_isolated"),
+        TerminationReason.ADMISSION_CHANNEL_ISOLATED,
+    ),
+    "invoker_not_allowed": (
+        lambda: AdmissionDenied(reason="invoker_not_allowed"),
+        TerminationReason.ADMISSION_DENIED,
+    ),
     "missing_config": (
         lambda: MissingTurnConfigError(
             missing=("agent",), agent_name_tier=None, environment_name_tier=None
@@ -319,6 +341,16 @@ def test_a_new_admission_denial_maps_to_the_generic_member() -> None:
     err = AdmissionDenied(reason="balance_depleted")
     err.reason = "access_policy"  # type: ignore[assignment]  # a value this module does not know yet
     assert termination_reason(err) is TerminationReason.ADMISSION_DENIED
+
+
+@pytest.mark.parametrize("denial", get_args(AdmissionDenialReason))
+def test_a_denial_string_maps_like_the_exception_carrying_it(
+    denial: AdmissionDenialReason,
+) -> None:
+    """A gate that decides with `authorize` instead of raising records the same member."""
+    assert denial_termination_reason(denial) is termination_reason(
+        AdmissionDenied(reason=denial)
+    ), f"{denial} must record one member whichever way the refusal is reported"
 
 
 def test_only_completed_and_interrupted_are_not_failures() -> None:
@@ -387,6 +419,9 @@ def test_the_value_set_is_pinned() -> None:
         "admission_balance_depleted",
         "admission_cap_exceeded",
         "admission_channel_budget_exceeded",
+        "admission_channel_protected",
+        "admission_agent_pinned_elsewhere",
+        "admission_channel_isolated",
         "admission_denied",
         "admission_concurrency_shed",
         "missing_config",

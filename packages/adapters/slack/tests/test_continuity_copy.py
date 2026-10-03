@@ -320,7 +320,16 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     # renderer call shape, not a distinct owner name (there is only one
     # agent in this fake).
     assert body["text"] == render_responder_changed_without_handoff(
-        new_responder="uat-agent", owner="uat-agent", channel=f"<#{channel}>"
+        new_responder="uat-agent", owner="uat-agent", channel=f"<#{channel}>", offer_button=True
+    )
+    buttons = [
+        element
+        for block in body["blocks"]
+        if block["type"] == "actions"
+        for element in block["elements"]
+    ]
+    assert [(b["action_id"], b["value"]) for b in buttons] == [("thread_hand_over", _AGENT_ID)], (
+        "the notice carries the Hand over button for the agent the channel answers with"
     )
 
 

@@ -124,20 +124,23 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def list_channels(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context,
+        ctx: Context, origin_context_id: str | None = None
     ) -> list[ChannelRow] | list[SlackChannelRow] | list[TeamsChannelRow]:
         """List channels in this server/workspace that you can view.
 
-        Teams: the channels of every team daimon is in that you belong to,
-        with each channel's team. A team appears once daimon has seen activity
-        in it since being added.
+        From inside an isolated channel (its own agent, or origin_context_id
+        placing this turn there) only that channel is listed. Teams: the
+        channels of every team daimon is in that you belong to, with each
+        channel's team. A team appears once daimon has seen activity in it
+        since being added.
         """
         auth = await _auth(ctx)
+        read_policy = await _read_policy(runtime, auth, origin_context_id)
         if auth.platform == "slack":
-            return await _slack_list_channels_impl(runtime, auth)
+            return await _slack_list_channels_impl(runtime, auth, read_policy)
         if auth.platform == "teams":
-            return await _teams_list_channels_impl(runtime, auth)
-        return await _list_channels_impl(runtime, auth)
+            return await _teams_list_channels_impl(runtime, auth, read_policy)
+        return await _list_channels_impl(runtime, auth, read_policy)
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def read_channel(  # pyright: ignore[reportUnusedFunction]
@@ -386,6 +389,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         display_name: str | None = None,
         avatar_url: str | None = None,
+        origin_context_id: str | None = None,
     ) -> DisplayIdentityRow:
         """Change how daimon appears in this Discord server: its display name,
         its avatar, or both.
@@ -398,14 +402,19 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         per-channel identity, so tell the user when they asked for one
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
-        server admin. Discord-only.
+        server admin. Pass this turn's origin_context_id: a pinned agent, or a
+        turn in an isolated channel, can't change it. Discord-only.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("set_display_identity")
         # MCP clients often send "" for an optional param they mean to omit.
         return await _set_display_identity_impl(
-            runtime, auth, display_name=display_name or None, avatar_url=avatar_url or None
+            runtime,
+            auth,
+            display_name=display_name or None,
+            avatar_url=avatar_url or None,
+            origin_context_id=origin_context_id or None,
         )
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]

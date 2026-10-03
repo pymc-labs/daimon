@@ -7,6 +7,7 @@ name and words the outcome.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from typing import Any, Literal, cast
 
@@ -14,8 +15,9 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.authz import build_subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import set_channel_isolation
+from daimon.core.channel_isolation_setup import ChannelIsolationRefused, set_channel_isolation
 from daimon.core.errors import DaimonError
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -46,11 +48,20 @@ async def change_isolation(
     choice: IsolationChoice,
 ) -> str:
     """Apply one click and return what happened, worded for the admin who clicked."""
+    audit = functools.partial(
+        record_panel_write,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op="isolation",
+    )
     try:
         channel, _, _ = normalize_channel_admin_ids(
             "slack", channel_id=channel_id, role_ids=(), user_ids=()
         )
     except InvalidChannelAdminIds as exc:
+        await audit(outcome="error", reason="invalid_channel")
         return f"{exc}. Nothing changed."
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
@@ -75,8 +86,13 @@ async def change_isolation(
             # Only a workspace admin reaches the isolation buttons.
             subject=build_subject(is_admin=True, platform_user_id=user_id),
         )
-    except DaimonError as exc:  # a refusal, or a copy that can't be made
+    except ChannelIsolationRefused as exc:
+        await audit(outcome="denied", reason=f"isolation:{exc.reason}")
         return f"{exc} Nothing changed."
+    except DaimonError as exc:  # a copy that can't be made
+        await audit(outcome="error", reason="failed")
+        return f"{exc} Nothing changed."
+    await audit(outcome="allowed", reason="completed")
     if not change.isolated:
         return f"<#{channel}> is no longer isolated. {change.end_warning}"
     name = escape_mrkdwn(change.agent_name or "")

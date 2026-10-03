@@ -74,13 +74,13 @@ async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch
             "anthropic_responses",
             "anthropic_ratelimit_remaining_min",
             "db_pool",
-            "session_preparations",
+            "prep_gate",
             "loop_lag_ms",
             "turns_in_flight",
         }
         assert fields["turns_in_flight"] == {"global": 2, "per_tenant_max": 1}
         assert set(fields["db_pool"]) == {"checkedout", "overflow", "size"}
-        assert fields["session_preparations"] == {"waiting": 0, "active": 0}
+        assert fields["prep_gate"] == {"waiting": 0, "active": 0}
         assert set(fields["loop_lag_ms"]) == {"max", "p95"}
         await log_health_once("test", engine, [4.0, 8.0], lambda: (0, None))
         assert logger.info.call_args.kwargs["loop_lag_ms"] == {"max": 8.0, "p95": 8.0}

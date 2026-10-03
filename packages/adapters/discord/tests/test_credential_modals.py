@@ -39,6 +39,7 @@ from daimon.adapters.discord.credential_repo_bind import (
     _SHARED_AGENT_SKILLS_MESSAGE,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import credential_submit
 from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
     build_custom_id,
@@ -2113,7 +2114,7 @@ async def test_env_file_key_appearing_mid_write_rolls_back_the_whole_file(
     never given.
     """
     row = await _seed_env_file_request(db_session_factory)
-    real_put = credential_modals_mod.put_agent_file_if_unchanged
+    real_put = credential_submit.put_agent_file_if_unchanged
     seen: list[str] = []
 
     async def _fails_on_the_second_key(session: AsyncSession, **kwargs: Any) -> Any:
@@ -2122,9 +2123,7 @@ async def test_env_file_key_appearing_mid_write_rolls_back_the_whole_file(
             return await real_put(session, **kwargs)
         return None
 
-    monkeypatch.setattr(
-        credential_modals_mod, "put_agent_file_if_unchanged", _fails_on_the_second_key
-    )
+    monkeypatch.setattr(credential_submit, "put_agent_file_if_unchanged", _fails_on_the_second_key)
     modal = _env_file_modal(
         runtime=_runtime(sessionmaker=db_session_factory),
         row=row,
@@ -2174,7 +2173,7 @@ async def test_env_submission_records_a_private_input_continuation_in_the_same_t
     async def _write_fails(session: AsyncSession, **kwargs: Any) -> Any:
         raise RuntimeError("the write blew up")
 
-    monkeypatch.setattr(credential_modals_mod, "put_agent_file_if_unchanged", _write_fails)
+    monkeypatch.setattr(credential_submit, "put_agent_file_if_unchanged", _write_fails)
     doomed = EnvCredentialModal(runtime=runtime, request_row=row)
     doomed.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
     await doomed.on_submit(_card_interaction())
@@ -2943,10 +2942,9 @@ async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The alias read before the gate is repeated inside the write transaction."""
-    import daimon.adapters.discord.credential_modals as modals_mod
 
     row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
-    real = modals_mod.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -2966,7 +2964,7 @@ async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
         )
         return await real(session, **kw)
 
-    monkeypatch.setattr(modals_mod, "list_turn_key_names", first_read_misses_the_alias)
+    monkeypatch.setattr(credential_submit, "list_turn_key_names", first_read_misses_the_alias)
     modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
@@ -3084,10 +3082,9 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daimon.adapters.discord.credential_modals as modals_mod
 
     row = await _aws_pair_and_secret_request(db_session_factory)
-    real = modals_mod.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -3104,7 +3101,7 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
             )
         return await real(session, **kw)
 
-    monkeypatch.setattr(modals_mod, "list_turn_key_names", family_changes_after_the_gate)
+    monkeypatch.setattr(credential_submit, "list_turn_key_names", family_changes_after_the_gate)
     modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
     modal.value_input._value = "new-secret"  # pyright: ignore[reportPrivateUsage]
 

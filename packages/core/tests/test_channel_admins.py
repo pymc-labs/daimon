@@ -68,6 +68,9 @@ def test_normalize_ids_checks_platform_formats() -> None:
     assert normalize_channel_admin_ids(
         "slack", channel_id="C0123", role_ids=[], user_ids=["U0456"]
     ) == ("C0123", (), ("U0456",)), "a Slack channel and user"
+    assert normalize_channel_admin_ids(
+        "slack", channel_id="C0123", role_ids=["S0LEADS"], user_ids=[]
+    ) == ("C0123", ("S0LEADS",), ()), "a Slack user group"
     entra = "CDE058C4-3357-4EF3-8842-65C5B73974A1"
     assert normalize_channel_admin_ids(
         "teams", channel_id="19:abc_D-1@thread.tacv2", role_ids=[], user_ids=[entra]
@@ -79,7 +82,8 @@ def test_normalize_ids_checks_platform_formats() -> None:
         ("teams", {"channel_id": "19:a@thread.tacv2", "role_ids": [], "user_ids": ["29:1x"]}),
         ("discord", {"channel_id": "general", "role_ids": [], "user_ids": []}),
         ("discord", {"channel_id": SNOWFLAKE, "role_ids": ["<@&1>"], "user_ids": []}),
-        ("slack", {"channel_id": "C0123", "role_ids": ["S1"], "user_ids": []}),
+        ("slack", {"channel_id": "C0123", "role_ids": ["<!subteam^S1>"], "user_ids": []}),
+        ("slack", {"channel_id": "C0123", "role_ids": ["U0456"], "user_ids": []}),
         ("slack", {"channel_id": "C0123", "role_ids": [], "user_ids": ["C0123"]}),
         ("slack", {"channel_id": "D0123", "role_ids": [], "user_ids": ["U0456"]}),
         ("cli", {"channel_id": "c", "role_ids": [], "user_ids": []}),

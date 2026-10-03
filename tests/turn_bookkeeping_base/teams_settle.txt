@@ -1,0 +1,11 @@
+from __future__ import annotations
+
+async def _settle(self, intent_id: uuid.UUID | None, message_id: str | None, closed: bool, markers: set[uuid.UUID]) -> None:
+    try:
+        async with self.runtime.sessionmaker.begin() as session:
+            if closed and intent_id is not None:
+                await retire_turn_card_intent(session, id=intent_id, expected_message_id=message_id)
+            for marker_id in markers:
+                await clear_active_turn(session, id=marker_id)
+    except SQLAlchemyError:
+        log.exception('teams.turn.settle_failed', intent_id=str(intent_id))

@@ -7,6 +7,14 @@ candidate, `unprompted`), or a personal-chat message from the configured Entra
 tenant, and reduces it to `TeamsInbound`. `live_tenant_id`
 then maps it to the organisation's live daimon tenant; a 1:1 chat names its
 organisation, so it needs no DM workspace choice. Group chats are refused for now.
+
+A channel must be the configured tenant's (`conversation.tenantId`, the host
+tenant), but its sender may be from another one: a shared channel's external
+participant (B2B direct connect), who stays in their home tenant. Any foreign
+tenant the activity names for its sender (`foreign_tenant`) marks them
+`is_external`; `externals.ExternalParticipants` asks the member lists when
+the activity names none, and finds guests. A 1:1 chat naming a foreign tenant
+is refused, as before.
 """
 
 from __future__ import annotations
@@ -20,8 +28,9 @@ from typing import Literal
 from daimon.adapters.teams.attachments import InboundFile, parse_attachments
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
-from microsoft_teams.api import MessageActivity
+from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
+from microsoft_teams.api.models.channel_data import ChannelData
 from microsoft_teams.api.models.entity.quoted_reply_entity import QuotedReplyData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -61,7 +70,9 @@ class TeamsInbound:
     enter organic thread participation, never the mention path.
     `composed_ids` are the earlier queued messages folded into this one.
     `timestamp` is when it was sent (ISO 8601); the channel and team names
-    come from the activity, General's filled in.
+    come from the activity, General's filled in. `is_external` marks a sender
+    answered as from another organisation, `is_external_known` that it rests on
+    positive evidence (`externals.Membership`), `home_tenant_id` their tenant.
     """
 
     kind: Literal["dm", "channel"]
@@ -84,6 +95,9 @@ class TeamsInbound:
     channel_name: str | None = None
     channel_type: str | None = None
     team_name: str | None = None
+    is_external: bool = False
+    is_external_known: bool = False
+    home_tenant_id: str | None = None
 
     @property
     def thread_id(self) -> str:
@@ -100,6 +114,21 @@ class Refusal:
     """Tell the sender why no turn runs. `None` text means drop silently."""
 
     text: str | None
+
+
+def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: str) -> str | None:
+    """A tenant id the activity names for its sender that is not `ours`, or None.
+
+    Undocumented for a cross-tenant sender, so each place one may appear is
+    read: `channelData.tenant.id`, `from.tenantId`, `from.properties.tenantId`.
+    A value that is not a UUID counts as foreign: it is not ours.
+    """
+    tenant = channel_data.tenant if channel_data is not None else None
+    properties = sender.properties or {}
+    for candidate in (tenant.id if tenant else None, sender.tenant_id, properties.get("tenantId")):
+        if isinstance(candidate, str) and candidate.strip() and canonical_uuid(candidate) != ours:
+            return canonical_uuid(candidate) or candidate.strip()
+    return None
 
 
 def _thread_id(conversation_id: str, activity_id: str) -> str:
@@ -172,10 +201,16 @@ def parse_inbound(
     if channel_data is not None and channel_data.tenant is not None:
         channel_tenant = channel_data.tenant.id
     user_id = canonical_uuid(activity.from_.aad_object_id)
+    home = foreign_tenant(activity.from_, channel_data, ours=tenant) if tenant else None
+    # The conversation is always the host's. A channel may hold another
+    # organisation's people; a 1:1 chat holds only ours, as before.
+    sender_verified = kind == "channel" or (
+        canonical_uuid(channel_tenant) == tenant and home is None
+    )
     verified = (
         tenant is not None
         and canonical_uuid(conversation.tenant_id) == tenant
-        and canonical_uuid(channel_tenant) == tenant
+        and sender_verified
         and user_id is not None
         and activity.channel_id == "msteams"
         and bool(conversation.id.strip())
@@ -230,6 +265,9 @@ def parse_inbound(
         channel_name=channel_name,
         channel_type=channel.type if channel is not None else None,
         team_name=team.name if team is not None else None,
+        is_external=home is not None,
+        is_external_known=home is not None,
+        home_tenant_id=home,
     )
 
 

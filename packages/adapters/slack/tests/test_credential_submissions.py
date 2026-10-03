@@ -39,6 +39,7 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core import credential_submit
 from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
     build_skill_repo_target,
@@ -2258,7 +2259,6 @@ async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The alias read before the gate is repeated inside the write transaction."""
-    import daimon.adapters.slack.credential_submissions as submissions_mod
 
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
@@ -2274,7 +2274,7 @@ async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_
     )
     await db_session.commit()
 
-    real = submissions_mod.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -2292,7 +2292,7 @@ async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_
         )
         return await real(session, **kw)
 
-    monkeypatch.setattr(submissions_mod, "list_turn_key_names", first_read_misses_the_alias)
+    monkeypatch.setattr(credential_submit, "list_turn_key_names", first_read_misses_the_alias)
 
     await _run_env(
         _build_runtime(
@@ -2385,7 +2385,6 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daimon.adapters.slack.credential_submissions as submissions_mod
 
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(
@@ -2397,7 +2396,7 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     token = await _aws_pair_and_secret_token(db_session, tenant_id, live_agent)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
     _override_users_info_admin(fake_slack_web_client.mock)
-    real = submissions_mod.list_turn_key_names
+    real = credential_submit.list_turn_key_names
     calls = 0
 
     async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
@@ -2414,7 +2413,7 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
             )
         return await real(session, **kw)
 
-    monkeypatch.setattr(submissions_mod, "list_turn_key_names", family_changes_after_the_gate)
+    monkeypatch.setattr(credential_submit, "list_turn_key_names", family_changes_after_the_gate)
 
     await _run_env(
         _build_runtime(

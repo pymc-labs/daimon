@@ -1,0 +1,91 @@
+from __future__ import annotations
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any, cast
+import anthropic as anthropic_pkg
+import structlog
+from anthropic import AsyncAnthropic
+from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
+from daimon.core.continuity.continuation import ContinuationRequest, ResponderChanged, decide_continuation
+from daimon.core.continuity.wakes import WAKE_RETRY_DELAY, busy_retry_at, claim_wake, list_dispatchable_wakes, release_wake, settle_wake, start_wake
+from daimon.core.errors import DaimonError
+from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.protection import protection_state
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+log = structlog.get_logger(__name__)
+__all__ = ['RunFollowUp', 'dispatch_pending_continuations']
+RunFollowUp = Callable[[TaskContinuationRow, str], Awaitable[None]]
+
+async def _latest_human_message_at(web_client: AsyncWebClient, *, channel: str, thread_ts: str, after: datetime) -> datetime | None:
+    response = await web_client.conversations_replies(channel=channel, ts=thread_ts, oldest=f'{after.timestamp():.6f}', inclusive=False, limit=THREAD_PAGE_LIMIT)
+    messages = cast(list[dict[str, Any]], response['messages'])
+    latest: datetime | None = None
+    for msg in messages:
+        if 'bot_id' in msg or not msg.get('user'):
+            continue
+        ts_value = cast(str | None, msg.get('ts'))
+        if not ts_value:
+            continue
+        candidate = datetime.fromtimestamp(float(ts_value), tz=UTC)
+        if latest is None or candidate > latest:
+            latest = candidate
+    return latest
+
+async def dispatch_pending_continuations(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAnthropic, web_client: AsyncWebClient, *, tenant_id: uuid.UUID, channel: str, thread_id: str, active_turn: bool, run_follow_up: RunFollowUp, now: Callable[[], datetime]=lambda : datetime.now(UTC)) -> None:
+
+    async def _post(text: str, *, reason: str) -> None:
+        state = await protection_state(sessionmaker, tenant_id=tenant_id, channel_id=channel, thread_id=thread_id)
+        if not state.may_post:
+            log.info('slack.continuation.notice_withheld', thread_id=thread_id, reason=reason, state=state.value)
+            return
+        await web_client.chat_postMessage(channel=channel, thread_ts=thread_id, text=text)
+    rows = await list_dispatchable_wakes(sessionmaker, tenant_id=tenant_id, platform='slack', thread_id=thread_id, now=now())
+    for row in rows:
+        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
+        if claim is None:
+            continue
+        request = ContinuationRequest(tenant_id=row.tenant_id, platform='slack', parent_channel_id=row.parent_channel_id, thread_id=row.thread_id, requester_account_id=row.requester_account_id, requester_external_user_id=row.requester_external_user_id, target_ma_agent_id=row.target_ma_agent_id, target_name=row.target_name, requested_work=row.requested_work, reason=row.reason, idempotency_key=row.idempotency_key)
+        latest_user_message_at = await _latest_human_message_at(web_client, channel=channel, thread_ts=thread_id, after=row.created_at)
+        decision = await decide_continuation(sessionmaker, anthropic, request=request, now=now(), latest_user_message_at=latest_user_message_at, active_turn=active_turn)
+        if decision.action == 'skip_turn_running' and row.available_at is not None:
+            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+            continue
+        if decision.action == 'dispatch':
+            seed = decision.seed_user_message
+            if seed is None:
+                log.error('slack.continuation.dispatch_missing_seed', row_id=str(row.id))
+                await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason='missing_seed')
+                continue
+            if not await start_wake(sessionmaker, claim, now=now()):
+                continue
+            try:
+                await run_follow_up(row, seed)
+            except SessionPreparationFailed:
+                log.warning('slack.continuation.dispatch_preparation_failed', row_id=str(row.id))
+                await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason='blocked_preparation_failed')
+                continue
+            except ResponderChanged as exc:
+                await _post(exc.message, reason='skip_target_changed')
+                await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason='skip_target_changed')
+                continue
+            except AdmissionDenied as exc:
+                log.info('slack.continuation.dispatch_admission_denied', row_id=str(row.id))
+                await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason=f'admission_denied:{exc.reason}')
+                continue
+            except SessionBusyError as busy:
+                log.warning('slack.continuation.dispatch_turn_running', row_id=str(row.id))
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after))
+                continue
+            except (DaimonError, anthropic_pkg.APIError, SlackApiError) as exc:
+                log.warning('slack.continuation.dispatch_failed', row_id=str(row.id), error=str(exc))
+                await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason='dispatch_failed')
+                continue
+            await settle_wake(sessionmaker, claim, status='delivered', now=now())
+            continue
+        if decision.message is not None:
+            await _post(decision.message, reason=decision.action)
+        await settle_wake(sessionmaker, claim, status='skipped', now=now(), skip_reason=decision.action)

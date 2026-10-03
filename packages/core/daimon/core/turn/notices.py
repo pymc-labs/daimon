@@ -9,6 +9,9 @@ greps the logs for. Adapters draw the fields in their own markup;
 What survives is stated per reason rather than guessed from the state: the
 reason alone decides whether the session was kept (most failures) or retired
 (the ceiling marks the mapping dead), and that is the fact the person acts on.
+
+`admission_refusal_text` is the one wording of a turn refused at admission, so
+every platform says the same thing about the same reason in its own nouns.
 """
 
 from __future__ import annotations
@@ -19,10 +22,17 @@ from datetime import UTC, datetime
 
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 
-__all__ = ["TerminationNotice", "fit_notice", "render_termination_notice"]
+__all__ = [
+    "RefusalNouns",
+    "TerminationNotice",
+    "admission_refusal_text",
+    "fit_notice",
+    "render_termination_notice",
+]
 
 # Every name in a notice comes from outside (tool and MCP server names), so
 # each is clipped and only the first few are listed: the notice has to fit a
@@ -138,15 +148,35 @@ _COPY: dict[TerminationReason, _Copy] = {
     ),
     TerminationReason.ADMISSION_CAP_EXCEEDED: _Copy(
         "Usage cap reached",
-        "This workspace reached its monthly usage cap, so the turn did not run.",
+        "You've reached your monthly usage cap, so the turn did not run.",
         _KEPT,
-        "An admin can raise the cap.",
+        # The cap is per person and set by the operator, not by an admin command.
+        "An operator can raise it.",
     ),
     TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED: _Copy(
         "Channel budget reached",
         "This channel has used its spending budget, so the turn did not run.",
         _KEPT,
         "An admin can raise or clear the channel's budget.",
+    ),
+    TerminationReason.ADMISSION_CHANNEL_PROTECTED: _Copy(
+        "Channel protected",
+        "This channel is protected, so the agent can't answer in it.",
+        _KEPT,
+        "Ask somewhere else, or ask an admin about the channel's protection.",
+    ),
+    TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE: _Copy(
+        "Agent pinned elsewhere",
+        "This agent only runs in the channels an operator pinned it to, so the turn did not run.",
+        _KEPT,
+        "Ask it in one of those channels.",
+    ),
+    TerminationReason.ADMISSION_CHANNEL_ISOLATED: _Copy(
+        "Channel isolated",
+        "This channel is isolated and the agent that would answer isn't one of its own, "
+        "so the turn did not run.",
+        _KEPT,
+        "An admin must set the channel's agent.",
     ),
     TerminationReason.ADMISSION_DENIED: _Copy(
         "Not allowed",
@@ -185,6 +215,82 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Start a new conversation to talk to this agent.",
     ),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class RefusalNouns:
+    """How a platform names what an admission refusal mentions."""
+
+    scope: str
+    """The tenant's name there: "server", "workspace", "organisation"."""
+    admin: str
+    """Who administers it, with its article: "a server admin"."""
+    billing: str
+    """Where an admin tops up, in the platform's markup: "`/billing`"."""
+
+
+# `{admin}` is capitalised where it starts a sentence. A cap is per person and
+# set by the operator, not by an admin command.
+_REFUSALS: dict[AdmissionDenialReason, str] = {
+    "balance_depleted": (
+        "This {scope}'s {bot}credit is depleted. {Admin} can top up with {billing}."
+    ),
+    "cap_exceeded": "You've reached your monthly usage cap. An operator can raise it.",
+    "channel_budget_exceeded": (
+        "This channel has used its spending budget. {Admin} can raise or clear it."
+    ),
+    "invoker_not_allowed": (
+        "You aren't on this {scope}'s list of people who can start a turn. {Admin} can add you."
+    ),
+    "agent_pinned_elsewhere": (
+        "This agent only runs in the channels an operator pinned it to, so it can't answer here."
+    ),
+    "channel_isolated": (
+        "This channel is isolated and the agent that would answer isn't one of its own. "
+        "{Admin} must set the channel's agent."
+    ),
+    "channel_protected": "This channel is protected, so the agent can't answer in it.",
+    # Only Teams marks people from another organisation (shared channels).
+    "external_participant": (
+        "People from another organisation can use this agent only in its isolated channel."
+    ),
+}
+# The place-bound refusals, worded for a conversation moved to or held in a DM.
+_DM_REFUSALS: dict[AdmissionDenialReason, str] = {
+    "agent_pinned_elsewhere": (
+        "This channel's agent only runs in the channels an operator pinned it to, "
+        "so it can't continue in a DM."
+    ),
+    "channel_isolated": (
+        "This channel is isolated, so its conversations stay in it and can't move to a DM."
+    ),
+    "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "external_participant": "People from another organisation can't move a conversation to a DM.",
+}
+
+
+def admission_refusal_text(
+    reason: AdmissionDenialReason,
+    nouns: RefusalNouns,
+    *,
+    bot_name: str | None = None,
+    in_dm: bool = False,
+) -> str:
+    """What a person is told when admission refuses their turn for `reason`.
+
+    `bot_name`, already escaped for the surface, names whose credit ran out.
+    `in_dm` words the place-bound refusals for a DM. Whether to post at all
+    (nothing goes into a protected channel) stays the caller's call.
+    """
+    template = (_DM_REFUSALS.get(reason) if in_dm else None) or _REFUSALS[reason]
+    return template.format(
+        scope=nouns.scope,
+        admin=nouns.admin,
+        Admin=nouns.admin[:1].upper() + nouns.admin[1:],
+        billing=nouns.billing,
+        bot=f"{bot_name} " if bot_name else "",
+    )
+
 
 _FALLBACK = _Copy(
     "Something went wrong",

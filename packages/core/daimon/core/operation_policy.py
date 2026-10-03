@@ -23,9 +23,10 @@ There are three rule families, each a fixed short-circuit order:
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`. Adding or removing one of an agent's skills
   changes what it does, so it follows the same order: a managed agent is
-  refused, and anyone may change an agent nobody else uses. Skill files
-  reach every place keys do, so both kinds read sharing as wide as a key
-  change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
+  refused, and anyone may change an agent nobody else uses. A prompt or
+  skill change reaches every place keys do (an admin's routine runs the
+  edited agent), so every kind in this family and the next reads sharing as
+  wide as a key change (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
 
 - **attachment** (`key_replace`, `key_remove`, `mcp_replace`, `mcp_remove`,
   `repo_bind`, `skill_repo_connect`): attachments never enter the agent
@@ -53,7 +54,9 @@ There are three rule families, each a fixed short-circuit order:
 Where either of the first two families would answer `needs_admin`, a channel
 admin whose channels hold every place the agent answers or runs
 (`is_local_to_caller_channels`, see `daimon.core.agent_reach`) is allowed
-instead. The managed check still refuses them: only a server admin passes it.
+instead, when the agent is theirs (`is_held_by_caller`, see
+`daimon.core.authz.channel_admin_holds`). The managed check still refuses
+them: only a server admin passes it.
 """
 
 from __future__ import annotations
@@ -108,6 +111,9 @@ class TargetFacts(BaseModel):
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
     is_local_to_caller_channels: bool = False
+    # And it is theirs as a channel admin (`daimon.core.authz.channel_admin_holds`):
+    # created for, pinned inside or set as a default by a server admin of their channels.
+    is_held_by_caller: bool = False
     # Why a channel admin's agent is not local: an unattended run owed to someone
     # with wider rights. Explains a refusal; decisions never read it.
     runs_unattended_beyond_caller: bool = False
@@ -151,6 +157,7 @@ def _decide_operation(
             managed=target.is_daimon_managed,
             reachable=target.is_reachable_in_tenant,
             local_to_caller=target.is_local_to_caller_channels,
+            held_by_caller=target.is_held_by_caller,
         ),
     )
     if decision:

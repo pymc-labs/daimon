@@ -31,6 +31,7 @@ from daimon.adapters.scheduler.main import (
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, ModelRates
@@ -527,11 +528,78 @@ async def test_fire_gates_on_and_attributes_to_the_routine_channel(
         return
     assert fetched.last_error is None
     assert calls[0]["budget_channel_id"] == "chan-9"
+    assert calls[0]["origin_place"] == RoutineOrigin(
+        "chan-9", None, frozenset(), f"routine:{row.id}"
+    ), "the routine session is stamped with the channel it runs in"
     factory = calls[0]["usage_record_factory"]
     assert callable(factory)
     partial = factory("sess_abc", "claude-opus-4-7")
     assert isinstance(partial, functools.partial)
     assert partial.keywords["channel_id"] == "chan-9"
+
+
+async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routine posting into a sealed thread opens its session stamped with the
+    thread, its parent and the seal, so its transcript stays inside the channel."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(sealed_channel_ids=("room",))
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u3",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind="thread",
+        destination_id="555000555",
+        channel_id="room",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(row)
+    await fake_client.close()
+
+    assert len(calls) == 1, "the routine runs"
+    assert calls[0]["origin_place"] == RoutineOrigin(
+        "room", "555000555", frozenset({"room"}), f"routine:{row.id}"
+    ), "the session carries the destination and the seal over it"
 
 
 async def test_fire_checks_the_agent_pin_before_the_channel_budget(

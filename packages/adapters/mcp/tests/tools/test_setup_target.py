@@ -210,10 +210,13 @@ async def test_identity_pin_refuses_deleted_recreated_namesake(
     )
 
 
+@pytest.mark.parametrize("credential", ["agent_id", "chat_agent_id"])
 async def test_origin_refuses_agent_scoped_token_for_another_responder(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    credential: str,
 ) -> None:
+    """An agent key or a chat turn's credential claims only its own responder's origin."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
@@ -234,7 +237,7 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
             tenant_id=tenant.id,
             role=Role.USER,
             platform="discord",
-            agent_id=uuid.uuid4(),
+            **{credential: uuid.uuid4()},
         )
         with pytest.raises(ToolError, match="another responder"):
             await require_turn_origin(runtime, auth, str(origin.id))

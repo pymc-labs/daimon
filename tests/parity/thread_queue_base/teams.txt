@@ -1,0 +1,120 @@
+def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
+    """One turn per author, replying where that author's last message came from."""
+    by_author: dict[str, list[TeamsInbound]] = {}
+    for item in queued:
+        by_author.setdefault(item.user_id, []).append(item)
+    return [
+        dataclasses.replace(
+            items[-1],
+            text="\n\n".join(item.text for item in items),
+            files=tuple(file for item in items for file in item.files),
+            composed_ids=tuple(item.activity_id for item in items[:-1]),
+        )
+        for items in by_author.values()
+    ]
+
+class Base:
+    async def _orchestrate(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        key = inbound.conversation_id
+        # Read first: no await may split the queue check from the claim below.
+        cap = await self._turn_cap(tenant_id)
+        if key in self._processing:
+            self._last_message_at[key] = datetime.now(UTC)
+            self._pending.setdefault(key, []).append(inbound)
+            self._supersede_batch(inbound)
+            return
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+            )
+            log.info(
+                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+            )
+            await self._say(inbound, _SHED)
+            return
+        self._last_message_at[key] = datetime.now(UTC)
+        self._supersede_batch(inbound)
+        async with self._holding(key, tenant_id):
+            await self._run_turns(key, tenant_id, [inbound])
+
+
+    @contextlib.asynccontextmanager
+    async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:
+        """Hold a chat and a tenant turn slot; on exit, answer what could not run."""
+        self._inflight[tenant_id] = self._inflight.get(tenant_id, 0) + 1
+        self._processing.add(key)
+        try:
+            yield
+        finally:
+            self._release(key)
+            if (remaining := self._inflight.pop(tenant_id, 1) - 1) > 0:
+                self._inflight[tenant_id] = remaining
+            for item in self._pending.pop(key, []):
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._say(item, _FAILED)
+
+
+    async def _run_turns(self, key: str, tenant_id: uuid.UUID, turns: list[TeamsInbound]) -> None:
+        """Run `turns`, then what queued behind them, in order, until the queue is empty."""
+        while turns:
+            for queued in turns:
+                # Routed now, not on arrival: the setup conversation may have ended since.
+                turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
+                await self._run_turn_guarded(turn, tenant_id)
+                await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
+            turns = _compose_queued(self._pending.pop(key, []))
+
+
+    def _release(self, key: str) -> None:
+        """Free a conversation; re-run private-input dispatches that found it busy."""
+        self._processing.discard(key)
+        self._last_message_at.pop(key, None)
+        for thread_id in [t for t in self._deferred_dispatch if conversation_of(t) == key]:
+            tenant_id, service_url, capped = self._deferred_dispatch.pop(thread_id)
+            if not self.draining:
+                resume = self.dispatch_after_input(tenant_id, thread_id, service_url, capped=capped)
+                self.spawn(resume, name="teams.resume")
+
+
+    async def dispatch_after_input(
+        self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None, *, capped: bool = False
+    ) -> None:
+        """Run what a saved private input or a due wake queued here, from outside a turn.
+
+        A busy conversation is left to its turn's tail dispatch, and re-run on
+        release in case that tail already passed. Messages queued meanwhile follow.
+        A `capped` dispatch (a wake) waits while the tenant is at its turn cap:
+        its rows stay due, so the next poll retries them.
+        """
+        if self.draining:
+            return
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)
+        conversation_id = conversation_of(thread_id)
+        # Only a wake is capped; read before the busy check, as `_orchestrate` does.
+        cap = await self._turn_cap(tenant_id) if capped else 0
+        if conversation_id in self._processing:
+            # A wake's None must not drop a saved input's regional service URL, and
+            # the cap never holds back a saved input's resume.
+            _, previous_url, previous_capped = self._deferred_dispatch.get(
+                thread_id, (tenant_id, None, True)
+            )
+            self._deferred_dispatch[thread_id] = (
+                tenant_id,
+                service_url or previous_url,
+                capped and previous_capped,
+            )
+            return
+        if capped and not should_admit_turn(
+            current_in_flight=self._inflight.get(tenant_id, 0), cap=cap
+        ):
+            return
+        async with self._holding(conversation_id, tenant_id):
+            await self._dispatch_continuations(thread_id, tenant_id, service_url)
+            queued = _compose_queued(self._pending.pop(conversation_id, []))
+            await self._run_turns(conversation_id, tenant_id, queued)

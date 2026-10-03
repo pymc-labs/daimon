@@ -49,8 +49,10 @@ from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
     decode_panel_metadata,
 )
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_lifecycle import create_blank_agent
+from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -260,6 +262,7 @@ async def run_new_agent_submission(
     On success the view the form became shows Details for the new agent —
     which says, honestly, that it does not answer anywhere yet — and the root
     Agents view behind it is refreshed so the new row is there on the way back.
+    An agent a channel admin creates from their channel is that channel's to set up.
     """
     try:
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -298,6 +301,18 @@ async def run_new_agent_submission(
         log.info("slack.agent_setup.new_agent.created", team_id=team_id, agent_name=name)
 
         is_admin = await resolve_is_admin(web_client, user_id=user_id)
+        caller = await channel_admin_caller(
+            runtime, web_client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+        )
+        async with runtime.sessionmaker.begin() as session:
+            await record_created_for_channel(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                ma_agent_id=outcome.anthropic_id,
+                channel_id=channel_id or None,
+                caller=caller,
+            )
         async with runtime.sessionmaker() as session:
             roster = await load_panel_roster(
                 session,

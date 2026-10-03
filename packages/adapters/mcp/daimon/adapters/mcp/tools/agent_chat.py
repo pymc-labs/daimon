@@ -84,6 +84,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.access_policy import is_own_isolated_agent, isolation_owner
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
@@ -92,6 +93,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_MET
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -264,11 +266,34 @@ async def _bound_seal(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]
     Read right before the session is created or continued, as `reauthorize`
     reads a seal added since admission for a platform turn.
     """
+    return (await _bound_posture(runtime, auth, agent_names=()))[0]
+
+
+async def _bound_posture(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_names: tuple[str | None, ...]
+) -> tuple[frozenset[str], bool]:
+    """A channel-bound key's seal now, and whether its session's memory is read-only.
+
+    Memory is read-only under the seal unless the agent is the isolated
+    channel's own, the same rule chat admission applies (`is_own_isolated_agent`).
+    """
     channel_id = token_channel_id(auth)
     if channel_id is None:
-        return frozenset()
-    sealed = (await load_channel_policy(runtime, auth)).sealed_channel_ids
-    return frozenset({channel_id}) if channel_id in sealed else frozenset()
+        return frozenset(), False
+    policy = await load_channel_policy(runtime, auth)
+    if channel_id not in policy.sealed_channel_ids:
+        return frozenset(), False
+    own = is_own_isolated_agent(policy, agent_names, channel_id=channel_id)
+    return frozenset({channel_id}), not own
+
+
+async def _budget_channel(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_names: tuple[str | None, ...]
+) -> str | None:
+    """The channel a turn is charged to: the isolated channel whose own agent this
+    is, wherever an exempt caller runs it, else a key's bound channel."""
+    policy = await load_channel_policy(runtime, auth)
+    return isolation_owner(policy, agent_names) or token_channel_id(auth)
 
 
 async def _verify_agent_owns_session(
@@ -422,9 +447,12 @@ async def _start_turn_impl(
     it: the operator absorbs that usage. The stamp is the creator's posture
     and covers the whole session, including later ``continue_turn`` calls.
 
-    An agent key minted in a channel (``token_channel_id``) opens the session
-    as a turn in that channel would: stamped with the channel as its origin
-    and its budget channel, sealed (and memory read-only) when the channel is.
+    An isolated channel's own agent is charged to that channel
+    (``_budget_channel``), from the hub too. An agent key minted in a channel
+    (``token_channel_id``) opens the session as a turn in that channel would:
+    stamped with the channel as its origin and otherwise its budget channel,
+    sealed when the channel is, with read-only memory unless the agent is that
+    isolated channel's own.
 
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
 
@@ -451,6 +479,7 @@ async def _start_turn_impl(
 
     is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
     channel_id = token_channel_id(auth)
+    budget_channel_id = await _budget_channel(runtime, auth, agent_names=agent_pin_names(ma_agent))
 
     if bundle is not None:
         if not is_isolated:
@@ -479,7 +508,9 @@ async def _start_turn_impl(
         ]
         if recheck is not None:
             await recheck()
-        seal = await _bound_seal(runtime, auth)
+        seal, memory_read_only = await _bound_posture(
+            runtime, auth, agent_names=agent_pin_names(ma_agent)
+        )
         session = await create_isolated_session(
             runtime.client,
             agent=ma_agent,
@@ -488,8 +519,8 @@ async def _start_turn_impl(
             tenant_id=auth.tenant_id,
             resources=resources,
             billing_exempt=billing_exempt,
-            memory_read_only=bool(seal),
-            budget_channel_id=channel_id,
+            memory_read_only=memory_read_only,
+            budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
         )
@@ -508,7 +539,9 @@ async def _start_turn_impl(
 
         if recheck is not None:
             await recheck()
-        seal = await _bound_seal(runtime, auth)
+        seal, memory_read_only = await _bound_posture(
+            runtime, auth, agent_names=agent_pin_names(ma_agent)
+        )
 
         async def before_create() -> None:
             if recheck is not None:
@@ -532,8 +565,8 @@ async def _start_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
-            memory_read_only=bool(seal),
-            budget_channel_id=channel_id,
+            memory_read_only=memory_read_only,
+            budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
             # Vault, repo-token and env work run first: decide again right
@@ -598,8 +631,6 @@ async def _continue_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
-    if recheck is not None:
-        await recheck()
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
     if auth.platform_user_id is not None and await is_over_channel_budget(
@@ -624,15 +655,23 @@ async def _continue_turn_impl(
         )
         raise ToolError(_CHANNEL_BUDGET_SPENT_MSG)
     turn_started_at = now()
-    sent = await runtime.client.beta.sessions.events.send(
-        handle,
-        events=[
-            {
-                "type": "user.message",
-                "content": [{"type": "text", "text": message}],
-            }
-        ],
-    )
+    async with session_mutation_fence(runtime.session_factory, handle):
+        # The fence may have waited behind a transfer or another send.
+        if recheck is not None:
+            await recheck()
+        if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
+            raise ToolError(_SEALED_SINCE_START_MSG)
+        if session.archived_at is not None:
+            raise ToolError("This session is archived.")
+        sent = await runtime.client.beta.sessions.events.send(
+            handle,
+            events=[
+                {
+                    "type": "user.message",
+                    "content": [{"type": "text", "text": message}],
+                }
+            ],
+        )
     turn_event_id = _turn_boundary(sent)
     return {
         "handle": handle,
@@ -688,7 +727,8 @@ async def _archive_my_session_impl(
     cross-agent handles (WR-03).
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.archive(handle)
+    async with session_mutation_fence(runtime.session_factory, handle):
+        await runtime.client.beta.sessions.archive(handle)
     return {"handle": handle, "archived": "true"}
 
 
@@ -718,7 +758,8 @@ async def _cancel_turn_impl(
     cross-agent handles (WR-03) before any send.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
+    async with session_mutation_fence(runtime.session_factory, handle):
+        await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
     session = await runtime.client.beta.sessions.retrieve(handle)
     return {"handle": handle, "status": session.status}
 

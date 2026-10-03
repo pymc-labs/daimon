@@ -130,6 +130,7 @@ def _auth_identity(
     platform_user_id: str | None = "42",
     tenant_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    is_external: bool = False,
 ) -> AuthIdentity:
     return AuthIdentity(
         account_id=uuid.uuid4(),
@@ -139,6 +140,7 @@ def _auth_identity(
         external_id=external_id,
         platform_user_id=platform_user_id,
         is_admin=is_admin,
+        is_external=is_external,
     )
 
 
@@ -149,6 +151,7 @@ def _ma_agent(
     tenant_id: uuid.UUID,
     managed: bool = False,
     account_id: uuid.UUID | None = None,
+    mcp_servers: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     metadata = {
         MA_METADATA_KEY_TENANT: str(tenant_id),
@@ -163,6 +166,7 @@ def _ma_agent(
         name=name,
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata=metadata,
+        mcp_servers=mcp_servers,
     )
     return agent.model_dump(mode="json")
 
@@ -3007,3 +3011,63 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
     body = posts[0].kwargs["json"]
     assert body["channel"] == "D0ADMIN1"
     assert "thread_ts" not in body or body["thread_ts"] is None, "a dm: scope is not a Slack ts"
+
+
+@pytest.mark.parametrize("attached", [True, False])
+async def test_an_external_caller_may_sign_in_only_to_a_server_the_agent_has(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    attached: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    server = {"type": "url", "name": "notion", "url": "https://mcp.notion.com/mcp"}
+    agent = _ma_agent(
+        agent_id="ag_mcp",
+        name="daimon",
+        tenant_id=tenant.id,
+        mcp_servers=(server,) if attached else (),
+    )
+    runtime = _runtime(committing_sessionmaker, client=_ma_client_with_agents([agent]))
+    auth = _auth_identity(tenant_id=tenant.id, is_external=True)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform="discord",
+            parent_channel_id="1111",
+            thread_id="222",
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9304", posted=posted)
+
+    async def request() -> object:
+        return await _request_mcp_oauth_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            expected_ma_agent_id="ag_mcp",
+            agent_name="daimon",
+            server_name="notion",
+            url="https://mcp.notion.com/mcp/",
+            channel_id="222",
+        )
+
+    if attached:
+        await request()
+        assert posted, "their own sign-in to a server the agent has"
+    else:
+        with pytest.raises(ToolError, match="another organisation"):
+            await request()
+        assert posted == {} and await _row_count(db_session) == 0, "no card, no row"

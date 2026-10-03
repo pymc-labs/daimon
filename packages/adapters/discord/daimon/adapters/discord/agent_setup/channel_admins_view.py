@@ -7,6 +7,7 @@ Every click and submit re-checks Manage Server live; the rendered state is a hin
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from typing import Final
 
@@ -24,6 +25,7 @@ from daimon.core.channel_admins import (
     normalize_channel_admin_ids,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.channel_admins import (
     delete_channel_admins,
     list_channel_admins,
@@ -157,9 +159,19 @@ class ChannelAdminsModal(discord.ui.Modal):
         self.add_item(discord.ui.Label(text="Members", component=self.users))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
-            return
         view, state = self._view, self._view.state
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
+        audit = functools.partial(
+            record_panel_write,
+            view.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=str(interaction.user.id),
+            op="channel_admins",
+        )
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            await audit(outcome="denied", reason="needs_admin")
+            return
         role_ids = [str(role.id) for role in self.roles.values if not role.is_default()]
         user_ids = [str(user.id) for user in self.users.values if not user.bot]
         try:
@@ -168,8 +180,8 @@ class ChannelAdminsModal(discord.ui.Modal):
             )
         except InvalidChannelAdminIds as exc:
             await interaction.response.send_message(f"{exc}. Nothing changed.", ephemeral=True)
+            await audit(outcome="error", reason="invalid_ids")
             return
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
         async with view.runtime.sessionmaker.begin() as session:
             if roles or users:
                 await set_channel_admins(
@@ -185,6 +197,7 @@ class ChannelAdminsModal(discord.ui.Modal):
                 await delete_channel_admins(
                     session, tenant_id=tenant_id, platform="discord", channel_id=channel_id
                 )
+        await audit(outcome="allowed", reason="completed")
         log.info("agent_setup.channel_admins.saved", roles=len(roles), users=len(users))
         rebuilt = ChannelAdminsView(
             state,

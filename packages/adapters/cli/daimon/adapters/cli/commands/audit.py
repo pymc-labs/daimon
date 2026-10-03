@@ -10,6 +10,7 @@ from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.core.config import load_settings
+from daimon.core.stores.agent_posts import prune_posts
 from daimon.core.stores.security_audit import list_events, prune_events
 from rich.console import Console
 
@@ -73,7 +74,8 @@ def audit_list_command(
 
 @audit_app.command("prune")
 def audit_prune_command(tenant: uuid.UUID) -> None:
-    """Expire this tenant's events using security_audit_retention_days (default 90)."""
+    """Expire this tenant's events and channel post records using
+    security_audit_retention_days (default 90)."""
     settings = load_settings()
     console = Console(highlight=False)
     days = settings.security_audit_retention_days
@@ -85,6 +87,7 @@ def audit_prune_command(tenant: uuid.UUID) -> None:
     async def run() -> None:
         async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
             count = await prune_events(session, tenant_id=tenant, older_than=cutoff)
-        console.print(f"Removed {count} expired audit events.")
+            posts = await prune_posts(session, tenant_id=tenant, older_than=cutoff)
+        console.print(f"Removed {count} expired audit events and {posts} post records.")
 
     run_cli(run(), console=console)

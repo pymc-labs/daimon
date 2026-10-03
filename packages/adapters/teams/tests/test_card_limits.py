@@ -31,8 +31,15 @@ from daimon.core.agent_details import (
     RepoBinding,
     SkillEntry,
 )
-from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRef, TenantAnswer
+from daimon.core.answering_map import (
+    AnsweringMap,
+    ChannelAnswer,
+    ChannelEnvironment,
+    SetupThreadRef,
+    TenantAnswer,
+)
 from daimon.core.billing_panel import BillingPanelState, MemberRow
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
@@ -54,7 +61,7 @@ from daimon.core.roster import Roster, RosterAgent, paginate
 from daimon.core.routines import PANEL_CAP
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
-from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
+from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, RoutineRow
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
@@ -201,6 +208,12 @@ def _routing() -> AdaptiveCard:
             for index in range(10)
         ),
         setup_threads_truncated=True,
+        channel_environments=tuple(
+            ChannelEnvironment(channel_id=f"{CHANNEL}{index}", environment_name=EMOJI * 256)
+            for index in range(100)
+        ),
+        tenant_environment=EMOJI * 256,
+        deployment_environment=EMOJI * 256,
     )
     page = paginate(overrides, page=1, page_size=setup_card.PAGE_SIZE)
     return setup_card.routing_card(answering_map, page, is_admin=False, request_agent=NAME)
@@ -279,6 +292,26 @@ def _billing(*, is_admin: bool) -> AdaptiveCard:
         guild_distinct_members=10**6,
         member_rows=rows,
         over_cap_count=10**6,
+        channel_budgets=tuple(
+            ChannelBudgetStatus(
+                budget=ChannelBudgetRow(
+                    id=uuid.UUID(int=index),
+                    tenant_id=uuid.UUID(int=0),
+                    platform="teams",
+                    channel_id=f"19:{'x' * 120}@thread.tacv2",
+                    limit_usd=Decimal(10**6),
+                    window="fixed",
+                    starts_at=NOW,
+                    ends_at=NOW,
+                    set_by_account_id=None,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                spent_usd=Decimal(10**6),
+                is_active=True,
+            )
+            for index in range(10**3)
+        ),
     )
     return billing_card(state, since=NOW)
 

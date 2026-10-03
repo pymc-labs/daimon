@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import httpx
 import pytest
+import structlog.testing
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.core import channel_isolation_setup
@@ -33,9 +37,11 @@ from daimon.core.defaults.metadata import (
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -59,6 +65,9 @@ def test_isolated_agent_name_slugs_the_channel_and_avoids_taken_names() -> None:
     assert isolated_agent_name(None, "C0ABCDEF12", taken=()) == "channel-cdef12", (
         "no label falls back to the channel id's tail"
     )
+    assert isolated_agent_name(None, "19:a1b2c3d4e5f6@thread.tacv2", taken=()) == (
+        "channel-d4e5f6"
+    ), "a Teams id's tail comes from its id part, never its domain or the colon"
 
 
 def _client(tenant_id: uuid.UUID, *agents: tuple[str, bool]) -> tuple[AsyncAnthropic, FakeMAState]:
@@ -237,6 +246,49 @@ async def test_isolating_with_a_fork_pins_the_copy(
         )
 
 
+@pytest.mark.parametrize("fork", [False, True], ids=["own-agent", "fork"])
+async def test_isolating_looks_agents_up_before_taking_the_policy_lock(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fork: bool,
+) -> None:
+    """No agent lookup waits on the network while the policy lock is held: the
+    channel's agent, or the fresh copy, is looked up first and reused under it."""
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("local", False), ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared" if fork else "local")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    locked = False
+    lookups_under_lock: list[str] = []
+    real_lock = channel_isolation_setup.lock_access_policy
+    real_find = channel_isolation_setup.find_agent_by_daimon_tag
+
+    async def lock(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+        nonlocal locked
+        await real_lock(session, tenant_id=tenant_id)
+        locked = True
+
+    async def find(anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> Any:
+        if locked:
+            lookups_under_lock.append(name)
+        return await real_find(anthropic, tenant_id=tenant_id, name=name)
+
+    async def fork_unlocked(*args: Any, **kwargs: Any) -> AgentCopy:
+        nonlocal locked
+        locked = False  # the first transaction has ended
+        return await fork_agent(*args, **kwargs)
+
+    monkeypatch.setattr(channel_isolation_setup, "lock_access_policy", lock)
+    monkeypatch.setattr(channel_isolation_setup, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(channel_isolation_setup, "fork_agent", fork_unlocked)
+    change = await _isolate(client, db_session_factory, tenant.id, "c1", fork=fork)
+
+    assert change.isolated and change.changed, "the channel is isolated"
+    assert lookups_under_lock == [], "no lookup ran while the policy lock was held"
+
+
 async def test_a_copy_refused_after_the_fork_is_archived(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -278,6 +330,142 @@ async def test_a_copy_refused_after_the_fork_is_archived(
     assert scope is not None and scope.agent_name == "shared", "the channel keeps its agent"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.isolated_channel_ids == ()
+
+
+async def test_a_copy_whose_isolation_write_fails_is_archived(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any failure after the fork, not only a refusal, archives the copy and re-raises."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+
+    async def broken_write(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(channel_isolation_setup, "set_fields", broken_write)
+    with pytest.raises(RuntimeError, match="write failed"):
+        await _isolate(client, db_session_factory, tenant.id, "c1", fork=True)
+
+    assert len(archived) == 1 and archived[0] != shared.id, "the orphan copy is archived"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.isolated_channel_ids == (), "nothing was isolated"
+
+
+def _archive_recorder(
+    state: FakeMAState, archived: list[str], *, status: int = 200
+) -> AsyncAnthropic:
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        if status != 200:
+            return httpx.Response(status, json={"type": "error", "error": {"type": "api_error"}})
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    return build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+
+
+async def _shared_in_two_channels(db_session: AsyncSession) -> tuple[uuid.UUID, FakeMAState]:
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    return tenant.id, state
+
+
+class _LostCommit:
+    """A sessionmaker whose transaction, once armed, commits and then reports a
+    dropped connection: the ambiguous commit a caller cannot tell from a failure."""
+
+    def __init__(self, inner: async_sessionmaker[AsyncSession]) -> None:
+        self.inner = inner
+        self.armed = False
+
+    def __call__(self) -> AsyncSession:
+        return self.inner()
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[AsyncSession]:
+        async with self.inner.begin() as session:
+            yield session
+        if self.armed:
+            self.armed = False
+            raise OSError("connection lost after commit")
+
+
+async def test_a_copy_the_channel_already_names_is_kept_when_its_commit_errors(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit the database applied before the error surfaced leaves the channel
+    naming the copy: it is kept and logged, never archived under the channel."""
+    tenant_id, state = await _shared_in_two_channels(db_session)
+    archived: list[str] = []
+    client = _archive_recorder(state, archived)
+    sessionmaker = _LostCommit(db_session_factory)
+
+    async def fork_then_arm(*args: Any, **kwargs: Any) -> AgentCopy:
+        copy = await fork_agent(*args, **kwargs)
+        sessionmaker.armed = True
+        return copy
+
+    monkeypatch.setattr(channel_isolation_setup, "fork_agent", fork_then_arm)
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(OSError, match="connection lost after commit"),
+    ):
+        await _isolate(client, cast(Any, sessionmaker), tenant_id, "c1", fork=True)
+
+    assert archived == [], "the copy the channel names is never archived"
+    kept = [log.get("reason") for log in logs if log["event"] == "channel_isolation.fork_kept"]
+    assert kept == ["channel_points_at_it"], logs
+    policy = await load_access_policy(db_session, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == ("c1",), "the commit did apply"
+
+
+async def test_a_failed_archive_never_hides_the_write_error(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, state = await _shared_in_two_channels(db_session)
+    archived: list[str] = []
+    client = _archive_recorder(state, archived, status=500)
+
+    async def broken_write(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(channel_isolation_setup, "set_fields", broken_write)
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(RuntimeError, match="write failed"),
+    ):
+        await _isolate(client, db_session_factory, tenant_id, "c1", fork=True)
+
+    assert archived, "the archive was tried"
+    assert any(log["event"] == "channel_isolation.fork_archive_failed" for log in logs), logs
 
 
 async def test_fork_agent_copies_the_source_under_a_new_name(
@@ -323,11 +511,12 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
         await fork("team-beta")
 
 
-async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
+async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_skills(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The copy an isolated channel gets holds no token and reaches into no other
-    agent's skills; the skills left off are named."""
+    """The copy an isolated channel gets holds no token, gets the source's own
+    uploaded skills as new skills of its own, reaches into no other agent's
+    skills, and names every skill it left off, including one that failed to copy."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
     source = ma_agent(
@@ -351,28 +540,53 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
             for name in ("crm", "docs")
         ],
         skills=[
-            {"type": "custom", "skill_id": "skill_scoped", "version": "1"},
-            {"type": "custom", "skill_id": "skill_library", "version": "1"},
+            {"type": "custom", "skill_id": skill_id, "version": "1"}
+            for skill_id in ("skill_own", "skill_broken", "skill_other", "skill_library")
         ],
     )
     state = FakeMAState()
     state.agents[source.id] = source.model_dump(mode="json")
-    skills = [
-        SkillListResponse(
+
+    def skill_row(skill_id: str, title: str) -> dict[str, Any]:
+        return SkillListResponse(
             id=skill_id,
             type="custom",
-            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name=body),
+            display_title=title,
             latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
             source="custom",
         ).model_dump(mode="json")
-        for skill_id, body in (("skill_scoped", "shared/notes"), ("skill_library", "notes-lib"))
+
+    skills = [
+        skill_row(skill_id, tenant_scoped_display_title(tenant_id=tenant.id, name=body))
+        for skill_id, body in (
+            ("skill_own", "shared/notes"),
+            ("skill_broken", "shared/broken"),
+            ("skill_other", "other/tips"),
+            ("skill_library", "notes-lib"),
+        )
     ]
+    notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
+    downloads: list[str] = []
 
     def skills_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/skills":
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/skills":
             return list_response(skills)
+        if request.method == "POST" and path == "/v1/skills":
+            found = re.search(rb'name="display_title"\r\n\r\n([^\r]+)', request.content)
+            assert found is not None, "skills.create must send a display_title"
+            created = skill_row(f"sk_new_{len(skills)}", found.group(1).decode())
+            skills.append(created)
+            return httpx.Response(200, json=created)
+        if request.method == "GET" and path.endswith("/content"):
+            downloads.append(path)
+            if "skill_own" in path:
+                return httpx.Response(200, content=notes.zip_bytes)
+            return httpx.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
         raise NotHandled
 
     client = build_fake_anthropic(combine_handlers(skills_handler, make_fake_ma_handler(state)))
@@ -384,6 +598,22 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
         mcp_server_url="https://crm.example.com/mcp",
         plaintext_token="tok",
     )
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_src"),
+        agent_name="shared",
+        name="notes",
+        source_repo_url="",
+        source_repo_branch="",
+        source_path="",
+        content_hash=notes.preview.content_hash,
+        anthropic_id="skill_own",
+        anthropic_latest_version="1",
+        source="upload",
+        origin="pasted",
+    )
+    await db_session.commit()
 
     copy = await fork_agent(
         client,
@@ -398,10 +628,109 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_scoped_skills(
     assert [server.name for server in copy.agent.mcp_servers] == ["docs"], (
         "a server backed by the source's stored token is left off the copy"
     )
-    assert [skill.skill_id for skill in copy.agent.skills] == ["skill_library"], (
-        "a skill scoped to the source agent is left off; a library skill is kept"
+    new_id = skills[-1]["id"]
+    assert skills[-1]["display_title"] == tenant_scoped_display_title(
+        tenant_id=tenant.id, name="notes", agent_name="team-alpha"
+    ), "the source's own skill is uploaded again under the copy's name"
+    assert {skill.skill_id for skill in copy.agent.skills} == {"skill_library", new_id}, (
+        "the copy keeps library skills and gets a new id for its own; it never shares skill_own"
     )
-    assert copy.dropped_skills == ("shared/notes",)
+    assert copy.copied_skills == ("team-alpha/notes",), copy.copied_skills
+    assert copy.dropped_skills == ("other/tips", "shared/broken"), (
+        "another agent's skill and the one that failed to download are named, not copied"
+    )
+    assert len(downloads) == 2, "only the source's own skills are downloaded"
+    fork_id = copy.agent.id
+    row = await load_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=fork_id),
+        agent_name="team-alpha",
+        name="notes",
+    )
+    assert row is not None and row.source == "upload" and row.anthropic_id == new_id, (
+        "the copy's upload row names the copy, so isolation's listing filters see it as its own"
+    )
+    assert row.origin == "pasted", "the copy keeps where the skill came from"
+
+
+async def test_fork_agent_returns_the_copy_when_its_final_reread_fails(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The copy exists once created: a failed re-read after its skills are copied
+    returns it with what was copied instead of raising and orphaning it."""
+    tenant = await make_tenant(db_session)
+    source = ma_agent(
+        id="agent_src",
+        name="shared",
+        tenant_id=tenant.id,
+        skills=[{"type": "custom", "skill_id": "skill_own", "version": "1"}],
+    )
+    state = FakeMAState()
+    state.agents[source.id] = source.model_dump(mode="json")
+    notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
+    skills = [
+        SkillListResponse(
+            id="skill_own",
+            type="custom",
+            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name="shared/notes"),
+            latest_version="1",
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            source="custom",
+        ).model_dump(mode="json")
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        if method == "GET" and path == "/v1/skills":
+            return list_response(skills)
+        if method == "POST" and path == "/v1/skills":
+            created = {**skills[0], "id": "sk_new", "display_title": "copy"}
+            skills.append(created)
+            return httpx.Response(200, json=created)
+        if method == "GET" and path.endswith("/content"):
+            return httpx.Response(200, content=notes.zip_bytes)
+        copy = next((a for i, a in state.agents.items() if i != "agent_src"), None)
+        attached = copy is not None and any(
+            skill["skill_id"] == "sk_new" for skill in copy.get("skills") or []
+        )
+        if method == "GET" and copy is not None and path == f"/v1/agents/{copy['id']}" and attached:
+            return httpx.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
+        raise NotHandled
+
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_src"),
+        agent_name="shared",
+        name="notes",
+        source_repo_url="",
+        source_repo_branch="",
+        source_path="",
+        content_hash=notes.preview.content_hash,
+        anthropic_id="skill_own",
+        anthropic_latest_version="1",
+        source="upload",
+        origin="pasted",
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(combine_handlers(handler, make_fake_ma_handler(state)))
+
+    copy = await fork_agent(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        source_name="shared",
+        new_name="team-alpha",
+        public_url=None,
+        subject=ADMIN,
+    )
+
+    assert copy.agent.id in state.agents, "the copy that exists is the one returned"
+    assert copy.copied_skills == ("team-alpha/notes",), "the copied skill is still reported"
 
 
 def test_a_pinned_agent_is_never_offered_as_a_copy() -> None:

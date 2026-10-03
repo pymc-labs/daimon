@@ -39,9 +39,21 @@ from daimon.adapters.slack.agent_setup.channel_admins import (
     evaluate_channel_admins_submission,
     run_channel_admins_submission,
 )
+from daimon.adapters.slack.agent_setup.channel_skills import (
+    ChannelSkillsSubmission,
+    evaluate_channel_skills_submission,
+    run_channel_skills_submission,
+)
+from daimon.adapters.slack.agent_setup.operator_tokens import (
+    OperatorTokenSubmission,
+    evaluate_operator_token_submission,
+    run_operator_token_submission,
+)
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
     CALLBACK_CHANNEL_ADMINS,
+    CALLBACK_CHANNEL_SKILLS,
+    CALLBACK_OPERATOR_MINT,
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
@@ -68,6 +80,8 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
+from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -123,6 +137,7 @@ from daimon.adapters.slack.routines_panel.submit import (
 )
 from daimon.adapters.slack.runtime import (
     SlackRuntime,
+    admission_refusal_message,
     resolve_bot_display_name,
     responder_handle,
 )
@@ -134,6 +149,11 @@ from daimon.adapters.slack.support_escalation import (
     handle_ask_human_click,
     run_support_submission,
     slack_support_enabled,
+)
+from daimon.adapters.slack.thread_handoff import (
+    HAND_OVER_ACTION_ID,
+    build_hand_over_blocks,
+    handle_hand_over_click,
 )
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
@@ -201,6 +221,13 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.thread_queue import (
+    ThreadQueue,
+    claim_dispatch,
+    dispatch_and_drain,
+    group_by_author,
+    release_thread,
+)
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
@@ -307,7 +334,7 @@ class SlackApp:
     """
 
     def __init__(self, *, runtime: SlackRuntime) -> None:
-        self.runtime = runtime
+        self.runtime = with_budget_notifier(runtime)
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}
@@ -809,6 +836,52 @@ class SlackApp:
                             )
 
                     self._spawn(_run_channel_admins())
+            elif cb_id == CALLBACK_CHANNEL_SKILLS:
+                _cs = evaluate_channel_skills_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _cs is not None:
+                    _cs_team: dict[str, Any] = payload.get("team") or {}
+                    _cs_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_channel_skills(
+                        *,
+                        _t: str = str(_cs_team.get("id") or ""),
+                        _u: str = str(_cs_user.get("id") or ""),
+                        _s: ChannelSkillsSubmission = _cs,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_channel_skills_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_channel_skills())
+            elif cb_id == CALLBACK_OPERATOR_MINT:
+                # Pure evaluate, then an empty ack closes the form; the token
+                # arrives as an ephemeral and the routing view refreshes.
+                _ot = evaluate_operator_token_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _ot is not None:
+                    _ot_team: dict[str, Any] = payload.get("team") or {}
+                    _ot_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_operator_token(
+                        *,
+                        _t: str = str(_ot_team.get("id") or ""),
+                        _u: str = str(_ot_user.get("id") or ""),
+                        _s: OperatorTokenSubmission = _ot,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_operator_token_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_operator_token())
             elif cb_id == CALLBACK_ADD_SKILL:
                 # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
                 _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
@@ -998,6 +1071,8 @@ class SlackApp:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
+                elif action_id == HAND_OVER_ACTION_ID:
+                    self._spawn(handle_hand_over_click(self.runtime, payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).
@@ -1509,6 +1584,10 @@ class SlackApp:
                 still_pending, channel=channel, web_client=web_client, thread_id=thread_id
             )
 
+    @property
+    def _thread_queue(self) -> ThreadQueue[str, dict[str, Any]]:
+        return ThreadQueue(self._processing, self._pending)
+
     async def _drain_pending_mentions(
         self,
         *,
@@ -1518,83 +1597,56 @@ class SlackApp:
         thread_id: str,
         team_id: str,
     ) -> None:
-        """Run the mentions queued (⌛) behind this thread's turn, one turn per author.
+        def author(event: dict[str, Any]) -> str | None:
+            if user := _author_id(event):
+                return user
+            log.warning(
+                "slack.drain.skipped_authorless_event", thread_id=thread_id, team_id=team_id
+            )
+            return None
 
-        Callers must own the thread's `_processing` slot: a mention turn
-        (`_orchestrate`) and an out-of-turn continuation dispatch
-        (`dispatch_continuations_in_thread`) both call this before releasing
-        it, so a mention queued behind either one gets its own turn.
-        """
-        # Drain loop: new events may arrive during the drain turn; they land
-        # in _pending and are picked up by the next iteration. Each drained
-        # turn independently re-enters _run_thread_turn, which admission-gates
-        # and bills every turn — new session or reused.
-        while queued := self._pending.pop(thread_id, []):
-            # Partition by author and run one composite turn per author,
-            # in first-seen arrival order. Coalescing distinct authors onto
-            # one turn would route B's mention into A's session, under A's
-            # vault token and Slack visibility, billed to A, with B's own
-            # per-user cap never evaluated. One turn = one caller.
-            # Mirrors Discord's _drain_pending_mentions (bot.py:900-914).
-            by_user: dict[str, list[dict[str, Any]]] = {}
-            for q_event in queued:
-                author = _author_id(q_event)
-                if not author:
-                    # No author to run as. `_run_thread_turn` would resolve a
-                    # principal for the empty string and bill a turn to a
-                    # phantom account. Discord cannot hit this — a Message
-                    # always has an author.
-                    log.warning(
-                        "slack.drain.skipped_authorless_event",
-                        thread_id=thread_id,
-                        team_id=team_id,
-                    )
-                    continue
-                by_user.setdefault(author, []).append(q_event)
-            for user_events in by_user.values():
-                # One author's failure must not consume the others'. Their
-                # events are already popped from _pending, so the owner's
-                # `_notify_undrained_mentions` cannot reach them — without this they would
-                # vanish with no turn and no message. Discord gets the same
-                # property for free because `_handle_mention` renders turn
-                # errors internally and never raises; `_run_thread_turn`
-                # documents the opposite ("errors propagate to the listener
-                # boundary"), so Slack has to isolate here.
-                try:
-                    await self._run_thread_turn(
-                        user_events[0],
+        async def run(user_events: list[dict[str, Any]]) -> None:
+            try:
+                await self._run_thread_turn(
+                    user_events[0],
+                    channel=channel,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    content_override=_compose_queued_content(user_events),
+                    team_id=team_id,
+                    # Merge files from ALL of this author's queued events,
+                    # in first-seen order — user_events[0] alone would
+                    # silently drop files on their later mentions.
+                    files=_collect_files(user_events),
+                )
+            except (
+                DaimonError,
+                anthropic.APIError,
+                SlackApiError,
+                InvalidToken,
+                SQLAlchemyError,
+                aiohttp.ClientError,
+                TimeoutError,
+            ) as exc:
+                log.exception(
+                    "slack.drain.turn_failed",
+                    thread_id=thread_id,
+                    team_id=team_id,
+                    exc_info=exc,
+                )
+                with contextlib.suppress(SlackApiError):
+                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel,
-                        web_client=web_client,
-                        tenant_id=tenant_id,
-                        thread_id=thread_id,
-                        content_override=_compose_queued_content(user_events),
-                        team_id=team_id,
-                        # Merge files from ALL of this author's queued events,
-                        # in first-seen order — user_events[0] alone would
-                        # silently drop files on their later mentions.
-                        files=_collect_files(user_events),
+                        text=("Sorry, something went wrong handling that — please try again."),
+                        thread_ts=thread_id,
                     )
-                except (
-                    DaimonError,
-                    anthropic.APIError,
-                    SlackApiError,
-                    InvalidToken,
-                    SQLAlchemyError,
-                    aiohttp.ClientError,
-                    TimeoutError,
-                ) as exc:
-                    log.exception(
-                        "slack.drain.turn_failed",
-                        thread_id=thread_id,
-                        team_id=team_id,
-                        exc_info=exc,
-                    )
-                    with contextlib.suppress(SlackApiError):
-                        await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                            channel=channel,
-                            text=("Sorry, something went wrong handling that — please try again."),
-                            thread_ts=thread_id,
-                        )
+
+        await self._thread_queue.drain(
+            thread_id,
+            compose=lambda queued: group_by_author(queued, author),
+            run=run,
+        )
 
     async def _notify_undrained_mentions(
         self,
@@ -1709,6 +1761,13 @@ class SlackApp:
                 channel_id=channel,
                 thread_id=thread_id,
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=()
+                if is_admin
+                else sorted(
+                    await user_group_ids(
+                        self.runtime, web_client, tenant_id=tenant_id, user_id=author_id
+                    )
+                ),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -1772,14 +1831,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "You aren't on this workspace's list of people who can start a turn. "
-                        "A workspace admin can add you."
-                    ),
-                )
             elif err.reason == "agent_pinned_elsewhere":
                 log.info(
                     "turn.skipped.agent_pinned_elsewhere",
@@ -1787,14 +1838,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This agent only runs in the channels an operator pinned it to, "
-                        "so it can't answer here."
-                    ),
                 )
             elif err.reason == "channel_isolated":
                 log.info(
@@ -1804,14 +1847,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel is isolated and the agent that would answer isn't one of "
-                        "its own. A workspace admin must set the channel's agent."
-                    ),
-                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1820,16 +1855,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        f"This workspace's "
-                        f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
-                        "credit is depleted. "
-                        "An admin can top up with `/billing`."
-                    ),
-                )
             elif err.reason == "channel_budget_exceeded":
                 log.info(
                     "turn.skipped.over_channel_budget",
@@ -1837,14 +1862,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel has used its spending budget. "
-                        "A workspace admin can raise or clear it."
-                    ),
                 )
             else:
                 log.info(
@@ -1855,13 +1872,11 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
+            if err.reason != "channel_protected":
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=(
-                        "Monthly usage cap reached for this workspace. "
-                        "An admin can adjust the cap with `/billing` (when available)."
-                    ),
+                    text=admission_refusal_message(err.reason, self.runtime.settings),
                 )
             return
 
@@ -1893,6 +1908,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2075,13 +2091,19 @@ class SlackApp:
                     new_responder=admission.agent.name,
                     owner=owner_name,
                     channel=f"<#{channel}>",
+                    offer_button=True,
+                )
+                hand_over = build_hand_over_blocks(
+                    text=explanation,
+                    agent_id=admission.agent.id,
+                    agent_name=admission.agent.name,
                 )
                 if lifecycle.status_ts is not None:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
                         text=explanation,
-                        blocks=[],
+                        blocks=hand_over,
                     )
                     intent_terminal = True
                 else:
@@ -2089,6 +2111,7 @@ class SlackApp:
                         channel=channel,
                         thread_ts=thread_id,
                         text=explanation,
+                        blocks=hand_over,
                     )
                 return
             ma_session_id = prepared.ma_session_id
@@ -2319,6 +2342,7 @@ class SlackApp:
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
+                    budget_channel_id=admission.budget_channel_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
                     client=web_client,
@@ -2654,6 +2678,16 @@ class SlackApp:
             channel_id=channel,
             thread_id=thread_id,
             role=role,
+            platform_role_ids=()
+            if role is Role.ADMIN
+            else sorted(
+                await user_group_ids(
+                    self.runtime,
+                    web_client,
+                    tenant_id=tenant_id,
+                    user_id=row.requester_external_user_id,
+                )
+            ),
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.
@@ -2697,6 +2731,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=follow_admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2780,6 +2815,7 @@ class SlackApp:
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
+                budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,
                 channel=channel,
@@ -2929,44 +2965,39 @@ class SlackApp:
         account_id: uuid.UUID,
         team_id: str,
     ) -> None:
-        """Claim and run any pending continuations for this thread, from outside a turn.
-
-        Takes the same per-thread guard a mention takes, so a form submission
-        and a mention can never dispatch the same thread at once. A thread
-        already processing is skipped outright rather than queued: the turn
-        running there reaches `_dispatch_continuations` at its own tail anyway,
-        and will pick up whatever this call would have.
-        """
         await self._wait_for_orphan_recovery()
-        if thread_id in self._processing:
-            # The turn running here may already be past its own tail
-            # dispatch, so remember the call and re-run it on release.
-            self._deferred_dispatch[thread_id] = {
-                "web_client": web_client,
-                "tenant_id": tenant_id,
-                "channel": channel,
-                "thread_id": thread_id,
-                "account_id": account_id,
-                "team_id": team_id,
-            }
+        request = dict(
+            web_client=web_client,
+            tenant_id=tenant_id,
+            channel=channel,
+            thread_id=thread_id,
+            account_id=account_id,
+            team_id=team_id,
+        )
+        if not claim_dispatch(
+            self._processing,
+            thread_id,
+            self._deferred_dispatch,
+            thread_id,
+            request,
+        ):
             return
-        self._processing.add(thread_id)
         try:
-            await self._dispatch_continuations(
-                web_client=web_client,
-                tenant_id=tenant_id,
-                channel=channel,
-                thread_id=thread_id,
-                account_id=account_id,
-            )
-            # A mention that arrived during the dispatch queued behind it (⌛);
-            # it gets its own turn here, as it would behind a mention turn.
-            await self._drain_pending_mentions(
-                channel=channel,
-                web_client=web_client,
-                tenant_id=tenant_id,
-                thread_id=thread_id,
-                team_id=team_id,
+            await dispatch_and_drain(
+                lambda: self._dispatch_continuations(
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    channel=channel,
+                    thread_id=thread_id,
+                    account_id=account_id,
+                ),
+                lambda: self._drain_pending_mentions(
+                    channel=channel,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    team_id=team_id,
+                ),
             )
         finally:
             self._release_thread(thread_id)
@@ -2978,19 +3009,16 @@ class SlackApp:
             )
 
     def _release_thread(self, thread_id: str) -> None:
-        """Free the thread's `_processing` slot; re-run a dispatch it skipped.
-
-        `dispatch_continuations_in_thread` skips a processing thread, trusting
-        the running turn's tail dispatch. A continuation recorded after that
-        tail already ran (a form submitted as the turn was finishing) would
-        otherwise wait for the next completed turn in the thread. Spawned, so
-        the caller's `finally` never blocks; not while draining, when no new
-        turn may start (the row stays pending for the next turn).
-        """
-        self._processing.discard(thread_id)
-        deferred = self._deferred_dispatch.pop(thread_id, None)
-        if deferred is not None and not self.draining:
-            self._spawn(self.dispatch_continuations_in_thread(**deferred))
+        release_thread(
+            self._processing,
+            thread_id,
+            self._deferred_dispatch,
+            dispatch_keys=lambda: [thread_id],
+            draining=self.draining,
+            resume=lambda _key, request: self._spawn(
+                self.dispatch_continuations_in_thread(**request)
+            ),
+        )
 
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.

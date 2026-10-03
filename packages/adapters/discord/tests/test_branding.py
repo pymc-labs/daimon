@@ -16,9 +16,9 @@ import discord
 import pytest
 from daimon.adapters.discord.bot import (
     _build_welcome_embed,  # pyright: ignore[reportPrivateUsage]
-    _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]
     _responder_handle,  # pyright: ignore[reportPrivateUsage]
     _setting_up_message,  # pyright: ignore[reportPrivateUsage]
+    admission_refusal_message,
 )
 from daimon.adapters.discord.commands.help import build_help_view
 from daimon.adapters.discord.commands.privacy import PrivacyCog
@@ -181,15 +181,21 @@ class TestWelcomeEmbedOnceReadyField:
 
 
 class TestCreditDepletedMessage:
-    def test_unset_matches_todays_text(self) -> None:
-        assert _credit_depleted_message("daimon") == (
-            "This server's daimon credit is depleted. An admin can top up with `/billing`."
-        )
+    def test_unset_names_daimon(self) -> None:
+        settings = MagicMock()
+        settings.discord = DiscordSettings(bot_token=SecretStr("test-bot-token"))
+        assert admission_refusal_message("balance_depleted", settings) == (
+            "This server's daimon credit is depleted. A server admin can top up with `/billing`."
+        ), "unset bot_display_name must name daimon"
 
     def test_set_name_changes_text(self) -> None:
-        assert _credit_depleted_message("daimon-staging") == (
-            "This server's daimon-staging credit is depleted. An admin can top up with `/billing`."
+        settings = MagicMock()
+        settings.discord = DiscordSettings(
+            bot_token=SecretStr("test-bot-token"), bot_display_name="daimon-staging"
         )
+        assert "daimon-staging credit is depleted" in admission_refusal_message(
+            "balance_depleted", settings
+        ), "set bot_display_name must change the text"
 
 
 class TestHelpViewConversationalExamples:

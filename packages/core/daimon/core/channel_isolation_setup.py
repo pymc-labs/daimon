@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from anthropic import AsyncAnthropic
+import structlog
+from anthropic import APIError, AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.agent_fork import fork_agent
 from daimon.core.agent_pins import agent_pin_names
@@ -29,17 +31,26 @@ from daimon.core.authz import Subject
 from daimon.core.channel_environments import sealed_network_warning
 from daimon.core.channel_isolation import BindingRefusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ISOLATION_COPY,
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+)
 from daimon.core.errors import DaimonError
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, pick_agent
+from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
+    lock_policy_writes_exclusive,
+    policy_write_transaction,
     set_access_policy,
 )
-from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 IsolationRefusal = Literal[
     "no_channel_agent",
@@ -132,7 +143,7 @@ class IsolationChange:
     forked_from: str | None
     changed: bool
     dropped_skills: tuple[str, ...] = ()
-    """Skills scoped to one agent, left off the copy."""
+    """Skills left off the copy: another agent's, or the source's own that failed to copy."""
     lifted_seal_and_pins: bool = False
     """Isolation ended along with the channel's seal and its dedicated agents' pins."""
     network_warning: str | None = None
@@ -147,7 +158,7 @@ class IsolationChange:
     def dropped_skills_note(self) -> str | None:
         if not self.dropped_skills:
             return None
-        return f"Left off the copy, as they belong to one agent: {', '.join(self.dropped_skills)}."
+        return f"Left off the copy: {', '.join(self.dropped_skills)}."
 
 
 def isolated_agent_name(
@@ -155,7 +166,10 @@ def isolated_agent_name(
 ) -> str:
     """A new agent name from the channel's name, unique among `taken`. Pure."""
     slug = re.sub(r"[^a-z0-9]+", "-", (channel_label or "").lower()).strip("-")[:40].strip("-")
-    base = slug or f"channel-{channel_id[-6:].lower()}"
+    # A Teams id (`19:<id>@thread.tacv2`) ends in its domain and holds ":", so
+    # the tail comes from its id part, letters and digits only.
+    tail = re.sub(r"[^a-z0-9]", "", channel_id.partition("@")[0].lower())[-6:]
+    base = slug or f"channel-{tail}"
     name, suffix = base, 2
     while name in taken:
         name, suffix = f"{base}-{suffix}", suffix + 1
@@ -205,17 +219,23 @@ async def _channel_agent(
     channel_id: str,
     policy: TenantAccessPolicy,
     default: DeploymentDefault,
+    known: Mapping[str, BetaManagedAgentsAgent | None] | None = None,
 ) -> _ChannelAgent:
-    """The channel's default agent and why it can't be the channel's own, if it can't."""
+    """The channel's default agent and why it can't be the channel's own, if it can't.
+
+    `known` holds agents already looked up by name (`_lookup_channel_agent`),
+    so a caller holding the policy lock needn't wait on the network for them.
+    """
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     row = next((row for row in channels if row.channel_id == channel_id), None)
     name = row.agent_name if row is not None and row.mode == "agent" else None
     answering = pick_agent(row, tenant, default)[0]
-    agent = (
-        None
-        if name is None
-        else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
-    )
+    if name is None:
+        agent = None
+    elif known is not None and name in known:
+        agent = known[name]
+    else:
+        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
     if name is None or agent is None:
         return _ChannelAgent(name, answering, "no_channel_agent")
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
@@ -238,6 +258,31 @@ async def _channel_agent(
         )
         return _ChannelAgent(name, answering, refusal, names)
     return _ChannelAgent(name, answering, None, names)
+
+
+async def _lookup_channel_agent(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+) -> dict[str, BetaManagedAgentsAgent | None]:
+    """The channel's default agent looked up by name before the policy lock is taken.
+
+    The lookup leaves the process; doing it first keeps a pooled connection
+    from holding the lock while it waits. The locked read uses it only if the
+    channel's agent is still the one looked up here.
+    """
+    async with sessionmaker() as session:
+        _, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    row = next((row for row in channels if row.channel_id == channel_id), None)
+    if row is None or row.mode != "agent" or row.agent_name is None:
+        return {}
+    return {
+        row.agent_name: await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=row.agent_name
+        )
+    }
 
 
 async def isolation_refusal(
@@ -279,8 +324,10 @@ async def _write_isolation(
     platform: str,
     channel_id: str,
     default: DeploymentDefault,
+    known: Mapping[str, BetaManagedAgentsAgent | None],
 ) -> tuple[_ChannelAgent, bool]:
     """Under the policy lock: isolate with the channel's default agent if it may be its own."""
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
     found = await _channel_agent(
@@ -291,6 +338,7 @@ async def _write_isolation(
         channel_id=channel_id,
         policy=policy,
         default=default,
+        known=known,
     )
     if found.refusal is not None or found.name is None:
         return found, False
@@ -315,6 +363,42 @@ async def _network_warning(
         )
 
 
+async def _archive_unused_copy(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    name: str,
+    agent_id: str,
+) -> None:
+    """Archive a copy whose write failed, unless the channel may point at it.
+
+    A commit can fail after the database applied it, so the channel is read
+    again first; a copy it names, or one when that read fails, is kept and
+    logged. A failed archive is logged too: the caller re-raises the write's
+    own error.
+    """
+    log_fields = {"tenant_id": str(tenant_id), "channel_id": channel_id, "agent_id": agent_id}
+    try:
+        async with sessionmaker() as session:
+            scope = await get_scope(
+                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id)
+            )
+    except (SQLAlchemyError, OSError):
+        _log.warning(
+            "channel_isolation.fork_kept", reason="unreadable", exc_info=True, **log_fields
+        )
+        return
+    if isinstance(scope, ChannelConfigRow) and scope.agent_name == name:
+        _log.warning("channel_isolation.fork_kept", reason="channel_points_at_it", **log_fields)
+        return
+    try:
+        await anthropic.beta.agents.archive(agent_id)
+    except APIError:
+        _log.warning("channel_isolation.fork_archive_failed", exc_info=True, **log_fields)
+
+
 async def set_channel_isolation(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -336,11 +420,13 @@ async def set_channel_isolation(
 
     A copy is made only when `fork` is set and the channel has no agent that may
     be its own, so repeating a request never copies twice; `subject` is who
-    asks for it (`authorize(FORK)`). A copy the locked re-check refuses is
-    archived.
+    asks for it (`authorize(FORK)`). A copy the locked re-check refuses, or
+    one whose write fails, is archived unless the channel names it
+    (`_archive_unused_copy`).
     """
     if not isolated:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             policy = await load_access_policy(session, tenant_id=tenant_id)
             updated = end_isolation(
@@ -356,7 +442,10 @@ async def set_channel_isolation(
             updated != policy,
             lifted_seal_and_pins=drop_seal_and_pins,
         )
-    async with sessionmaker.begin() as session:
+    known = await _lookup_channel_agent(
+        anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id
+    )
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         found, changed = await _write_isolation(
             anthropic,
             session,
@@ -364,6 +453,7 @@ async def set_channel_isolation(
             platform=platform,
             channel_id=channel_id,
             default=default,
+            known=known,
         )
     if found.refusal is None:
         return IsolationChange(
@@ -392,9 +482,11 @@ async def set_channel_isolation(
         new_name=new_name,
         public_url=public_url,
         subject=subject,
+        extra_metadata={MA_METADATA_KEY_ISOLATION_COPY: channel_id},
     )
     try:
-        async with sessionmaker.begin() as session:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
             await set_fields(
                 session,
@@ -403,6 +495,7 @@ async def set_channel_isolation(
                 agent_name=new_name,
                 mode="agent",
                 actor_account_id=actor_account_id,
+                set_by_admin=subject.is_admin and not subject.via_agent_key,
             )
             found, _ = await _write_isolation(
                 anthropic,
@@ -411,11 +504,20 @@ async def set_channel_isolation(
                 platform=platform,
                 channel_id=channel_id,
                 default=default,
+                known={new_name: copy.agent},
             )
             if found.refusal is not None:
                 raise ChannelIsolationRefused(found.refusal, agent_name=new_name)
-    except ChannelIsolationRefused:
-        await anthropic.beta.agents.archive(copy.agent.id)
+    except Exception:
+        # Re-raised: a copy no channel got, refused or not, must not linger.
+        await _archive_unused_copy(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            name=new_name,
+            agent_id=copy.agent.id,
+        )
         raise
     return IsolationChange(
         channel_id,

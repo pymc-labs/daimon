@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +63,7 @@ async def set_channel_budget(
         "starts_at": starts_at,
         "ends_at": ends_at,
         "set_by_account_id": set_by_account_id,
+        "exhausted_notice_key": None,
     }
     stmt = (
         pg_insert(ChannelBudget)
@@ -93,3 +94,34 @@ async def delete_channel_budget(
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount > 0
+
+
+async def claim_exhausted_notice(session: AsyncSession, *, budget_id: uuid.UUID, key: str) -> bool:
+    """Record that window ``key``'s exhausted notice is going out; False if it already has.
+
+    One UPDATE, so of several workers refused in the same window only one wins.
+    """
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.id == budget_id,
+            ChannelBudget.exhausted_notice_key.is_distinct_from(key),
+        )
+        .values(exhausted_notice_key=key, updated_at=ChannelBudget.updated_at)
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    return result.rowcount > 0
+
+
+async def release_exhausted_notice(
+    session: AsyncSession, *, budget_id: uuid.UUID, key: str
+) -> None:
+    """Undo `claim_exhausted_notice` for window ``key`` when nobody was sent the notice.
+
+    Matching on ``key`` leaves a newer window's claim, or a reset, alone.
+    """
+    await session.execute(
+        update(ChannelBudget)
+        .where(ChannelBudget.id == budget_id, ChannelBudget.exhausted_notice_key == key)
+        .values(exhausted_notice_key=None, updated_at=ChannelBudget.updated_at)
+    )

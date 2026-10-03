@@ -13,7 +13,6 @@ cross-platform state reuse (T-83-09).
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from typing import TYPE_CHECKING
 
@@ -31,17 +30,8 @@ from daimon.core.github_credentials import (
     upsert_credential_encrypted,
 )
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.scope import (
-    ChannelConfigRow,
-    ChannelScopeRef,
-    ScopeRef,
-    TenantConfigRow,
-    TenantScopeRef,
-)
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.scoped_config_read import get_scope
-from daimon.core.stores.scoped_config_write import clear_agent_references, set_fields, unset_fields
-from sqlalchemy.ext.asyncio import AsyncSession
+from daimon.core.stores.scoped_config_write import clear_agent_references
 
 if TYPE_CHECKING:
     from cryptography.fernet import MultiFernet
@@ -68,71 +58,6 @@ def owner_repo_from_url(url: str) -> str:
         .removeprefix("github.com/")
         .removesuffix(".git")
         .rstrip("/")
-    )
-
-
-# ---------------------------------------------------------------------------
-# Scope propagation (port of Discord scope_default.py, verbatim logic)
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass(frozen=True)
-class PropagateResult:
-    """What ``do_propagate`` returns so the caller can render an overwrite display.
-
-    ``prior_agent_name`` and ``prior_actor_account_id`` are the values that
-    existed on the row BEFORE the write — both None on a clean propagation,
-    populated on an overwrite.
-    """
-
-    prior_agent_name: str | None
-    prior_actor_account_id: uuid.UUID | None
-
-
-async def do_propagate(
-    session: AsyncSession,
-    *,
-    scope: ChannelScopeRef | TenantScopeRef,
-    tenant_id: uuid.UUID,
-    agent_name: str | None = None,
-    actor_account_id: uuid.UUID,
-) -> PropagateResult:
-    """Stamp agent_name at scope (mode='agent', last-write-wins).
-
-    Returns the prior agent_name + actor so the caller can render an
-    overwrite line ('replaced X → Y'). Both None on a clean write.
-    """
-    from daimon.core.errors import StoreError
-
-    if not agent_name:
-        raise StoreError("propagate requires agent_name")
-    prior_scope_ref: ScopeRef = scope
-    prior_row = await get_scope(session, scope=prior_scope_ref)
-    prior_agent_name: str | None = None
-    prior_actor: uuid.UUID | None = None
-    if isinstance(prior_row, (ChannelConfigRow, TenantConfigRow)):
-        prior_agent_name = prior_row.agent_name
-        prior_actor = prior_row.agent_name_set_by_account_id
-    await set_fields(
-        session,
-        scope=scope,
-        tenant_id=tenant_id,
-        agent_name=agent_name,
-        mode="agent",
-        actor_account_id=actor_account_id,
-    )
-    return PropagateResult(prior_agent_name=prior_agent_name, prior_actor_account_id=prior_actor)
-
-
-async def do_unpropagate(
-    session: AsyncSession,
-    *,
-    scope: ScopeRef,
-    actor_account_id: uuid.UUID,
-) -> None:
-    """Clear agent_name at scope; the row auto-deletes if it ends fully NULL."""
-    await unset_fields(
-        session, scope=scope, fields=["agent_name"], actor_account_id=actor_account_id
     )
 
 

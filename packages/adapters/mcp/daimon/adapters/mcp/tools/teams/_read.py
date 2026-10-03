@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.teams._directory import (
     TeamsChannelRef,
     channels_of,
@@ -146,9 +146,10 @@ async def _located(
 
 
 async def _teams_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity
+    runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy = OPEN_READ_POLICY
 ) -> list[TeamsChannelRow]:
-    """Channels of the teams daimon is in that the caller belongs to."""
+    """Channels of the teams daimon is in that the caller belongs to; held to an
+    isolated channel, only that one."""
     client, caller = require_client(runtime, auth)
     rows: list[TeamsChannelRow] = []
     for team in await installed_teams(runtime, auth):
@@ -156,6 +157,8 @@ async def _teams_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
             if not await client.is_member(team.team_id, caller):
                 continue
             for ref in await channels_of(client, team):
+                if not read_policy.lists(ref.channel_id):
+                    continue
                 # A private or shared channel is listed only to its own members.
                 if not ref.is_standard and not await client.is_member(ref.channel_id, caller):
                     continue

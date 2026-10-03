@@ -42,7 +42,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import can_manage_routine, routine_label
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
@@ -180,34 +182,35 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
 
             async with runtime.sessionmaker() as session, session.begin():
-                # TOCTOU-safe: re-fetch and validate inside session.begin().
-                # Tenant scoping is enforced by the store (tenant_id kwarg).
-                row = await get_routine(session, routine_id, tenant_id=tenant_id)
-                if row is None:
-                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel_id or user_id,
-                        user=user_id,
-                        text="This routine no longer exists.",
-                    )
-                    return
-                # T-82-06: authority check at click time (TOCTOU-safe).
-                is_admin = await resolve_is_admin(client, user_id=user_id)
-                if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
-                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel_id or user_id,
-                        user=user_id,
-                        text=(
-                            "Only the routine's creator or a workspace admin "
-                            "can pause or resume this routine."
-                        ),
-                    )
-                    return
 
-                now = datetime.now(UTC)
-                if action_value == "pause":
-                    await pause_routine(session, routine_id, tenant_id=tenant_id)
-                else:
-                    await resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
+                async def allowed(row: RoutineRow) -> bool:
+                    is_admin = await resolve_is_admin(client, user_id=user_id)
+                    return can_manage_routine(row, user_id=user_id, is_admin=is_admin)
+
+                result = await apply_routine_action(
+                    session,
+                    routine_id,
+                    tenant_id=tenant_id,
+                    op=action_value,
+                    allowed=allowed,
+                    load=get_routine,
+                    pause=pause_routine,
+                    resume=resume_routine,
+                    now=lambda: datetime.now(UTC),
+                )
+                if result != "changed":
+                    text = (
+                        "This routine no longer exists."
+                        if result == "gone"
+                        else "Only the routine's creator or a workspace admin "
+                        "can pause or resume this routine."
+                    )
+                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                        channel=channel_id or user_id,
+                        user=user_id,
+                        text=text,
+                    )
+                    return
 
             # Re-render after successful write.
             async with runtime.sessionmaker() as session:

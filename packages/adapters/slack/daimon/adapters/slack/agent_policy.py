@@ -38,6 +38,7 @@ from typing import Final
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
@@ -127,8 +128,8 @@ async def gather_target_facts(
     """The policy facts about one target, read fresh and only while the decision turns on them.
 
     Reachability and channel admin locality are database reads, never cached and
-    never taken from the rendered view. Slack has no roles, so a caller is a
-    channel admin only when listed by user id. A decision that turns on neither
+    never taken from the rendered view. A caller is a channel admin when listed
+    by user id or through a user group (`channel_admin_caller`). A decision that turns on neither
     opens no session at all.
     """
     if not needs_reachability_read(
@@ -199,7 +200,9 @@ async def refuse_unless_allowed(
         agent_names=agent_pin_names(agent.name, agent.metadata),
         ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
-        caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller=await channel_admin_caller(
+            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+        ),
         caller_account_id=caller_account_id,
     )
     return await _render_outcome(
@@ -251,7 +254,9 @@ async def refuse_unless_allowed_for_agent_name(
         else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
         ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
-        caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+        caller=await channel_admin_caller(
+            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+        ),
         caller_account_id=caller_account_id,
     )
     return await _render_outcome(
@@ -281,7 +286,9 @@ async def refuse_unless_pin_allows(
     anywhere; anyone else only from inside the pin. Without `agent` the name is
     looked up, and only under a pin. Returns True when refused (posted).
     """
-    caller = ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin)
+    caller = await channel_admin_caller(
+        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+    )
 
     async def target() -> BetaManagedAgentsAgent | None:
         if agent is not None:

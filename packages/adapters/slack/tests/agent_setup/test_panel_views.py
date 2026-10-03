@@ -13,11 +13,13 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CHANNEL_ADMINS,
+    ACTION_CHANNEL_SKILLS,
     ACTION_CODING_TOOLS,
     ACTION_END_ISOLATION,
     ACTION_EXPAND_CONNECTIONS,
@@ -27,10 +29,13 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ISOLATE_COPY,
     ACTION_LIFT_ISOLATION,
     ACTION_NEW,
+    ACTION_OPERATOR_MINT,
+    ACTION_OPERATOR_REVOKE,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
     CALLBACK_CHANNEL_ADMINS,
     CALLBACK_NEW_AGENT,
+    CHANNEL_ADMINS_GROUPS_INPUT_ID,
     CHANNEL_ADMINS_INPUT_ID,
     LEGACY_ACTION_IDS,
     build_agents_view,
@@ -54,7 +59,13 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
-from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, ChannelAdminsRow
+from daimon.core.stores.domain import (
+    AgentFileRow,
+    AgentRepoBindingRow,
+    ChannelAdminsRow,
+    ChannelSkillRow,
+    McpTokenRow,
+)
 from daimon.testing import ma_agent
 
 _TEAM_ID = "T_PANEL"
@@ -1111,6 +1122,8 @@ def _routing(
     channel_admins: list[ChannelAdminsRow] | None,
     isolation: ChannelIsolationStatus | None = None,
     channel_id: str = _CHANNEL_ID,
+    operator_tokens: list[McpTokenRow] | None = None,
+    channel_skills: list[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
     return build_routing_view(
         _answering_map(),
@@ -1123,6 +1136,56 @@ def _routing(
         unrouted_agent_name=None,
         channel_admins=channel_admins,
         isolation=isolation,
+        operator_tokens=operator_tokens,
+        channel_skills=channel_skills,
+    )
+
+
+def test_routing_view_lists_channel_skills_with_edit_for_admins_in_a_channel_only() -> None:
+    row = ChannelSkillRow(
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        channel_id=_CHANNEL_ID,
+        skill_id="skill_1",
+        version="v1",
+        name="pdf-tools",
+        owner_agent_name=None,
+        added_by_account_id=None,
+        added_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    view = _routing(channel_admins=[], channel_skills=[row])
+    assert ACTION_CHANNEL_SKILLS in set(_action_ids(view))
+    assert any("`pdf-tools`" in t for t in _texts(view))
+    assert ACTION_CHANNEL_SKILLS not in set(_action_ids(_routing(channel_admins=None))), (
+        "members never see the entry"
+    )
+    dm = _routing(channel_admins=[], channel_skills=[], channel_id="D0123456")
+    assert ACTION_CHANNEL_SKILLS not in set(_action_ids(dm)), "a DM has no channel skills"
+
+
+def test_routing_view_lists_operator_tokens_with_mint_and_revoke_without_secrets() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    row = McpTokenRow(
+        jti=uuid.UUID("12345678-0000-0000-0000-000000000000"),
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        kind="operator",
+        agent_id=None,
+        scopes=("tenant:read",),
+        label="ci",
+        created_at=now,
+        expires_at=now,
+        revoked_at=None,
+        max_issued_usd=None,
+        issued_usd=Decimal(0),
+    )
+    view = _routing(channel_admins=[], operator_tokens=[row])
+    assert {ACTION_OPERATOR_MINT, ACTION_OPERATOR_REVOKE} <= set(_action_ids(view))
+    assert any("`12345678 · ci · tenant:read · expires 2026-01-01`" in t for t in _texts(view))
+    empty = _routing(channel_admins=[], operator_tokens=[])
+    assert ACTION_OPERATOR_REVOKE not in set(_action_ids(empty)), "nothing to revoke"
+    assert ACTION_OPERATOR_MINT not in set(_action_ids(_routing(channel_admins=None))), (
+        "members never see the entry"
     )
 
 
@@ -1152,15 +1215,15 @@ def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> N
         tenant_id=uuid.uuid4(),
         platform="slack",
         channel_id=_OTHER_CHANNEL_ID,
-        role_ids=(),
+        role_ids=("S0LEADS",),
         user_ids=("U0LEAD1", "U0LEAD2"),
         updated_by_account_id=None,
         updated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     admin = _routing(channel_admins=[grant])
-    assert f"<#{_OTHER_CHANNEL_ID}> → <@U0LEAD1>, <@U0LEAD2>" in "\n".join(_texts(admin)), (
-        "each channel lists its members"
-    )
+    assert f"<#{_OTHER_CHANNEL_ID}> → <!subteam^S0LEADS>, <@U0LEAD1>, <@U0LEAD2>" in "\n".join(
+        _texts(admin)
+    ), "each channel lists its user groups, then its members"
     assert ACTION_CHANNEL_ADMINS in _action_ids(admin), "admins may edit this channel"
     member = _routing(channel_admins=None)
     assert ACTION_CHANNEL_ADMINS not in _action_ids(member), "members see no channel admins"
@@ -1210,3 +1273,37 @@ def test_channel_admins_form_prefills_members_and_keeps_the_ids_the_submission_r
     assert json.loads(form["private_metadata"])["r"] == "V_ROUTING", (
         "the form returns to the routing panel"
     )
+
+
+def test_channel_admins_form_offers_user_groups_and_keeps_a_stored_one_slack_no_longer_lists() -> (
+    None
+):
+    form = build_channel_admins_form(
+        meta=_meta(view="channel_admins"),
+        user_ids=[],
+        group_ids=["S0GONE", "S0LEADS"],
+        groups={"S0LEADS": "@leads (Leads)", "S0OPS": "@ops (Ops)"},
+    )
+    (_, groups) = [block for block in form["blocks"] if block["type"] == "input"]
+    assert groups["block_id"] == groups["element"]["action_id"] == CHANNEL_ADMINS_GROUPS_INPUT_ID
+    options = {o["value"]: o["text"]["text"] for o in groups["element"]["options"]}
+    assert options == {
+        "S0GONE": "unknown group S0GONE",
+        "S0LEADS": "@leads (Leads)",
+        "S0OPS": "@ops (Ops)",
+    }, "every listed group, plus a stored one Slack no longer lists"
+    assert [o["value"] for o in groups["element"]["initial_options"]] == ["S0GONE", "S0LEADS"], (
+        "the stored groups start selected, so saving keeps them"
+    )
+    assert any("limit user group management to admins" in text for text in _texts(form)), (
+        "the form warns that a group admits whoever can join or edit it"
+    )
+
+
+def test_channel_admins_form_without_a_group_listing_says_so_and_offers_no_groups() -> None:
+    form = build_channel_admins_form(
+        meta=_meta(view="channel_admins"), user_ids=[], group_ids=["S0LEADS"], groups=None
+    )
+    inputs = [block["block_id"] for block in form["blocks"] if block["type"] == "input"]
+    assert inputs == [CHANNEL_ADMINS_INPUT_ID], "no group select to clear the groups by accident"
+    assert any("usergroups:read" in text for text in _texts(form)), "the missing scope is named"

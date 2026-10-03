@@ -9,11 +9,13 @@ configuration change decided by the pinned-agent write rule.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.publish import (
     _publish_report_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -21,12 +23,15 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.reports.host_client import Recipient
 from daimon.core.reports.publish import PublishResult
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_account
+from daimon.testing.ma import MARouter, build_fake_anthropic
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -68,6 +73,29 @@ def test_an_ordinary_agent_named_like_a_reader_gains_no_extra_pin() -> None:
     assert agent_pin_names("x-reader", {"daimon_name": "x-reader"}) == ("x-reader", "x-reader")
 
 
+def _with_helper(runtime: McpRuntime, tenant_id: uuid.UUID) -> McpRuntime:
+    """`runtime` whose tenant also has ``helper``, an unpinned agent a chat turn runs."""
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(
+            id=_AGENT_ID,
+            name="Acme Display",
+            tenant_id=tenant_id,
+            metadata={"daimon_name": "acme-config", "daimon_account": str(uuid.uuid4())},
+        ),
+        ma_agent(id="agent_helper", name="helper", tenant_id=tenant_id),
+    )
+    return dataclasses.replace(runtime, client=build_fake_anthropic(router.dispatch))
+
+
+def _helper_turn(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
+    """A chat turn run by ``helper``: unpinned, so it may publish."""
+    return dataclasses.replace(
+        _member(tenant_id, is_admin=is_admin),
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_helper"),
+    )
+
+
 def _ok_publish(captured: dict[str, object]):  # type: ignore[no-untyped-def]
     async def fake(**kwargs: object) -> PublishResult:
         captured.update(kwargs)
@@ -92,6 +120,7 @@ async def test_a_member_cannot_publish_a_pinned_agents_reader_from_outside(
 ) -> None:
     runtime, tenant_id = await _pinned(db_session, db_session_factory)
     runtime.settings.mcp.jwt_secret = SecretStr("s" * 32)
+    runtime = _with_helper(runtime, tenant_id)
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", _ok_publish({}))
 
     with pytest.raises(ToolError, match="pinned this agent to its own channels"):
@@ -104,7 +133,7 @@ async def test_a_member_cannot_publish_a_pinned_agents_reader_from_outside(
             recipients=[Recipient(name="Ada", label="ada")],
             cap_usd="1",
             agent="acme-config",
-            auth=_member(tenant_id),
+            auth=_helper_turn(tenant_id),
         )
 
 
@@ -115,6 +144,7 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
 ) -> None:
     runtime, tenant_id = await _pinned(db_session, db_session_factory)
     runtime.settings.mcp.jwt_secret = SecretStr("s" * 32)
+    runtime = _with_helper(runtime, tenant_id)
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", _ok_publish({}))
     account = await make_account(db_session, tenant=await get_tenant(db_session, tenant_id))
     await db_session.commit()
@@ -165,6 +195,30 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
         recipients=[Recipient(name="Ada", label="ada")],
         cap_usd="1",
         agent="acme-config",
-        auth=_member(tenant_id, is_admin=True),
+        auth=_helper_turn(tenant_id, is_admin=True),
     )
     assert admin_out == {"upload_url": "u", "links": {}}
+
+
+async def test_a_chat_turn_whose_agent_is_gone_publishes_nothing_under_a_pin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It may have been a pinned agent, so it fails closed, admins included."""
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    runtime.settings.mcp.jwt_secret = SecretStr("s" * 32)
+    monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", _ok_publish({}))
+
+    with pytest.raises(ToolError, match="agent could not be found"):
+        await _publish_report_impl(
+            runtime,
+            tenant_id=tenant_id,
+            account_id=uuid.uuid4(),
+            slug="q1",
+            title="Q1",
+            recipients=[Recipient(name="Ada", label="ada")],
+            cap_usd="1",
+            agent="acme-config",
+            auth=_member(tenant_id, is_admin=True),
+        )

@@ -114,6 +114,8 @@ async def request_pin_refusal(
     name all hold. An unreadable policy refuses. Admin is the requester's
     stored role, the signal the MCP gate reads too; so are the requester's
     channel admin grants, matched against the roles stored at their last turn.
+    A stored Slack group or Teams team counts for nothing here: the check runs
+    under the policy lock, so it makes no live lookup (`load_stored_subject`).
     """
 
     async def stored_subject() -> Subject:

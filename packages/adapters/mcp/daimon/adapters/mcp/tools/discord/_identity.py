@@ -5,7 +5,8 @@ Provides: _set_display_identity_impl.
 Both fields live on the bot's guild member (``PATCH /guilds/{id}/members/@me``),
 so they apply to the whole server; Discord has no per-channel identity. A
 server-wide, everyone-visible change is a tenant-wide mutation, so it is
-gated on a server admin rather than a channel permission. Discord-only: a
+gated on a server admin rather than a channel permission, and refused for
+an agent held to a channel (`require_identity_changeable`). Discord-only: a
 Slack bot cannot rename itself through the Web API, recorded in
 ``tests/parity/test_display_identity_discord_only.py``.
 """
@@ -16,6 +17,7 @@ import aiohttp
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_identity_changeable
 from daimon.adapters.mcp.tools._ctx import _require_admin  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -52,6 +54,7 @@ async def _set_display_identity_impl(  # pyright: ignore[reportUnusedFunction]
     *,
     display_name: str | None = None,
     avatar_url: str | None = None,
+    origin_context_id: str | None = None,
     session: aiohttp.ClientSession | None = None,
 ) -> DisplayIdentityRow:
     """Set daimon's nickname and/or avatar in the caller's guild.
@@ -69,6 +72,7 @@ async def _set_display_identity_impl(  # pyright: ignore[reportUnusedFunction]
     user_id = _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)
+    await require_identity_changeable(runtime, auth, origin_context_id=origin_context_id)
 
     avatar_bytes: bytes | None = None
     if avatar_url is not None:

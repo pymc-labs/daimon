@@ -257,31 +257,42 @@ async def test_reachable_non_managed_target_flips_with_the_scope_row(
 async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A role grant on the agent's only channel opens the gate; the server default stays shut."""
+    """A role grant on the only channel of an agent made for it opens the gate; the server
+    default, and an agent someone else made that a member bound, stay shut."""
     from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.agent_creation_channels import record_creation_channel
     from daimon.core.stores.channel_admins import set_channel_admins
 
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=str(_GUILD_ID))
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="500",
-            role_ids=["77"],
-            user_ids=[],
-            actor_account_id=None,
-        )
+        for channel in ("500", "501"):
+            await set_channel_admins(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id=channel,
+                role_ids=["77"],
+                user_ids=[],
+                actor_account_id=None,
+            )
         for name, scope in (
             ("local-bot", ChannelScopeRef(tenant_id=tenant.id, channel_id="500")),
+            ("bound-bot", ChannelScopeRef(tenant_id=tenant.id, channel_id="501")),
             ("wide-bot", TenantScopeRef(tenant_id=tenant.id)),
         ):
             await scoped_config_write.set_fields(
                 session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
             )
+        await record_creation_channel(
+            session,
+            tenant_id=tenant.id,
+            ma_agent_id="agent_local-bot",
+            platform="discord",
+            channel_id="500",
+        )
     agents = [
         _make_agent(ma_agent_id=f"agent_{name}", tenant_id=tenant.id, name=name, managed=False)
-        for name in ("local-bot", "wide-bot")
+        for name in ("local-bot", "bound-bot", "wide-bot")
     ]
     runtime = _runtime(
         sessionmaker=db_session_factory,
@@ -299,7 +310,8 @@ async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
             interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
         )
 
-    assert await refused("local-bot") is False, "the agent answers only in the admin's channel"
+    assert await refused("local-bot") is False, "made for the admin's channel and local to it"
+    assert await refused("bound-bot") is True, "a member's binding does not make it the admin's"
     assert await refused("wide-bot") is True, "the server default stays with server admins"
 
 

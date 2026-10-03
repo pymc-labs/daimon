@@ -27,6 +27,7 @@ from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup.actions import (
     CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
+    OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
@@ -42,6 +43,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ISOLATE_COPY,
     ACTION_LIFT_ISOLATION,
     ACTION_NEW,
+    ACTION_OPERATOR_MINT,
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
     ACTION_ROUTING,
@@ -60,6 +62,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -856,6 +859,32 @@ async def test_channel_admins_click_refuses_a_member(
         "the member is told only a workspace admin may do this"
     )
     assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "no form is pushed"
+
+
+async def test_operator_token_click_refuses_a_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member's Mint click opens no form, and the refusal is audited."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(ACTION_OPERATOR_MINT, meta=_meta(view="routing"), view_id="V_ROUTING"),
+    )
+
+    ephemerals = _sent(
+        fake_slack_web_client.mock,
+        ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
+    )
+    assert [e["text"] for e in ephemerals] == [OPERATOR_TOKENS_NEED_ADMIN_MESSAGE]
+    assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "no form is pushed"
+    async with db_session_factory() as session:
+        (event,) = await list_events(session, tenant_id=tenant_id)
+    assert (event.tool_name, event.outcome) == ("panel:operator_token_mint", "denied")
 
 
 async def test_isolation_click_refuses_a_member(

@@ -127,6 +127,7 @@ async def list_propagations_for_tenant(
             environment_name=ch.environment_name,
             agent_name_set_by_account_id=ch.agent_name_set_by_account_id,
             agent_name_set_at=ch.agent_name_set_at,
+            agent_name_set_by_admin=ch.agent_name_set_by_admin,
             mode=cast(Literal["agent", "user_active"], ch.mode),
         )
         for ch in ch_orms
@@ -218,6 +219,7 @@ async def _fetch_channel(
         environment_name=orm.environment_name,
         agent_name_set_by_account_id=orm.agent_name_set_by_account_id,
         agent_name_set_at=orm.agent_name_set_at,
+        agent_name_set_by_admin=orm.agent_name_set_by_admin,
         mode=cast(Literal["agent", "user_active"], orm.mode),
     )
 

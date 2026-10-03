@@ -85,6 +85,10 @@ _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0
 _TEAMS_CHANNEL: Final[str] = r"19:[\w-]+@thread\.(?:tacv2|skype)"
 _TEAMS_THREAD: Final[re.Pattern[str]] = re.compile(rf"({_TEAMS_CHANNEL});messageid=([0-9]+)")
 
+_TEAMS_DESTINATION: Final[re.Pattern[str]] = re.compile(
+    rf"({_TEAMS_CHANNEL})(?:;messageid=[0-9]+)?"
+)
+
 #: A Slack thread destination is `<channel id>:<thread ts>`.
 _THREAD_SEPARATOR: Final[str] = ":"
 
@@ -128,6 +132,13 @@ def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
             return None
         return DeliveryTarget(channel_id=channel_id, thread_ts=thread_ts)
     return DeliveryTarget(channel_id=row.destination_id)
+
+
+def teams_channel_of(destination_id: str) -> str | None:
+    """The Teams channel a destination id names (the channel, or a thread in it);
+    None for any other platform's id. Teams ids contain ":", so never split one there."""
+    match = _TEAMS_DESTINATION.fullmatch(destination_id)
+    return match.group(1) if match else None
 
 
 def teams_thread_id(target: DeliveryTarget) -> str:

@@ -1,0 +1,49 @@
+"""Serialize session sends with retirement, without holding row locks over MA I/O.
+
+This advisory lock is acquired after preparation's advisory lock, when present.
+Sends take no policy, account or binding row locks. Retirement publishes its
+closure under the tenant lock after MA I/O. Handoff and policy writers never
+acquire this fence. Replacement publishes the successor before archiving.
+"""
+
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
+
+from daimon.core.errors import SessionRetired as SessionRetired
+from daimon.core.session_fence_retry import retry_fences, try_fence
+from daimon.core.session_preparation_gate import pool_headroom
+from daimon.core.stores.thread_sessions import require_writable_session
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def lock_session_mutation(db: AsyncSession, session_id: str, *, check: bool = True) -> None:
+    """Hold the fence until the caller's transaction ends.
+
+    Preparations already hold a connection for their advisory lock. Reuse it
+    so the preparation gate reserves room for short database transactions.
+    """
+    await try_fence(db, f"session_mutation:{session_id}")
+    if check:
+        await require_writable_session(db, session_id)
+
+
+@asynccontextmanager
+async def session_mutation_fence(
+    factory: async_sessionmaker[AsyncSession], session_id: str, *, check: bool = True
+) -> AsyncIterator[None]:
+    async def acquire() -> AsyncExitStack:
+        stack = AsyncExitStack()
+        db: AsyncSession | None = None
+        try:
+            await stack.enter_async_context(pool_headroom(factory))
+            db = await stack.enter_async_context(factory.begin())
+            await lock_session_mutation(db, session_id, check=check)
+        except BaseException:
+            if db is not None:
+                await db.rollback()
+            await stack.aclose()
+            raise
+        return stack
+
+    async with await retry_fences(acquire):
+        yield

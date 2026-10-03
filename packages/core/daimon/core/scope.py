@@ -84,6 +84,8 @@ class ChannelConfigRow(BaseModel):
     mode: Literal["agent", "user_active"] = "agent"
     agent_name_set_by_account_id: uuid.UUID | None = None
     agent_name_set_at: datetime | None = None
+    # A server admin set `agent_name`, as decided at the time.
+    agent_name_set_by_admin: bool = False
 
 
 class TenantConfigRow(BaseModel):
