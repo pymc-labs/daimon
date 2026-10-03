@@ -148,3 +148,21 @@ async def test_drain_proceeds_to_close_on_grace_window_expiry() -> None:
 
     assert bot.draining is True, "_drain_and_close must set draining=True"
     bot.close.assert_called_once(), "close() must be called even if drain timed out"  # pyright: ignore[reportUnusedExpression]
+
+
+async def test_drain_waits_for_budget_notices_before_closing() -> None:
+    """close() shuts the HTTP session a pending budget notice still needs for its DMs."""
+    bot = make_bot(_make_runtime())
+    order: list[str] = []
+
+    async def closing() -> None:
+        order.append("close")
+
+    async def draining() -> None:
+        order.append("notices")
+
+    bot.close = closing  # type: ignore[method-assign]
+    with patch("daimon.adapters.discord.bot.drain_budget_notices", draining):
+        await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]
+
+    assert order == ["notices", "close"], "pending notices finish while the client is open"

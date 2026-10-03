@@ -802,6 +802,41 @@ def test_member_lookup_container_nonzero_spend_renders_spend_and_turns() -> None
     assert "5 turns" in text, "lookup container must show turn count"
 
 
+def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:
+    budget = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        channel_id=channel_id,
+        limit_usd=Decimal("10"),
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    return ChannelBudgetStatus(budget=budget, spent_usd=Decimal(spent), is_active=True)
+
+
+def test_the_admin_view_lists_channel_budgets_and_the_member_view_does_not() -> None:
+    budgets = tuple(_budget_status(str(100 + i), str(9 - i)) for i in range(7))
+    admin = _joined_container_text(
+        build_billing_container(
+            _make_state(is_admin=True, channel_budgets=budgets), now=NOW, since=SINCE
+        )
+    )
+    assert "<#100>: $9.00 of $10.00 (monthly) · 90% used" in admin
+    assert "<#104>" in admin and "<#105>" not in admin, "only the five most used"
+    assert "2 more channel budgets" in admin
+    member = _joined_container_text(
+        build_billing_container(
+            _make_state(is_admin=False, channel_budgets=budgets), now=NOW, since=SINCE
+        )
+    )
+    assert "Channel budgets" not in member, "a member sees no other channel"
+
+
 def test_admin_container_budget_content_length_under_4000() -> None:
     """Admin container with 5 rows of 32-char names must fit in 4000 display characters."""
     long_name = "A" * 32
@@ -821,6 +856,7 @@ def test_admin_container_budget_content_length_under_4000() -> None:
         guild_distinct_members=10,
         member_rows=rows,
         over_cap_count=5,
+        channel_budgets=tuple(_budget_status("9" * 20, "1" * 9) for _ in range(100)),
     )
     from daimon.adapters.discord import layout as layout_mod
 

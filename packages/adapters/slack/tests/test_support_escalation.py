@@ -7,14 +7,18 @@ double-submit idempotency, sealed origins, and the access refusals.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 import yarl
+from aioresponses import CallbackResult
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
@@ -27,10 +31,15 @@ from daimon.adapters.slack.support_escalation import (
     slack_support_enabled,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import SupportSettings
+from daimon.core.channel_admins import GroupMembersCache
+from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     OUT_OF_CREDITS,
@@ -39,7 +48,7 @@ from daimon.core.support_escalation import (
     offer_text,
     received_text,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -454,3 +463,143 @@ async def test_escalation_workspace_without_daimon_keeps_the_row_undelivered(
     assert len(rows) == 1 and rows[0]["delivered_at"] is None
     assert _posts(permalink) == []
     assert _ephemeral_texts(permalink) == [RECORDED_UNDELIVERED]
+
+
+# ---------------------------------------------------------------------------
+# a channel with its own admins
+# ---------------------------------------------------------------------------
+
+_OPEN_DM_PATTERN = re.compile(r"https://slack\.com/api/conversations\.open.*")
+
+
+async def _grant(session: AsyncSession, tenant_id: uuid.UUID, *, admins: tuple[str, ...]) -> None:
+    tenant = await get_tenant(session, tenant_id)
+    assert tenant is not None
+    account = await make_account(session, tenant=tenant)
+    await make_platform_principal(
+        session, platform="slack", external_id="U_SERVER", tenant=tenant, account=account
+    )
+    await accounts.set_role(session, account.id, Role.ADMIN)
+    await set_channel_admins(
+        session,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=_CHANNEL,
+        role_ids=(),
+        user_ids=admins,
+        actor_account_id=None,
+    )
+    await session.commit()
+
+
+def _dms(fake: Any, *, refuse: frozenset[str] = frozenset()) -> None:
+    def opened(url: yarl.URL, **_: Any) -> CallbackResult:
+        user = url.query["users"]
+        if user in refuse:
+            return CallbackResult(payload={"ok": False, "error": "cannot_dm_bot"})
+        return CallbackResult(payload={"ok": True, "channel": {"id": f"D_{user}"}})
+
+    fake.mock.post(_OPEN_DM_PATTERN, callback=opened, repeat=True)
+
+
+async def test_a_channel_with_admins_sends_the_request_to_them_not_the_escalation_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    tenant_id, key = await _seed(db_session)
+    await _grant(db_session, tenant_id, admins=("U_LEAD", _USER))
+    _dms(permalink)
+    runtime = _runtime(key, db_session_factory, _support())
+    runtime.settings.direct_message_policies = {}
+
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    (body,) = _posts(permalink)
+    assert body["channel"] == "D_U_LEAD", "the channel's admin hears it, never the asker"
+    assert _PERMALINK in body["text"] and body["text"].endswith("help")
+    assert body["unfurl_links"] is False
+    (row,) = await _rows(db_session_factory)
+    assert row["delivered_at"] is not None
+    assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
+
+
+async def test_unreachable_channel_admins_fall_back_to_server_admins_then_the_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    tenant_id, key = await _seed(db_session)
+    await _grant(db_session, tenant_id, admins=("U_LEAD",))
+    _dms(permalink, refuse=frozenset({"U_LEAD"}))
+    runtime = _runtime(key, db_session_factory, _support())
+    runtime.settings.direct_message_policies = {}
+
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("one")))
+    assert [p["channel"] for p in _posts(permalink)] == ["D_U_SERVER"]
+
+    blocked = {tenant_id: DirectMessagePolicy(mode="disabled")}
+    runtime.settings.direct_message_policies = blocked
+    await run_support_submission(
+        runtime, evaluate_support_submission(_submit_payload("two", message_ts="1700000002.0"))
+    )
+    assert [p["channel"] for p in _posts(permalink)] == ["D_U_SERVER", _ESC_CHANNEL], (
+        "with no admin reachable, the escalation channel still gets it"
+    )
+
+
+_GROUP_USERS_PATTERN = re.compile(r"https://slack\.com/api/usergroups\.users\.list.*")
+
+
+async def test_a_stored_group_is_looked_up_with_no_session_open(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    """A slow Slack must hold neither a pooled connection nor the ledger transaction."""
+    tenant_id, key = await _seed(db_session)
+    tenant = await get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="slack", external_id=_USER, tenant=tenant, account=account
+    )
+    await accounts.set_platform_role_ids(db_session, account.id, ["S1"])
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=_CHANNEL,
+        role_ids=["S1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    open_sessions = [0]
+    seen: list[int] = []
+
+    @asynccontextmanager
+    async def counting() -> AsyncIterator[AsyncSession]:
+        open_sessions[0] += 1
+        try:
+            async with db_session_factory() as session:
+                yield session
+        finally:
+            open_sessions[0] -= 1
+
+    def listed(url: yarl.URL, **_: Any) -> CallbackResult:
+        seen.append(open_sessions[0])
+        return CallbackResult(payload={"ok": True, "users": [_USER]})
+
+    permalink.mock.get(_GROUP_USERS_PATTERN, callback=listed, repeat=True)
+    _dms(permalink)
+    runtime = dataclasses.replace(
+        _runtime(key, cast(Any, counting), _support()), group_members=GroupMembersCache(ttl_s=0)
+    )
+    runtime.settings.direct_message_policies = {}
+
+    await handle_ask_human_click(runtime, _click())
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert len(seen) >= 2, "the click and the submit each looked the group up"
+    assert set(seen) == {0}, "every lookup ran after its session closed"

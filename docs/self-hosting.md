@@ -174,7 +174,8 @@ Two things work differently from Discord and Slack:
   with a valid certificate. Discord and Slack dial out for messages instead.
 - **One deployment serves one organisation.** The bot answers only people in
   the Microsoft 365 organisation it is registered in, and turns away
-  messages from anywhere else.
+  messages from anywhere else, except from people of another organisation
+  (external participants and guests) inside an isolated channel (below).
 
 What the bot does once it is running (1:1 chats, channel threads, commands,
 files and its limits) is in [`teams.md`](teams.md).
@@ -333,7 +334,8 @@ Teams installs apps from a zip file holding three files at its top level:
 - `outline.png`, a 32×32 icon, white on a transparent background.
 
 The manifest template is
-[`teams-app-manifest.yaml`](teams-app-manifest.yaml). Fill in your client ID
+[`teams-app-manifest.yaml`](teams-app-manifest.yaml), in manifest version
+1.25 so the app can be added to private and shared channels. Fill in your client ID
 and hostname and convert it to JSON. From the repository root, with any
 Python 3 that has PyYAML:
 
@@ -396,9 +398,53 @@ your apps** → **Upload an app**.
   the team. To ask it something, @mention it in a post or a reply. Pick the
   name from the autocomplete list so it turns into a highlighted mention:
   typed text alone doesn't count.
+- **A private or shared channel:** adding the app to the team doesn't add it
+  there. The channel's owner adds it from the channel itself, in the
+  channel's apps settings. A package built from an
+  older template, before manifest 1.25, can't be added to these channels:
+  rebuild it and upload it again (see Updating the app).
 
 Group chats aren't supported: the package doesn't offer them, and the bot
 turns away any that reach it.
+
+### People from another organisation (optional)
+
+To work with a client's people in one channel, use a Teams shared channel
+with B2B direct connect (Microsoft's guides: [Collaborate with external
+participants in a
+channel](https://learn.microsoft.com/en-us/microsoft-365/solutions/collaborate-teams-direct-connect)
+and [Shared channels in Microsoft
+Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
+
+1. **Cross-tenant access, in both organisations** (Entra → **External
+   Identities** → **Cross-tenant access settings**): add the other
+   organisation. Yours allows B2B direct connect inbound, theirs outbound,
+   for the users involved and the Office 365 application. Changes can take
+   up to six hours.
+2. **Teams policies** (Teams admin center → **Teams** → **Teams policies**):
+   in your organisation, "Create shared channels" and "Invite external users
+   to shared channels"; in theirs, "Join external shared channels".
+3. **Guest access in Teams stays on.** Shared channels with external
+   participants don't use guest accounts, but guest access must be enabled
+   to invite them. The SharePoint and Microsoft 365 Groups guest settings
+   must stay on too (the default).
+4. Create the shared channel, make it isolated in daimon (the setup panel's
+   Channel settings, `set_channel_isolation` or `daimon channels isolate`),
+   then add the other organisation's people as channel members. Guests,
+   including guests converted to members, can't be added to a shared
+   channel; someone who also has a guest account in your organisation is
+   added as an external participant (in the admin center, search
+   `ext:user@domain.com`).
+
+daimon answers them only there, as a member who can't change its setup.
+Guests in standard and private channels and 1:1 chats get the same rules;
+list the ones who are colleagues with `daimon tenants access-policy
+--add-member-guest <object id>`. `DAIMON_TEAMS__RESTRICT_GUESTS=false` treats
+every guest as a member; `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS=false`
+does the same for external participants. To tell guests apart, the manifest
+asks for the `ChannelMember.Read.Group` permission: an existing install
+needs the rebuilt package uploaded again (see Updating the app) and a team
+owner to accept it. See [`teams.md`](teams.md).
 
 ### Channel files (optional)
 

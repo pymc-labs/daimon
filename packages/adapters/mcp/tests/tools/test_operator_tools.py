@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import pydantic_core
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -36,6 +37,9 @@ from daimon.adapters.mcp.tools.channel_admins import (
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.environments import (
+    _list_environments_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
     _list_promo_codes_impl,  # pyright: ignore[reportPrivateUsage]
@@ -46,13 +50,14 @@ from daimon.adapters.mcp.tools.propagation import (
     _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.tenant_summary import (
-    ChannelAdmins,
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope, scope_tag
+from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_credit import PromoRedeemed, redeem_promo_code
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.access_policy import set_access_policy
@@ -62,6 +67,7 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.tenant_summary import ChannelAdmins
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import (
     make_account,
@@ -266,6 +272,56 @@ async def test_tenant_summary_marks_isolated_channels(
     )
 
 
+async def test_tenant_summary_omits_seals_and_protection_and_lists_timed_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    now = datetime.now(UTC)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c3",),
+                protected_channel_ids=("c3",),
+                isolated_channel_ids=("c3",),
+                agent_channel_pins={"local": ("c3",)},
+            ),
+        )
+        terms = build_promo_code_terms(
+            amount_usd=Decimal("7"),
+            timed=True,
+            credit_starts_at=now - timedelta(hours=1),
+            credit_ends_at=now + timedelta(days=1),
+        )
+        await promo_codes.insert_promo_code(
+            session, code_hash=hash_promo_code(normalize_promo_code("TIMEDCREDIT1234")), terms=terms
+        )
+    redeemed = await redeem_promo_code(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=None,
+        code="TIMEDCREDIT1234",
+        now=now,
+    )
+    assert isinstance(redeemed, PromoRedeemed), redeemed
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+    wire = pydantic_core.to_jsonable_python(summary)
+    assert set(wire["channels"][0]) == {
+        "channel_id",
+        "agent_name",
+        "environment_name",
+        "isolated",
+        "admins",
+        "budget",
+    }, "seal and protection are omitted, not sent as false, for a caller that can't read them"
+    assert [(c.remaining_usd, c.ends_at) for c in summary.timed_credit] == [
+        ("7.00", terms.credit_ends_at.isoformat() if terms.credit_ends_at else None)
+    ], "the live timed credit and when it ends"
+
+
 async def test_channel_isolation_requires_channels_write(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -282,6 +338,14 @@ async def test_operator_without_the_scope_is_refused_by_the_tool_itself(
     _tenant, auth = await _operator(committing_sessionmaker, "promo:redeem")
     with pytest.raises(ToolError, match="does not have the tenant:read scope"):
         await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+
+async def test_list_environments_refuses_an_operator_without_tenant_read(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "channels:write")
+    with pytest.raises(ToolError, match="does not have the tenant:read scope"):
+        await _list_environments_impl(_runtime(committing_sessionmaker), auth, None)
 
 
 async def test_agent_default_tools_require_channels_write(

@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -15,11 +16,14 @@ from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
     AgentRecheck,
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    fetch_teams_attachment,
+    read_local_skill,
     repo_origin,
 )
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
@@ -337,6 +341,76 @@ async def test_an_attachment_is_fetched_without_following_redirects() -> None:
             await fetch_attachment(http, "https://cdn.discordapp.com/a/b/s.zip")
 
 
+_SHAREPOINT = "https://contoso.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1"
+
+
+async def _teams_fetch(url: str, routes: dict[str, httpx.Response]) -> tuple[list[str], object]:
+    """GETs made and the result (or the error) of fetching `url` through `routes`."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        assert "authorization" not in request.headers, "the link authorises itself"
+        return routes.get(str(request.url), httpx.Response(404))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        try:
+            return seen, await fetch_teams_attachment(http, url)
+        except SkillIngestError as exc:
+            return seen, exc
+
+
+async def test_a_teams_file_downloads_from_sharepoint_named_by_its_disposition() -> None:
+    disposition = {"content-disposition": "attachment; filename*=UTF-8''notes%20v2.md"}
+    graph = "https://graph.microsoft.com/v1.0/drives/d/items/i/content"
+    routes = {
+        graph: httpx.Response(302, headers={"location": _SHAREPOINT}),
+        _SHAREPOINT: httpx.Response(200, headers=disposition, content=_md().encode()),
+    }
+
+    seen, fetched = await _teams_fetch(graph, routes)
+
+    assert fetched == (_md().encode(), "notes v2.md")
+    assert seen == [graph, _SHAREPOINT], "a Graph link may hand over to SharePoint"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://contoso.sharepoint.com/sites/a/skill.zip",
+        "https://contoso.sharepoint.com.evil.example/skill.zip",
+        "https://files.example/skill.zip",
+    ],
+)
+async def test_a_teams_file_comes_only_over_https_from_sharepoint_or_graph(url: str) -> None:
+    seen, refused = await _teams_fetch(url, {})
+
+    assert isinstance(refused, SkillIngestError) and "not a Teams file host" in str(refused)
+    assert seen == [], "nothing is requested"
+
+
+async def test_a_teams_download_never_follows_a_redirect_off_those_hosts() -> None:
+    evil = "https://evil.example/skill.zip"
+    routes = {_SHAREPOINT: httpx.Response(302, headers={"location": evil})}
+
+    seen, refused = await _teams_fetch(_SHAREPOINT, routes)
+
+    assert isinstance(refused, SkillIngestError) and "evil.example" in str(refused)
+    assert seen == [_SHAREPOINT]
+
+
+async def test_a_teams_file_of_the_wrong_kind_or_size_is_refused() -> None:
+    iso = {"content-disposition": 'attachment; filename="disk.iso"'}
+    big = MAX_UNCOMPRESSED_BYTES + 1
+    zip_url = "https://contoso.sharepoint.com/sites/a/Shared%20Documents/skill.zip"
+
+    _, wrong = await _teams_fetch(_SHAREPOINT, {_SHAREPOINT: httpx.Response(200, headers=iso)})
+    _, huge = await _teams_fetch(zip_url, {zip_url: httpx.Response(200, content=b"0" * big)})
+
+    assert isinstance(wrong, SkillIngestError) and "upload a SKILL.md or a .zip" in str(wrong)
+    assert isinstance(huge, SkillIngestError) and "at most" in str(huge), "named by its path"
+
+
 async def test_a_skill_a_fork_shares_is_never_given_a_new_version(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -426,3 +500,15 @@ def test_a_repo_origin_keeps_no_credentials_or_query() -> None:
     url = "https://user:ghp_secret@github.com/o/r.git?token=abc#frag"
     assert repo_origin(url, path="/skills/notes/", branch="main") == "o/r/skills/notes@main"
     assert repo_origin("https://github.com/o/r", path="", branch="dev") == "o/r@dev"
+
+
+async def test_read_local_skill_takes_a_folder_or_a_skill_md(tmp_path: Path) -> None:
+    """A folder and its SKILL.md read as the same skill; a missing path is refused."""
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(_md())
+    from_folder = await read_local_skill(folder)
+    from_file = await read_local_skill(folder / "SKILL.md")
+    assert from_folder.preview.name == from_file.preview.name == "notes", "both read the skill"
+    with pytest.raises(SkillIngestError, match="not a file or folder"):
+        await read_local_skill(tmp_path / "missing")

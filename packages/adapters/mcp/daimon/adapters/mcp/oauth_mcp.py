@@ -217,6 +217,9 @@ def build_oauth_mcp_routes(
                     session_factory=runtime.session_factory,
                     default=runtime.deployment_default,
                     may_write=lambda: _may_write(flow, request_row),
+                    group_members=(
+                        runtime.group_lookups.members if runtime.group_lookups else None
+                    ),
                 )
         except McpOAuthWriteRefusedError:
             # A pin landed during the code exchange: nothing was stored.

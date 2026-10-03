@@ -165,7 +165,7 @@ async def log_health_once(
         anthropic_responses=counts,
         anthropic_ratelimit_remaining_min=remaining,
         db_pool={"checkedout": pool.checkedout(), "overflow": pool.overflow(), "size": pool.size()},
-        session_preparations=preparation_counts(),
+        prep_gate=preparation_counts(),
         loop_lag_ms={
             "max": max(lag_samples_ms, default=0.0),
             "p95": _percentile(lag_samples_ms, 0.95),

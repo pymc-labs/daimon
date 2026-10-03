@@ -213,9 +213,10 @@ the same with or without Stripe and for either funding mode. Budgets exist on
 Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
-  markup included: what the tenant was charged for turns there, not the
-  pre-markup usage `/billing` totals. Debits carry the parent channel, so a
-  thread counts toward its channel. A session records it in its own
+  markup included, whatever paid for them (promo credit too): what the
+  tenant was charged for turns there, not the pre-markup usage `/billing`
+  totals. Debits carry the parent channel, so a thread counts toward its
+  channel. A session records it in its own
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
@@ -227,10 +228,26 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
+- **The notice.** The first chat turn the gate refuses in a window DMs the
+  channel's admins (users granted directly, and members whose roles at
+  their last turn match a granted role, a Slack user group or Teams team
+  only if a live lookup still lists them), or the server admins when the
+  channel has none, at most ten people, on Discord, Slack and Teams
+  (`daimon.core.channel_budget_notice`). A monthly budget's window is the
+  month; any other budget's is the budget itself. Setting or raising the
+  budget re-arms it (`channel_budgets.exhausted_notice_key`), and so does a
+  notice no admin received, so a later refusal tries again. It is sent in
+  the background, follows the tenant's DM policy, never changes or delays
+  the refusal, and is off for a tenant set to `false` in
+  `DAIMON_BUDGET_NOTICES`. Refusals of MCP turns, media calls
+  and routines send none.
 
 Members can read a channel's budget with `get_channel_budget`; listing,
-setting and clearing are admin-only. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`.
+setting and clearing are for server admins only, never a channel's own admins
+(`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
+shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
+lists the five most used budgets on that platform (active ones first, by
+share of the limit spent) with a count of the rest.
 
 What a budget does not cover:
 
@@ -249,7 +266,10 @@ What a budget does not cover:
   `continue_turn` are gated by that channel's budget, and the sessions it
   opens carry `daimon_budget_channel`, so their spend is attributed there.
   Every other key, the hub and bearer tokens record no channel and are not
-  gated. A media tool call without a live `origin_context_id` is not
+  gated, except on an isolated channel's own agent: every run of it, an
+  admin's or that channel's admin's from the hub or a DM included, is gated
+  by and charged to that channel. Its routines can only post there, so they
+  already are. A media tool call without a live `origin_context_id` is not
   attributed either.
 - **Routines with no channel**: made without a destination outside a
   channel (no `origin_context_id`, or from a DM), and Discord thread
@@ -478,7 +498,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 the optional `billing` extra, which is what pulls in `stripe`.
 
 Discord and Slack status cards end on a summary of tokens, cost and, for
-prepaid tenants, the balance left after the turn's debit. The answer replaces
+prepaid tenants, the balance left after the turn's debit. In a channel with an
+active budget (a DM: its source channel's) it shows instead what that budget
+has left, for either funding mode. The answer replaces
 the card (unless a completion ping posts it fresh), so the summary stays only
 above a pinged answer or on a turn with none; answers themselves carry no
 usage line on any platform. Teams cards show no summary.
@@ -511,7 +533,14 @@ because zero would falsely claim the turn was free.
 `turn_outcomes` records terminal reasons and timings separately from billing. Its
 content-free usage references join `usage_events` on `(managed_session_id,
 event_id)`; one outcome may refer to multiple model calls or recovered sessions.
-Refused turns have no usage references. The best-effort outcome writer never
+Refused turns have no usage references, and each admission refusal has its own
+reason: `admission_balance_depleted`, `admission_cap_exceeded`,
+`admission_channel_budget_exceeded`, `admission_channel_protected`,
+`admission_agent_pinned_elsewhere`, `admission_channel_isolated` and
+`admission_concurrency_shed`. `admission_denied` covers the invoker allowlist,
+an unreadable access policy and any other gate; rows written before
+`0045_admission_refusal_reasons` record every protection, pin and isolation
+refusal under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).
@@ -521,7 +550,8 @@ not mean no model work was billed. See the turn-outcome contract in
 
 `daimon usage turns TENANT_UUID --days 7 --json` lists content-free turn
 measurements. Add `--channel CHANNEL_ID` or `--origin routine` to filter;
-`--summary` groups by platform, channel and origin. The command reads the local
+`--summary` groups by platform, channel and origin; each listed turn's `reason`
+is its [outcome reason](#turn-outcomes). The command reads the local
 database and makes no upstream API calls. `--limit` bounds the individual-turn
 listing (1–1000); summaries cover the whole selected date range.
 

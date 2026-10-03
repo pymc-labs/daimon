@@ -19,6 +19,7 @@ the agent is pinned to, the token is bound to that channel
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import uuid
 from typing import Any, Final
 
@@ -30,6 +31,7 @@ from daimon.adapters.slack.agent_setup.read import (
     load_panel_roster,
     public_mcp_url,
 )
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -43,6 +45,7 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
+from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -199,7 +202,9 @@ async def handle_coding_tools_click(
             tenant_id=tenant_id,
             channel_id=channel_id or None,
             target=target,
-            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+            caller=await channel_admin_caller(
+                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+            ),
         )
     except AccessPolicyUnreadable:
         await post_ephemeral(
@@ -221,6 +226,14 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=_needs_admin_message(agent_name),
+        )
+        await _audit(
+            runtime,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            op="coding_token_mint",
+            outcome="denied",
+            reason=f"authz:{decision.reason}",
         )
         return
     account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
@@ -261,6 +274,15 @@ async def handle_coding_tools_click(
         text=text,
         blocks=blocks,
     )
+    await _audit(
+        runtime,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        op="coding_token_mint",
+        outcome="allowed",
+        reason="completed",
+        jti=jti,
+    )
 
 
 async def handle_revoke_token_click(
@@ -279,6 +301,9 @@ async def handle_revoke_token_click(
     the button lives on without needing a channel id.
     """
     del client  # every reply on this path is addressed by response_url
+    audit = functools.partial(
+        _audit, runtime, tenant_id=tenant_id, user_id=user_id, op="coding_token_revoke", jti=jti
+    )
     account_id = await _resolve_actor_account_id(runtime, tenant_id=tenant_id, user_id=user_id)
     async with runtime.sessionmaker() as session:
         row = await get_mcp_token(session, jti=jti)
@@ -290,6 +315,7 @@ async def handle_revoke_token_click(
             text="Only the person who minted this token can revoke it.",
             replace_original=False,
         )
+        await audit(outcome="denied", reason="not_minter")
         return
 
     async with runtime.sessionmaker() as session, session.begin():
@@ -301,9 +327,34 @@ async def handle_revoke_token_click(
             text="That token was already revoked.",
             replace_original=True,
         )
+        await audit(outcome="error", reason="already_revoked")
         return
     log.info("slack.coding_tools.revoked", jti=str(jti))
+    await audit(outcome="allowed", reason="completed")
     await _respond(runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True)
+
+
+async def _audit(
+    runtime: SlackRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    op: PanelOp,
+    outcome: PanelOutcome,
+    reason: str,
+    jti: uuid.UUID | None = None,
+) -> None:
+    await record_panel_write(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op=op,
+        outcome=outcome,
+        reason=reason,
+        token_kind="agent",
+        token_jti=jti,
+    )
 
 
 async def _authorize_mint(
@@ -316,7 +367,7 @@ async def _authorize_mint(
 ) -> tuple[Decision, str | None]:
     """Whether the caller may mint here, and the channel the token is bound to.
 
-    Slack has no roles, so a channel admin is one listed by user id. The agent
+    A channel admin is one listed by user id or through a user group. The agent
     is read only under a pin.
     """
     async with runtime.sessionmaker() as session:

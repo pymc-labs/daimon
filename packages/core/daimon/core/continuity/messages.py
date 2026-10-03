@@ -545,15 +545,24 @@ def render_access_changed_try_again() -> str:
 
 
 def render_responder_changed_without_handoff(
-    *, new_responder: str, owner: str, channel: str
+    *, new_responder: str, owner: str, channel: str, offer_button: bool = False
 ) -> str:
-    """Tell the person a new responder answers here, but the task still belongs to `owner`."""
+    """Tell the person a new responder answers here, but the task still belongs to `owner`.
+
+    `offer_button` is set where the notice carries the hand-over button
+    (Discord, Slack). No turn runs in this thread until the work is handed
+    over, so without the button the only way on is a new conversation.
+    """
+    first = (
+        f"{new_responder} now answers in {channel}, but this conversation's work "
+        f"belongs to {owner}."
+    )
+    if not offer_button:
+        return "\n".join([first, f"Start a new conversation to talk to {new_responder}."])
     return "\n".join(
         [
-            f"{new_responder} now answers in {channel}, but this conversation's work "
-            f"belongs to {owner}.",
-            f'Say "have {new_responder} take over this task" and I\'ll move the conversation and '
-            "working files across.",
+            first,
+            f"Press Hand over to move this conversation and its working files to {new_responder}.",
             f"Or start a new conversation to begin fresh with {new_responder}.",
         ]
     )

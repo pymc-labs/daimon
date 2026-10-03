@@ -1,0 +1,63 @@
+class SlackConfirmationCards:
+    """Posted confirmation cards awaiting a click, keyed by token."""
+
+    def __init__(self) -> None:
+        self._pending = PendingConfirmations()
+        self._cards: dict[str, _PostedCard] = {}
+
+    def hook(self, client: AsyncWebClient, *, channel: str, thread_ts: str) -> ConfirmationHook:
+        """A hook that posts each prompt's card into `channel`/`thread_ts`."""
+
+        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+            token, future = self._pending.open()
+            card = build_confirmation_card(prompt, state="pending", token=token)
+            try:
+                response = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=confirmation_card_text(card),
+                    blocks=build_confirmation_blocks(card, prompt=prompt),
+                )
+            except SlackApiError:
+                self._pending.discard(token)
+                raise
+            ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
+            self._cards[token] = _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
+            timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
+            try:
+                answer = await self._pending.wait(token, future, timeout_s=timeout_s)
+            except BaseException:
+                # The turn was stopped while the card was up: retire it.
+                posted = self._cards.pop(token, None)
+                if posted is not None:
+                    await _edit(posted, "denied", answered_by=None)
+                raise
+            posted = self._cards.pop(token, None)
+            if answer == "expired" and posted is not None:
+                await _edit(posted, "expired", answered_by=None)
+            return answer
+
+        return _confirm
+
+    async def handle_click(self, payload: dict[str, Any]) -> None:
+        """Route an Approve/Deny `block_actions` click to its waiting turn."""
+        actions: list[dict[str, Any]] = payload.get("actions") or []
+        action_id = str(actions[0].get("action_id") or "") if actions else ""
+        parsed = parse_confirmation_custom_id(action_id)
+        if parsed is None:
+            return
+        token, answer = parsed
+        user: dict[str, Any] = payload.get("user") or {}
+        clicker = str(user.get("id") or "")
+        posted = self._cards.get(token)
+        if posted is None:
+            await _ephemeral_from_payload(payload, clicker, NO_LONGER_PENDING_MESSAGE)
+            return
+        if clicker != posted.prompt.requester_platform_user_id:
+            await _ephemeral(posted, clicker, NOT_YOURS_MESSAGE)
+            return
+        self._cards.pop(token, None)
+        if not self._pending.resolve(token, answer):
+            await _ephemeral(posted, clicker, NO_LONGER_PENDING_MESSAGE)
+            return
+        await _edit(posted, answer, answered_by=clicker)

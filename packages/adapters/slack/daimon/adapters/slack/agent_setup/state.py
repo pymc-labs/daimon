@@ -36,7 +36,15 @@ __all__ = [
 PANEL_PAGE_SIZE: Final = 20
 
 PanelViewName = Literal[
-    "agents", "details", "routing", "channel_admins", "new_agent", "creating", "add_skill"
+    "agents",
+    "details",
+    "routing",
+    "channel_admins",
+    "channel_skills",
+    "operator_token",
+    "new_agent",
+    "creating",
+    "add_skill",
 ]
 """Which of the panel's screens a view is showing."""
 
@@ -44,7 +52,17 @@ PanelExpansion = Literal["keys", "skills", "connections"]
 """A list the reader has asked to see in full rather than collapsed."""
 
 _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
-    {"agents", "details", "routing", "channel_admins", "new_agent", "creating", "add_skill"}
+    {
+        "agents",
+        "details",
+        "routing",
+        "channel_admins",
+        "channel_skills",
+        "operator_token",
+        "new_agent",
+        "creating",
+        "add_skill",
+    }
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")
 

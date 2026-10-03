@@ -18,7 +18,7 @@ import dataclasses
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -40,9 +40,9 @@ from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
-from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -145,6 +145,7 @@ class DiscordTurnLifecycle:
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
+        budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._requester_id = requester_id
@@ -155,6 +156,7 @@ class DiscordTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._edit = edit
         self._delete = delete
@@ -326,13 +328,15 @@ class DiscordTurnLifecycle:
         if self._sessionmaker is not None and self._tenant_id is not None:
             try:
                 async with self._sessionmaker() as session:
-                    balance = await tenant_ledger.get_prepaid_balance(
-                        session, tenant_id=self._tenant_id
+                    footer = await balance_footer(
+                        session,
+                        tenant_id=self._tenant_id,
+                        platform="discord",
+                        budget_channel_id=self._budget_channel_id,
+                        now=datetime.now(UTC),
                     )
-                if balance is not None:
-                    self._state = dataclasses.replace(
-                        self._state, balance_str=f"${balance:.2f} left"
-                    )
+                if footer is not None:
+                    self._state = dataclasses.replace(self._state, balance_str=footer)
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True

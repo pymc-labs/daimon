@@ -53,6 +53,7 @@ from daimon.adapters.mcp.tools._session_access import (
     load_hub_subject,
     session_belongs_to_caller,
     sessions_outside_seals,
+    stored_group_members,
 )
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
@@ -70,7 +71,7 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
 from daimon.core.authz import Subject
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_admins import load_stored_subject
+from daimon.core.channel_admins import confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -132,8 +133,8 @@ async def _agents_by_tenant(
         try:
             async with runtime.session_factory() as session:
                 policy = await load_access_policy(session, tenant_id=tenant.tenant_id)
-                subject = (
-                    await load_stored_subject(
+                stored = (
+                    await read_stored_admin(
                         session,
                         tenant_id=tenant.tenant_id,
                         platform=hub.platform,
@@ -141,11 +142,19 @@ async def _agents_by_tenant(
                         platform_user_id=hub.platform_user_id,
                     )
                     if policy.isolated_channel_ids
-                    else Subject()
+                    else None
                 )
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
+        # Looked up after the session closes: a slow platform must not hold it.
+        subject = (
+            await confirm_stored_subject(
+                stored, stored_group_members(runtime, hub.platform, tenant.workspace_id)
+            )
+            if stored is not None
+            else Subject()
+        )
         agents = by_id[tenant.tenant_id]
         out.append((tenant, [a for a in agents if _hub_sees(policy, subject, a)]))
     return out

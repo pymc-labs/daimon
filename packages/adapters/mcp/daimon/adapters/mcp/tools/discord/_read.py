@@ -172,8 +172,9 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
 async def _list_channels_impl(  # pyright: ignore[reportUnusedFunction]
     runtime: McpRuntime,
     auth: AuthIdentity,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> list[ChannelRow]:
-    """List viewable channels in the caller's guild."""
+    """List viewable channels in the caller's guild (only its own, held to an isolated one)."""
     _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)
@@ -183,6 +184,8 @@ async def _list_channels_impl(  # pyright: ignore[reportUnusedFunction]
         channels = await guild.fetch_channels()
         result: list[ChannelRow] = []
         for ch in channels:
+            if not read_policy.lists(str(ch.id)):
+                continue
             if member.guild_permissions.administrator or ch.permissions_for(member).view_channel:
                 result.append(
                     ChannelRow(

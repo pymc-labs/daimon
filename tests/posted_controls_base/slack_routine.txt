@@ -1,0 +1,243 @@
+async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """Block-action handler for overflow (⋯) and Refresh actions in the routines panel.
+
+    Dispatches on the parsed ``value`` from the selected overflow option:
+    - ``pause``/``resume``: TOCTOU-safe write inside ``session.begin()``.
+    - ``output``: ``chat.postEphemeral`` with the fenced last-output text.
+    - ``refresh`` (action_id ``routines_refresh``): re-read + ``views.update``.
+
+    Authority gate (re-checked at click time, not stored in view state):
+      Admin (resolve_is_admin) OR creator (row.created_by_user_id == user_id).
+
+    Tenant gate (inside session.begin()):
+      ``row.tenant_id != derive_tenant_uuid("slack", team_id)`` → refused.
+
+    Args:
+        runtime: Injected SlackRuntime.
+        payload: block_actions payload from the Socket Mode interactive envelope.
+    """
+    team_info: dict[str, Any] = payload.get("team") or {}
+    team_id: str = team_info.get("id") or payload.get("team_id") or ""  # type: ignore[assignment]
+    user_info: dict[str, Any] = payload.get("user") or {}
+    user_id: str = user_info.get("id") or ""
+    actions: list[dict[str, Any]] = payload.get("actions") or []
+    view_info: dict[str, Any] = payload.get("view") or {}
+    view_id: str = view_info.get("id") or ""
+    channel_id: str = view_info.get("private_metadata") or ""
+
+    if not actions:
+        return
+
+    action = actions[0]
+    action_id: str = action.get("action_id") or ""
+
+    # Parse routine_id and action value from the action_id string.
+    if action_id.startswith("routine_action:"):
+        routine_id_str = action_id.removeprefix("routine_action:")
+        selected_opt: dict[str, Any] = action.get("selected_option") or {}
+        action_value: str = selected_opt.get("value") or ""
+    elif action_id == "routines_refresh":
+        routine_id_str = ""
+        action_value = "refresh"
+    elif action_id == "routines_create":
+        routine_id_str = ""
+        action_value = "create"
+    else:
+        return  # unknown action — ignore
+
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        log.warning("slack.routines_action.no_token", team_id=team_id)
+        return
+
+    try:
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        if action_value in ("pause", "resume"):
+            try:
+                routine_id = uuid.UUID(routine_id_str)
+            except ValueError:
+                log.warning("slack.routines_action.bad_routine_id", action_id=action_id)
+                return
+
+            async with runtime.sessionmaker() as session, session.begin():
+                # TOCTOU-safe: re-fetch and validate inside session.begin().
+                # Tenant scoping is enforced by the store (tenant_id kwarg).
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
+                if row is None:
+                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                        channel=channel_id or user_id,
+                        user=user_id,
+                        text="This routine no longer exists.",
+                    )
+                    return
+                # T-82-06: authority check at click time (TOCTOU-safe).
+                is_admin = await resolve_is_admin(client, user_id=user_id)
+                if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
+                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                        channel=channel_id or user_id,
+                        user=user_id,
+                        text=(
+                            "Only the routine's creator or a workspace admin "
+                            "can pause or resume this routine."
+                        ),
+                    )
+                    return
+
+                now = datetime.now(UTC)
+                if action_value == "pause":
+                    await pause_routine(session, routine_id, tenant_id=tenant_id)
+                else:
+                    await resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
+
+            # Re-render after successful write.
+            async with runtime.sessionmaker() as session:
+                entries, over_cap_count, agent_name_map = await load_routines(
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
+                )
+            state = RoutinesPanelState(
+                rows=entries,
+                over_cap_count=over_cap_count,
+                agent_name_map=agent_name_map,
+            )
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=build_content_view(state, channel_id=channel_id),
+            )
+
+        elif action_value == "delete":
+            try:
+                routine_id = uuid.UUID(routine_id_str)
+            except ValueError:
+                log.warning("slack.routines_action.bad_routine_id", action_id=action_id)
+                return
+
+            async with runtime.sessionmaker() as session:
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
+
+            if row is None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text="This routine no longer exists.",
+                )
+                return
+            # Authority gate before showing the confirm modal (re-checked at
+            # submit for TOCTOU safety). Admin OR creator.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
+            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=(
+                        "Only the routine's creator or a workspace admin can delete this routine."
+                    ),
+                )
+                return
+
+            await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+                trigger_id=payload.get("trigger_id") or "",
+                view=build_delete_confirm_modal(
+                    team_id=team_id,
+                    channel_id=channel_id,
+                    routine_id=routine_id_str,
+                    root_view_id=view_id,
+                    label=routine_label(row),
+                ),
+            )
+
+        elif action_value == "output":
+            try:
+                routine_id = uuid.UUID(routine_id_str)
+            except ValueError:
+                log.warning("slack.routines_action.bad_routine_id", action_id=action_id)
+                return
+
+            async with runtime.sessionmaker() as session:
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
+
+            if row is None:
+                return
+
+            # Same authority as pause/resume/delete. last_result_tail is the
+            # agent's own output from a scheduled run and routinely carries
+            # business data, so reading it is not a lesser act than pausing.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
+            if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=(
+                        "Only the routine's creator or a workspace admin "
+                        "can read this routine's output."
+                    ),
+                )
+                return
+
+            if row.last_error is not None:
+                output_text = row.last_error
+            else:
+                output_text = row.last_result_tail or "(no output)"
+
+            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id or user_id,
+                user=user_id,
+                text=build_last_output_view(output_text),
+            )
+
+        elif action_value == "refresh":
+            async with runtime.sessionmaker() as session:
+                entries, over_cap_count, agent_name_map = await load_routines(
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
+                )
+            state = RoutinesPanelState(
+                rows=entries,
+                over_cap_count=over_cap_count,
+                agent_name_map=agent_name_map,
+            )
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=build_content_view(state, channel_id=channel_id),
+            )
+
+        elif action_value == "create":
+            # Admin gate at click time. Refused → ephemeral.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
+            if not is_admin:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=":x: Only a workspace admin can create routines.",
+                )
+                return
+
+            agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
+            agent_names: list[str] = []
+            for agent in agents:
+                name = agent.metadata.get(MA_METADATA_KEY_NAME)
+                if name is not None:
+                    agent_names.append(name)
+
+            await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+                trigger_id=payload.get("trigger_id") or "",
+                view=build_create_routine_modal(
+                    team_id=team_id,
+                    channel_id=channel_id,
+                    agent_names=agent_names,
+                ),
+            )
+
+    except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+        log.error(
+            "slack.routine_action_failed",
+            team_id=team_id,
+            action_id=action_id,
+            exc_info=exc,
+        )
+        capture_exception_with_scope(exc)

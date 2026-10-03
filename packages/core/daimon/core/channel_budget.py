@@ -19,10 +19,12 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import get_args
 
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Decision, Place, Subject, authorize
 from daimon.core.errors import DaimonError
-from daimon.core.stores.channel_budgets import get_channel_budget
+from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from daimon.core.stores.tenant_ledger import get_channel_spend
+from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 BUDGET_WINDOWS: tuple[BudgetWindow, ...] = get_args(BudgetWindow)
@@ -65,6 +67,13 @@ class ChannelBudgetStatus:
     @property
     def is_exceeded(self) -> bool:
         return self.is_active and self.spent_usd >= self.budget.limit_usd
+
+    @property
+    def percent_used(self) -> int:
+        """Spend as a whole percentage of the limit; a limit of 0 reads as 100."""
+        if self.budget.limit_usd <= 0:
+            return 100
+        return int(self.spent_usd / self.budget.limit_usd * 100)
 
 
 def _parse_usd(value: str) -> Decimal:
@@ -176,6 +185,35 @@ async def load_budget_status(
     )
 
 
+def rank_by_percent_used(
+    statuses: list[ChannelBudgetStatus],
+) -> list[ChannelBudgetStatus]:
+    """Active budgets first, each group by the share of its limit spent, highest first. Pure."""
+    return sorted(
+        statuses,
+        key=lambda s: (
+            not s.is_active,
+            -(s.spent_usd / s.budget.limit_usd if s.budget.limit_usd > 0 else Decimal("Infinity")),
+            s.budget.channel_id,
+        ),
+    )
+
+
+async def list_channel_budget_statuses(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str | None, now: datetime
+) -> list[ChannelBudgetStatus]:
+    """Every budget of the tenant (on `platform`, if given) with its spend, by
+    `rank_by_percent_used`."""
+    budgets = await list_channel_budgets(session, tenant_id=tenant_id)
+    return rank_by_percent_used(
+        [
+            await load_budget_status(session, budget, now=now)
+            for budget in budgets
+            if platform is None or budget.platform == platform
+        ]
+    )
+
+
 async def get_channel_budget_status(
     session: AsyncSession,
     *,
@@ -213,3 +251,36 @@ async def is_over_channel_budget(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
         )
     return status is not None and status.is_exceeded
+
+
+async def balance_footer(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    budget_channel_id: str | None,
+    now: datetime,
+) -> str | None:
+    """A turn footer's money line: what an active channel budget has left, else the
+    prepaid balance; None for an operator-funded tenant outside a budgeted channel."""
+    if budget_channel_id is not None:
+        status = await get_channel_budget_status(
+            session, tenant_id=tenant_id, platform=platform, channel_id=budget_channel_id, now=now
+        )
+        if status is not None and status.is_active:
+            return f"${status.remaining_usd:.2f} of channel budget left"
+    balance = await get_prepaid_balance(session, tenant_id=tenant_id)
+    return None if balance is None else f"${balance:.2f} left"
+
+
+def may_set_channel_budget(subject: Subject, channel_id: str) -> Decision:
+    """Whether ``subject`` may set, clear or raise ``channel_id``'s budget. Pure.
+
+    No access policy fact counts, so the empty policy stands in for it.
+    """
+    return authorize(
+        TenantAccessPolicy(),
+        subject=subject,
+        action=Action.SET_CHANNEL_BUDGET,
+        place=Place(channel_id=channel_id),
+    )

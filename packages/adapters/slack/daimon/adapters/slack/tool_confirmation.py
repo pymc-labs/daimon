@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -22,17 +21,16 @@ from daimon.core.confirmation import (
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
-    PendingConfirmations,
 )
 from daimon.core.posted_controls.confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     NO_LONGER_PENDING_MESSAGE,
-    NOT_YOURS_MESSAGE,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
     parse_confirmation_custom_id,
 )
+from daimon.core.posted_controls.lifecycle import PostedConfirmations
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -57,40 +55,29 @@ class SlackConfirmationCards:
     """Posted confirmation cards awaiting a click, keyed by token."""
 
     def __init__(self) -> None:
-        self._pending = PendingConfirmations()
-        self._cards: dict[str, _PostedCard] = {}
+        self._controls = PostedConfirmations[_PostedCard]()
 
     def hook(self, client: AsyncWebClient, *, channel: str, thread_ts: str) -> ConfirmationHook:
         """A hook that posts each prompt's card into `channel`/`thread_ts`."""
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
-            token, future = self._pending.open()
-            card = build_confirmation_card(prompt, state="pending", token=token)
-            try:
+            async def post(token: str) -> _PostedCard:
+                card = build_confirmation_card(prompt, state="pending", token=token)
                 response = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
                     thread_ts=thread_ts,
                     text=confirmation_card_text(card),
                     blocks=build_confirmation_blocks(card, prompt=prompt),
                 )
-            except SlackApiError:
-                self._pending.discard(token)
-                raise
-            ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
-            self._cards[token] = _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
-            timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
-            try:
-                answer = await self._pending.wait(token, future, timeout_s=timeout_s)
-            except BaseException:
-                # The turn was stopped while the card was up: retire it.
-                posted = self._cards.pop(token, None)
-                if posted is not None:
-                    await _edit(posted, "denied", answered_by=None)
-                raise
-            posted = self._cards.pop(token, None)
-            if answer == "expired" and posted is not None:
-                await _edit(posted, "expired", answered_by=None)
-            return answer
+                ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
+                return _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
+
+            async def retire(posted: _PostedCard, state: ConfirmationAnswer) -> None:
+                await _edit(posted, state, answered_by=None)
+
+            return await self._controls.confirm(
+                prompt, post=post, retire=retire, post_errors=(SlackApiError,)
+            )
 
         return _confirm
 
@@ -104,16 +91,12 @@ class SlackConfirmationCards:
         token, answer = parsed
         user: dict[str, Any] = payload.get("user") or {}
         clicker = str(user.get("id") or "")
-        posted = self._cards.get(token)
+        posted = self._controls.cards.get(token)
         if posted is None:
             await _ephemeral_from_payload(payload, clicker, NO_LONGER_PENDING_MESSAGE)
             return
-        if clicker != posted.prompt.requester_platform_user_id:
-            await _ephemeral(posted, clicker, NOT_YOURS_MESSAGE)
-            return
-        self._cards.pop(token, None)
-        if not self._pending.resolve(token, answer):
-            await _ephemeral(posted, clicker, NO_LONGER_PENDING_MESSAGE)
+        if refusal := self._controls.claim(token, clicker, answer):
+            await _ephemeral(posted, clicker, refusal)
             return
         await _edit(posted, answer, answered_by=clicker)
 

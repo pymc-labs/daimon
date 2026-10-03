@@ -433,8 +433,8 @@ async def agents_archive(
 @agents_app.command(
     "fork",
     help=(
-        "Copy an agent under a new name. The copy holds no MCP credentials and no skill "
-        "scoped to another agent; the skills left off are named."
+        "Copy an agent under a new name. The copy holds no MCP credentials; the source's "
+        "own skills are uploaded again as the copy's, and the skills left off are named."
     ),
 )
 def agents_fork_command(
@@ -494,9 +494,11 @@ async def agents_fork(
         subject=Subject(is_admin=True),
     )
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
+    if copy.copied_skills:
+        console.print(f"Copied its own skills: {', '.join(copy.copied_skills)}")
     if copy.dropped_skills:
         left_off = ", ".join(copy.dropped_skills)
-        console.print(f"[yellow]Left off skills scoped to another agent: {left_off}[/yellow]")
+        console.print(f"[yellow]Left off the copy: {left_off}[/yellow]")
 
 
 class _BackfillRow(BaseModel):

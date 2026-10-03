@@ -28,6 +28,8 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
+from daimon.core.stores.agent_creation_channels import get_creation_channel
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
@@ -427,6 +429,57 @@ async def test_submit_stamps_the_guild_account_not_the_personal_one(
     assert captured["managed"] is False, (
         "a guild-owned agent must not be daimon_managed — the next defaults apply would archive it"
     )
+
+
+@pytest.mark.parametrize(("grant", "server_admin"), [(True, False), (False, False), (True, True)])
+async def test_a_channel_admins_new_agent_is_their_channels(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    grant: bool,
+    server_admin: bool,
+) -> None:
+    """Only a channel admin, not a member or a server admin, makes the agent the channel's."""
+    await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD_ID), id=_TENANT_ID)
+    if grant:
+        await set_channel_admins(
+            db_session,
+            tenant_id=_TENANT_ID,
+            platform="discord",
+            channel_id="900",
+            role_ids=[],
+            user_ids=["42"],
+            actor_account_id=None,
+        )
+    await db_session.commit()
+
+    async def _fake_create(*_args: Any, **_kwargs: Any) -> ResourceOutcome:
+        return ResourceOutcome(
+            kind="agent", name=_CREATED_NAME, action=Action.CREATED, anthropic_id=_CREATED_ID
+        )
+
+    monkeypatch.setattr(new_agent_mod, "create_blank_agent", _fake_create)
+    monkeypatch.setattr(
+        new_agent_mod, "resolve_tenant_for_panel", AsyncMock(return_value=_TENANT_ID)
+    )
+    runtime = _runtime(build_stub_anthropic(_ma_handler(seen=[])), sessionmaker=db_session_factory)
+    modal = _modal(_state(account_id), runtime=runtime)
+    _fill(modal)
+    interaction = _interaction()
+    interaction.user.roles = []
+    interaction.user.guild.owner_id = 1
+    interaction.user.guild_permissions = discord.Permissions(
+        administrator=server_admin, manage_guild=server_admin
+    )
+
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        channel = await get_creation_channel(
+            session, tenant_id=_TENANT_ID, ma_agent_id=_CREATED_ID, platform="discord"
+        )
+    assert channel == ("900" if grant and not server_admin else None)
 
 
 # ---------------------------------------------------------------------------

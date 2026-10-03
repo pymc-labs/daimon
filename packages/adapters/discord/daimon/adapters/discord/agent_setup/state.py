@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from typing import Any, Literal
+from typing import Literal
 
-from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
-    BetaManagedAgentsURLMCPServerParams,
-)
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
@@ -128,91 +125,6 @@ class PanelState:
     # holds the PARENT channel in that case, so both are needed to resolve who
     # answers for the caller exactly as a mention would.
     thread_id: str | None = None
-
-    def apply_mcp_modal(
-        self,
-        *,
-        server_entry: BetaManagedAgentsURLMCPServerParams,
-    ) -> None:
-        """Append an MCP server to the selected agent's spec.
-
-        MA rejects an agent whose ``mcp_servers`` names are not each referenced
-        by a matching ``{type: mcp_toolset, mcp_server_name: <name>, ...}`` entry
-        in ``tools``. Append BOTH halves here so reconcile sees a valid spec.
-        Stay pure — no I/O.
-        """
-        if self.selected is None:
-            return
-        current_mcps = list(self.selected.spec.mcp_servers or [])
-        current_mcps.append(server_entry)
-        current_tools: list[dict[str, Any]] = [dict(t) for t in (self.selected.spec.tools or [])]
-        server_name = server_entry.get("name", "")
-        already_referenced = any(
-            t.get("type") == "mcp_toolset" and t.get("mcp_server_name") == server_name
-            for t in current_tools
-        )
-        if not already_referenced:
-            current_tools.append(
-                {
-                    "type": "mcp_toolset",
-                    "mcp_server_name": server_name,
-                    "default_config": {"permission_policy": {"type": "always_allow"}},
-                }
-            )
-        updated = self.selected.spec.model_copy(
-            update={"mcp_servers": current_mcps, "tools": current_tools}
-        )
-        self.selected = dataclasses.replace(self.selected, spec=updated)
-        for idx, entry in enumerate(self.roster):
-            if entry.name == self.selected.name:
-                self.roster[idx] = self.selected
-                break
-
-    def remove_skill_at(self, index: int) -> None:
-        """Remove the skill at `index` from the selected agent's spec."""
-        if self.selected is None:
-            return
-        skills = list(self.selected.spec.skills)
-        if 0 <= index < len(skills):
-            skills.pop(index)
-            updated = self.selected.spec.model_copy(update={"skills": skills})
-            self.selected = dataclasses.replace(self.selected, spec=updated)
-            for idx, entry in enumerate(self.roster):
-                if entry.name == self.selected.name:
-                    self.roster[idx] = self.selected
-                    break
-
-    def remove_mcp_at(self, index: int) -> str | None:
-        """Remove the user MCP at ``index`` from the selected agent's spec.
-
-        An ``mcp_toolset`` entry in ``tools`` that references a removed
-        ``mcp_servers`` name is an MA validation error on the next reconcile.
-        Remove both halves atomically.
-
-        Returns the removed MCP's name (for logging / error surfacing), or
-        ``None`` if nothing was removed (no selection, or index out of range).
-        """
-        if self.selected is None:
-            return None
-        mcps = list(self.selected.spec.mcp_servers or [])
-        if not (0 <= index < len(mcps)):
-            return None
-        removed_entry = mcps.pop(index)
-        removed_name = removed_entry.get("name", "")
-        tools: list[dict[str, Any]] = [
-            dict(t)
-            for t in (self.selected.spec.tools or [])
-            if not (t.get("type") == "mcp_toolset" and t.get("mcp_server_name") == removed_name)
-        ]
-        updated = self.selected.spec.model_copy(
-            update={"mcp_servers": mcps or None, "tools": tools or None}
-        )
-        self.selected = dataclasses.replace(self.selected, spec=updated)
-        for idx, entry in enumerate(self.roster):
-            if entry.name == self.selected.name:
-                self.roster[idx] = self.selected
-                break
-        return removed_name
 
     def select_agent(self, agent: RosterAgent) -> None:
         """Point Details and setup at `agent`, keeping the legacy selection in step.

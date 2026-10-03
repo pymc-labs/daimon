@@ -116,12 +116,9 @@ _REACTIONS_ADD_PATTERN = re.compile(r"https://slack\.com/api/reactions\.add.*")
 _CONVERSATIONS_REPLIES_PATTERN = re.compile(r"https://slack\.com/api/conversations\.replies.*")
 
 _BALANCE_BLOCKED_TEXT = (
-    "This workspace's daimon credit is depleted. An admin can top up with `/billing`."
+    "This workspace's daimon credit is depleted. A workspace admin can top up with `/billing`."
 )
-_CAP_BLOCKED_TEXT = (
-    "Monthly usage cap reached for this workspace. "
-    "An admin can adjust the cap with `/billing` (when available)."
-)
+_CAP_BLOCKED_TEXT = "You've reached your monthly usage cap. An operator can raise it."
 
 
 def _register_slack_defaults(mock: AioResponsesMock) -> None:

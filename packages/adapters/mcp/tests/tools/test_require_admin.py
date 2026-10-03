@@ -287,9 +287,9 @@ async def test_list_impl_does_not_raise_admin_gate_for_non_admin(
 # ---------------------------------------------------------------------------
 
 
-def _env_runtime(client: AsyncAnthropic) -> McpRuntime:
+def _env_runtime(client: AsyncAnthropic, session_factory: Any = None) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
@@ -357,7 +357,9 @@ async def test_archive_environment_impl_raises_when_not_admin() -> None:
     )
 
 
-async def test_list_environments_impl_does_not_raise_for_non_admin() -> None:
+async def test_list_environments_impl_does_not_raise_for_non_admin(
+    db_session_factory: Any,
+) -> None:
     """Read is ungated — non-admin callers can list environments."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -400,5 +402,7 @@ async def test_list_environments_impl_does_not_raise_for_non_admin() -> None:
         role=Role.USER,
         is_admin=False,
     )
-    result = await _list_environments_impl(_env_runtime(client), auth, page=None)
+    result = await _list_environments_impl(
+        _env_runtime(client, db_session_factory), auth, page=None
+    )
     assert isinstance(result, list), "non-admin read must succeed and return a list"

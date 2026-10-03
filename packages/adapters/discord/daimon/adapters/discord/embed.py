@@ -8,83 +8,34 @@ Discord markup and the phase colors. No discord or anthropic imports.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
-from enum import Enum
-from typing import Literal
 
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
     COLOR_IN_PROGRESS,
     COLOR_RED,
 )
+from daimon.core.turn.card_state import (
+    CardEvent as _CardEvent,
+)
+from daimon.core.turn.card_state import (
+    CardState as EmbedState,
+)
+from daimon.core.turn.card_state import (
+    TurnPhase as TurnPhase,
+)
+from daimon.core.turn.card_state import (
+    update as update,
+)
+from daimon.core.turn.card_state import (
+    update_activity as update_activity,
+)
 from daimon.core.turn.notices import TerminationNotice, fit_notice
-from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
-    format_draft,
     format_headline,
-    format_tool_lines,
-    has_running_tool,
 )
 
-# ---------------------------------------------------------------------------
-# Phase enum
-# ---------------------------------------------------------------------------
-
-
-class TurnPhase(Enum):
-    THINKING = "thinking"
-    TOOL_RUNNING = "tool_running"
-    DONE = "done"
-    ERROR = "error"
-
-
-# ---------------------------------------------------------------------------
-# Event type
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class EmbedEvent:
-    """An event fed into the embed state machine.
-
-    kind discriminates the event:
-    - "message": agent emitted intermediate text; label is the full text
-      (flattened and clipped to the draft length in ``update``)
-    - "done": turn completed successfully
-    - "error": turn failed; label is the error description
-
-    Tool calls are not events here: ``update_activity`` reads them from the
-    turn state on each render.
-    """
-
-    kind: Literal["message", "done", "error"]
-    label: str = ""
-
-
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class EmbedState:
-    """Accumulated embed state. Immutable — update() returns new instances."""
-
-    phase: TurnPhase = TurnPhase.THINKING
-    tool_lines: tuple[str, ...] = ()
-    agent_name: str = ""
-    started_at: float = 0.0
-    usage_in: int = 0
-    usage_out: int = 0
-    cost_str: str | None = None
-    balance_str: str | None = None
-    text_preview: str | None = None
-    error_reason: str = ""
-    """Why the turn failed; leads the ERROR card's footer."""
-    notice: str = ""
-    """Rendered termination notice; the ERROR card's body."""
-
+EmbedEvent = _CardEvent
 
 # ---------------------------------------------------------------------------
 # Output shape
@@ -131,33 +82,6 @@ def _escape_markdown(text: str) -> str:
     for char in r"\`*_~|>[]()#":
         text = text.replace(char, f"\\{char}")
     return text
-
-
-def update(state: EmbedState, event: EmbedEvent) -> EmbedState:
-    """Return a new EmbedState with event applied.
-
-    A message replaces the draft shown under the tool lines; an empty one
-    keeps the last draft. done and error move to the terminal phases.
-    """
-    if event.kind == "message":
-        if not event.label:
-            return state
-        return dataclasses.replace(state, text_preview=format_draft(event.label))
-    if event.kind == "done":
-        return dataclasses.replace(state, phase=TurnPhase.DONE)
-    return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")
-
-
-def update_activity(state: EmbedState, turn: TurnState) -> EmbedState:
-    """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
-
-    A no-op once the turn is terminal, so a late render cannot reopen the card.
-    """
-    if state.phase in _TERMINAL_PHASES:
-        return state
-    phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
-    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
-    return dataclasses.replace(state, phase=phase, tool_lines=lines)
 
 
 def _fmt_tokens(n: int) -> str:

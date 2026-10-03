@@ -16,14 +16,15 @@ import discord
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-
-# pyright: reportPrivateUsage=false
 from daimon.adapters.discord.billing_panel.read import (
     _resolve_member_name,
     invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
 )
+
+# pyright: reportPrivateUsage=false
+from daimon.adapters.discord.billing_panel.state import BillingPanelState
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.tenants import get_tenant
@@ -537,3 +538,29 @@ async def test_load_billing_snapshot_reads_the_invoking_channels_budget(
         channel_id="c2",
     )
     assert unbudgeted.channel_budget is None
+
+
+async def test_load_billing_snapshot_lists_channel_budgets_for_admins_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="guild_c")
+    await make_channel_budget(db_session, tenant=tenant, channel_id="c1", limit_usd=Decimal("5"))
+    await make_channel_budget(db_session, tenant=tenant, channel_id="c2", limit_usd=Decimal("5"))
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-4"), channel_id="c2")
+    guild = _make_guild_with_members({})
+    now = datetime.now(UTC)
+
+    async def snapshot(is_admin: bool) -> BillingPanelState:
+        return await load_billing_snapshot(
+            db_session,
+            guild=guild,
+            guild_id="guild_c",
+            caller_user_id="1",
+            is_admin=is_admin,
+            since=now - timedelta(days=1),
+            now=now,
+        )
+
+    admin = await snapshot(True)
+    assert [s.budget.channel_id for s in admin.channel_budgets] == ["c2", "c1"], "most used first"
+    assert (await snapshot(False)).channel_budgets == (), "a member sees no other channel"

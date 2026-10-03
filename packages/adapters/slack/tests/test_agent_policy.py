@@ -397,7 +397,7 @@ def test_refusal_copy_differs_by_operation_family() -> None:
 async def test_repo_bind_allows_a_channel_admin_for_an_agent_local_to_their_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A listed channel admin may attach to an agent that answers only there."""
+    """A listed channel admin may attach to an agent a server admin set to answer only there."""
     async with db_session_factory() as session:
         tenant = await make_tenant(session, platform="slack", workspace_id=_TEAM_ID)
         await set_fields(
@@ -433,6 +433,17 @@ async def test_repo_bind_allows_a_channel_admin_for_an_agent_local_to_their_chan
                 role_ids=[],
                 user_ids=[_USER_ID],
                 actor_account_id=None,
+            )
+            await session.commit()
+        assert await refused(), "a member's binding does not make the agent the channel admin's"
+        async with db_session_factory() as session:
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=_CHANNEL_ID),
+                tenant_id=tenant.id,
+                agent_name=_AGENT_NAME,
+                mode="agent",
+                set_by_admin=True,
             )
             await session.commit()
         assert not await refused(), "the channel admin runs the only channel it answers in"

@@ -356,7 +356,12 @@ async def test_responder_changed_without_handoff_posts_offer_and_runs_no_turn(
         p is not None and "test-agent now answers" in p and "belongs to owner-bot" in p
         for p in posted
     ), f"expected the responder-changed-without-handoff offer, got {posted}"
-    assert any(p is not None and "have test-agent take over this task" in p for p in posted)
+    assert any(p is not None and "Press Hand over" in p for p in posted)
+    views = [c.kwargs.get("view") for c in message.channel.send.return_value.edit.call_args_list]
+    buttons = [item for view in views if view is not None for item in view.children]
+    assert [getattr(b, "custom_id", None) for b in buttons] == ["tho:ag_test"], (
+        "the notice carries the Hand over button for the agent the channel answers with"
+    )
     await _assert_no_recoverable_cards(db_session_factory)
 
 

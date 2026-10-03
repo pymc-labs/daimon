@@ -48,7 +48,11 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import routine_destination_channel, routine_destination_place
+from daimon.core.channel_isolation import (
+    routine_destination_channel,
+    routine_destination_place,
+    routine_origin,
+)
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -464,6 +468,13 @@ async def _build_fire(
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
             budget_channel_id=row.channel_id,
+            # Stamped like a turn in the destination, so an isolated or sealed
+            # channel's routine transcript reads only from inside it.
+            origin_place=(
+                routine_origin(fire_policy, row, platform=platform)
+                if fire_policy is not None
+                else None
+            ),
         )
 
         if row.destination_kind is None:

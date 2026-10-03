@@ -38,6 +38,10 @@ class TenantAccessPolicy(BaseModel):
     # Agent name -> the only channels (and threads under them) it may run in.
     # An agent not named here runs wherever the cascade sends it.
     agent_channel_pins: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    # Teams guests (Entra object ids, lower case) treated as members of the
+    # organisation; any other guest is answered as from another organisation.
+    # Only read while `teams.restrict_guests` is on.
+    member_guest_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _isolated_channels_are_sealed(self) -> TenantAccessPolicy:
@@ -127,6 +131,37 @@ def isolation_owner(policy: TenantAccessPolicy, agent_names: tuple[str | None, .
         return None
     (channel,) = channels
     return channel if channel in policy.isolated_channel_ids else None
+
+
+def is_own_isolated_agent(
+    policy: TenantAccessPolicy,
+    agent_names: tuple[str | None, ...],
+    *,
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+) -> bool:
+    """Whether an isolated channel's own agent is at work in it; its memory stays writable."""
+    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
+    return inside is not None and isolation_owner(policy, agent_names) == inside
+
+
+def source_seal_ids(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> frozenset[str]:
+    """Every id that seals a turn: its channel and a thread sealed on its own.
+
+    A Discord thread is sealed by its id, a Slack one as channel_id:thread_ts.
+    All of them are recorded, so unsealing one later leaves the others holding.
+    """
+    return frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
+    )
 
 
 def is_sealed_source(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:

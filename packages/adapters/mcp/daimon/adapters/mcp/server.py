@@ -19,6 +19,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
+from daimon.adapters.mcp.auth.group_members import GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -55,10 +56,13 @@ from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tool
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
 from daimon.adapters.mcp.tools.channel_isolation import register_channel_isolation_tools
+from daimon.adapters.mcp.tools.channel_protection import register_channel_protection_tools
+from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
+from daimon.adapters.mcp.tools.isolation_copies import register_isolation_copy_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
@@ -74,6 +78,7 @@ from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_too
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
+from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
@@ -211,6 +216,20 @@ def create_mcp_app(
             allow_plaintext=effective_settings.crypto.allow_plaintext,
         )
 
+    fernet = (
+        build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
+        if effective_settings.crypto.keys
+        else None
+    )
+    teams_client = (
+        build_teams_client(effective_settings.teams)
+        if effective_settings.teams is not None
+        else None
+    )
+    group_lookups = GroupLookups(
+        sessionmaker=effective_sessionmaker, fernet=fernet, teams_client=teams_client
+    )
+
     effective_auth = auth
     if effective_auth is None:
         secret_value = effective_settings.mcp.jwt_secret
@@ -221,6 +240,7 @@ def create_mcp_app(
         effective_auth = DaimonJWTVerifier(
             secret=secret_value.get_secret_value().encode(),
             sessionmaker=effective_sessionmaker,
+            group_members=group_lookups.members,
         )
 
     effective_resolver = subject_resolver or production_subject_resolver
@@ -327,12 +347,6 @@ def create_mcp_app(
         max_requests=effective_settings.mcp.bundle_uploads_per_hour,
     )
 
-    fernet = (
-        build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
-        if effective_settings.crypto.keys
-        else None
-    )
-
     deployment_default = parse_deployment_default(effective_settings.defaults_root)
     artifact_store = (
         build_artifact_store(effective_settings.artifacts)
@@ -350,11 +364,8 @@ def create_mcp_app(
         bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
-        teams_client=(
-            build_teams_client(effective_settings.teams)
-            if effective_settings.teams is not None
-            else None
-        ),
+        teams_client=teams_client,
+        group_lookups=group_lookups,
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -376,6 +387,8 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
+        if effective_settings.discord is not None or effective_settings.slack is not None:
+            register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:
         log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
@@ -385,9 +398,12 @@ def create_mcp_app(
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_channel_admin_tools(mcp, runtime)  # who administers a channel
     register_channel_isolation_tools(mcp, runtime)  # channels whose own agents stay inside
+    register_channel_protection_tools(mcp, runtime)  # protect or seal one channel
+    register_isolation_copy_tools(mcp, runtime)  # archive a closing channel's copy
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
     register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
 

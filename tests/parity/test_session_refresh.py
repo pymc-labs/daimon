@@ -79,7 +79,11 @@ def _build_router(
     """
     calls = resource_calls if resource_calls is not None else []
     router = build_turn_router(
-        str(tenant_id), session_id=turn_session_id, model_id=model_id, fresh_event_ids=True
+        str(tenant_id),
+        session_id=turn_session_id,
+        model_id=model_id,
+        fresh_event_ids=True,
+        replacement_session_ids=(_LIVE_SESSION_ID,),
     )
 
     def _upload(request: httpx.Request, _match: object) -> httpx.Response:

@@ -104,8 +104,13 @@ async def turn_origin(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
+    is_external: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
-    """Commit a distinct origin for this execution and remove it after execution."""
+    """Commit a distinct origin for this execution and remove it after execution.
+
+    `is_external` (`Admission.is_external`) holds the turn's MCP calls to what
+    an external participant may do, even when nothing about them was stored.
+    """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
         origin = await create_origin(
@@ -123,6 +128,7 @@ async def turn_origin(
             expires_at=now + timedelta(hours=2),
             now=now,
             is_setup=is_setup,
+            is_external=is_external,
         )
     try:
         yield origin

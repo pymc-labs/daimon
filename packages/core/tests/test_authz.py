@@ -14,7 +14,9 @@ import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
+    AgentReach,
     AgentRef,
+    AgentStanding,
     Decision,
     Place,
     SessionFacts,
@@ -22,6 +24,7 @@ from daimon.core.authz import (
     Surface,
     authorize,
     build_subject,
+    channel_admin_holds,
 )
 
 PINNED = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME",)})
@@ -30,6 +33,7 @@ DISPLAY_PINNED = TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME
 SEALED = TenantAccessPolicy(sealed_channel_ids=("C_SEAL",))
 PROTECTED = TenantAccessPolicy(protected_channel_ids=("C_PROT",))
 INVOKERS = TenantAccessPolicy(invoker_user_ids=("U_OK",))
+OPEN = TenantAccessPolicy()
 
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
@@ -65,6 +69,27 @@ def _deny(reason: str) -> Decision:
 ALLOW = Decision(True)
 
 ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
+    # --- shared agent change: a channel admin needs a local agent that is theirs ---
+    *[
+        (
+            f"shared change by channel admin {name}",
+            OPEN,
+            {
+                "subject": ACME_CHANNEL_ADMIN,
+                "action": Action.CHANGE_SHARED_AGENT,
+                "surface": Surface.CONFIG,
+                "operation_family": family,
+                "reach": AgentReach(reachable=True, local_to_caller=local, held_by_caller=held),
+            },
+            ALLOW if local and held else _deny("admin_required"),
+        )
+        for family in ("spec", "attachment")
+        for name, local, held in (
+            (f"{family} local and theirs", True, True),
+            (f"{family} local, someone else's", True, False),
+            (f"{family} theirs, lost its locality", False, True),
+        )
+    ],
     # --- G_pin_turn: a pinned agent runs only in its channels ---
     (
         "G_pin_turn member outside",
@@ -1032,30 +1057,6 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("channel_isolated"),
     ),
     (
-        "isolation own agent cannot publish outside",
-        ISOLATED,
-        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": ACME},
-        _deny("channel_isolated"),
-    ),
-    (
-        "isolation turn origin cannot publish outside",
-        ISOLATED,
-        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": SHARED, "origin": INSIDE},
-        _deny("channel_isolated"),
-    ),
-    (
-        "ordinary agent may publish outside",
-        ISOLATED,
-        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": SHARED},
-        ALLOW,
-    ),
-    (
-        "unresolved agent cannot publish while isolation is active",
-        ISOLATED,
-        {"subject": MEMBER, "action": Action.PUBLISH_EXTERNAL, "agent": AgentRef.unresolved()},
-        _deny("agent_unresolved"),
-    ),
-    (
         "isolation shared agent reads nothing inside",
         ISOLATED,
         {
@@ -1076,6 +1077,95 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": INSIDE,
             "origin_channel_ids": frozenset({"C_ACME"}),
+        },
+        ALLOW,
+    ),
+    # --- Isolation: a call held to C reads only C and C's sessions ---
+    (
+        "isolation own agent reads nothing outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.READ_CHANNEL, "agent": ACME, "place": OUTSIDE},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent reads a thread inside",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_CHANNEL,
+            "agent": ACME,
+            "place": THREAD_INSIDE,
+            "origin_channel_ids": frozenset({"C_ACME"}),
+        },
+        ALLOW,
+    ),
+    (
+        "isolation an origin inside holds a shared agent's reads",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_CHANNEL,
+            "agent": SHARED,
+            "place": OUTSIDE,
+            "origin": SETUP_ORIGIN,
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation an origin outside leaves a shared agent's reads alone",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_CHANNEL,
+            "agent": SHARED,
+            "place": OUTSIDE,
+            "origin": OUTSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation own agent reads no other channel's session",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "agent": ACME,
+            "session": SessionFacts(channel="C_OTHER"),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation own agent reads no DM session",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.CONTINUE_SESSION,
+            "agent": ACME,
+            "session": SessionFacts(private=True),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation an origin inside holds a shared agent's session reads",
+        ISOLATED,
+        {
+            "subject": MEMBER,
+            "action": Action.READ_SESSION,
+            "agent": SHARED,
+            "origin": THREAD_INSIDE,
+            "session": SessionFacts(channel="C_OTHER"),
+        },
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation an admin's hub read through the own agent is not held",
+        ISOLATED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "agent": ACME,
+            "session": SessionFacts(channel="C_OTHER", owned=False),
         },
         ALLOW,
     ),
@@ -1186,6 +1276,72 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin": SETUP_ORIGIN,
         },
         _deny("channel_isolated"),
+    ),
+    (
+        "isolation an own agent creates no agent, even for an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": ACME},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a call from inside creates no agent, whatever agent runs it",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": SHARED, "origin": SETUP_ORIGIN},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation an unresolved agent creates no agent",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": AgentRef.unresolved()},
+        _deny("agent_unresolved"),
+    ),
+    (
+        "isolation an outside agent creates agents",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": SHARED, "origin": OUTSIDE},
+        ALLOW,
+    ),
+    (
+        "an unresolved agent creates agents while nothing is isolated",
+        PINNED,
+        {"subject": MEMBER, "action": Action.CREATE_AGENT, "agent": AgentRef.unresolved()},
+        ALLOW,
+    ),
+    (
+        "a pinned agent publishes nothing, even for an admin",
+        PINNED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME, "origin": INSIDE},
+        _deny("agent_pinned"),
+    ),
+    (
+        "isolation an own agent publishes nothing, even for an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a call from inside publishes nothing, whatever agent runs it",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": SHARED, "origin": SETUP_ORIGIN},
+        _deny("channel_isolated"),
+    ),
+    (
+        "an unresolved agent publishes nothing while an agent is pinned",
+        PINNED,
+        {"subject": MEMBER, "action": Action.PUBLISH, "agent": AgentRef.unresolved()},
+        _deny("agent_unresolved"),
+    ),
+    (
+        "an unpinned agent publishes from outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH, "agent": SHARED, "origin": OUTSIDE},
+        ALLOW,
+    ),
+    (
+        "a call with no executing agent publishes",
+        ISOLATED,
+        {"subject": BEARER, "action": Action.PUBLISH},
+        ALLOW,
     ),
     (
         "isolation a routine saved in the setup thread stays in the channel",
@@ -1366,6 +1522,55 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         },
         ALLOW,
     ),
+    # --- channel protection and seals: server admins only ---
+    (
+        "server admin protects or seals any channel",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_OTHER"),
+        },
+        ALLOW,
+    ),
+    (
+        "channel admin protects or seals not even their own channel",
+        ACME_SEALED,
+        {
+            "subject": ACME_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_ACME"),
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "an agent key protects nothing, whoever minted it",
+        PINNED,
+        {
+            "subject": AGENT_KEY_CHANNEL_ADMIN,
+            "action": Action.SET_CHANNEL_PROTECTION,
+            "place": Place(channel_id="C_ACME"),
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "server admin archives an isolation copy",
+        OPEN,
+        {"subject": ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        ALLOW,
+    ),
+    (
+        "a channel admin archives no isolation copy",
+        OPEN,
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        _deny("admin_required"),
+    ),
+    (
+        "an admin's agent key archives no isolation copy",
+        OPEN,
+        {"subject": AGENT_KEY_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        _deny("admin_required"),
+    ),
     (
         "an agent key picks no environment, whoever minted it",
         PINNED,
@@ -1375,6 +1580,84 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
         },
         _deny("admin_required"),
+    ),
+    # --- channel budgets: server admins only, never a channel's own admins ---
+    *(
+        (
+            name,
+            TenantAccessPolicy(),
+            {"subject": subject, "action": Action.SET_CHANNEL_BUDGET, "place": place},
+            expected,
+        )
+        for name, subject, place, expected in [
+            ("server admin sets any channel's budget", ADMIN, Place(channel_id="C_X"), ALLOW),
+            (
+                "channel admin can't set their own channel's budget",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "nor through one of its threads",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="T1", parent_channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "channel admin can't set another channel's budget",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_OTHER"),
+                _deny("admin_required"),
+            ),
+            (
+                "a member sets no budget",
+                MEMBER,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "an agent key sets no budget, whoever minted it",
+                AGENT_KEY_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "an admin's agent key keeps its budget rights",
+                AGENT_KEY_ADMIN,
+                Place(channel_id="C_X"),
+                ALLOW,
+            ),
+        ]
+    ),
+    # --- channel skills: server admins only, never a channel's own admins ---
+    *(
+        (
+            name,
+            TenantAccessPolicy(),
+            {"subject": subject, "action": Action.SET_CHANNEL_SKILLS, "place": place},
+            expected,
+        )
+        for name, subject, place, expected in [
+            ("server admin sets any channel's skills", ADMIN, Place(channel_id="C_X"), ALLOW),
+            (
+                "channel admin can't set their own channel's skills",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "a member sets no channel skills",
+                MEMBER,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+            (
+                "an agent key sets no channel skills, whoever minted it",
+                AGENT_KEY_CHANNEL_ADMIN,
+                Place(channel_id="C_ACME"),
+                _deny("admin_required"),
+            ),
+        ]
     ),
 ]
 
@@ -1410,3 +1693,92 @@ def test_build_subject_gives_grants_only_to_a_person_without_an_agent_key() -> N
     assert person.administered_channel_ids == frozenset(grants), "a person keeps their grants"
     assert key.administered_channel_ids == frozenset(), "an agent key holds none"
     assert bearer.administered_channel_ids == frozenset(), "a platform-less token holds none"
+
+
+ACME_MADE = AgentStanding(created_for_channel_id="C_ACME")
+ACME_ASSIGNED = AgentStanding(admin_default_channel_ids=frozenset({"C_ACME"}))
+UNPINNED = AgentRef.of("helper", "helper")
+
+HOLD_ROWS: list[tuple[str, TenantAccessPolicy, Subject, AgentRef, AgentStanding, bool, bool]] = [
+    # (name, policy, subject, agent, standing, binding, expected)
+    ("made for their channel", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_MADE, False, True),
+    ("made for their channel, binding", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_MADE, True, True),
+    (
+        "made for a channel they do not administer",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(created_for_channel_id="C_OTHER"),
+        False,
+        False,
+    ),
+    (
+        "unpinned, made by someone else",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(),
+        False,
+        False,
+    ),
+    (
+        "pinned inside their channels",
+        PINNED,
+        ACME_CHANNEL_ADMIN,
+        ACME,
+        AgentStanding(),
+        False,
+        True,
+    ),
+    ("pinned inside, binding", PINNED, ACME_CHANNEL_ADMIN, ACME, AgentStanding(), True, True),
+    (
+        "pinned beyond their channels",
+        TWO_CHANNELS,
+        ACME_CHANNEL_ADMIN,
+        ACME,
+        AgentStanding(),
+        False,
+        False,
+    ),
+    ("pinned to no channel", NOWHERE, ACME_CHANNEL_ADMIN, ACME, AgentStanding(), False, False),
+    ("default a server admin set", OPEN, ACME_CHANNEL_ADMIN, UNPINNED, ACME_ASSIGNED, False, True),
+    (
+        "default a server admin set, binding",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        ACME_ASSIGNED,
+        True,
+        False,
+    ),
+    (
+        "default a server admin set elsewhere",
+        OPEN,
+        ACME_CHANNEL_ADMIN,
+        UNPINNED,
+        AgentStanding(admin_default_channel_ids=frozenset({"C_OTHER"})),
+        False,
+        False,
+    ),
+    ("an agent key", OPEN, AGENT_KEY_CHANNEL_ADMIN, UNPINNED, ACME_MADE, False, False),
+    ("no grant", OPEN, MEMBER, UNPINNED, ACME_MADE, False, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("policy", "subject", "agent", "standing", "binding", "expected"),
+    [pytest.param(*row[1:], id=row[0]) for row in HOLD_ROWS],
+)
+def test_channel_admin_holds_table(
+    policy: TenantAccessPolicy,
+    subject: Subject,
+    agent: AgentRef,
+    standing: AgentStanding,
+    binding: bool,
+    expected: bool,
+) -> None:
+    """Made for, pinned inside, or set as a default by a server admin of their channels."""
+    held = channel_admin_holds(
+        policy, subject=subject, agent=agent, standing=standing, binding=binding
+    )
+    assert held is expected, "a channel admin holds only an agent that came to them that way"

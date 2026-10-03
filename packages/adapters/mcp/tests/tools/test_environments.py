@@ -54,17 +54,22 @@ def _ma_env(**overrides: object) -> BetaEnvironment:
     return BetaEnvironment.model_validate(base)
 
 
-def _runtime(client: AsyncAnthropic) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic, sessionmaker: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=sessionmaker or MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 
 
-async def test_list_environments_impl_returns_list() -> None:
-    tenant_id = uuid.uuid4()
+async def test_list_environments_impl_returns_list(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
     account_id = uuid.uuid4()
 
     router = MARouter()
@@ -83,7 +88,9 @@ async def test_list_environments_impl_returns_list() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
-    result = await _list_environments_impl(_runtime(client), auth, page=None)
+    result = await _list_environments_impl(
+        _runtime(client, committing_sessionmaker), auth, page=None
+    )
     assert isinstance(result, list), "should return a list"
     assert [e.name for e in result] == ["e1"], "should list the tenant's environment"
 
@@ -200,8 +207,11 @@ async def test_create_environment_impl_rejects_duplicate_name() -> None:
     assert created == [], "create route must not be hit when the name collides"
 
 
-async def test_update_environment_impl_patch_only_non_none() -> None:
-    tenant_id = uuid.uuid4()
+async def test_update_environment_impl_patch_only_non_none(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
     account_id = uuid.uuid4()
 
     captured: dict[str, Any] = {}
@@ -230,7 +240,7 @@ async def test_update_environment_impl_patch_only_non_none() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _update_environment_impl(
-        _runtime(client),
+        _runtime(client, committing_sessionmaker),
         auth,
         name="e",
         config=None,
@@ -323,14 +333,17 @@ async def test_archive_environment_impl_archives_in_ma_and_clears_its_picks(
     )
 
 
-async def test_update_and_archive_refuse_a_managed_environment() -> None:
+async def test_update_and_archive_refuse_a_managed_environment(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     """A seeded environment is edited through `defaults/`, never from chat.
 
     A chat edit leaves the reconciler's spec hash in place, so `defaults apply`
     would skip the drifted environment forever; archiving one strands every
     seeded agent scoped onto it. Admins are refused too.
     """
-    tenant_id = uuid.uuid4()
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
     writes: list[str] = []
 
     def on_write(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -356,7 +369,7 @@ async def test_update_and_archive_refuse_a_managed_environment() -> None:
         ),
     )
     router.add("POST", r"/v1/environments/([^/]+)", on_write)
-    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )

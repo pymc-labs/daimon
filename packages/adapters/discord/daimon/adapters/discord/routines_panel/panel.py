@@ -27,6 +27,8 @@ from daimon.adapters.discord.routines_panel.write import (
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
@@ -137,42 +139,40 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         try:
             async with runtime.sessionmaker() as session, session.begin():
-                row = await get_routine(session, routine_id, tenant_id=tenant_id)
-                if row is None:
-                    await interaction.response.send_message(
-                        "This routine no longer exists.",
-                        ephemeral=True,
+
+                async def allowed(row: RoutineRow) -> bool:
+                    member = interaction.user
+                    is_admin = (
+                        isinstance(member, discord.Member) and member.guild_permissions.manage_guild
                     )
-                    return
-                # Defense-in-depth: the store call above is already tenant-scoped
-                # (Routine.tenant_id == tenant_id), so this can only trip if a
-                # caller's mock/stub bypasses that filter.
-                if row.tenant_id != tenant_id:
-                    await interaction.response.send_message(
-                        "This routine does not belong to this guild.",
-                        ephemeral=True,
+                    is_creator = (
+                        row.created_by_user_id is not None
+                        and row.created_by_user_id == str(interaction.user.id)
                     )
-                    return
-                member = interaction.user
-                is_admin = (
-                    isinstance(member, discord.Member) and member.guild_permissions.manage_guild
+                    return is_admin or is_creator
+
+                result = await apply_routine_action(
+                    session,
+                    routine_id,
+                    tenant_id=tenant_id,
+                    op="toggle",
+                    allowed=allowed,
+                    load=get_routine,
+                    pause=pause_routine_via_panel,
+                    resume=resume_routine_via_panel,
+                    now=lambda: datetime.now(UTC),
+                    check_tenant=True,
                 )
-                is_creator = row.created_by_user_id is not None and row.created_by_user_id == str(
-                    interaction.user.id
-                )
-                if not (is_admin or is_creator):
-                    await interaction.response.send_message(
-                        "Only the routine's creator or a guild admin can pause this routine.",
-                        ephemeral=True,
-                    )
+                refusals = {
+                    "gone": "This routine no longer exists.",
+                    "wrong_tenant": "This routine does not belong to this guild.",
+                    "not_owner": (
+                        "Only the routine's creator or a guild admin can pause this routine."
+                    ),
+                }
+                if result != "changed":
+                    await interaction.response.send_message(refusals[result], ephemeral=True)
                     return
-                now = datetime.now(UTC)
-                if row.enabled:
-                    await pause_routine_via_panel(session, routine_id, tenant_id=tenant_id)
-                else:
-                    await resume_routine_via_panel(
-                        session, routine_id, tenant_id=tenant_id, now=now
-                    )
 
             await _rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:

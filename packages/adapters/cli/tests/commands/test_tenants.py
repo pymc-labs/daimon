@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from io import StringIO
 from typing import cast
@@ -661,6 +662,8 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--isolated-channel",
         "--dm-memory-read-only",
         "--pin-agent",
+        "--add-member-guest",
+        "--remove-member-guest",
         "--clear",
     ):
         assert flag in flags, f"{flag} missing from registered options"
@@ -777,7 +780,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
     release = asyncio.Event()
     second_lock_started = asyncio.Event()
     original_load = tenants_mod.load_access_policy
-    original_lock = tenants_mod.lock_access_policy
+    original_transaction = tenants_mod.policy_write_transaction
     calls = 0
 
     async def held_load(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
@@ -789,13 +792,15 @@ async def test_concurrent_policy_edits_preserve_both_fields(
             await release.wait()
         return policy
 
-    async def observed_lock(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    @asynccontextmanager
+    async def observed_transaction(factory, *, tenant_id):
         if loaded.is_set():
             second_lock_started.set()
-        await original_lock(session, tenant_id=tenant_id)
+        async with original_transaction(factory, tenant_id=tenant_id) as session:
+            yield session
 
     monkeypatch.setattr(tenants_mod, "load_access_policy", held_load)
-    monkeypatch.setattr(tenants_mod, "lock_access_policy", observed_lock)
+    monkeypatch.setattr(tenants_mod, "policy_write_transaction", observed_transaction)
     first = asyncio.create_task(
         tenants_access_policy_set(
             rt=rt,
@@ -878,6 +883,91 @@ async def test_access_policy_accepts_platform_ids(
     assert policy.protected_channel_ids == tuple(channels)
     assert policy.protected_category_ids == (() if platform == "teams" else tuple(channels))
     assert policy.sealed_channel_ids == tuple(channels)
+
+
+async def test_access_policy_adds_and_removes_teams_member_guests_in_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="teams", workspace_id="guests")
+    first, second = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))
+
+    async def edit(**flags: list[str]) -> TenantAccessPolicy:
+        await tenants_access_policy_set(
+            rt=rt, console=_make_console(), platform="teams", external_id="guests", **flags
+        )
+        async with db_session_factory() as session:
+            return await load_access_policy(session, tenant_id=tenant.id)
+
+    added = await edit(add_member_guest=[first.upper(), second], invoker=[first])
+    assert added.member_guest_ids == (first, second), "lower-cased, in order"
+    removed = await edit(remove_member_guest=[first])
+    assert removed.member_guest_ids == (second,) and removed.invoker_user_ids == (first,)
+    for flags in ({"remove_member_guest": [first]}, {"add_member_guest": ["not-an-id"]}):
+        with pytest.raises(typer.BadParameter, match="member_guest_ids"):
+            await edit(**flags)
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="teams", external_id="guests", as_json=False
+    )
+    assert f"member_guest_ids: {second}" in _output(console), "shown with the policy"
+    with pytest.raises(typer.BadParameter, match="only Teams"):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="slack",
+            external_id="guests",
+            add_member_guest=[first],
+        )
+
+
+async def test_access_policy_isolates_a_teams_channel_with_its_own_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Teams takes a whole channel's pin and isolation, as Discord and Slack do."""
+    from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+    from daimon.testing.ma_models import ma_agent
+
+    channel = "19:abc123@thread.tacv2"
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="teams", workspace_id="teams-isolate")
+        await scoped_config_write.set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+            tenant_id=tenant.id,
+            agent_name="local",
+            mode="agent",
+        )
+    state = FakeMAState()
+    agent = ma_agent(id="agent_local", name="local", tenant_id=tenant.id)
+    state.agents[agent.id] = agent.model_dump(mode="json")
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(make_fake_ma_handler(state)),
+        settings=_FakeSettings(),
+    )
+    args = {"rt": rt, "platform": "teams", "external_id": "teams-isolate"}
+
+    with pytest.raises(typer.BadParameter, match="invalid teams id"):
+        await tenants_access_policy_set(
+            **args,  # type: ignore[arg-type]
+            console=_make_console(),
+            sealed_channel=[channel],
+            isolated_channel=[f"{channel};messageid=1"],
+        )
+    await tenants_access_policy_set(
+        **args,  # type: ignore[arg-type]
+        console=_make_console(),
+        sealed_channel=[channel],
+        isolated_channel=[channel],
+        add_pin_agent=[f"local={channel}"],
+    )
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.isolated_channel_ids == (channel,), "a Teams channel is isolated"
+    assert policy.agent_channel_pins == {"local": (channel,)}, "and its own agent pinned to it"
 
 
 async def test_access_policy_seals_a_single_slack_thread(

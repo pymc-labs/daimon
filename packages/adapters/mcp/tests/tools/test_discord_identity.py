@@ -286,6 +286,34 @@ async def test_set_display_identity_refuses_non_admin_before_any_request(
         )
 
 
+async def test_set_display_identity_is_held_like_a_post_outside_the_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The nickname shows in every channel, so the held-to-a-channel check runs, with the
+    turn's origin, before any request."""
+
+    async def no_requests(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        raise AssertionError(f"unexpected request {route.method} {route.path}")
+
+    seen: list[str | None] = []
+
+    async def held(
+        _runtime: McpRuntime, _auth: AuthIdentity, *, origin_context_id: str | None
+    ) -> None:
+        seen.append(origin_context_id)
+        raise ToolError("held to an isolated channel")
+
+    patch_discord_http(monkeypatch, no_requests)
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.discord._identity.require_identity_changeable", held
+    )
+    with pytest.raises(ToolError, match="held"):
+        await _set_display_identity_impl(
+            _runtime_with_discord_token(), _auth(), display_name="Daimon", origin_context_id="o1"
+        )
+    assert seen == ["o1"], "the turn's origin decides where the call is held"
+
+
 async def test_set_display_identity_refuses_non_cdn_avatar_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

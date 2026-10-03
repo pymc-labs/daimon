@@ -70,6 +70,15 @@ requester on Discord and Slack. On Teams it closes the status card and posts the
 fresh, mentioning the requester in channels (Teams bots cannot react). Missing/false
 preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON object.
 
+### `DAIMON_BUDGET_NOTICES`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant switch for the channel budget notice, keyed by tenant UUID. When a channel's
+budget is used up, its channel admins (else the server admins) get one DM per budget
+window on Discord, Slack and Teams. Missing/true sends it; false turns it off. Configure
+DAIMON_BUDGET_NOTICES as a JSON object.
+
 ### `DAIMON_DIRECT_MESSAGE_POLICIES`
 
 `dict[UUID, DirectMessagePolicy]` · optional · default `{}`
@@ -135,7 +144,11 @@ processes and the database connection limit.
 `int` · optional · default `10`
 
 Temporary Postgres connections above pool_size per process. Default 10; include these in
-the database connection budget.
+the database connection budget. pool_size + max_overflow must be at least 4; smaller
+pools are rejected at engine startup to reserve independent preparation and mutation
+capacity with nested query headroom. Fence contenders release connections and permits
+between nonblocking attempts, retrying with 25-75 ms jitter for at most 5 seconds before
+retryable session busy.
 
 ### `DAIMON_DATABASE__POOL_TIMEOUT`
 
@@ -600,6 +613,23 @@ Entra object IDs of the people who administer this deployment from Teams. Teams 
 no admin role to bots, so this list is the admin check: admins get the admin role in
 turns, create routines, replace shared keys, top up and see everyone's usage. Everyone
 else is a regular user.
+
+### `DAIMON_TEAMS__RESTRICT_GUESTS`
+
+`bool` · optional · default `True`
+
+When True, guests (Entra B2B guest accounts in this tenant) are treated as people from
+another organisation: answered only in an isolated channel, with a few conversation
+tools and no commands or admin role. The tenant access policy's member guest list
+exempts some. When False, guests are treated as team members.
+
+### `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
+
+`bool` · optional · default `True`
+
+When True, a shared channel's external participants (people from another tenant, via B2B
+direct connect) are answered only in an isolated channel, with a few conversation tools
+and no commands or admin role. When False, they are treated as team members.
 
 ## GitHub
 

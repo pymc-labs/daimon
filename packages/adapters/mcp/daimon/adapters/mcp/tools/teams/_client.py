@@ -60,6 +60,8 @@ class TeamsMember(BaseModel):
     name: str | None = None
     aad_object_id: str | None = Field(default=None, alias="aadObjectId")
     user_role: str | None = Field(default=None, alias="userRole")
+    # The member's home organisation; another one's for a shared channel's external participant.
+    tenant_id: str | None = Field(default=None, alias="tenantId")
 
 
 class TeamDetails(BaseModel):

@@ -25,8 +25,9 @@ profile) publishes the port; the messaging endpoint must reach it.
 A deployment serves one Entra organisation, `DAIMON_TEAMS__TENANT_ID`. At boot
 the adapter provisions that tenant and reconciles its defaults; turns are
 denied until the reconcile succeeds. The adapter fails closed unless the
-conversation tenant and the channel-data tenant both equal the configured one
-and the sender has a well-formed `aad_object_id`. Users need no setup: their
+conversation tenant equals the configured one and the sender has a well-formed
+`aad_object_id`; in a 1:1 chat the channel-data tenant must match too. A
+channel sender from another tenant, or a guest, is from another organisation (below). Users need no setup: their
 principal is created on first contact. Only the commercial Microsoft 365 cloud
 is supported; government and China clouds use other Bot Framework hosts.
 
@@ -40,6 +41,10 @@ is supported; government and China clouds use other Bot Framework hosts.
   thread. A bare @mention asks about the thread; if the thread cannot be
   read, the bot says so instead of starting a turn. A followed thread also
   gets unprompted replies (below).
+- **Private and shared channels** work like standard ones once the app is in
+  them. The package declares `supportsChannelFeatures: tier1` (manifest
+  1.25), but adding the app to a team does not add it to these channels: each
+  one's owner adds it from the channel.
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
@@ -55,6 +60,47 @@ refuses that work, it is dropped without a notice, as on Slack. Retried
 deliveries are deduplicated in memory only, so a retry that lands after a
 restart runs again.
 
+### People from another organisation
+
+Two kinds of people count as from another organisation: a shared channel's
+external participants, who join through B2B direct connect and stay in their
+home tenant, and guests (Entra B2B guest accounts in ours), who can be in
+standard and private channels and 1:1 chats. daimon answers them only inside
+an isolated channel and its threads. Anywhere else an addressed message gets
+one line saying so and runs no turn, and their unmentioned replies are never
+judged for a followed thread. Their turns run as a member (never an admin or
+a channel admin, whatever is configured, a grant naming a team they own
+included), commands go to the agent as plain text, and the agent sees
+`external="true"` on their message. Their tool calls get only the
+conversation's tools: reading, searching and posting in it, files into it,
+their own sessions and timers, and signing in to an MCP server the agent
+already has. Anything else, including tools added later, returns a tool
+error the agent relays. Files can't be saved in a shared channel.
+
+A sender is placed from these signals, cheapest first: a foreign tenant on
+the activity (`channelData.tenant.id`, `from.tenantId`,
+`from.properties.tenantId`); their Bot Framework roster entry (`tenantId`,
+and `userRole` "guest"); then, in a channel, Graph's member list
+(`allMembers`: `tenantId` and the "guest" role), which needs the
+`ChannelMember.Read.Group` permission in the manifest. A foreign tenant is
+external; a guest is too, unless the tenant access policy lists them as a
+member (`daimon tenants access-policy --add-member-guest <object id>`). The
+list never overrides a foreign tenant. Our tenant with a member's role is
+internal.
+
+Without either, the sender is unknown and nothing is stored. In a channel
+not known to be standard or private (the activity, an earlier activity
+there or the team's channel list says) they are held as external for that
+turn. Elsewhere they are answered as before, unless the account is already
+marked external. Positive evidence is stored on the account, so queued work,
+routines and MCP tokens see it; a held turn's MCP calls are held too.
+Answers are cached in memory (an hour for an external, ten minutes for ours,
+a minute after a failure) and each lookup times out after a few seconds.
+
+`DAIMON_TEAMS__RESTRICT_GUESTS` and `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
+(both on) switch these rules off per kind: those people are then treated as
+members, and the lookups only their kind needs are skipped.
+
 ### Commands and admins
 
 Commands answer in the 1:1 chat, since their replies can carry account
@@ -68,7 +114,7 @@ longer goes to the agent. None of them runs an agent turn.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
@@ -86,8 +132,20 @@ and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
-Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
-here) and channel budgets (`set_channel_budget`) work as on Discord and Slack.
+Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
+group ID in `role_ids` to admit that team's owners), channel budgets
+(`set_channel_budget`) and channel environments (`set_channel_environment`)
+work as on Discord and Slack. Who answers where lists each channel's
+environment, and its **Channel settings** dialog changes one channel picked
+there, since the panel lives in the 1:1 chat: its environment (server admins,
+or that channel's admins), and its isolation and admins by Entra object ID
+(server admins only).
+Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
+`daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
+counts as its channel, and the isolated agents send nothing to 1:1 chats. The
+CLI can't read channel names, so a copy it makes is named from the channel id.
+The setup panel lives in the 1:1 chat, outside every channel, so a member's
+Agents list leaves out each isolated channel's own agents; an admin sees all.
 
 ### Channel history
 
@@ -105,7 +163,9 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest. A team owner grants it when adding the app to a team, for that
+the manifest, plus `TeamMember.Read.Group` for the owner list a team grant of
+channel admins reads (cached for a minute; without it the team's owners are
+not channel admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
 mention unless their thread is followed. An existing install needs the updated app package uploaded again
@@ -166,6 +226,12 @@ consent above) a followed thread stays mention-only.
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
 every redirect hop is re-checked (Graph reads follow none).
+
+A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
+takes its download link only over https from a SharePoint, OneDrive or Graph
+host, sends no token, refuses a redirect off those hosts, and checks the
+file's name before reading its capped body, with the usual preview and
+confirmation card.
 
 ### Channel files (optional)
 
@@ -241,7 +307,10 @@ registration:
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
   `cancel_timer`), routines that post to a channel or thread (below),
-  `bind_public_repo` and the GitHub App install link.
+  `bind_public_repo` and the GitHub App install link. A handoff is asked of
+  the agent; the Hand over button that Discord and Slack show when a channel's
+  agent changed under a thread is not on Teams, where the notice says to start
+  a new conversation.
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can
@@ -289,7 +358,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted or in private and shared channels, and coding-tool tokens minted by
-a channel admin (one must be minted inside their channel, and panels live in
-the 1:1 chat). Removing the app does not
+not granted or in private and shared channels. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

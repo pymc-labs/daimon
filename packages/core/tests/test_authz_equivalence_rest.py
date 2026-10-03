@@ -91,7 +91,9 @@ _OLD_POSTED_TOKEN: frozenset[str] = frozenset({"key_add", "keys_import", "mcp_co
 
 
 def _old_reachable_outcome(target: TargetFacts) -> PolicyOutcome:
-    if target.is_reachable_in_tenant and not target.is_local_to_caller_channels:
+    # Locality counts for a channel admin only on an agent that is theirs.
+    local = target.is_local_to_caller_channels and target.is_held_by_caller
+    if target.is_reachable_in_tenant and not local:
         return "needs_admin"
     return "allow"
 
@@ -228,13 +230,14 @@ def test_no_agent_post_ignores_subject_and_pins() -> None:
 
 @pytest.mark.parametrize("operation", get_args(OperationKind))
 def test_shared_agent_table_matches(operation: OperationKind) -> None:
-    for is_admin, managed, reachable, local, unattended, unplaced in itertools.product(
-        (False, True), repeat=6
+    for is_admin, managed, reachable, local, held, unattended, unplaced in itertools.product(
+        (False, True), repeat=7
     ):
         target = TargetFacts(
             is_daimon_managed=managed,
             is_reachable_in_tenant=reachable,
             is_local_to_caller_channels=local,
+            is_held_by_caller=held,
             runs_unattended_beyond_caller=unattended,
             has_unplaced_run=unplaced,
         )

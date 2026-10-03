@@ -1,54 +1,29 @@
-"""Write-path helpers for the /agent-setup panel.
-
-Wraps the existing reconcile_agent + archive paths; adds tenant-shared roster
-loading (all non-archived MA agents in the tenant) and a display-only
-mask helper for PAT/MCP-token last-4 surfaces.
-"""
+"""Agent creation and inline PAT helpers for Discord."""
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from typing import TYPE_CHECKING
 
-import httpx
 import structlog
-from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.defaults.ma_index import (
-    find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
-    list_agents_by_tenant,
-    list_skills_lenient,
-)
-from daimon.core.defaults.metadata import (
-    MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
-    strip_tenant_prefix,
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
-from daimon.core.defaults.report import Action, ResourceOutcome
-from daimon.core.defaults.skills import resolve_refs
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import (
     build_multifernet,
     get_pat,
     upsert_credential_encrypted,
 )
-from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.skill_sync import SyncReport, sync_agent_skills
 from daimon.core.specs import (
     AgentSpec,
-    SkillRepo,
-    build_authoring_params,
-    dump_agent_spec,
 )
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from pydantic import ValidationError
-
-from .state import PanelState, RosterEntry
 
 _log = structlog.get_logger()
 
@@ -66,137 +41,6 @@ def validate_model_id(model: str) -> str | None:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
         return f"Model `{model}` is not allowed. Choose one of: {allowed}"
     return None
-
-
-def _build_roster_entry(
-    agent: BetaManagedAgentsAgent, *, custom_skill_titles: dict[str, str]
-) -> RosterEntry:
-    """Build a panel RosterEntry from the full MA agent response.
-
-    Hydrates `mcp_servers`, `skills`, and `tools` so that downstream
-    actions (Fork in particular) carry the full agent shape forward
-    rather than dropping back to a name+model+system minimal spec.
-
-    `SkillRef.skill_id` is authoring-time identity (bare authoring name for
-    custom skills, anthropic skill id for built-ins). MA's agent payload only
-    carries the resolved MA skill id, so we translate via `custom_skill_titles`
-    (id → bare-name map built by the caller; only this tenant's skills are
-    present). The save path re-prefixes bare names to canonical titles via
-    `resolve_refs(tenant_id=...)` (chokepoint).
-    Without the translation, `reconcile_agent`'s `resolve_refs` would try to
-    look up the MA id as a bare name and fail.
-
-    model_id, mcp_servers, skills, and tools all flow through
-    `AgentSpec.model_validate` so the SDK's Literal / discriminator
-    validation runs at the boundary — malformed shapes raise SpecError
-    instead of leaking into a later reconcile.
-    """
-    mcp_servers = [build_authoring_params(server) for server in agent.mcp_servers] or None
-    skills: list[dict[str, str]] = []
-    for skill in agent.skills:
-        if skill.type == "custom":
-            title = custom_skill_titles.get(skill.skill_id)
-            if title is None:
-                # Dangling skill ref: MA's agents endpoint still lists a skill_id
-                # that skills.list no longer returns (orphan/GC'd skill, or a
-                # skills.list scope/pagination drop). Skip the ref rather than
-                # crashing — otherwise the agent becomes un-editable from the
-                # panel forever. The user sees one fewer skill in the embed; a
-                # subsequent reconcile will re-attach if they re-add the repo.
-                _log.warning(
-                    "panel.skill_ref_dropped",
-                    agent_name=agent.name,
-                    skill_id=skill.skill_id,
-                    reason="not in skills.list",
-                )
-                continue
-            skills.append({"type": "custom", "skill_id": title})
-        else:
-            skills.append({"type": skill.type, "skill_id": skill.skill_id})
-    tools = [build_authoring_params(tool) for tool in agent.tools] or None
-    try:
-        spec = AgentSpec.model_validate(
-            {
-                "name": agent.name,
-                "model": agent.model.id,
-                "system": agent.system,
-                "mcp_servers": mcp_servers,
-                "skills": skills,
-                "tools": tools,
-            }
-        )
-    except ValidationError as err:
-        raise DaimonError(f"Cannot rebuild AgentSpec for {agent.name!r}: {err}") from err
-    return RosterEntry(
-        name=agent.name,
-        model=agent.model.id,
-        spec=spec,
-        ma_agent_id=str(agent.id),
-        routing_name=str((agent.metadata or {}).get(MA_METADATA_KEY_NAME) or ""),
-    )
-
-
-async def _build_custom_skill_title_map(
-    anthropic: AsyncAnthropic,
-    *,
-    tenant_id: uuid.UUID,
-) -> dict[str, str]:
-    """Return MA-skill-id → bare authoring name for this tenant's custom skills.
-
-    Uses list_skills_lenient for the single skills.list call so
-    truncation is observable (structlog warning + Sentry) but non-fatal in
-    this read context. Only includes skills whose display_title carries this
-    tenant's prefix — foreign-tenant and unprefixed-legacy skills are excluded.
-    Their skill_ids produce a None title in _build_roster_entry, which hits the
-    existing dangling-ref skip branch (panel.skill_ref_dropped warning).
-
-    The map value is the BARE authoring name (prefix stripped), not the canonical
-    title. This means SkillRef.skill_id in panel state holds bare names; the save
-    path (replace_agent_resources_for_panel) re-prefixes via resolve_refs(tenant_id=...).
-    """
-    rows, _truncated = await list_skills_lenient(anthropic)
-    titles: dict[str, str] = {}
-    for sk in rows:
-        if sk.source == "custom" and sk.display_title is not None:
-            bare = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title)
-            if bare is not None:
-                titles[sk.id] = bare
-    return titles
-
-
-async def load_tenant_roster(
-    anthropic: AsyncAnthropic,
-    *,
-    tenant_id: uuid.UUID,
-) -> list[RosterEntry]:
-    """Return the full tenant roster — all non-archived agents in the tenant.
-
-    Every member of the guild sees the same roster (guild-account-owned,
-    legacy user-stamped, and unstamped system agents alike). The per-user
-    account filter is retired.
-
-    Defaults-managed agents (daimon_managed="true") carry is_system=True so the
-    panel gates edit/delete on that flag; guild seed also stamps daimon_account
-    on these agents (defaults/_reconcile.py), so account presence alone cannot
-    distinguish them from forks. Everyone sees seeded agents but nobody owns
-    them for editing purposes — Fork is the edit path (#160).
-    """
-    all_agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    custom_skill_titles = await _build_custom_skill_title_map(anthropic, tenant_id=tenant_id)
-    out: list[RosterEntry] = []
-    for agent in all_agents:
-        entry = _build_roster_entry(agent, custom_skill_titles=custom_skill_titles)
-        # is_system keys off the reconciler's own provenance marker
-        # (daimon_managed="true"), not daimon_account: seeded agents ARE
-        # account-stamped by the guild seed path, so the account stamp alone
-        # cannot discriminate seeded vs. forked agents. Panel forks explicitly
-        # stamp managed=False (call_reconcile_for_panel above) so they stay
-        # editable. Reconciler behavior is unchanged — scalar edits to seeded
-        # agents would still be reverted on the next `defaults apply`; the
-        # panel now simply never offers Edit on them.
-        is_system = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        out.append(dataclasses.replace(entry, is_system=is_system))
-    return out
 
 
 async def load_agent_inline_pat(runtime: DiscordRuntime, *, agent_id: uuid.UUID) -> str | None:
@@ -229,96 +73,6 @@ async def load_agent_inline_pat(runtime: DiscordRuntime, *, agent_id: uuid.UUID)
         sessionmaker=runtime.sessionmaker,
         fernet=_build_runtime_fernet(runtime),
         allow_service_default=False,
-    )
-
-
-async def call_reconcile_for_panel(
-    runtime: DiscordRuntime, state: PanelState, *, tenant_id: uuid.UUID
-) -> ResourceOutcome:
-    """Reconcile the currently-selected agent.
-
-    Propagates `account_id` (per-user metadata stamp) and `public_url`
-    (default-MCP merge). Raises DaimonError if nothing is selected.
-    """
-    if state.selected is None:
-        raise DaimonError("No agent selected; cannot reconcile.")
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    return await reconcile_agent(
-        runtime.anthropic,
-        state.selected.spec,
-        tenant_id=tenant_id,
-        dry_run=False,
-        account_id=state.guild_account_id,  # SC-2: stamp guild account, not personal
-        public_url=public_url,
-        # User-owned forks must NOT be stamped daimon_managed=true — that
-        # marker is what makes the sweep eligible to archive them on the
-        # next defaults apply (live repro: panel edit → fork archived).
-        managed=False,
-    )
-
-
-async def replace_agent_resources_for_panel(
-    runtime: DiscordRuntime, state: PanelState, *, tenant_id: uuid.UUID
-) -> ResourceOutcome:
-    """Authoritatively replace the selected agent's mcp_servers/skills/tools.
-
-    For REMOVALS only. The panel's remove reducers (`remove_mcp_at`,
-    `remove_skill_at`) already produce the full desired set — the MCP and its
-    `mcp_toolset`, or the skill, dropped from the in-memory spec. Routing that
-    through `reconcile_agent` would re-add the removed entry, because reconcile's
-    update path unconditionally unions the spec with MA's current state
-    (`merge_mcp_servers_with_ma` / `merge_skills_with_ma`). That union exists to
-    stop `defaults apply` from clobbering user-attached resources — the exact
-    opposite of an explicit user removal. So removals bypass reconcile and send
-    the reduced set verbatim; MA's per-field partial update replaces each array,
-    and the removed entry is actually gone.
-
-    Skills carry authoring-time identity (`skill_id` == display_title for custom
-    skills), so they're resolved to MA ids before sending — same as reconcile.
-    Existing metadata is preserved as-is (ownership/stamp unchanged).
-    """
-    if state.selected is None:
-        raise DaimonError("No agent selected; cannot update.")
-    spec = state.selected.spec
-    ma_agent = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=spec.name
-    )
-    if ma_agent is None:
-        raise DaimonError(f"Agent {spec.name!r} not found on MA; cannot update.")
-    resolved_skills = await resolve_refs(
-        runtime.anthropic, refs=list(spec.skills), tenant_id=tenant_id
-    )
-    payload = dump_agent_spec(spec)
-    # Removal is authoritative, and MA's update is a per-field PARTIAL merge: a
-    # field present in the body is replaced, an ABSENT field is preserved. When
-    # the removed entry was the last one, the reduced spec's `mcp_servers` is
-    # None and `dump_agent_spec(exclude_none=True)` drops the key — so MA would
-    # preserve the old (non-empty) `mcp_servers` while the sent `tools` drops the
-    # toolset, leaving an orphaned server → "mcp_servers <name> declared but no
-    # mcp_toolset references them" (400). Force both keys present (empty list when
-    # emptied) so MA replaces rather than preserves.
-    payload["mcp_servers"] = payload.get("mcp_servers") or []
-    payload["tools"] = payload.get("tools") or []
-
-    # `payload` and `resolved_skills` are spec-derived; only version and metadata
-    # are agent-derived state and must come from `fresh` to avoid resending a
-    # stale copy that would undo a concurrent metadata change (#144-2).
-    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        return await runtime.anthropic.beta.agents.update(
-            fresh.id,
-            version=fresh.version,
-            **payload,
-            skills=resolved_skills,
-            metadata=fresh.metadata,  # type: ignore[arg-type]  # Dict[str,str] satisfies Dict[str,str|None]; invariance false positive
-        )
-
-    updated = await update_agent_with_version_retry(runtime.anthropic, ma_agent.id, _apply)
-    return ResourceOutcome(
-        kind="agent", name=spec.name, action=Action.UPDATED, anthropic_id=updated.id
     )
 
 
@@ -361,8 +115,7 @@ async def create_blank_agent(
         # New agents created from the panel are user-owned, NOT seeded
         # resources — managed=True would stamp daimon_managed=true and make
         # them sweep-eligible, so the next defaults apply (every boot/deploy)
-        # archives them because they aren't in the seeded spec list. Mirror
-        # call_reconcile_for_panel's managed=False.
+        # archives them because they aren't in the seeded spec list.
         managed=False,
     )
 
@@ -404,38 +157,3 @@ async def store_inline_pat(
         await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
     _log.info("repo_auth.pat_stored")
     return f"inline-pat:{agent_id}"
-
-
-async def kick_off_skill_sync(
-    runtime: DiscordRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    agent_name: str,
-    repo_url: str,
-) -> SyncReport:
-    """Invoke `sync_agent_skills` for one repo + the selected agent.
-
-    The caller wraps in `asyncio.create_task` to fire-and-forget. Builds a
-    fresh `httpx.AsyncClient` (closed when the task completes) so the orchestrator
-    can fetch the GitHub tarball.
-    """
-    fernet = _build_runtime_fernet(runtime)
-    repos = [SkillRepo(url=repo_url, branch="main", path="", split=True)]
-    github_fallback_pat = (
-        runtime.settings.github.fallback_pat.get_secret_value()
-        if runtime.settings.github.fallback_pat is not None
-        else None
-    )
-    async with httpx.AsyncClient() as http_client:
-        return await sync_agent_skills(
-            principal_id=account_id,
-            tenant_id=tenant_id,
-            agent_name=agent_name,
-            repos=repos,
-            sessionmaker=runtime.sessionmaker,
-            fernet=fernet,
-            http_client=http_client,
-            anthropic_client=runtime.anthropic,
-            github_fallback_pat=github_fallback_pat,
-        )

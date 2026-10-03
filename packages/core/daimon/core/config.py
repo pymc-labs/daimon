@@ -50,7 +50,12 @@ class DatabaseSettings(BaseModel):
         ge=0,
         description=(
             "Temporary Postgres connections above pool_size per process. Default 10; "
-            "include these in the database connection budget."
+            "include these in the database connection budget. pool_size + max_overflow "
+            "must be at least 4; smaller pools are rejected at engine startup to reserve "
+            "independent preparation and mutation capacity with nested query headroom. "
+            "Fence contenders release connections and permits between nonblocking "
+            "attempts, retrying with 25-75 ms jitter for at most 5 seconds before "
+            "retryable session busy."
         ),
     )
     pool_timeout: float = Field(
@@ -573,6 +578,25 @@ class TeamsSettings(BaseModel):
             "the admin check: admins get the admin role in turns, create "
             "routines, replace shared keys, top up and see everyone's usage. "
             "Everyone else is a regular user."
+        ),
+    )
+    restrict_guests: bool = Field(
+        default=True,
+        description=(
+            "When True, guests (Entra B2B guest accounts in this tenant) are "
+            "treated as people from another organisation: answered only in an "
+            "isolated channel, with a few conversation tools and no commands or "
+            "admin role. The tenant access policy's member guest list exempts "
+            "some. When False, guests are treated as team members."
+        ),
+    )
+    restrict_external_participants: bool = Field(
+        default=True,
+        description=(
+            "When True, a shared channel's external participants (people from "
+            "another tenant, via B2B direct connect) are answered only in an "
+            "isolated channel, with a few conversation tools and no commands or "
+            "admin role. When False, they are treated as team members."
         ),
     )
 
@@ -1117,6 +1141,15 @@ class Settings(BaseSettings):
             "fresh, mentioning the requester in channels (Teams bots cannot react). "
             "Missing/false preserves in-place delivery. "
             "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
+    budget_notices: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant switch for the channel budget notice, keyed by tenant UUID. "
+            "When a channel's budget is used up, its channel admins (else the server admins) "
+            "get one DM per budget window on Discord, Slack and Teams. Missing/true sends it; "
+            "false turns it off. Configure DAIMON_BUDGET_NOTICES as a JSON object."
         ),
     )
     direct_message_policies: dict[uuid.UUID, DirectMessagePolicy] = Field(

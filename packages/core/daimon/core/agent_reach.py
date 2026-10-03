@@ -23,6 +23,10 @@ narrows the sharing read toward refusal, never past it.
 A private conversation counts as the channel `/dm` ran in: its DM channel's
 row and its `dm:` scope answer only while it is the tenant's live conversation
 there, and then as that source channel.
+
+Locality alone never makes an agent a channel admin's: it must also be theirs
+(`daimon.core.authz.channel_admin_holds`), which this module reads the facts
+for (its creation channel, its pins, the defaults server admins set to it).
 """
 
 from __future__ import annotations
@@ -31,6 +35,18 @@ import uuid
 from collections.abc import Collection, Iterable, Sequence
 from typing import Final, NamedTuple
 
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    AgentStanding,
+    Place,
+    agent_held_in,
+    authorize,
+    build_subject,
+    channel_admin_holds,
+)
+from daimon.core.authz import AgentReach as ReachFacts
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     administered_channel_ids,
@@ -44,6 +60,11 @@ from daimon.core.scope import (
     TenantConfigRow,
     answering_places,
     is_agent_reachable,
+)
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.agent_creation_channels import (
+    get_creation_channel,
+    record_creation_channel,
 )
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
@@ -65,17 +86,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
     {
+        "agent_spec_edit",
         "key_replace",
         "key_remove",
         "mcp_replace",
         "mcp_remove",
+        "repo_bind",
         "skill_repo_connect",
         "skill_add",
         "skill_remove",
     }
 )
-"""Read as shared by `is_agent_shared_for_key_changes`: the keys, servers and skills
-also reach routines and live sessions. Spec edits and repo binds read the cascade only."""
+"""Read as shared by `is_agent_shared_for_key_changes`: every one of these writes also
+reaches routines, bound threads and live sessions, so an agent only those point at is
+still someone else's (an admin's routine would run a member's edited prompt)."""
 
 
 class UnattendedRights(BaseModel):
@@ -106,6 +130,8 @@ class AgentReach(BaseModel):
     has_unplaced_run: bool = False
     unattended_runs: tuple[UnattendedRights, ...] = ()
     is_personal_default: bool = False
+    # Channels whose default a server admin set to it (`AgentStanding`).
+    admin_default_channel_ids: frozenset[str] = frozenset()
 
     @property
     def is_tenant_wide(self) -> bool:
@@ -196,6 +222,14 @@ def build_agent_reach(
     by_channel = {dm.channel_id: dm.origin for dm in dm_origins}
     by_scope = {dm.scope_id: dm.origin for dm in dm_origins}
     dm_channels = by_channel.keys() | {binding[0] for binding in dm_bindings}
+    admin_defaults = frozenset(
+        row.channel_id
+        for row in channels
+        if row.mode == "agent"
+        and row.agent_name in names
+        and row.agent_name_set_by_admin
+        and row.channel_id not in dm_channels
+    )
     places: dict[AnsweringPlace, None] = {}
     for name in names:
         for place in answering_places(name, tenant=tenant, channels=channels, default=default):
@@ -233,6 +267,7 @@ def build_agent_reach(
             for requester in dict.fromkeys(unattended_requesters)
         ),
         is_personal_default=is_personal_default,
+        admin_default_channel_ids=admin_defaults,
     )
 
 
@@ -306,6 +341,8 @@ async def load_agent_reach(
 
 class _Locality(NamedTuple):
     is_local: bool
+    # And the agent is the caller's (`channel_admin_holds`); read only when local.
+    is_held: bool = False
     # Why a reachable agent is not local, when that is the reason; both False when local.
     held_back_by_unattended_run: bool = False
     held_back_by_unplaced_run: bool = False
@@ -340,7 +377,19 @@ async def _caller_locality(
         caller_platform_user_id=caller_platform_user_id,
     )
     if reach.is_local_to(administered, platform_user_id=caller.platform_user_id):
-        return _Locality(is_local=True)
+        return _Locality(
+            is_local=True,
+            is_held=await _caller_holds(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                agent_names=agent_names,
+                ma_agent_id=ma_agent_id,
+                caller=caller,
+                administered=administered,
+                reach=reach,
+            ),
+        )
     return _Locality(
         is_local=False,
         held_back_by_unattended_run=reach.runs_unattended_beyond(
@@ -350,35 +399,74 @@ async def _caller_locality(
     )
 
 
-async def is_agent_local_to_caller(
+async def _caller_holds(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     agent_names: tuple[str, ...],
     ma_agent_id: str | None,
-    default: DeploymentDefault,
     caller: ChannelAdminCaller,
-    caller_account_id: uuid.UUID | None = None,
+    administered: frozenset[str],
+    reach: AgentReach,
 ) -> bool:
-    """True when the caller administers some channels and the agent is local to them.
+    """Shell half of `channel_admin_holds`. An unreadable policy counts no pin."""
+    try:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        policy = TenantAccessPolicy()
+    created_for = (
+        await get_creation_channel(
+            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, platform=platform
+        )
+        if ma_agent_id is not None
+        else None
+    )
+    return channel_admin_holds(
+        policy,
+        subject=build_subject(
+            is_admin=False,
+            platform_user_id=caller.platform_user_id,
+            administered_channel_ids=administered,
+        ),
+        agent=AgentRef.of(*agent_names),
+        standing=AgentStanding(
+            created_for_channel_id=created_for,
+            admin_default_channel_ids=reach.admin_default_channel_ids,
+        ),
+    )
 
-    False for a caller with no channel admin grant, without reading the reach,
-    so a tenant with no channel admins pays one indexed read and nothing else.
-    `caller_account_id` leaves the caller's own live sessions out; None counts them.
+
+async def record_created_for_channel(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    channel_id: str | None,
+    caller: ChannelAdminCaller,
+) -> bool:
+    """Record that a channel admin created the agent for `channel_id`, from there.
+
+    Only when the caller administers that channel (a thread's parent) and is
+    no server admin, whose agents reach a channel by being made its default.
+    True when recorded.
     """
-    locality = await _caller_locality(
+    if caller.is_server_admin or channel_id is None:
+        return False
+    administered = await load_administered_channel_ids(
+        session, tenant_id=tenant_id, platform=platform, caller=caller
+    )
+    if channel_id not in administered:
+        return False
+    await record_creation_channel(
         session,
         tenant_id=tenant_id,
-        platform=platform,
-        agent_names=agent_names,
         ma_agent_id=ma_agent_id,
-        default=default,
-        caller=caller,
-        caller_account_id=caller_account_id,
-        caller_platform_user_id=caller.platform_user_id,
+        platform=platform,
+        channel_id=channel_id,
     )
-    return locality.is_local
+    return True
 
 
 async def may_bind_as_channel_default(
@@ -386,6 +474,7 @@ async def may_bind_as_channel_default(
     *,
     tenant_id: uuid.UUID,
     platform: str,
+    channel_id: str,
     agent_names: tuple[str, ...],
     ma_agent_id: str | None,
     default: DeploymentDefault,
@@ -393,35 +482,158 @@ async def may_bind_as_channel_default(
     is_daimon_managed: bool,
     caller_account_id: uuid.UUID | None = None,
 ) -> bool:
-    """Whether `caller` may make the agent the default of a channel they administer.
+    """Whether `caller` may make the agent the default of `channel_id`, which they administer.
 
-    Check the pin first, for everyone, with `authorize(BIND_CHANNEL_DEFAULT)`.
-    Then server admins bind anything. A channel admin binds only agents shared
-    by design (tenant-wide or defaults-managed, which stay read-only to them),
-    one answering nowhere yet, or one answering and running only in their
-    channels. Never another
-    channel's own agent: that would lend its keys and memory to this channel
-    and take its edit rights from that channel's admins. `caller_account_id`
-    leaves the caller's own live sessions out; None counts them.
+    Server admins bind anything. A channel admin binds by the handoff rule,
+    `authorize(BIND_CHANNEL_DEFAULT)` with `load_binding_reach`: never another
+    channel's own agent, or one a member made, which would lend its keys and
+    memory to this channel. `caller_account_id` leaves the caller's own live
+    sessions out; None counts them. An unreadable policy counts no pin.
     """
-    if caller.is_server_admin or is_daimon_managed:
+    if caller.is_server_admin:
         return True
+    try:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        policy = TenantAccessPolicy()
+    administered = await load_administered_channel_ids(
+        session, tenant_id=tenant_id, platform=platform, caller=caller
+    )
+    agent = AgentRef.of(*agent_names)
+    reach = await load_binding_reach(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        policy=policy,
+        agent=agent,
+        ma_agent_id=ma_agent_id,
+        default=default,
+        caller=caller,
+        administered=administered,
+        channel_id=channel_id,
+        is_daimon_managed=is_daimon_managed,
+        caller_account_id=caller_account_id,
+    )
+    return authorize(
+        policy,
+        subject=build_subject(
+            is_admin=False,
+            platform_user_id=caller.platform_user_id,
+            administered_channel_ids=administered,
+        ),
+        action=Action.BIND_CHANNEL_DEFAULT,
+        agent=agent,
+        place=Place(channel_id=channel_id),
+        reach=reach,
+    ).allowed
+
+
+def _grant_holders(grants: Sequence[ChannelAdminsRow]) -> dict[tuple[str, str], frozenset[str]]:
+    """Each user and group a grant names, with the channels it names them for."""
+    held: dict[tuple[str, str], set[str]] = {}
+    for grant in grants:
+        for user_id in grant.user_ids:
+            held.setdefault(("user", user_id), set()).add(grant.channel_id)
+        for role_id in grant.role_ids:
+            held.setdefault(("role", role_id), set()).add(grant.channel_id)
+    return {holder: frozenset(channels) for holder, channels in held.items()}
+
+
+def _held_by_other_admin(
+    policy: TenantAccessPolicy,
+    *,
+    reach: AgentReach,
+    agent: AgentRef,
+    standing: AgentStanding,
+    grants: Sequence[ChannelAdminsRow],
+    caller_platform_user_id: str | None,
+    channel_id: str,
+) -> bool:
+    """Whether a channel admin other than the caller holds the agent local to
+    channels without `channel_id`, which a binding there would take away.
+
+    Read over the union of the channels of every other user and group a grant
+    names without `channel_id`, since one person may hold it through several:
+    both checks only grow with the channels, so it fails closed and may
+    over-refuse.
+    """
+    channels = frozenset[str]().union(
+        *(
+            held
+            for holder, held in _grant_holders(grants).items()
+            if holder != ("user", caller_platform_user_id) and channel_id not in held
+        )
+    )
+    return reach.is_local_to(channels, platform_user_id=None) and agent_held_in(
+        policy, agent=agent, standing=standing, channel_ids=channels
+    )
+
+
+async def load_binding_reach(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    policy: TenantAccessPolicy,
+    agent: AgentRef,
+    ma_agent_id: str | None,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+    administered: frozenset[str],
+    channel_id: str,
+    is_daimon_managed: bool,
+    caller_account_id: uuid.UUID | None,
+) -> ReachFacts:
+    """The facts `authorize` reads for a channel admin binding the agent into `channel_id`.
+
+    As a channel's default, or a thread under it handed off (`HAND_OFF`).
+    DB reads only: safe under the tenant policy lock.
+    """
+    if is_daimon_managed:
+        return ReachFacts(managed=True)
     reach = await load_agent_reach(
         session,
         tenant_id=tenant_id,
         platform=platform,
-        agent_names=agent_names,
+        agent_names=tuple(name for name in agent.names if name),
         ma_agent_id=ma_agent_id,
         default=default,
         caller_account_id=caller_account_id,
         caller_platform_user_id=caller.platform_user_id,
     )
     if reach.is_tenant_wide:
-        return True
-    administered = await load_administered_channel_ids(
-        session, tenant_id=tenant_id, platform=platform, caller=caller
+        return ReachFacts(tenant_wide=True)
+    standing = AgentStanding(
+        created_for_channel_id=await get_creation_channel(
+            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, platform=platform
+        )
+        if ma_agent_id is not None
+        else None,
+        admin_default_channel_ids=reach.admin_default_channel_ids,
     )
-    return reach.may_move_into(administered, platform_user_id=caller.platform_user_id)
+    return ReachFacts(
+        local_to_caller=reach.may_move_into(administered, platform_user_id=caller.platform_user_id),
+        held_by_caller=channel_admin_holds(
+            policy,
+            subject=build_subject(
+                is_admin=False,
+                platform_user_id=caller.platform_user_id,
+                administered_channel_ids=administered,
+            ),
+            agent=agent,
+            standing=standing,
+            binding=True,
+        ),
+        held_by_other_admin=_held_by_other_admin(
+            policy,
+            reach=reach,
+            agent=agent,
+            standing=standing,
+            grants=await list_channel_admins(session, tenant_id=tenant_id, platform=platform),
+            caller_platform_user_id=caller.platform_user_id,
+            channel_id=channel_id,
+        ),
+    )
 
 
 async def _is_shared(
@@ -516,6 +728,7 @@ async def load_target_facts(
         is_daimon_managed=is_daimon_managed,
         is_reachable_in_tenant=reachable,
         is_local_to_caller_channels=locality.is_local,
+        is_held_by_caller=locality.is_held,
         runs_unattended_beyond_caller=locality.held_back_by_unattended_run,
         has_unplaced_run=locality.held_back_by_unplaced_run,
     )
@@ -526,8 +739,9 @@ __all__ = [
     "AgentReach",
     "UnattendedRights",
     "build_agent_reach",
-    "is_agent_local_to_caller",
     "load_agent_reach",
+    "load_binding_reach",
     "load_target_facts",
     "may_bind_as_channel_default",
+    "record_created_for_channel",
 ]

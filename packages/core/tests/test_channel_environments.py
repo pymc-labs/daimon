@@ -7,6 +7,7 @@ import uuid
 import httpx
 import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -19,14 +20,23 @@ from daimon.core.channel_environments import (
     environment_choices,
     environment_option_value,
     has_open_network,
+    hidden_environment_names,
     list_environment_names,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
     sealed_network_warning,
 )
+from daimon.core.channel_isolation import IsolationViewer
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext, TenantScopeRef
+from daimon.core.scope import (
+    ChannelConfigRow,
+    ChannelScopeRef,
+    DeploymentDefault,
+    ScopeContext,
+    TenantConfigRow,
+    TenantScopeRef,
+)
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
@@ -321,3 +331,32 @@ async def test_sealed_network_warning_survives_a_failed_lookup(db_session: Async
     )
 
     assert warning == SEALED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"
+
+
+def test_only_names_isolated_channels_across_the_line_pick_are_hidden() -> None:
+    """A name could name an isolated channel's client; one any other place uses is shared."""
+    tenant_id = uuid.uuid4()
+    policy = TenantAccessPolicy(
+        sealed_channel_ids=("c_acme", "c_beta"), isolated_channel_ids=("c_acme", "c_beta")
+    )
+    channels = [
+        ChannelConfigRow(tenant_id=tenant_id, channel_id=channel_id, environment_name=name)
+        for channel_id, name in (
+            ("c_acme", "acme"),
+            ("c_beta", "beta"),
+            ("c_beta", "shared-pick"),
+            ("c_open", "shared-pick"),
+            ("c_beta", "workspace"),
+            ("c_acme", "deployment"),
+            ("c_open", "open"),
+        )
+    ]
+    tenant = TenantConfigRow(tenant_id=tenant_id, environment_name="workspace")
+    default = DeploymentDefault(environment_name="deployment")
+
+    def hidden(inside: str | None) -> frozenset[str]:
+        viewer = IsolationViewer(policy, inside)
+        return hidden_environment_names(viewer, tenant=tenant, channels=channels, default=default)
+
+    assert hidden(None) == {"acme", "beta"}, "outside, both isolated channels' own names hide"
+    assert hidden("c_acme") == {"beta"}, "inside one, only the other's own name hides"

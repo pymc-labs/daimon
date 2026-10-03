@@ -9,6 +9,7 @@ import asyncio
 import json
 import uuid
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -19,11 +20,15 @@ from daimon.adapters.teams.billing_panel import (
     NOT_CONFIGURED,
     REDEEM_ADMIN_ONLY,
     UNKNOWN_AMOUNT,
+    panel_card,
 )
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
+from daimon.core.billing_panel import BillingPanelState
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.stores import promo_codes as promo_store
+from daimon.core.stores.domain import ChannelBudgetRow
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -161,3 +166,50 @@ async def test_an_admin_redeems_a_promo_code_from_the_card(
     assert isinstance(wrong["value"], str) and wrong["value"], "a refusal is said, the card kept"
     card = json.dumps(redeemed, ensure_ascii=False)
     assert "Redeemed **$10.00** of credit" in card and "admin view" in card
+
+
+def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    budget = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="teams",
+        channel_id=channel_id,
+        limit_usd=Decimal("10"),
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    return ChannelBudgetStatus(budget=budget, spent_usd=Decimal(spent), is_active=True)
+
+
+def test_the_admin_card_lists_channel_budgets_and_the_member_card_does_not() -> None:
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    budgets = tuple(_budget_status(f"19:c{i}", str(9 - i)) for i in range(7))
+    for is_admin in (True, False):
+        state = BillingPanelState(
+            is_admin=is_admin,
+            caller_user_id="u",
+            caller_spend=0.0,
+            caller_turns=0,
+            caller_cap=None,
+            guild_balance_usd=Decimal("1"),
+            guild_spend=0.0,
+            guild_turns=0,
+            guild_distinct_members=0,
+            member_rows=(),
+            over_cap_count=0,
+            channel_budgets=budgets,
+        )
+        text = json.dumps(
+            panel_card(state, since=since).model_dump(by_alias=True), ensure_ascii=False
+        )
+        if is_admin:
+            assert "Channel `19:c0`: $9.00 of $10.00 (monthly) · 90% used" in text
+            assert "19:c4" in text and "19:c5" not in text, "only the five most used"
+            assert "2 more channel budgets" in text
+        else:
+            assert "Channel budgets" not in text, "a member sees no other channel"

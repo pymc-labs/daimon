@@ -1,0 +1,54 @@
+async def callback(self, interaction: discord.Interaction) -> None:
+    if self.view is None:
+        return
+    state = self.view.state
+    if state.selected is None:
+        return
+    routine_id = state.selected.routine.id
+    runtime = self.view.runtime
+
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+    try:
+        async with runtime.sessionmaker() as session, session.begin():
+            row = await get_routine(session, routine_id, tenant_id=tenant_id)
+            if row is None:
+                await interaction.response.send_message(
+                    "This routine no longer exists.",
+                    ephemeral=True,
+                )
+                return
+            # Defense-in-depth: the store call above is already tenant-scoped
+            # (Routine.tenant_id == tenant_id), so this can only trip if a
+            # caller's mock/stub bypasses that filter.
+            if row.tenant_id != tenant_id:
+                await interaction.response.send_message(
+                    "This routine does not belong to this guild.",
+                    ephemeral=True,
+                )
+                return
+            member = interaction.user
+            is_admin = (
+                isinstance(member, discord.Member) and member.guild_permissions.manage_guild
+            )
+            is_creator = row.created_by_user_id is not None and row.created_by_user_id == str(
+                interaction.user.id
+            )
+            if not (is_admin or is_creator):
+                await interaction.response.send_message(
+                    "Only the routine's creator or a guild admin can pause this routine.",
+                    ephemeral=True,
+                )
+                return
+            now = datetime.now(UTC)
+            if row.enabled:
+                await pause_routine_via_panel(session, routine_id, tenant_id=tenant_id)
+            else:
+                await resume_routine_via_panel(
+                    session, routine_id, tenant_id=tenant_id, now=now
+                )
+
+        await _rerender(interaction, self.view)
+    except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+        await _send_callback_error(interaction, exc)
+    except Exception as exc:  # routines-panel button-callback boundary
+        await _send_callback_error(interaction, exc)

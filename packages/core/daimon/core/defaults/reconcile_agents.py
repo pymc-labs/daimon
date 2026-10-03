@@ -56,10 +56,10 @@ async def reconcile_agent(
     that have dropped out of the seeded spec. This is correct for callers
     in the defaults pipeline.
 
-    `managed=False` is for editing user-owned agents (e.g. Discord's panel
-    `call_reconcile_for_panel` updating a user fork). Without this guard,
-    every panel edit re-stamps the user fork as managed → next `defaults
-    apply` sweeps it because it isn't in the seeded spec list.
+    `managed=False` is for user-owned agents (e.g. `create_blank_agent` in
+    `core/agent_lifecycle.py`). Without this guard, every write re-stamps the
+    user's agent as managed → next `defaults apply` sweeps it because it isn't
+    in the seeded spec list.
 
     `spec.isolated` is a third mode alongside `managed=True/False`: an
     isolated spec never gains the default daimon-mcp server, the matching

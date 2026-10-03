@@ -8,7 +8,8 @@ channel's roster, the rule the channel tools apply.
 
 When the destination cannot be used (protected, gone, the creator no longer
 in it, or Teams refuses the post) the result goes to the creator's 1:1 chat
-instead, if the tenant's direct-message policy allows them. The creator is
+instead, if the tenant's direct-message policy allows them, unless the
+destination lies in an isolated channel, whose results never leave it. The creator is
 cleared before any of this: an unreadable policy or a creator no longer allowed
 to invoke the agent gets nothing.
 """
@@ -24,6 +25,7 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
+from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -74,9 +76,16 @@ def make_teams_routine_poster(
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
+        keep_inside = keeps_routine_inside(cleared, row)
+
+        async def fallback(reason: str) -> DeliveryOutcome:
+            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+                return DeliveryOutcome(status="skipped", note=reason)
+            return await dm_fallback(row, reason)
+
         target = delivery_target(row, platform="teams")
         if target is None:
-            return await dm_fallback(row, "destination_unavailable")
+            return await fallback("destination_unavailable")
         if not authorize(
             cleared,
             subject=Subject(),
@@ -85,22 +94,22 @@ def make_teams_routine_poster(
             place=Place(channel_id=target.channel_id),
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
-            return await dm_fallback(row, "protected_channel")
+            return await fallback("protected_channel")
         creator = row.created_by_user_id
         try:
             on_roster = creator is not None and await teams.member(target.channel_id, creator)
         except TEAMS_SEND_ERRORS:
-            return await dm_fallback(row, "destination_unavailable")
+            return await fallback("destination_unavailable")
         if not on_roster:
             log.info(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
-            return await dm_fallback(row, "creator_cannot_post")
+            return await fallback("creator_cannot_post")
         try:
             await teams.post(teams_thread_id(target), render_fallback_post(row))
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (400, 403, 404):
-                return await dm_fallback(row, "destination_unavailable")
+                return await fallback("destination_unavailable")
             raise
         return DeliveryOutcome(status="delivered")
 

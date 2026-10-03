@@ -153,3 +153,69 @@ async def test_team_groups_prefer_the_activity_then_look_up_once_per_team() -> N
         await teams.group_id("19:other@thread.tacv2")
     with pytest.raises(GraphUnavailable, match="no team"):
         await teams.group_id(None)
+
+
+async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
+    owner = "AAAAAAAA-0000-0000-0000-000000000001"
+    seen: list[httpx.Request] = []
+    next_link = f"https://graph.microsoft.com/v1.0/teams/{GROUP}/members?$skiptoken=p2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "skiptoken" in str(request.url):
+            return httpx.Response(200, json={"value": [{"userId": "b2", "roles": ["owner"]}]})
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {"userId": owner, "roles": ["owner"]},
+                    {"userId": "c3", "roles": []},
+                    {"roles": ["owner"]},
+                ],
+                "@odata.nextLink": next_link,
+            },
+        )
+
+    owners = await _client(handler, seen).list_team_owner_ids(GROUP)
+
+    assert owners == frozenset({owner.lower(), "b2"}), "owners only, Entra ids lower-cased"
+    assert seen[0].url.params["$filter"] == "roles/any(r:r eq 'owner')", "Graph filters owners"
+    assert seen[0].url.path == f"/v1.0/teams/{GROUP}/members"
+    assert "$filter" not in seen[1].url.params, "a next link carries its own query"
+
+
+async def test_team_owners_refused_without_consent() -> None:
+    with pytest.raises(GraphUnavailable) as caught:
+        await _client(lambda _: httpx.Response(403)).list_team_owner_ids(GROUP)
+    assert caught.value.status == 403, "no TeamMember.Read.Group consent is a failed read"
+
+
+async def test_channel_members_carry_their_home_tenant_and_guest_role() -> None:
+    seen: list[httpx.Request] = []
+    next_link = f"https://graph.microsoft.com/v1.0/teams/{GROUP}/channels/x/allMembers?$skiptoken=2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "skiptoken" in str(request.url):
+            return httpx.Response(200, json={"value": [{"userId": "g", "roles": ["guest"]}]})
+        member = {"userId": "e", "roles": [], "tenantId": "other-tenant"}
+        return httpx.Response(200, json={"value": [member], "@odata.nextLink": next_link})
+
+    members = await _client(handler, seen).list_channel_members(GROUP, CHANNEL)
+
+    assert [(m.user_id, m.tenant_id, m.roles) for m in members] == [
+        ("e", "other-tenant", []),
+        ("g", None, ["guest"]),
+    ], "every page, with tenant and roles"
+    assert seen[0].url.path == f"/v1.0/teams/{GROUP}/channels/{CHANNEL}/allMembers"
+
+
+async def test_channel_members_stop_after_the_page_limit() -> None:
+    from daimon.core.teams_graph import MAX_MEMBER_PAGES
+
+    seen: list[httpx.Request] = []
+    more = f"https://graph.microsoft.com/v1.0/teams/{GROUP}/channels/x/allMembers?$skiptoken=n"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": [{"userId": "u"}], "@odata.nextLink": more})
+
+    members = await _client(handler, seen).list_channel_members(GROUP, CHANNEL)
+    assert len(seen) == len(members) == MAX_MEMBER_PAGES, "a long list is cut short, not refused"

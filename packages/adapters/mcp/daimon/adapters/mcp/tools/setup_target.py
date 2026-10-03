@@ -45,7 +45,10 @@ async def require_turn_origin(
         )
     if origin is None:
         raise ToolError("This turn origin is unavailable or expired; retry in that conversation.")
-    if auth.agent_id is not None and auth.agent_id != derive_agent_uuid(
+    # A chat turn's credential names its agent as chat_agent_id, as
+    # `get_verified_origin` reads it: it may claim only its own responder's origin.
+    executing_agent = auth.agent_id or auth.chat_agent_id
+    if executing_agent is not None and executing_agent != derive_agent_uuid(
         tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
         raise ToolError("This turn origin belongs to another responder.")

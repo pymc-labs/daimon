@@ -262,7 +262,8 @@ async def test_an_isolated_channels_sessions_are_read_only_by_its_own_agents(
     world: _World,
 ) -> None:
     """An agent answering C's setup thread runs inside C but is not one of C's own
-    agents, so C's conversations stay out of its reach; C's own agent reads them."""
+    agents, so C's conversations stay out of its reach, and held to C it reads no
+    others; C's own agent reads C's alone."""
     world.add_session(
         "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed=_SEALED
     )
@@ -283,13 +284,15 @@ async def test_an_isolated_channels_sessions_are_read_only_by_its_own_agents(
 
     await isolate("local")
     listed = await _list_sessions_impl(world.runtime(), world.auth(), None, None, setup_thread)
-    assert [s.id for s in listed] == ["ses_b"], "C's session is hidden from an outside agent"
+    assert listed == [], "an outside agent inside C reads neither C's sessions nor others'"
     with pytest.raises(ToolError, match="sealed channel"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_acme", None, None, None, setup_thread
         )
 
     await isolate("acme-project")
+    listed = await _list_sessions_impl(world.runtime(), world.auth(), None, None, setup_thread)
+    assert [s.id for s in listed] == ["ses_acme"], "C's own agent reads only C's sessions"
     page = await _list_session_events_impl(
         world.runtime(), world.auth(), "ses_acme", None, None, None, setup_thread
     )

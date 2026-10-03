@@ -1,8 +1,6 @@
 """Real-Postgres tests for agent_setup/write.py.
 
 Covers:
-- do_propagate persists agent_name at the scope (set_fields); second call returns prior name
-- do_unpropagate clears the agent_name (unset_fields)
 - mask_tail covers the full-length and short-string cases
 - delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
@@ -23,9 +21,6 @@ from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAge
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup import write as write_mod
 from daimon.adapters.slack.agent_setup.write import (
-    PropagateResult,
-    do_propagate,
-    do_unpropagate,
     load_agent_inline_pat,
     owner_repo_from_url,
 )
@@ -195,116 +190,6 @@ def test_owner_repo_from_url_matches_store_normalization() -> None:
     ]:
         assert owner_repo_from_url(url) == _normalize_owner_repo(url), (
             "owner_repo_from_url must stay byte-identical to the store's normalization"
-        )
-
-
-# ---------------------------------------------------------------------------
-# do_propagate — persists scope write and returns prior state
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_do_propagate_persists_agent_name_at_tenant_scope(
-    db_session: AsyncSession,
-) -> None:
-    """do_propagate stamps agent_name at TenantScopeRef; get_scope shows the persisted value."""
-    tenant_id = await _seed_tenant(db_session)
-    account_id = await _seed_account(db_session, tenant_id)
-
-    scope = TenantScopeRef(tenant_id=tenant_id)
-    result = await do_propagate(
-        db_session,
-        scope=scope,
-        tenant_id=tenant_id,
-        agent_name=_AGENT_NAME,
-        actor_account_id=account_id,
-    )
-
-    assert isinstance(result, PropagateResult), "do_propagate should return PropagateResult"
-    assert result.prior_agent_name is None, "clean propagation should have no prior agent name"
-
-    row = await get_scope(db_session, scope=scope)
-    from daimon.core.scope import TenantConfigRow
-
-    assert isinstance(row, TenantConfigRow), (
-        "get_scope should return a TenantConfigRow after propagate"
-    )
-    assert row.agent_name == _AGENT_NAME, "propagated agent_name should be persisted at the scope"
-    assert row.agent_name_set_by_account_id == account_id, (
-        "actor account_id should be recorded for audit"
-    )
-
-
-@pytest.mark.asyncio
-async def test_do_propagate_returns_prior_agent_name_on_overwrite(
-    db_session: AsyncSession,
-) -> None:
-    """Second do_propagate returns the prior agent name (last-write-wins audit trail)."""
-    tenant_id = await _seed_tenant(db_session)
-    account_id = await _seed_account(db_session, tenant_id)
-    second_account_id = await _seed_account(db_session, tenant_id)
-
-    scope = TenantScopeRef(tenant_id=tenant_id)
-
-    # First propagation — clean write
-    await do_propagate(
-        db_session,
-        scope=scope,
-        tenant_id=tenant_id,
-        agent_name=_AGENT_NAME,
-        actor_account_id=account_id,
-    )
-
-    # Second propagation — overwrite; prior name should surface
-    result = await do_propagate(
-        db_session,
-        scope=scope,
-        tenant_id=tenant_id,
-        agent_name=_OTHER_AGENT_NAME,
-        actor_account_id=second_account_id,
-    )
-
-    assert result.prior_agent_name == _AGENT_NAME, (
-        "do_propagate should return the agent_name that was overwritten"
-    )
-    assert result.prior_actor_account_id == account_id, (
-        "do_propagate should return the actor who set the prior value"
-    )
-
-
-# ---------------------------------------------------------------------------
-# do_unpropagate — clears agent_name at scope
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_do_unpropagate_clears_agent_name_at_scope(
-    db_session: AsyncSession,
-) -> None:
-    """do_unpropagate removes agent_name so the row becomes effectively empty."""
-    tenant_id = await _seed_tenant(db_session)
-    account_id = await _seed_account(db_session, tenant_id)
-
-    scope = TenantScopeRef(tenant_id=tenant_id)
-    await do_propagate(
-        db_session,
-        scope=scope,
-        tenant_id=tenant_id,
-        agent_name=_AGENT_NAME,
-        actor_account_id=account_id,
-    )
-
-    await do_unpropagate(db_session, scope=scope, actor_account_id=account_id)
-
-    row = await get_scope(db_session, scope=scope)
-    from daimon.core.scope import TenantConfigRow
-
-    # After unpropagate, either the row is gone (None) or agent_name is None
-    if isinstance(row, TenantConfigRow):
-        assert row.agent_name is None, "do_unpropagate should clear agent_name from the scope row"
-    else:
-        assert row is None, (
-            "do_unpropagate should leave the scope empty (row deleted or agent_name None)"
         )
 
 

@@ -59,6 +59,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.scope import ScopeContext
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
@@ -390,6 +391,8 @@ def _check_agent_pin(
         place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
         origin=origin,
     )
+    if not decision:
+        record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
     if decision.reason == "channel_isolated":
         if origin is not None and isolated_channel_of(
             policy, origin.channel_id, origin.parent_channel_id

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -21,12 +22,15 @@ import pytest
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_isolation import routine_origin
+from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, RoutineDestinationKind, RoutineRow
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -432,3 +436,102 @@ async def test_a_channel_admin_reads_only_sessions_sealed_inside_their_channels(
         events = await hub.call("list_events", handle=handle)
         assert events.get("isError") and _TOPIC not in str(events), (handle, events)
     assert hub.sent == []
+
+
+_ROUTINE_CHANNEL = "chan-routine"
+
+
+def _routine_row(
+    kind: RoutineDestinationKind | None, destination: str | None, channel: str | None
+) -> RoutineRow:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return RoutineRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        created_by_user_id="u-owner",
+        agent_id=_AGENT,
+        agent_name="acme-project",
+        cron_expr="0 * * * *",
+        timezone="UTC",
+        trigger_message="hi",
+        enabled=True,
+        next_fire_at=None,
+        last_fired_at=None,
+        last_error=None,
+        last_result_tail=None,
+        destination_kind=kind,
+        destination_id=destination,
+        channel_id=channel,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+_ROUTINE_SHAPES = {
+    "channel": _routine_row("channel", _ROUTINE_CHANNEL, _ROUTINE_CHANNEL),
+    "thread": _routine_row("thread", "thr-routine", _ROUTINE_CHANNEL),
+    # Made in a DM started from the channel: its saved channel is the DM's source.
+    "dm": _routine_row(None, None, _ROUTINE_CHANNEL),
+    "no-destination": _routine_row(None, None, None),
+    "legacy-thread": _routine_row("thread", "thr-legacy", None),
+    "legacy-channel": _routine_row("channel", _ROUTINE_CHANNEL, None),
+}
+
+
+def _routine_stamp(row: RoutineRow) -> dict[str, str]:
+    """What `run_turn` stamps on the routine's session (`create_session`)."""
+    origin = routine_origin(TenantAccessPolicy(), row, platform="discord")
+    if origin is None:
+        return {}
+    return {
+        **origin_stamp(channel_id=origin.channel_id, thread_id=origin.thread_id),
+        MA_METADATA_KEY_PRIVATE_DM: origin.private_dm_id,
+    }
+
+
+@pytest.mark.parametrize("shape", list(_ROUTINE_SHAPES))
+@pytest.mark.parametrize("caller", ["owner", "server-admin", "channel-admin", "outsider"])
+async def test_a_routine_transcript_reads_only_for_its_owner_from_the_hub(
+    hub: _Hub, shape: str, caller: str
+) -> None:
+    """As before routine sessions carried a channel: the owner reads every shape,
+    and no server admin, channel admin of its channel or other member reads one."""
+    if caller == "server-admin":
+        await _as(hub, Role.ADMIN)
+    if caller == "channel-admin":
+        for channel in (_ROUTINE_CHANNEL, "thr-legacy"):
+            await _grant(hub, channel)
+    account = hub.account_id if caller == "owner" else uuid.uuid4()
+    hub.add_session("ses_routine", account=account, **_routine_stamp(_ROUTINE_SHAPES[shape]))
+
+    listed = str(await hub.call("list_my_sessions"))
+    events = await hub.call("list_events", handle="ses_routine")
+
+    if caller == "owner":
+        assert "ses_routine" in listed, "the owner lists their routine's session"
+        assert not events.get("isError") and _TOPIC in str(events), events
+    else:
+        assert "ses_routine" not in listed, f"a {caller} never lists another's routine"
+        assert events.get("isError") and _TOPIC not in str(events), (caller, events)
+    assert hub.sent == []
+
+
+async def test_a_sealed_channels_routine_transcript_stays_inside_it_for_its_owner(
+    hub: _Hub,
+) -> None:
+    """The private stamp leaves the seal binding: the owner's hub read, outside the
+    channel, is refused for a routine that fires into a sealed channel."""
+    row = _routine_row("channel", _SEALED, _SEALED)
+    origin = routine_origin(
+        TenantAccessPolicy(sealed_channel_ids=(_SEALED,)), row, platform="discord"
+    )
+    assert origin is not None
+    hub.add_session(
+        "ses_routine",
+        **origin_stamp(channel_id=origin.channel_id, thread_id=None, seal=origin.seal_ids),
+        daimon_private_dm=origin.private_dm_id,
+    )
+
+    events = await hub.call("list_events", handle="ses_routine")
+
+    assert events.get("isError") and _TOPIC not in str(events), events

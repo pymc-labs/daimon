@@ -24,8 +24,8 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import (
-    require_external_publish_allowed,
-    turn_origin_place,
+    require_publishable,
+    require_reader_source_publishable,
 )
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
@@ -38,7 +38,6 @@ from daimon.core.reports.publish import (
     delete_report,
     publish_report,
 )
-from daimon.core.stores.domain import TurnOriginRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -63,17 +62,22 @@ def _report_host_error_message(err: ReportHostError) -> str:
     return str(err)
 
 
-def _source_authorizer(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None
+async def _source_authorizer(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> Callable[[BetaManagedAgentsAgent], Awaitable[None]]:
-    """The pinned-agent write rule for the agent whose reader variant is published.
+    """The rules for the agent whose reader variant is published.
 
     A reader answers as its source agent, so publishing one is a change to
-    what that agent reaches: an admin may, and a member only from a turn
-    inside the source's pinned channels (the verified ``origin``).
+    what that agent reaches: never an isolated channel's own agent; a pinned
+    one by an admin, or a member only from a turn inside the source's pinned
+    channels (``origin_context_id``).
     """
+    origin = (
+        await require_turn_origin(runtime, auth, origin_context_id) if origin_context_id else None
+    )
 
     async def authorize_source(source: BetaManagedAgentsAgent) -> None:
+        await require_reader_source_publishable(runtime, auth, source)
         await require_pin_write_access(runtime, auth, ma_agent=source, origin=origin)
 
     return authorize_source
@@ -100,16 +104,11 @@ async def _publish_report_impl(
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
-    origin = (
-        await require_turn_origin(runtime, auth, origin_context_id)
-        if auth is not None and origin_context_id
-        else None
-    )
     if auth is not None:
-        await require_external_publish_allowed(
-            runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
-        )
-    authorize_source = _source_authorizer(runtime, auth, origin) if auth is not None else None
+        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+    authorize_source = (
+        await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
+    )
     try:
         async with client_factory() as client:
             result = await publish_report(
@@ -186,9 +185,11 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         should answer questions (defaults to this tenant's configured
         agent).
 
-        When the answering agent is pinned to channels, a non-admin may only
-        publish its reader from inside them: pass this turn's
-        ``origin_context_id``.
+        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
+        an isolated channel, publishes nothing: a link reaches whoever holds
+        it. An isolated channel's own agent never answers a report. When the
+        answering agent is pinned to channels, a non-admin may only publish
+        its reader from inside them.
 
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own

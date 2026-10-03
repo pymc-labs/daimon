@@ -10,12 +10,16 @@ import datetime as dt
 import uuid
 
 import jwt as pyjwt
+from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.security_audit import list_events
+from daimon.testing import MARouter, build_fake_anthropic, ma_environment
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
@@ -28,7 +32,10 @@ SECRET = "a" * 32
 
 
 def _make_app(
-    sessionmaker: async_sessionmaker[AsyncSession], *, calls_per_minute: int = 60
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    calls_per_minute: int = 60,
+    anthropic: AsyncAnthropic | None = None,
 ) -> Starlette:
     return create_mcp_app(
         settings=Settings(
@@ -41,6 +48,7 @@ def _make_app(
             ),
         ),
         sessionmaker=sessionmaker,
+        anthropic=anthropic,
     )
 
 
@@ -97,7 +105,37 @@ async def test_tenant_read_token_lists_exactly_its_tools(
         "list_channel_budgets",
         "get_channel_budget",
         "list_channel_admins",
+        "list_channel_skills",
+        "list_environments",
     }, "an operator token sees only its scopes' tools, without the search collapse"
+
+
+async def test_tenant_read_token_lists_only_its_tenants_environments(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An integration picks an environment by name; another tenant's never shows up."""
+    tenant_id, _jti, reader = await _operator_token(sessionmaker, "tenant:read")
+    _other, _jti2, redeemer = await _operator_token(sessionmaker, "promo:redeem")
+    router = MARouter()
+    router.add_environment_list(
+        ma_environment(id="env_mine", name="python", tenant_id=tenant_id),
+        ma_environment(id="env_theirs", name="secret-env", tenant_id=uuid.uuid4()),
+    )
+    app = _make_app(sessionmaker, anthropic=build_fake_anthropic(router.dispatch))
+
+    listed = _text(await call_mcp_tool(app, token=reader, name="list_environments"))
+    refused = _text(await call_mcp_tool(app, token=redeemer, name="list_environments"))
+
+    assert "python" in listed and "secret-env" not in listed, f"own tenant only: {listed}"
+    assert "Unknown tool" in refused, f"promo:redeem alone cannot list them: {refused}"
+
+
+async def test_agents_archive_token_lists_exactly_its_tool(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant_id, _jti, token = await _operator_token(sessionmaker, "agents:archive")
+    names = await _tool_names(_make_app(sessionmaker), token)
+    assert names == {"archive_isolation_copy"}, "agents:archive opens only the copy archive"
 
 
 async def test_channels_write_token_lists_exactly_its_tools(
@@ -113,9 +151,15 @@ async def test_channels_write_token_lists_exactly_its_tools(
         "set_channel_admins",
         "clear_channel_admins",
         "set_channel_isolation",
+        "set_channel_protection",
         "set_channel_environment",
         "clear_channel_environment",
-    }, "channels:write covers the channel budget, agent, admin, isolation and environment tools"
+        "add_channel_skill",
+        "remove_channel_skill",
+    }, (
+        "channels:write covers the channel budget, agent, admin, isolation, protection, "
+        "environment and skill tools"
+    )
 
 
 async def test_operator_token_cannot_call_a_tool_outside_its_scopes(
@@ -230,3 +274,27 @@ async def test_operator_calls_are_rate_limited_and_audited(
         ("denied", "operator", jti, None),
     ], "each call is audited with the token's kind, jti and the scope checked"
     assert all(e.platform_user_id == "u-admin" for e in calls), "it acts as the admin"
+
+
+async def test_the_tenant_summary_sent_to_an_operator_has_no_seal_or_protection_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _jti, token = await _operator_token(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker() as s, s.begin():
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=("c3",),
+                isolated_channel_ids=("c3",),
+                agent_channel_pins={"local": ("c3",)},
+            ),
+        )
+
+    result = await call_mcp_tool(
+        _make_app(committing_sessionmaker), token=token, name="get_tenant_summary"
+    )
+
+    text = _text(result)
+    assert "'channel_id': 'c3'" in text and "timed_credit" in text, f"the summary: {result}"
+    assert "sealed" not in text and "protected" not in text, "neither key is on the wire"

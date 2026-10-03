@@ -29,6 +29,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_policy import require_agent_creatable, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -40,9 +41,11 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -80,6 +83,7 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
@@ -127,8 +131,12 @@ class AgentInfo(BaseModel):
     routes to the new agent yet: post it verbatim, so the person learns the
     agent exists but answers nowhere and what to say to change that."""
     dropped_skills: list[str] | None = None
-    """Set only by ``fork_agent``: skills scoped to one agent (``agent/skill``),
-    left off the copy. Tell the person which ones."""
+    """Set only by ``fork_agent``: skills left off the copy (another agent's, or the
+    source's own that failed to copy; its own are otherwise copied). Tell the person."""
+    copied_skills: list[str] | None = None
+    """Set only by ``fork_agent``: the source's own skills, uploaded again under the
+    copy's name. The copy has them even when ``skills`` does not list them yet; do
+    not add them again."""
 
     @classmethod
     def from_ma(
@@ -426,10 +434,29 @@ def _build_create_spec(
         ) from exc
 
 
+async def _record_creation_channel(
+    runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str, origin: TurnOriginRow | None
+) -> None:
+    """Make the new agent its channel admins' when one made it from their channel or its
+    setup thread (`daimon.core.agent_reach.record_created_for_channel`). Never a DM."""
+    if origin is None or origin.thread_id.startswith(DM_SCOPE_PREFIX):
+        return
+    async with runtime.session_factory.begin() as session:
+        await record_created_for_channel(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            ma_agent_id=ma_agent_id,
+            channel_id=origin_channel_id(origin),
+            caller=reachability.channel_admin_caller(auth),
+        )
+
+
 async def _create_agent_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     spec: AgentSpec,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
     if spec.skills:
         raise ToolError(
@@ -437,6 +464,10 @@ async def _create_agent_impl(
             "repo via skill_repos or use sync_skills after the agent "
             "is created."
         )
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    await require_agent_creatable(
+        runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
+    )
     await _reject_guild_name_collision(runtime, auth, spec.name)
     public_url = (
         str(runtime.settings.mcp.public_url)
@@ -458,6 +489,7 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+    await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
     # agents.create succeeded — always return AgentInfo even if sync fails.
     # if agents.create itself raises, let it propagate as ToolError.
@@ -882,6 +914,8 @@ async def _fork_agent_impl(
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
+    if copy.copied_skills:
+        info = info.model_copy(update={"copied_skills": list(copy.copied_skills)})
     return await _with_answering_note(runtime, auth, info)
 
 
@@ -967,6 +1001,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         tools: list[Tool] | None = None,
         mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None,
         skill_repos: list[SkillRepo] | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Create an agent called, for example, churn-explorer. Pass fields directly —
         there is NO ``spec`` wrapper.
@@ -983,7 +1018,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
 
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
+        without it is refused while a channel in the workspace is isolated, and with
+        it a channel admin creating the agent for their channel may set it up there.
         """
         spec = _build_create_spec(
             name=name,
@@ -994,7 +1031,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             mcp_servers=mcp_servers,
             skill_repos=skill_repos,
         )
-        return await _create_agent_impl(runtime, await _auth(ctx), spec)
+        return await _create_agent_impl(runtime, await _auth(ctx), spec, origin_context_id)
 
     @mcp.tool
     async def update_agent(  # pyright: ignore[reportUnusedFunction]

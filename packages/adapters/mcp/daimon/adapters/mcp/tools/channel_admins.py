@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_target import parse_channel_target
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -42,7 +43,7 @@ class ChannelAdmins:
 
     channel_id: str
     role_ids: list[str]
-    """Discord role ids; always empty on Slack and Teams, which have no roles here."""
+    """Group ids: Discord roles, Slack user groups, or Teams teams (their owners)."""
     user_ids: list[str]
 
 
@@ -101,7 +102,10 @@ async def _set_channel_admins_impl(
     platform = _platform(auth)
     try:
         channel, roles, users = normalize_channel_admin_ids(
-            platform, channel_id=channel_id, role_ids=role_ids, user_ids=user_ids
+            platform,
+            channel_id=parse_channel_target(platform, channel_id).channel_id,
+            role_ids=role_ids,
+            user_ids=user_ids,
         )
     except InvalidChannelAdminIds as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc
@@ -132,12 +136,13 @@ async def _clear_channel_admins_impl(
     require_scope(auth, "channels:write")
     _require_admin(auth)
     platform = _platform(auth)
+    channel = parse_channel_target(platform, channel_id).channel_id
     async with runtime.session_factory.begin() as session:
         removed = await delete_channel_admins(
-            session, tenant_id=auth.tenant_id, platform=platform, channel_id=channel_id.strip()
+            session, tenant_id=auth.tenant_id, platform=platform, channel_id=channel
         )
     return SetChannelAdminsResult(
-        channel=ChannelAdmins(channel_id=channel_id.strip(), role_ids=[], user_ids=[]),
+        channel=ChannelAdmins(channel_id=channel, role_ids=[], user_ids=[]),
         changed=removed,
         note="Only server admins administer this channel now.",
     )
@@ -148,7 +153,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> ChannelAdminsList:
-        """List the channels that have their own admins, with the roles and members
+        """List the channels that have their own admins, with the groups and members
         named for each. For example, list the admins of #support. Requires Manage
         Server (admin).
         """
@@ -170,9 +175,15 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
 
-        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
-        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
+        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
+        Entra object ids. ``role_ids`` names groups whose members all count: Discord
+        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
+        which admits that team's owners. ``channel_id`` MUST be the parent channel's
+        id; a Slack or Teams thread id names its channel.
+
+        A Slack user group makes anyone who can join or edit it a channel admin, and
+        Slack lets every member edit user groups by default: name one only where the
+        workspace limits user group management to admins.
         """
         return await _set_channel_admins_impl(
             runtime, await _auth(ctx), channel_id=channel_id, role_ids=role_ids, user_ids=user_ids

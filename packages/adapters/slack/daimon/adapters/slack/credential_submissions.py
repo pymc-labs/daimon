@@ -41,6 +41,7 @@ from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     store_inline_pat,
 )
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
@@ -48,10 +49,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import (
     FormPinRefused,
     agent_pin_names,
-    consume_form_unless_pinned,
     request_pin_refusal,
 )
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
@@ -59,20 +58,28 @@ from daimon.core.credential_requests import (
     availability_for_request,
     split_skill_repo_target,
 )
+from daimon.core.credential_submit import (
+    apply_env_file_submit,
+    apply_env_submit,
+    consume_credential_submit,
+    prepare_env_submit,
+    prepare_mcp_submit,
+    settle_credential_submit,
+    write_mcp_submit,
+    write_repo_submit,
+    write_skill_repo_submit,
+)
+from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
-    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_alias_shadowed,
     env_collision_line,
-    env_import_collisions,
     env_name_problem,
-    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -96,7 +103,6 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
-    CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
@@ -104,15 +110,9 @@ from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
-    list_agent_files,
-    lock_agent_keys,
-    put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
-from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -210,8 +210,7 @@ async def _consume(
     now: datetime,
 ) -> CredentialRequestRow | None:
     """Spend the form, deciding the pin rule in the same transaction (`FormPinRefused`)."""
-    async with runtime.sessionmaker() as session, session.begin():
-        return await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
+    return await consume_credential_submit(runtime.sessionmaker, row=request, agent=agent, now=now)
 
 
 async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
@@ -267,7 +266,9 @@ async def _replacement_refused_at_submit(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            caller=ChannelAdminCaller(platform_user_id=user_id),
+            caller=await channel_admin_caller(
+                runtime, client, tenant_id=row.tenant_id, user_id=user_id, is_admin=False
+            ),
             caller_account_id=row.account_id,
         )
     outcome = decide_operation("key_replace", is_admin=is_admin, target=facts)
@@ -298,9 +299,12 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="slack",
-        caller=ChannelAdminCaller(
-            platform_user_id=user_id,
-            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        caller=await channel_admin_caller(
+            runtime,
+            client,
+            tenant_id=row.tenant_id,
+            user_id=user_id,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
         ),
         default=runtime.deployment_default,
         shares_token=True,
@@ -372,19 +376,6 @@ async def _validate_submission(
     return row, agent
 
 
-def _env_name_refusal(name: str, problem: str) -> str:
-    """One-line refusal for a key name the submitter may not store."""
-    if problem == "bad_name":
-        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
-    if problem == "reserved_name":
-        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
-    return (
-        f"{name} is not a secret name a member can add. Use a name ending in "
-        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
-        "and URL names."
-    )
-
-
 async def run_env_credential_submission(
     runtime: SlackRuntime,
     *,
@@ -428,30 +419,13 @@ async def run_env_credential_submission(
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
 
-    # Decided before the transaction opens: this check needs Slack and MA, and
-    # whether the request is a replacement at all was fixed at mint and cannot
-    # change underneath it.
-    # A new name that a tool reads as a key already held (GH_TOKEN beside
-    # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same gate.
-    #
-    # Snapshot the related credentials (aliases and family members) before the
-    # transaction, for every submit. Under the lock the write proceeds only if
-    # that set is unchanged: a related key added or removed after the gate was
-    # decided was never put to it. An unchanged set — rotating
-    # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
-    async with runtime.sessionmaker() as session:
-        held_names = await list_turn_key_names(
-            session, tenant_id=request.tenant_id, agent_id=request.agent_id
-        )
-    related_before = env_related_held(request.target, held_names)
-    shadowed = (
-        env_alias_shadowed(request.target, held_names)
-        if request.replaces_updated_at is None
-        else None
+    async def replacement_refused() -> bool:
+        return await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
+
+    plan = await prepare_env_submit(
+        runtime.sessionmaker, row=request, replacement_refused=replacement_refused
     )
-    refuse_replacement = (request.replaces_updated_at is not None or shadowed is not None) and (
-        await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
-    )
+    shadowed = plan.shadowed
 
     # The name a member may store is re-checked against the submitter's live
     # role. `key_add` needs no gate, but the NAME does: a tool-control or
@@ -468,58 +442,17 @@ async def run_env_credential_submission(
         )
         return
 
-    now = datetime.now(UTC)
-    state: CardState = "applied"
-    queued = False
     try:
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            # Re-read under the write, holding the agent's key-set lock: an
-            # alias that appeared after the gate above was decided was never
-            # put to it, and one a concurrent writer is adding waits.
-            if consumed is not None:
-                await lock_agent_keys(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                )
-            appeared = (
-                consumed is not None
-                and env_related_held(
-                    consumed.target,
-                    await list_turn_key_names(
-                        session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                    ),
-                )
-                != related_before
-            )
-            if consumed is not None and refuse_replacement:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="write_failed"
-                )
-                state = "refused"
-            elif consumed is not None and appeared:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=token, outcome="stale_replacement"
-                )
-                state = "superseded"
-            elif consumed is not None:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=consumed.target,
-                    content=value,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=consumed.replaces_updated_at,
-                )
-                await credential_requests_store.set_credential_request_outcome(
-                    session,
-                    token=token,
-                    outcome="applied" if written is not None else "stale_replacement",
-                )
-                if written is None:
-                    state = "superseded"
-                else:
-                    queued = await record_input_continuation(session, consumed, platform="slack")
+        result = await apply_env_submit(
+            runtime.sessionmaker,
+            row=request,
+            agent=agent,
+            platform="slack",
+            value=value,
+            plan=plan,
+            now=datetime.now(UTC),
+        )
+        consumed, state, queued = result.consumed, result.state, result.queued
     except FormPinRefused as refused:
         # Decided with the consume: rolled back, nothing stored.
         await post_ephemeral(
@@ -623,19 +556,6 @@ def _download_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_FILE_DOWNLOAD_TIMEOUT_SECONDS)
 
 
-class _KeyAppearedMidWrite(Exception):
-    """A key the read found absent existed by the time it was written.
-
-    Raised inside the write transaction purely to roll it back: a whole-file
-    import is all-or-nothing, so one failed precondition has to undo the
-    entries already written beside it — and the consume with them.
-    """
-
-    def __init__(self, entry: EnvEntry) -> None:
-        super().__init__(entry.name)
-        self.entry = entry
-
-
 def _collision_lines(collisions: tuple[EnvEntry, ...], held: frozenset[str]) -> tuple[str, ...]:
     """Name the keys that already exist: names and line numbers, no values.
 
@@ -669,54 +589,9 @@ async def _apply_env_file_entries(
     someone is using. The continuation the request owes is queued in the same
     transaction as the keys, and only on the path that actually wrote them.
     """
-    try:
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            if consumed is None:
-                return None, (), False, frozenset()
-            # Held across the read below and the writes after it, so a
-            # concurrent writer of another alias name cannot interleave.
-            await lock_agent_keys(session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id)
-            existing = {
-                row.key
-                for row in await list_agent_files(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                )
-            }
-            collisions = env_import_collisions(entries, existing)
-            if collisions:
-                await credential_requests_store.set_credential_request_outcome(
-                    session, token=request.token, outcome="stale_replacement"
-                )
-                return consumed, collisions, False, frozenset(existing)
-            for entry in entries:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=entry.name,
-                    content=entry.value,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=None,
-                )
-                if written is None:
-                    raise _KeyAppearedMidWrite(entry)
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=request.token, outcome="applied"
-            )
-            queued = await record_input_continuation(session, consumed, platform="slack")
-            return consumed, (), queued, frozenset()
-    except _KeyAppearedMidWrite as err:
-        # The rollback took the consume with it, so the request is live again:
-        # spend it here and answer exactly as a read-time collision answers.
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
-            if consumed is None:
-                return None, (), False, frozenset()
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=request.token, outcome="stale_replacement"
-            )
-            return consumed, (err.entry,), False, frozenset({err.entry.name})
+    return await apply_env_file_submit(
+        runtime.sessionmaker, row=request, agent=agent, platform="slack", entries=entries, now=now
+    )
 
 
 async def run_env_file_credential_submission(
@@ -948,11 +823,14 @@ async def _refuse_mcp_replacement(
     user_id: str,
 ) -> None:
     """Spend the request and write nothing: no vault token, no published token."""
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="write_failed"
-        )
-        await record_input_continuation(session, row, platform="slack", carries_work=False)
+    await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="slack",
+        outcome="write_failed",
+        carries_work=False,
+        record=record_input_continuation,
+    )
     await edit_posted_card(client, row=row, state="refused", refusal="replacement_admin_required")
     await post_ephemeral(
         client,
@@ -1020,8 +898,10 @@ async def run_mcp_credential_submission(
         )
         return
 
-    connect = await _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id)
-    now = datetime.now(UTC)
+    connect, now = await prepare_mcp_submit(
+        decide=lambda: _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id),
+        clock=lambda: datetime.now(UTC),
+    )
     try:
         consumed = await _consume(runtime, request=request, agent=agent, now=now)
     except FormPinRefused as refused:
@@ -1087,24 +967,18 @@ async def run_mcp_credential_submission(
             text=rejected_token_message(mcp_server_url),
         )
         return
-    # Attach first, publish the agent-wide token only after that authorized
-    # attach, then the submitter's own vault copy: no other session may ever
-    # mirror a token this submission is refused for (see mcp_token_connect).
     try:
-        await connect_mcp_server_with_token(
+        await write_mcp_submit(
             runtime.anthropic,
-            sessionmaker=runtime.sessionmaker,
+            session_factory=runtime.sessionmaker,
+            row=consumed,
             fernet=runtime.turn_deps.fernet,
-            tenant_id=consumed.tenant_id,
-            agent_id=consumed.agent_id,
-            account_id=consumed.account_id,
-            server_name=consumed.target,
-            mcp_server_url=mcp_server_url,
-            token=value,
+            value=value,
             replace_allowed=connect.replace_allowed,
             jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
             public_url=str(mcp.public_url),
             now=now,
+            connect=connect_mcp_server_with_token,
         )
     except McpServerReplaceRefusedError:
         # A server or token for this URL appeared after the pre-consume check.
@@ -1144,11 +1018,14 @@ async def run_mcp_credential_submission(
             mcp_server_url=mcp_server_url,
             err_type=type(err.__cause__ or err).__name__,
         )
-        async with runtime.sessionmaker() as session, session.begin():
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="write_failed"
-            )
-            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await settle_credential_submit(
+            runtime.sessionmaker,
+            row=consumed,
+            platform="slack",
+            outcome="write_failed",
+            carries_work=False,
+            record=record_input_continuation,
+        )
         await edit_posted_card(
             client,
             row=consumed,
@@ -1172,11 +1049,13 @@ async def run_mcp_credential_submission(
         )
         return
 
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied"
-        )
-        queued = await record_input_continuation(session, consumed, platform="slack")
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied",
+        record=record_input_continuation,
+    )
     # The card is the receipt — no ephemeral beside it.
     await edit_posted_card(
         client,
@@ -1381,11 +1260,14 @@ async def _report_skill_repo_failure(
             ),
         )
         return
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=row.token, outcome="write_failed"
-        )
-        await record_input_continuation(session, row, platform="slack", carries_work=False)
+    await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="slack",
+        outcome="write_failed",
+        carries_work=False,
+        record=record_input_continuation,
+    )
     await edit_posted_card(
         client,
         row=row,
@@ -1532,18 +1414,8 @@ async def run_skill_repo_credential_submission(
         )
         is_token_stored = True
         async with runtime.sessionmaker.begin() as session:
-            await set_skill_repo_credential(
-                session,
-                tenant_id=consumed.tenant_id,
-                agent_id=consumed.agent_id,
-                repo_url=url,
-                default_branch=branch,
-                path=path,
-                ma_secret_ref=ma_secret_ref,
-                proof=proof,
-            )
-            seeded_skill_names = await list_seeded_skill_names(
-                session, tenant_id=consumed.tenant_id
+            seeded_skill_names = await write_skill_repo_submit(
+                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof
             )
         outcomes = await run_skill_sync(
             runtime.anthropic,
@@ -1593,11 +1465,14 @@ async def run_skill_repo_credential_submission(
     if not imported:
         # Nothing reached the library (an empty repo, or every skill refused
         # or failed), which an applied card must not claim.
-        async with runtime.sessionmaker() as session, session.begin():
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="write_failed"
-            )
-            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await settle_credential_submit(
+            runtime.sessionmaker,
+            row=consumed,
+            platform="slack",
+            outcome="write_failed",
+            carries_work=False,
+            record=record_input_continuation,
+        )
         await edit_posted_card(
             client,
             row=consumed,
@@ -1623,13 +1498,14 @@ async def run_skill_repo_credential_submission(
         attached=attach.attached,
         note=attach.note,
     )
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied" if attach.attached else "write_failed"
-        )
-        queued = await record_input_continuation(
-            session, consumed, platform="slack", carries_work=attach.attached
-        )
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied" if attach.attached else "write_failed",
+        carries_work=attach.attached,
+        record=record_input_continuation,
+    )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
     detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
@@ -1758,14 +1634,8 @@ async def run_repo_bind_credential_submission(
             now=now,
         )
         async with runtime.sessionmaker.begin() as session:
-            await set_binding(
-                session,
-                tenant_id=consumed.tenant_id,
-                agent_id=consumed.agent_id,
-                repo_url=repo_url,
-                default_branch=branch,
-                ma_secret_ref=ma_secret_ref,
-                proof=proof,
+            await write_repo_submit(
+                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof, write=set_binding
             )
     except DaimonError as err:
         log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)
@@ -1797,11 +1667,13 @@ async def run_repo_bind_credential_submission(
         )
         return
 
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied"
-        )
-        queued = await record_input_continuation(session, consumed, platform="slack")
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied",
+        record=record_input_continuation,
+    )
     # No `unsaved_work`: this bind copies nothing, and the copy line is a
     # promise only the panel's own flow is in a position to make.
     await edit_posted_card(

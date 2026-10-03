@@ -278,3 +278,37 @@ def test_only_a_session_created_gated_holds_add_skill_for_a_person() -> None:
         "a session created before the gate, or without tool safety, never asks"
     )
     assert not has_confirmation_gate(_tools()[2:], tool_name="add_skill"), "no daimon toolset"
+
+
+def test_a_per_tool_allow_under_an_asking_toolset_is_gated() -> None:
+    """A toolset already stored `always_ask` with one tool on `always_allow` still
+    changes: left raw, that tool would skip the card."""
+    ask, allow = {"type": "always_ask"}, {"type": "always_allow"}
+    stored = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "linear",
+            "default_config": {"permission_policy": ask},
+            "configs": [{"name": "create_issue", "permission_policy": allow}],
+        }
+    ]
+    out = session_tools_for_policy(_ON, stored)
+    assert out is not None, "the per-tool allow is a change"
+    assert out[0]["configs"] == [{"name": "create_issue", "permission_policy": ask}]
+
+
+def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
+    """The confirm config added to daimon's trusted toolset takes the toolset's own
+    `enabled`, so a server the agent turned off stays off for add_skill too."""
+    stored = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": DAIMON_SERVER_NAME,
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+        }
+    ]
+    out = session_tools_for_policy(_ON, stored, trusted_servers=frozenset({DAIMON_SERVER_NAME}))
+    assert out is not None
+    assert out[0]["configs"] == [
+        {"name": "add_skill", "enabled": False, "permission_policy": {"type": "always_ask"}}
+    ], "add_skill is not switched on"

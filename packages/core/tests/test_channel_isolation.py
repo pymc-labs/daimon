@@ -18,12 +18,16 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_isolation import (
     ChannelIsolationStatus,
     IsolationViewer,
+    RoutineOrigin,
     binding_refusal,
     channel_isolation_status,
     clear_refusal,
+    is_routine_parent_unknown,
     is_thread_turn_refused,
     keeps_routine_inside,
+    routine_destination_channel,
     routine_destination_place,
+    routine_origin,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -169,6 +173,60 @@ def test_a_thread_routine_saved_without_its_parent_stays_inside_until_placed() -
     assert not routine_destination_place(slack, channel_id="c1").parent_unresolved, (
         "a Slack thread carries its channel"
     )
+    no_channel = legacy.model_copy(update={"destination_id": ":1.2"})
+    assert is_routine_parent_unknown(no_channel), "an id with an empty channel part names none"
+    assert routine_destination_channel(no_channel) == ":1.2", "so it is placed by itself"
+
+
+_TEAMS_CHANNEL = "19:abc-123@thread.tacv2"
+
+
+@pytest.mark.parametrize(
+    ("kind", "destination"),
+    [("channel", _TEAMS_CHANNEL), ("thread", f"{_TEAMS_CHANNEL};messageid=1700000000000")],
+)
+def test_a_teams_routine_saved_without_its_channel_is_placed_by_its_id(
+    kind: str, destination: str
+) -> None:
+    """Teams ids contain ":", so they are never split there: a legacy Teams row
+    without a saved channel lies in the channel its id names, which isolation sees."""
+    legacy = _routine("shared", destination).model_copy(
+        update={"destination_kind": kind, "channel_id": None}
+    )
+    assert routine_destination_channel(legacy) == _TEAMS_CHANNEL, "the id names its channel"
+    assert not is_routine_parent_unknown(legacy), "a Teams thread id carries its channel"
+    isolated = TenantAccessPolicy(
+        sealed_channel_ids=(_TEAMS_CHANNEL,), isolated_channel_ids=(_TEAMS_CHANNEL,)
+    )
+    assert keeps_routine_inside(isolated, legacy), "so its result never goes by DM"
+
+
+def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None:
+    """Channel, thread and seal follow the destination; Slack names a thread by its
+    ts, Discord by its id; every stamp is private to the routine's owner; a routine
+    with no channel at all is headless."""
+    channel = _routine("local", "c1")
+    private = f"routine:{channel.id}"
+    assert routine_origin(POLICY, channel, platform="discord") == RoutineOrigin(
+        "c1", None, frozenset({"c1"}), private
+    )
+    discord = channel.model_copy(update={"destination_kind": "thread", "destination_id": "t9"})
+    assert routine_origin(POLICY, discord, platform="discord") == RoutineOrigin(
+        "c1", "t9", frozenset({"c1"}), private
+    ), "a Discord thread sits under its saved parent"
+    slack = channel.model_copy(update={"destination_kind": "thread", "destination_id": "c1:1.2"})
+    assert routine_origin(POLICY, slack, platform="slack") == RoutineOrigin(
+        "c1", "1.2", frozenset({"c1"}), private
+    )
+    open_channel = _routine("shared", "c2")
+    assert routine_origin(POLICY, open_channel, platform="discord") == RoutineOrigin(
+        "c2", None, frozenset(), f"routine:{open_channel.id}"
+    ), "an unsealed destination carries no seal"
+    no_destination = _routine("shared", None).model_copy(update={"channel_id": "c1"})
+    assert routine_origin(POLICY, no_destination, platform="discord") == RoutineOrigin(
+        "c1", None, frozenset({"c1"}), f"routine:{no_destination.id}"
+    ), "without a destination it runs where it was made"
+    assert routine_origin(POLICY, _routine("shared", None), platform="discord") is None
 
 
 def test_a_viewer_sees_only_its_side() -> None:

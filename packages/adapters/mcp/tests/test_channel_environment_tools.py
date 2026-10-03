@@ -12,7 +12,7 @@ import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import channel_environments as tool_module
+from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools.channel_admins import (
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -49,14 +49,16 @@ HIDDEN = "555555555555555555"
 
 @pytest.fixture(autouse=True)
 def _visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the Discord channel lookup: THREAD's parent is CHANNEL."""
+    """Stand in for the platform lookups: THREAD's parent is CHANNEL, the rest is visible."""
 
     async def fake(_runtime: McpRuntime, _auth: AuthIdentity, channel_id: str) -> str:
         if channel_id == HIDDEN:
             raise ToolError("that channel is not visible to the caller")
         return CHANNEL if channel_id == THREAD else channel_id
 
-    monkeypatch.setattr(tool_module, "resolve_visible_channel", fake)
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", fake)
+    monkeypatch.setattr(channel_target, "_visible_slack_channel", fake)
+    monkeypatch.setattr(channel_target, "_visible_teams_channel", fake)
 
 
 async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[uuid.UUID, uuid.UUID]:
@@ -337,6 +339,26 @@ async def test_a_slack_thread_id_resolves_to_its_channel(
     assert row is not None and row.environment_name == "science", "the channel row is written"
 
 
+async def test_a_teams_thread_id_resolves_to_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """A Teams thread id is never stored as a channel, where no turn would read it."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    admin = _auth(tenant_id, account_id, admin=True, platform="teams")
+    channel = "19:growth@thread.tacv2"
+
+    result = await _set_channel_environment_impl(
+        runtime, admin, environment_name="science", channel_id=f"{channel};messageid=1717"
+    )
+
+    assert result.scope == f"channel:{channel}", "a Teams thread id is stored under its channel"
+    row = await get_scope(
+        db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel)
+    )
+    assert row is not None and row.environment_name == "science", "the channel row is written"
+
+
 @pytest.mark.parametrize(
     ("platform", "channel_id"),
     [("discord", ""), ("discord", "  "), ("slack", ":1717.5"), ("slack", " :")],
@@ -467,13 +489,18 @@ async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
         runtime, member, environment_name="closed", channel_id=CHANNEL
     )
     assert closed.changed, "a limited network stays the channel admin's pick"
+    admin = _auth(tenant_id, account_id, admin=True)
+    with pytest.raises(ToolError, match="sealed.*Never confirm on their behalf"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="open", channel_id=CHANNEL
+        )
+    scope = ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
+    row = await get_scope(db_session, scope=scope)
+    assert row is not None and row.environment_name == "closed", "unconfirmed, nothing changed"
     opened = await _set_channel_environment_impl(
-        runtime,
-        _auth(tenant_id, account_id, admin=True),
-        environment_name="open",
-        channel_id=CHANNEL,
+        runtime, admin, environment_name="open", channel_id=CHANNEL, confirm_open_network=True
     )
-    assert opened.changed, "a server admin may pick an unrestricted network there"
+    assert opened.changed, "a server admin may pick an unrestricted network there, confirmed"
     with pytest.raises(ToolError, match="sealed"):
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=THREAD
@@ -500,6 +527,31 @@ async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
     await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
     cleared = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
     assert cleared.changed, "onto a limited workspace default the channel admin may clear"
+
+
+async def test_a_server_admin_confirms_clearing_a_sealed_channel_onto_an_open_default(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The fallback's network decides a clear, so an open one needs the admin's confirmation."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open", limited=("closed",))
+    admin = _auth(tenant_id, account_id, admin=True)
+    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
+    await _set_channel_environment_impl(
+        runtime, admin, environment_name="closed", channel_id=CHANNEL
+    )
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+
+    with pytest.raises(ToolError, match="the default it would fall back to.*confirm_open_network"):
+        await _clear_channel_environment_impl(runtime, admin, channel_id=CHANNEL)
+    cleared = await _clear_channel_environment_impl(
+        runtime, admin, channel_id=CHANNEL, confirm_open_network=True
+    )
+    assert cleared.changed, "confirmed, the clear goes through"
+    unsealed = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=OTHER_CHANNEL
+    )
+    assert unsealed.changed, "outside a seal an open network needs no confirmation"
 
 
 async def test_a_channel_admin_pick_looks_its_environment_up_once(

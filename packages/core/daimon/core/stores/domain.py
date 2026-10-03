@@ -51,6 +51,7 @@ class AccountRow(BaseModel):
     role: Role
     created_at: datetime
     platform_role_ids: tuple[str, ...] = ()
+    is_external: bool = False
 
 
 class AccountIdentityRow(BaseModel):
@@ -71,6 +72,8 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
+    # accounts.is_external: the last positive evidence about the account's organisation.
+    is_external: bool = False
 
 
 class ChannelAdminsRow(BaseModel):
@@ -85,6 +88,23 @@ class ChannelAdminsRow(BaseModel):
     user_ids: tuple[str, ...]
     updated_by_account_id: uuid.UUID | None
     updated_at: datetime
+
+
+class ChannelSkillRow(BaseModel):
+    """One extra skill a channel's sessions run with, at the version it was added at."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    skill_id: str
+    version: str
+    name: str
+    owner_agent_name: str | None
+    """The agent the skill was uploaded to, or None for a workspace library skill."""
+    added_by_account_id: uuid.UUID | None
+    added_at: datetime
 
 
 class CliPrincipalRow(BaseModel):
@@ -241,6 +261,7 @@ class ThreadSessionRow(BaseModel):
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
+    seal_ids: tuple[str, ...] | None = None
     watermark_message_id: str | None
     status: str
     created_at: datetime
@@ -464,6 +485,7 @@ class ChannelBudgetRow(BaseModel):
     set_by_account_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    exhausted_notice_key: str | None = None
 
 
 class TenantUserCapRow(BaseModel):
@@ -1006,6 +1028,7 @@ class TurnOriginRow(BaseModel):
     configuration_target_ma_agent_id: str | None
     configuration_target_name: str | None
     is_setup: bool = False
+    is_external: bool = False
     role: Role
     created_at: datetime
     expires_at: datetime
