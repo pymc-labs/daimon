@@ -20,7 +20,7 @@ from daimon.core.config import (
 )
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_connect
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
@@ -215,6 +215,12 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         async with sessionmaker.begin() as session:
+            await set_role(session, account_id, Role.ADMIN)
+            await set_external(session, account_id, True)
+        external = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert external.status_code == 400
+        async with sessionmaker.begin() as session:
+            await set_external(session, account_id, False)
             await set_role(session, account_id, Role.ADMIN)
         confirmed = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "101", "access_101": "write"}

@@ -57,6 +57,10 @@ admin whose channels hold every place the agent answers or runs
 instead, when the agent is theirs (`is_held_by_caller`, see
 `daimon.core.authz.channel_admin_holds`). The managed check still refuses
 them: only a server admin passes it.
+
+GitHub connection invitations are server-admin only. GitHub grants require a
+server admin or a channel admin who holds the agent and whose channels contain
+all places it answers or runs.
 """
 
 from __future__ import annotations
@@ -143,14 +147,18 @@ def _decide_operation(
 ) -> PolicyOutcome:
     """Return the policy outcome for `operation` against `target`.
 
-    Every `OperationKind` belongs to exactly one of the three families
-    described in the module docstring; `authorize` decides that family's
-    fixed order (`Action.CHANGE_SHARED_AGENT`). See the module docstring for
-    why the order differs between the spec and attachment families and why
-    the posted-token family always allows.
+    GitHub operations have their own admin rules. Other operations belong to
+    the three families described above; `authorize` decides each family's
+    fixed order (`Action.CHANGE_SHARED_AGENT`).
     """
-    if operation in ("github_connect", "github_grant"):
+    if operation == "github_connect":
         return "allow" if is_admin else "needs_admin"
+    if operation == "github_grant":
+        return (
+            "allow"
+            if is_admin or (target.is_local_to_caller_channels and target.is_held_by_caller)
+            else "needs_admin"
+        )
     decision = authorize(
         _NO_POLICY,
         subject=Subject(is_admin=is_admin),
@@ -190,8 +198,10 @@ def needs_reachability_read(
     re-derived at each of the three call sites that gate a live DB read on
     it.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS or operation in ("github_connect", "github_grant"):
+    if operation in _POSTED_TOKEN_OPERATIONS or operation == "github_connect":
         return False
+    if operation == "github_grant":
+        return not is_admin
     # Both remaining families only consult reachability once neither the
     # managed check nor the admin check has already settled the outcome.
     return not is_admin and not is_daimon_managed
