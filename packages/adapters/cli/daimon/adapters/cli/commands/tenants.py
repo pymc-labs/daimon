@@ -29,6 +29,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import (
+    AgentKind,
     ChannelPreset,
     ChannelReaders,
     ChannelRule,
@@ -570,8 +571,9 @@ class PermissionRuleRow(BaseModel):
     readers: ChannelReaders | None
     writers: ChannelWriters | None
     runs_in: list[str] | None
-    # An agent's confidential channel, judged by this name alone.
-    confidential_channel: str | None
+    # Judged by this name alone: free, pinned, or own to `own_channel`.
+    agent: AgentKind | None
+    own_channel: str | None
 
 
 def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
@@ -588,23 +590,26 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
             readers=rule.readers,
             writers=rule.writers,
             runs_in=None,
-            confidential_channel=None,
+            agent=None,
+            own_channel=None,
         )
         for kind, rules in places
         for place_id, rule in rules.items()
     ]
-    rows.extend(
-        PermissionRuleRow(
-            kind="agent",
-            id=name,
-            preset=None,
-            readers=None,
-            writers=None,
-            runs_in=list(rule.runs_in or ()),
-            confidential_channel=agent_permissions(policy, (name,)).confidential_channel,
+    for name, rule in sorted(agent_rules(policy).items()):
+        agent = agent_permissions(policy, (name,))
+        rows.append(
+            PermissionRuleRow(
+                kind="agent",
+                id=name,
+                preset=None,
+                readers=None,
+                writers=None,
+                runs_in=list(rule.runs_in or ()),
+                agent=agent.kind,
+                own_channel=agent.own_channel,
+            )
         )
-        for name, rule in sorted(agent_rules(policy).items())
-    )
     return rows
 
 
@@ -614,8 +619,8 @@ def _print_rule_rows(console: Console, rows: list[PermissionRuleRow]) -> None:
         table.add_column(column)
     for row in rows:
         runs_in = "-" if row.runs_in is None else ", ".join(row.runs_in) or "nowhere"
-        cells = (row.kind, row.id, row.preset, row.readers, row.writers, runs_in)
-        table.add_row(*(escape(cell or "-") for cell in (*cells, row.confidential_channel)))
+        cells = (row.kind, row.id, row.preset, row.readers, row.writers, runs_in, row.agent)
+        table.add_row(*(escape(cell or "-") for cell in (*cells, row.own_channel)))
     console.print(table)
 
 
@@ -625,8 +630,10 @@ def tenants_access_policy_rules_command(
 ) -> None:
     """Show a tenant's access policy as channel and agent rules.
 
-    Protected, sealed and confidential (isolated) are channel presets: who may
-    read the channel and who may write in it. A pin is an agent rule: where it runs.
+    Protected, sealed and confidential (isolated) are channel presets: which
+    agents may read the channel and which may write in it. A pin is an agent
+    rule: where it runs. An agent pinned to one confidential channel alone is
+    that channel's own agent.
     """
     settings = load_settings()
     console = Console(highlight=False)

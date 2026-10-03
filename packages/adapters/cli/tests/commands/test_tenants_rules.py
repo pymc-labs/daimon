@@ -65,12 +65,12 @@ async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
 
     rows = {(row["kind"], row["id"]): row for row in json.loads(_output(console))}
     expected = {
-        ("channel", "700"): ("protected", "anyone", "nobody", None, None),
-        ("channel", "800"): ("mix", "inside", "nobody", None, None),
-        ("channel", "600"): ("confidential", "own_agents", "own_agents", None, None),
-        ("category", "900"): ("protected", "anyone", "nobody", None, None),
-        ("agent", "client"): (None, None, None, ["600"], "600"),
-        ("agent", "parked"): (None, None, None, [], None),
+        ("channel", "700"): ("protected", "any", "none", None, None, None),
+        ("channel", "800"): ("mix", "inside", "none", None, None, None),
+        ("channel", "600"): ("confidential", "own", "own", None, None, None),
+        ("category", "900"): ("protected", "any", "none", None, None, None),
+        ("agent", "client"): (None, None, None, ["600"], "own", "600"),
+        ("agent", "parked"): (None, None, None, [], "pinned", None),
     }
     got = {
         key: (
@@ -78,7 +78,8 @@ async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
             row["readers"],
             row["writers"],
             row["runs_in"],
-            row["confidential_channel"],
+            row["agent"],
+            row["own_channel"],
         )
         for key, row in rows.items()
     }
