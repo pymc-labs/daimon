@@ -1,4 +1,30 @@
+import pytest
 from daimon.adapters.slack.tables import render_slack_tables
+
+
+async def test_slack_url_links_render_as_standard_markdown_without_enabling_broadcasts():
+    parts = await render_slack_tables("See <https://example.com|example.com> <!channel>")
+    assert parts[0][1]["text"] == "See [example.com](https://example.com) &lt;!channel&gt;"
+
+
+async def test_slack_url_link_examples_in_code_remain_literal():
+    parts = await render_slack_tables("`<https://example.com|example.com>`")
+    assert parts[0][1]["text"] == "`&lt;https://example.com|example.com&gt;`"
+
+
+@pytest.mark.parametrize(
+    "text", ["``<https://example.com|example>``", "~~~\n<https://example.com|example>\n~~~"]
+)
+async def test_slack_links_in_multibacktick_or_tilde_code_remain_literal(text):
+    parts = await render_slack_tables(text)
+    assert parts[0][1]["text"] == text.replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def test_an_unclosed_backtick_does_not_shield_links_in_later_paragraphs():
+    parts = await render_slack_tables("a stray ` here\n\nsee <https://example.com|docs>\n\n`x`")
+    assert "[docs](https://example.com)" in parts[0][1]["text"], (
+        "an inline code span ends at a blank line, so the next paragraph's link renders"
+    )
 
 
 async def test_wide_table_uses_native_wrapped_cells_between_prose():

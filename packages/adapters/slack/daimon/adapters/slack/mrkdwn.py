@@ -63,9 +63,49 @@ _EMPHASIZED_URL = re.compile(
 
 # Segments the linkifier must never touch: a fenced block (closed, or
 # open-to-end — Slack renders an unterminated fence as code), an inline
-# single-backtick span, or an existing ``[label](url)`` link — its label may
+# backtick span, or an existing ``[label](url)`` link — its label may
 # itself be an emphasized URL, and rewriting it would nest a link in a link.
-_VERBATIM_SEGMENT = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`|\[[^\]\n]*\]\([^)\s]*\)")
+# An inline span may wrap lines but, as in CommonMark, never crosses a blank
+# line: a stray backtick would otherwise shield every paragraph up to the next.
+_VERBATIM_SEGMENT = re.compile(
+    r"(?P<fence>`{3,}|~{3,})[\s\S]*?(?:(?P=fence)|$)"
+    r"|(?<!`)(?P<ticks>`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?P=ticks)(?!`)"
+    r"|\[[^\]\n]*\]\([^)\s]*\)"
+)
+_SLACK_URL_LINK = re.compile(r"<(https?://[^\s<>|]+)(?:\|([^<>\n]*))?>")
+
+
+def normalize_slack_url_links(text: str) -> str:
+    """Convert Slack URL entities to standard Markdown outside code and links."""
+
+    def rewrite(segment: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            raw_url = match.group(1)
+            url = raw_url.translate(
+                str.maketrans(
+                    {
+                        "(": "%28",
+                        ")": "%29",
+                        "[": "%5B",
+                        "]": "%5D",
+                        "\\": "%5C",
+                    }
+                )
+            )
+            label = match.group(2) or raw_url
+            label = re.sub(r"([\\`*_[\]])", r"\\\1", label)
+            return f"[{label}]({url})"
+
+        return _SLACK_URL_LINK.sub(replace, segment)
+
+    parts: list[str] = []
+    last = 0
+    for verbatim in _VERBATIM_SEGMENT.finditer(text):
+        parts.append(rewrite(text[last : verbatim.start()]))
+        parts.append(verbatim.group(0))
+        last = verbatim.end()
+    parts.append(rewrite(text[last:]))
+    return "".join(parts)
 
 
 def linkify_emphasized_urls(text: str) -> str:
