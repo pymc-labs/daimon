@@ -110,6 +110,32 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
+@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
+async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
+    partial_text: str,
+) -> None:
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    ]
+    if partial_text:
+        content.append(TextBlock(kind="text", text=partial_text))
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    rendered = "\n".join(
+        str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
+    )
+    assert "Turn cancelled." in rendered
+    if partial_text:
+        assert partial_text in rendered
+    assert "<@123>" not in rendered, "cancellation must not send a completion ping"
+    assert not lc.was_answered
+
+
 @pytest.mark.parametrize("status", [400, 429])
 async def test_spend_limit_posts_notice_and_error_log(
     status: int, monkeypatch: pytest.MonkeyPatch

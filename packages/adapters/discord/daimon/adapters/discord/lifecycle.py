@@ -52,7 +52,7 @@ from daimon.core.turn.state import (
     extract_final_response,
     extract_sealed_responses,
 )
-from daimon.core.turn.termination import termination_reason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -382,9 +382,18 @@ class DiscordTurnLifecycle:
         await self._flush_terminal()
 
         response_text = extract_final_response(state.content)
+        cancelled = state.termination == TerminationReason.INTERRUPTED
+        if cancelled:
+            if not response_text:
+                await self._edit(
+                    self._message_ref, content="Turn cancelled.", embed=None, view=None
+                )
+                log.info("turn.terminal_success", has_text=False, cancelled=True)
+                return
+            response_text = f"{response_text}\n\nTurn cancelled."
         if not response_text:
             # If tools ran but no final text, leave done embed visible.
-            # If content is entirely empty (cancellation), show "Turn cancelled."
+            # If content is entirely empty, show "Turn cancelled."
             has_tool_activity = any(isinstance(block, ToolUseBlock) for block in state.content)
             if has_tool_activity:
                 self._was_answered = True
@@ -401,7 +410,7 @@ class DiscordTurnLifecycle:
             log.info("turn.terminal_success", has_text=False)
             return
 
-        self._was_answered = True
+        self._was_answered = not cancelled
         if self.answer_prefix is not None:
             response_text = f"{self.answer_prefix}\n\n{response_text}"
             self.answer_prefix_applied = True
@@ -411,7 +420,10 @@ class DiscordTurnLifecycle:
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
         notify = (
-            self._notify_on_completion and self._requester_id is not None and not self._unprompted
+            self._notify_on_completion
+            and self._requester_id is not None
+            and not self._unprompted
+            and not cancelled
         )
         mentions = discord.AllowedMentions.none()
         if notify:

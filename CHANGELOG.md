@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cancelled turn says so.** A cancelled Discord or Slack turn someone asked for shows "Turn cancelled." even after tool calls, keeps any partial answer, and sends no completion ping or feedback buttons. An unprompted Discord turn cancelled before it has an answer stays silent.
 - **An isolated channel's content no longer leaves through new agents, timers
   or reads.** An isolated channel's own agent, wherever it runs and through
   any of its coding-tool tokens, could call `create_agent`, and the new agent

@@ -1244,6 +1244,11 @@ mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
+A cancelled prompted Discord or Slack turn keeps any partial answer and appends
+"Turn cancelled."; a turn cancelled after only tool calls shows that notice in its
+status card. A cancelled turn sends no completion ping and no feedback controls.
+An unprompted Discord turn cancelled before it has an answer stays silent.
+
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false

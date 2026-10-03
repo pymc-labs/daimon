@@ -81,7 +81,7 @@ from daimon.core.turn.state import (
     extract_final_response,
     extract_sealed_responses,
 )
-from daimon.core.turn.termination import termination_reason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -451,8 +451,9 @@ class SlackTurnLifecycle:
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace status message with final answer; post overflow chunks; widen final_ts.
 
-        If no final text (tool-only or cancelled), collapses to the done footer
-        in place. Always deregisters the cancel Event in finally.
+        Interrupted turns show cancellation even when tools ran, retain any
+        partial answer, and do not send completion pings. A completed tool-only
+        turn collapses to the done footer. Always deregisters Cancel in finally.
 
         Does not re-raise on Slack send errors — the lifecycle boundary absorbs
         render failures (same contract as on_terminal_failure), logging at
@@ -489,6 +490,14 @@ class SlackTurnLifecycle:
             if final_response:
                 answer_parts.append(final_response)
             final_text = "\n\n".join(answer_parts)
+            cancelled = state.termination == TerminationReason.INTERRUPTED
+            notify_on_completion = self._notify_on_completion and not cancelled
+            if cancelled:
+                if not final_text:
+                    await self._flush_cancelled()
+                    self.final_ts = self._status_ts
+                    return
+                final_text = f"{final_text}\n\nTurn cancelled."
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn
@@ -522,13 +531,13 @@ class SlackTurnLifecycle:
             deliveries = await render_slack_tables(
                 final_text,
                 enabled=self._render_tables,
-                preserve_mentions=not self._notify_on_completion,
+                preserve_mentions=not notify_on_completion,
             )
             # Rejected tables become Markdown in the same delivery slot, leaving
             # earlier answer chunks intact. The first successful delivery owns
             # continuity notices, and only the last carries feedback controls.
             self._terminal = True
-            if self._notify_on_completion:
+            if notify_on_completion:
                 await self._flush_terminal()
             index = 0
             first_markdown_prefixed = False
@@ -536,9 +545,7 @@ class SlackTurnLifecycle:
             while index < len(deliveries):
                 chunk, block = deliveries[index]
                 mention = (
-                    f"<@{self._author_id}>"
-                    if self._notify_on_completion and self._author_id
-                    else None
+                    f"<@{self._author_id}>" if notify_on_completion and self._author_id else None
                 )
                 if (
                     index == 0
@@ -559,13 +566,13 @@ class SlackTurnLifecycle:
                         blocks.insert(0, {"type": "markdown", "text": mention})
                         notification_chunk = f"{mention}\n{chunk}"
                     blocks.extend(to_blocks(self._state, now=self._clock()))
-                if index == len(deliveries) - 1:
+                if index == len(deliveries) - 1 and not cancelled:
                     feedback_block = build_feedback_actions_block()
                     if self._ask_human:
                         feedback_block["elements"].append(build_ask_human_button())
                     blocks.append(feedback_block)
                 try:
-                    if index == 0 and not self._notify_on_completion:
+                    if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
@@ -574,7 +581,7 @@ class SlackTurnLifecycle:
                             thread_ts=self._thread_ts,
                             blocks=blocks,
                             text=_notification_text(notification_chunk),
-                            link_names=False if self._notify_on_completion else None,
+                            link_names=False if notify_on_completion else None,
                         )
                         current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
                     if index == 0:
