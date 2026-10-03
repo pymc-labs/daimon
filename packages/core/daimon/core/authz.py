@@ -92,7 +92,10 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   scoped to the channel (the one it answers with, one pinned to it, or one of
   its own agents when isolated); any other needs a server admin, or a channel
   admin of the parent channel when neither the place nor any live session in
-  it was sealed.
+  it was sealed and they could bind the agent as its default (`Request.reach`:
+  managed, tenant-wide, or theirs with `binding` and staying in their
+  channels), unless the binding would take it out of another channel admin's
+  channels while it is theirs.
 - **Seals**: a sealed channel, a thread under one, and a session that ran
   under a seal are readable only from a turn inside every id that sealed it.
 - **Isolation** (`channel_isolated`): an isolated channel C is sealed and
@@ -352,19 +355,27 @@ OperationFamily = Literal["spec", "attachment", "posted_token"]
 
 @dataclass(frozen=True)
 class AgentReach:
-    """How far a change to an agent reaches (CHANGE_SHARED_AGENT only).
+    """How far a change to an agent, or a channel admin's handoff to it, reaches.
 
     ``managed`` is a defaults-managed agent; ``reachable`` one that answers
     for others in the tenant (a channel or workspace default);
     ``local_to_caller`` one whose every place lies in the caller's
     administered channels (`daimon.core.agent_reach`); and ``held_by_caller``
     one that is the caller's as a channel admin (`channel_admin_holds`).
+
+    For HAND_OFF, as for a default binding: ``local_to_caller`` also counts an
+    agent that answers nowhere yet, ``held_by_caller`` is read with `binding`,
+    ``tenant_wide`` is the tenant default or the deployment fall-through, and
+    ``held_by_other_admin`` an agent another channel admin holds and keeps
+    local to channels without this place, which a binding here would take away.
     """
 
     managed: bool = False
     reachable: bool = False
     local_to_caller: bool = False
     held_by_caller: bool = False
+    tenant_wide: bool = False
+    held_by_other_admin: bool = False
 
 
 @dataclass(frozen=True)
@@ -574,8 +585,15 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         # Sealed content would reach an agent with its own keys and
         # connectors: a server admin's call, as for an open network. A
         # session sealed before an unseal still holds sealed content.
-        sealed = _place_sealed(policy, place) or bool(req.recorded_seal_ids)
-        return _deny("sealed") if sealed else ALLOW
+        if _place_sealed(policy, place) or req.recorded_seal_ids:
+            return _deny("sealed")
+        # The default-binding rule: answering here would lend another
+        # channel's own agent's keys and memory to this channel.
+        reach = req.reach or AgentReach()
+        bindable = reach.managed or reach.tenant_wide
+        bindable = bindable or (reach.local_to_caller and reach.held_by_caller)
+        if bindable and not reach.held_by_other_admin:
+            return ALLOW
     return _deny("admin_required")
 
 
@@ -719,13 +737,29 @@ def channel_admin_holds(
     person behind it.
     """
     administered = subject.administered_channel_ids
-    if subject.via_agent_key or subject.platform_user_id is None or not administered:
+    if subject.via_agent_key or subject.platform_user_id is None:
         return False
-    if standing.created_for_channel_id in administered:
+    return agent_held_in(
+        policy, agent=agent, standing=standing, channel_ids=administered, binding=binding
+    )
+
+
+def agent_held_in(
+    policy: TenantAccessPolicy,
+    *,
+    agent: AgentRef,
+    standing: AgentStanding,
+    channel_ids: frozenset[str],
+    binding: bool = False,
+) -> bool:
+    """`channel_admin_holds` for a channel admin of `channel_ids`, whoever they are."""
+    if not channel_ids:
+        return False
+    if standing.created_for_channel_id in channel_ids:
         return True
-    if _pin_administered(policy, agent, administered):
+    if _pin_administered(policy, agent, channel_ids):
         return True
-    return not binding and not standing.admin_default_channel_ids.isdisjoint(administered)
+    return not binding and not standing.admin_default_channel_ids.isdisjoint(channel_ids)
 
 
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
@@ -1091,6 +1125,7 @@ __all__ = [
     "SessionFacts",
     "Subject",
     "Surface",
+    "agent_held_in",
     "agent_names",
     "authorize",
     "build_agent_ref",

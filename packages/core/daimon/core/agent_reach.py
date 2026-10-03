@@ -36,7 +36,14 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Final, NamedTuple
 
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import AgentRef, AgentStanding, build_subject, channel_admin_holds
+from daimon.core.authz import AgentReach as ReachFacts
+from daimon.core.authz import (
+    AgentRef,
+    AgentStanding,
+    agent_held_in,
+    build_subject,
+    channel_admin_holds,
+)
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     administered_channel_ids,
@@ -517,6 +524,86 @@ async def may_bind_as_channel_default(
     )
 
 
+def _grant_holders(grants: Sequence[ChannelAdminsRow]) -> dict[tuple[str, str], frozenset[str]]:
+    """Each user and group a grant names, with the channels it names them for."""
+    held: dict[tuple[str, str], set[str]] = {}
+    for grant in grants:
+        for user_id in grant.user_ids:
+            held.setdefault(("user", user_id), set()).add(grant.channel_id)
+        for role_id in grant.role_ids:
+            held.setdefault(("role", role_id), set()).add(grant.channel_id)
+    return {holder: frozenset(channels) for holder, channels in held.items()}
+
+
+async def load_handoff_reach(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    policy: TenantAccessPolicy,
+    agent: AgentRef,
+    ma_agent_id: str,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+    administered: frozenset[str],
+    parent_channel_id: str,
+    is_daimon_managed: bool,
+    caller_account_id: uuid.UUID | None,
+) -> ReachFacts:
+    """The facts `authorize(HAND_OFF)` reads for a channel admin of the parent channel.
+
+    The facts `may_bind_as_channel_default` reads, since a thread binding makes
+    the agent answer here as a default would, plus whether another channel
+    admin holds it local to channels without this one. Each user and group a
+    grant names counts on its own, so one person's grants split across both
+    fails closed. DB reads only: safe under the tenant policy lock.
+    """
+    if is_daimon_managed:
+        return ReachFacts(managed=True)
+    reach = await load_agent_reach(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_names=tuple(name for name in agent.names if name),
+        ma_agent_id=ma_agent_id,
+        default=default,
+        caller_account_id=caller_account_id,
+        caller_platform_user_id=caller.platform_user_id,
+    )
+    if reach.is_tenant_wide:
+        return ReachFacts(tenant_wide=True)
+    standing = AgentStanding(
+        created_for_channel_id=await get_creation_channel(
+            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, platform=platform
+        ),
+        admin_default_channel_ids=reach.admin_default_channel_ids,
+    )
+    holders = _grant_holders(
+        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+    )
+    return ReachFacts(
+        local_to_caller=reach.may_move_into(administered, platform_user_id=caller.platform_user_id),
+        held_by_caller=channel_admin_holds(
+            policy,
+            subject=build_subject(
+                is_admin=False,
+                platform_user_id=caller.platform_user_id,
+                administered_channel_ids=administered,
+            ),
+            agent=agent,
+            standing=standing,
+            binding=True,
+        ),
+        held_by_other_admin=any(
+            parent_channel_id not in channels
+            and reach.is_local_to(channels, platform_user_id=holder_id if kind == "user" else None)
+            and agent_held_in(policy, agent=agent, standing=standing, channel_ids=channels)
+            for (kind, holder_id), channels in holders.items()
+            if (kind, holder_id) != ("user", caller.platform_user_id)
+        ),
+    )
+
+
 async def _is_shared(
     session: AsyncSession,
     operation: OperationKind,
@@ -621,6 +708,7 @@ __all__ = [
     "UnattendedRights",
     "build_agent_reach",
     "load_agent_reach",
+    "load_handoff_reach",
     "load_target_facts",
     "may_bind_as_channel_default",
     "record_created_for_channel",
