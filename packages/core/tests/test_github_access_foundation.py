@@ -255,3 +255,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     closed_again = await github_issued_tokens.mark_revoked(db_session, token_id=pending.token_id)
     assert closed.status == "revoked" and closed.encrypted_token is None
     assert closed_again.revoked_at == closed.revoked_at
+    with pytest.raises(github_issued_tokens.GitHubTokenRowClosedError):
+        await github_issued_tokens.store_token(
+            db_session, token_id=pending.token_id, token="late-secret", fernet=fernet
+        )

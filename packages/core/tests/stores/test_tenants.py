@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core._models import TenantConfig
+from daimon.core._models import AccountGitHubLink, GitHubUserLink, TenantConfig
 from daimon.core.errors import StoreError
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.tenants import (
@@ -15,7 +16,7 @@ from daimon.core.stores.tenants import (
     get_tenant_liveness,
     set_provision_status,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -91,6 +92,41 @@ async def test_delete_tenant_removes_row_and_cascades(
 async def test_delete_tenant_raises_when_not_found(db_session: AsyncSession) -> None:
     with pytest.raises(StoreError, match="not found"):
         await delete_tenant(db_session, tenant_id=uuid.uuid4())
+
+
+async def test_delete_tenant_erases_github_user_after_last_link(db_session: AsyncSession) -> None:
+    first_tenant = await make_tenant(db_session, workspace_id="github-first")
+    second_tenant = await make_tenant(db_session, workspace_id="github-second")
+    first_account = await make_account(db_session, tenant=first_tenant)
+    second_account = await make_account(db_session, tenant=second_tenant)
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=101,
+            login="example",
+            encrypted_access_token=b"ciphertext",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            status="active",
+            token_generation=1,
+            link_generation=1,
+        )
+    )
+    await db_session.flush()
+    for account in (first_account, second_account):
+        db_session.add(
+            AccountGitHubLink(
+                account_id=account.id,
+                github_user_id=101,
+                platform="discord",
+                platform_user_id=str(account.id),
+                verified_via="discord_oauth",
+            )
+        )
+    await db_session.flush()
+
+    await delete_tenant(db_session, tenant_id=first_tenant.id)
+    assert await db_session.get(GitHubUserLink, 101) is not None
+    await delete_tenant(db_session, tenant_id=second_tenant.id)
+    assert await db_session.get(GitHubUserLink, 101) is None
 
 
 async def test_get_tenant_dependent_counts_returns_per_table_breakdown(

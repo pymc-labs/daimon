@@ -67,12 +67,8 @@ def group_repository_access(
         if key not in effective or profile == "write":
             effective[key] = profile
     groups: dict[tuple[int, PermissionProfile], list[int]] = {}
-    seen: dict[tuple[int, PermissionProfile], set[int]] = {}
     for (installation_id, repo_id), profile in effective.items():
         group_key = (installation_id, profile)
-        if repo_id in seen.setdefault(group_key, set()):
-            continue
-        seen[group_key].add(repo_id)
         group = groups.setdefault(group_key, [])
         group.append(repo_id)
     return [

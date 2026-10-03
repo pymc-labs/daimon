@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0040_github_access_foundation"
-down_revision: str | None = "0039_skill_uploads"
+revision: str = "0048_github_access_foundation"
+down_revision: str | None = "0047_turn_origin_external"
 branch_labels: str | None = None
 depends_on: str | None = None
 

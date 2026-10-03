@@ -2511,6 +2511,7 @@ class GitHubIssuedToken(Base):
     token_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
+    # Tenant deletion must revoke live installation tokens before this row cascades.
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
