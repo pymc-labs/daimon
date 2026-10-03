@@ -59,6 +59,13 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         await github_connect.mint_invitation(
             db_session, tenant_id=tenant_id, requester_account_id=member_id
         )
+    external_id = uuid.uuid4()
+    db_session.add(Account(id=external_id, tenant_id=tenant_id, role="admin", is_external=True))
+    await db_session.flush()
+    with pytest.raises(ValueError, match="tenant admin"):
+        await github_connect.mint_invitation(
+            db_session, tenant_id=tenant_id, requester_account_id=external_id
+        )
     token = await github_connect.mint_invitation(
         db_session,
         tenant_id=tenant_id,
@@ -70,6 +77,13 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     assert invitation is not None and invitation.workspace_label == "Example workspace"
     assert invitation.requester_label == "Alex"
     assert invitation.expires_at > datetime.now(UTC) + timedelta(days=6)
+    admin = await db_session.get(Account, admin_id)
+    assert admin is not None
+    admin.is_external = True
+    await db_session.flush()
+    assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
+    admin.is_external = False
+    await db_session.flush()
     await github_connect.create_flow(
         db_session,
         invitation_hash=github_connect.digest(token),

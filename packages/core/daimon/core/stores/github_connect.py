@@ -68,7 +68,12 @@ async def mint_invitation(
     requester_label: str | None = None,
 ) -> str:
     account = await session.get(Account, requester_account_id)
-    if account is None or account.tenant_id != tenant_id or account.role != "admin":
+    if (
+        account is None
+        or account.tenant_id != tenant_id
+        or account.role != "admin"
+        or account.is_external
+    ):
         raise ValueError("requester must be a tenant admin")
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
@@ -91,6 +96,14 @@ async def mint_invitation(
 async def get_invitation(session: AsyncSession, token_hash: str) -> Invitation | None:
     row = await session.get(GitHubConnectInvitation, token_hash)
     if row is None or row.used_at is not None or row.expires_at <= datetime.now(UTC):
+        return None
+    account = await session.get(Account, row.requester_account_id)
+    if (
+        account is None
+        or account.tenant_id != row.tenant_id
+        or account.role != "admin"
+        or account.is_external
+    ):
         return None
     return Invitation.model_validate(row)
 
@@ -207,7 +220,12 @@ async def confirm(
     ):
         return False
     account = await session.get(Account, invitation.requester_account_id, with_for_update=True)
-    if account is None or account.tenant_id != invitation.tenant_id or account.role != "admin":
+    if (
+        account is None
+        or account.tenant_id != invitation.tenant_id
+        or account.role != "admin"
+        or account.is_external
+    ):
         return False
     if len({repo.repo_id for repo in repos}) != len(repos) or len(
         {org.owner_id for org in orgs}

@@ -281,7 +281,7 @@ def build_oauth_github_routes(
             requester = await get_account_with_tenant(
                 session, account_id=invitation.requester_account_id
             )
-            if requester is None:
+            if requester is None or requester.is_external:
                 return _error()
         token = decrypt_token(fernet, flow.encrypted_user_token)
         try:
