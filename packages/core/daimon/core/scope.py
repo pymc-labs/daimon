@@ -28,6 +28,7 @@ class DeploymentDefault(BaseModel):
 
     agent_name: str | None = None
     environment_name: str | None = None
+    channel_defaults: Literal["confidential_only", "legacy"] = "legacy"
 
 
 class UserScopeRef(BaseModel):
@@ -135,6 +136,8 @@ def pick_agent(
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     default: DeploymentDefault,
+    *,
+    channel_isolated: bool = False,
 ) -> tuple[str | None, ConfigTier | None]:
     """Walk tiers channel→tenant, honoring mode='agent' only; fall through to deployment default.
 
@@ -144,7 +147,7 @@ def pick_agent(
         tuple[ChannelConfigRow | None, ConfigTier],
         tuple[TenantConfigRow | None, ConfigTier],
     ] = (
-        (channel, "channel"),
+        (channel if default.channel_defaults == "legacy" or channel_isolated else None, "channel"),
         (tenant, "tenant"),
     )
     for row, tier in tiers:
@@ -153,6 +156,18 @@ def pick_agent(
     if default.agent_name:
         return default.agent_name, "deployment"
     return None, None
+
+
+def active_agent_channels(
+    channels: Sequence[ChannelConfigRow],
+    default: DeploymentDefault,
+    isolated_channel_ids: Sequence[str],
+) -> list[ChannelConfigRow]:
+    """Keep channel agent defaults that can participate in the current cascade."""
+    if default.channel_defaults == "legacy":
+        return list(channels)
+    isolated = set(isolated_channel_ids)
+    return [row for row in channels if row.channel_id in isolated]
 
 
 def _pick_environment(
@@ -267,8 +282,9 @@ def merge(
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     default: DeploymentDefault,
+    channel_isolated: bool = False,
 ) -> ResolvedConfig:
-    agent_name, agent_tier = pick_agent(channel, tenant, default)
+    agent_name, agent_tier = pick_agent(channel, tenant, default, channel_isolated=channel_isolated)
     env_name, env_tier = _pick_environment(channel, tenant, default)
     return ResolvedConfig(
         agent_name=agent_name,

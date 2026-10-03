@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import (
     AnsweringMap,
     ChannelAnswer,
@@ -21,10 +22,13 @@ from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
     DeploymentDefault,
+    ScopeContext,
     TenantConfigRow,
 )
 from daimon.core.stores import scoped_config_write
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
+from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,6 +87,25 @@ def test_build_answering_map_orders_channel_overrides_and_carries_their_audit() 
         "the override must carry who set it"
     )
     assert answering.channel_overrides[0].set_at == _NOW, "the override must carry when it was set"
+
+
+def test_confidential_only_map_omits_ignored_defaults() -> None:
+    tenant_id = uuid.uuid4()
+    channels = [
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="shared", agent_name="old"),
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="private", agent_name="own"),
+    ]
+    answering = build_answering_map(
+        tenant=None,
+        channels=channels,
+        default=DeploymentDefault(agent_name="daimon", channel_defaults="confidential_only"),
+        setup_threads=[],
+        setup_threads_truncated=False,
+        isolated_channel_ids=("private",),
+    )
+    assert [(row.channel_id, row.agent_name) for row in answering.channel_overrides] == [
+        ("private", "own")
+    ]
 
 
 def test_build_answering_map_omits_user_active_rows_at_both_tiers() -> None:
@@ -273,3 +296,47 @@ def test_routed_agent_names_drops_the_deployment_default_behind_a_workspace_defa
     without_tenant = AnsweringMap(channel_overrides=overrides, deployment_default="daimon")
     assert routed_agent_names(with_tenant) == {"alpha", "beta"}, "deployment default is shadowed"
     assert routed_agent_names(without_tenant) == {"alpha", "daimon"}, "it answers with no tenant"
+
+
+async def test_resolve_confidential_only_keeps_isolated_default_and_ignores_shared(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await scoped_config_write.set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="shared"),
+        tenant_id=tenant.id,
+        agent_name="old",
+    )
+    await scoped_config_write.set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="private"),
+        tenant_id=tenant.id,
+        agent_name="own",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("private",), isolated_channel_ids=("private",)
+        ),
+    )
+    default = DeploymentDefault(agent_name="daimon", channel_defaults="confidential_only")
+    shared = await resolve(
+        db_session,
+        context=ScopeContext(tenant_id=tenant.id, channel_id="shared"),
+        default=default,
+    )
+    private = await resolve(
+        db_session,
+        context=ScopeContext(tenant_id=tenant.id, channel_id="private"),
+        default=default,
+    )
+    assert (shared.agent_name, shared.agent_name_tier) == ("daimon", "deployment")
+    assert (private.agent_name, private.agent_name_tier) == ("own", "channel")
+    rollback = await resolve(
+        db_session,
+        context=ScopeContext(tenant_id=tenant.id, channel_id="shared"),
+        default=default.model_copy(update={"channel_defaults": "legacy"}),
+    )
+    assert (rollback.agent_name, rollback.agent_name_tier) == ("old", "channel")

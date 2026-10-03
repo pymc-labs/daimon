@@ -52,7 +52,9 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
         crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
         allow_plaintext=settings.crypto.allow_plaintext,
     )
-    deployment_default = parse_deployment_default(settings.defaults_root)
+    deployment_default = parse_deployment_default(settings.defaults_root).model_copy(
+        update={"channel_defaults": settings.routing.channel_defaults}
+    )
     resolver_cache = new_resolver_cache()
     billing_config = load_billing_config()
     async with AsyncAnthropic(

@@ -1120,6 +1120,16 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+class RoutingSettings(BaseModel):
+    channel_defaults: Literal["confidential_only", "legacy"] = Field(
+        default="confidential_only",
+        description=(
+            "Use channel agent defaults only in confidential (isolated) channels. "
+            "Set legacy to honor existing defaults in every channel during rollback."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1180,6 +1190,10 @@ class Settings(BaseSettings):
         ),
     )
     cli: CLISettings = Field(default_factory=CLISettings)
+    routing: RoutingSettings = Field(
+        default_factory=RoutingSettings,
+        description="Agent default routing mode; see RoutingSettings.",
+    )
     log: LogSettings = Field(default_factory=LogSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)

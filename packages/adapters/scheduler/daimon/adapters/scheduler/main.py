@@ -685,7 +685,9 @@ async def run(
     # only the active scheduler serves the check; closed in the finally below.
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
-    deployment_default = parse_deployment_default(settings.defaults_root)
+    deployment_default = parse_deployment_default(settings.defaults_root).model_copy(
+        update={"channel_defaults": settings.routing.channel_defaults}
+    )
     caps = _CapsAdapter(sm, billing_config=load_billing_config())
     resolver_cache = new_resolver_cache()
     fire = await _build_fire(

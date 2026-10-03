@@ -19,6 +19,7 @@ typo is silent — check the spelling here.
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [CLI](#cli)
+- [Routing](#routing)
 - [Logging](#logging)
 - [Observability](#observability)
 - [Ops](#ops)
@@ -201,6 +202,19 @@ Read from `daimon.core.config.CLISettings`. Prefix `DAIMON_CLI__`.
 
 Display name used to identify the local operator running the CLI. Defaults to the $USER
 environment variable, falling back to 'daimon' when unset.
+
+## Routing
+
+Read from `daimon.core.config.RoutingSettings`. Prefix `DAIMON_ROUTING__`.
+
+Agent default routing mode; see RoutingSettings.
+
+### `DAIMON_ROUTING__CHANNEL_DEFAULTS`
+
+`'confidential_only' | 'legacy'` · optional · default `confidential_only`
+
+Use channel agent defaults only in confidential (isolated) channels. Set legacy to honor
+existing defaults in every channel during rollback.
 
 ## Logging
 

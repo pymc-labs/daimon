@@ -40,7 +40,9 @@ async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
         crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
         allow_plaintext=settings.crypto.allow_plaintext,
     )
-    deployment_default = parse_deployment_default(settings.defaults_root)
+    deployment_default = parse_deployment_default(settings.defaults_root).model_copy(
+        update={"channel_defaults": settings.routing.channel_defaults}
+    )
     resolver_cache = new_resolver_cache()
     async with AsyncAnthropic(
         api_key=settings.anthropic.api_key.get_secret_value(),

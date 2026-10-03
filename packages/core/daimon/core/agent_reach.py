@@ -58,6 +58,7 @@ from daimon.core.scope import (
     ChannelConfigRow,
     DeploymentDefault,
     TenantConfigRow,
+    active_agent_channels,
     answering_places,
     is_agent_reachable,
 )
@@ -290,6 +291,8 @@ async def load_agent_reach(
     """
     names = tuple(dict.fromkeys(name for name in agent_names if name))
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    channels = active_agent_channels(channels, default, policy.isolated_channel_ids)
     parents = await list_bound_parent_channel_ids(
         session, tenant_id=tenant_id, responder_names=names, responder_ma_agent_id=ma_agent_id
     )
@@ -662,6 +665,8 @@ async def _is_shared(
             caller_platform_user_id=caller_platform_user_id,
         )
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    channels = active_agent_channels(channels, default, policy.isolated_channel_ids)
     return any(
         is_agent_reachable(name, tenant=tenant, channels=channels, default=default)
         for name in agent_names

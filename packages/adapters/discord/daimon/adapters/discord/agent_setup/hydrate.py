@@ -29,6 +29,7 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +142,7 @@ async def load_roster_state(
             ),
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
         binding = (
             await get_binding(
                 session,
@@ -179,6 +181,7 @@ async def load_roster_state(
         channel_id=int(channel_id),
         channel_name=channel_name,
         cascade_view=cascade,
+        isolated_channel_ids=policy.isolated_channel_ids,
         deployment_default=runtime.deployment_default,
         roster_agents=roster.rows,
         answering=roster.answering,

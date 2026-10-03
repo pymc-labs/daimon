@@ -24,7 +24,7 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.roster import Page, Roster, RosterAgent
-from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.routing_facts import build_named_request, build_routing_request, precedence_line
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     EMPTY_ROSTER_COPY,
@@ -266,7 +266,14 @@ def routing_card(
     request = build_routing_request(
         agent_name=request_agent or "an agent", channel_label="a channel"
     )
-    body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
+    routing_hint = (
+        build_named_request(agent_name=request_agent or "an agent", channel_label="a channel")
+        if answering_map.channel_defaults == "confidential_only"
+        else f"{lead}{request}"
+    )
+    body.append(
+        _text(f"{precedence_line(answering_map.channel_defaults)} {routing_hint}", subtle=True)
+    )
     actions: list[Action] = [*_pager(page, "routing"), _button("Back", "agents")]
     if changes_channels:
         settings = OpenDialogData(CHANNEL_DIALOG)
