@@ -8,9 +8,12 @@ presets of these two rules, not separate mechanisms.
 `daimon.core.permissions` is the model. It reads the stored policy as rules,
 writes rules back, and derives every limit below from them.
 `daimon.core.authz.authorize` decides through it and adds who is asking:
-admin exemptions and agents it couldn't resolve. Tests check the two against
-each other for every combination of rules on two channels, a thread, a
-category and two pinned agents.
+admin exemptions and agents it couldn't resolve. Code that only asks whether
+anything is confidential, sealed, pinned or protected, or which channels
+are, asks the model (`any_confidential`, `confidential_channel_of`,
+`sealed_at`, `pinned_names` and the like), never the stored lists. Tests
+check the model against `authorize` over combinations of rules on two
+channels, a thread, a category and two pinned agents.
 
 ## Channel rules
 
@@ -41,7 +44,7 @@ is only open or protected. A Slack thread is only sealed, by its
 | open | `any` | `any` | | |
 | protected | `any` | `none` | protected channel or category | |
 | sealed | `inside` | `any` | sealed channel | Private |
-| confidential | `own` | `own` | isolated channel (also sealed) | Hidden |
+| confidential | `own` | `own` | isolated channel (also sealed) | Confidential |
 
 Any other pair is a mix, such as a sealed protected channel
 (`inside`/`none`).
@@ -59,19 +62,26 @@ the model, so every caller asks the same question.
 | Sessions read and continued by | anyone allowed | anyone allowed | turns inside | own agents inside | `session_confidential_channels` |
 | Memory writable | yes | yes | no | own agents only | `memory_writable` |
 | Content kept inside | no | no | no | yes | `keeps_content`, `held_to` |
+| People from another organisation answered | no | no | no | yes | `answers_external` |
 | Agents listed there | all | all | all | own only | `listed_at` |
 | Default agent | any | any | any | own only; never cleared | `binding_refusal`, `clear_refusal` |
 | Charged to its budget | its turns | its turns | its turns | its turns and its own agents' calls | `budget_channel` |
 
 **Content kept inside** means a call from a turn in the channel, whatever
-agent runs it, posts only inside the channel, sends no direct messages,
-creates no agents and publishes nothing. Routines saved there post only
+agent runs it, reads only the channel and the conversations that ran there,
+posts only inside it, sends no direct messages, creates no agents and
+publishes nothing. A call by the channel's own agent is held the same way,
+wherever it runs. Routines saved there post only
 there and never DM their results (`keeps_routine_inside`). Only the
 channel's setup thread may still configure its own agent.
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a confidential channel's own agents are hidden
 everywhere.
+
+**People from another organisation** (a Teams guest the tenant doesn't list
+as a member) are answered only in a confidential channel or its threads,
+never in its setup thread or a DM.
 
 A thread whose parent is unknown fails closed while any channel is
 confidential, since it may lie in one (`confidential_unknown`).
@@ -134,6 +144,7 @@ policy keeps its shape.
 every channel, category and agent rule, with each channel's preset and each
 pinned name's kind. An agent carrying two pinned names is bound by both.
 
-The invoker allowlist, read-only DM memory, channel admins, environments,
-budgets and operator tokens are not channel or agent rules. They say who may
+The invoker allowlist, the Teams guests counted as members, read-only DM
+memory, channel admins, environments, budgets and operator tokens are not
+channel or agent rules. They say who may
 act and who may change the rules.
