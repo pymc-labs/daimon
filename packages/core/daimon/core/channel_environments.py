@@ -7,8 +7,11 @@ one team needs. Server admins set any channel's environment or the tenant
 default; a channel admin sets the channels they run, except an environment
 with unrestricted networking in a sealed channel (`authorize`'s
 SET_CHANNEL_ENVIRONMENT): any network beyond package managers and the
-agent's MCP servers (`has_open_network`). A scope with no environment of its
-own falls through, so nothing changes until one is set.
+agent's MCP servers (`has_open_network`). A server admin confirms any change
+that leaves a sealed channel on one: a pick there, a workspace default it
+follows, an environment edit or archive (`update_needs_confirm`,
+`archive_needs_confirm`). A scope with no environment of its own falls
+through, so nothing changes until one is set.
 
 The sentences and the setup panels' picker live here so the chat tools and
 both panels say and offer the same. Only the select's length differs by
@@ -18,13 +21,15 @@ platform (`tests/parity/test_environment_select_caps.py`).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
 from typing import Final
 
 import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
+from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Action, Decision, Place, Subject, authorize, holds_seal
 from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
@@ -33,7 +38,7 @@ from daimon.core.defaults.ma_index import (
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.permissions import confidential_channel_of
+from daimon.core.permissions import confidential_channel_of, sealed_ids
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -134,6 +139,20 @@ def build_sealed_network_confirm(*, environment_name: str | None, panel: bool = 
     if panel:
         note += " To use it anyway, ask daimon to make the change in chat and confirm there."
     return note
+
+
+def build_sealed_channels_confirm(*, environment_name: str | None) -> str:
+    """Why a change beyond one channel waits for a confirmation: it leaves sealed
+    channels on an open network (a workspace default, an environment edit or archive)."""
+    what = (
+        f"the {environment_name} environment"
+        if environment_name is not None
+        else "the environment they would fall back to"
+    )
+    return (
+        f"Sealed channels would run in {what}, which has unrestricted network access, so "
+        "their content could leave through it. Nothing changed."
+    )
 
 
 def build_environment_resolution_note(
@@ -366,7 +385,8 @@ async def authorize_environment_pick(
     as open. A set looks its environment up once, after the admin check, and
     one that doesn't exist is `missing`. `thread_id` is a thread under
     `channel_id` the pick names, so a seal on that thread counts. A pick only
-    a server admin may make, an open network in a sealed channel, `needs_confirm`.
+    a server admin may make, an open network in a sealed channel, `needs_confirm`;
+    so is a workspace default that moves a sealed channel onto one.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
     place = Place(
@@ -395,11 +415,27 @@ async def authorize_environment_pick(
             return EnvironmentPick(decision=gate, missing=True)
         open_network = has_open_network(environment)
         decision = decide(open_network=open_network)
+        if channel_id is None and decision and open_network:
+            sealed = bool(
+                await _sealed_moves(
+                    session,
+                    policy,
+                    tenant_id=tenant_id,
+                    default=default,
+                    change=_workspace(environment_name),
+                )
+            )
         return EnvironmentPick(
             decision=decision,
             environment=environment if decision else None,
             needs_confirm=bool(decision) and sealed and open_network,
         )
+    if channel_id is None:
+        moves = await _sealed_moves(
+            session, policy, tenant_id=tenant_id, default=default, change=_workspace(None)
+        )
+        open_network = await _any_open(client, tenant_id=tenant_id, names=moves)
+        return EnvironmentPick(decision=gate, needs_confirm=open_network)
     if not sealed:
         return EnvironmentPick(decision=gate)
     fallback = await resolve(
@@ -411,6 +447,130 @@ async def authorize_environment_pick(
     open_network = environment is None or has_open_network(environment)
     decision = decide(open_network=open_network)
     return EnvironmentPick(decision=decision, needs_confirm=bool(decision) and open_network)
+
+
+@dataclass(frozen=True)
+class _Picks:
+    """Each channel's own environment, and the workspace default."""
+
+    channels: dict[str, str]
+    workspace: str | None
+
+    def runs(self, seal_id: str, default: DeploymentDefault) -> str:
+        """The environment a turn under `seal_id` runs in.
+
+        A Slack thread key (``channel:ts``) follows its channel. A Discord
+        thread's channel isn't known here, so it counts as following the
+        workspace default, as a direct pick counts only a thread it names.
+        """
+        own = self.channels.get(seal_id) or next(
+            (name for channel, name in self.channels.items() if seal_id.startswith(f"{channel}:")),
+            None,
+        )
+        return own or self.workspace or default.environment_name or "default"
+
+    def without(self, environment_name: str) -> _Picks:
+        """The picks once every pick of `environment_name` is cleared."""
+        return _Picks(
+            channels={c: n for c, n in self.channels.items() if n != environment_name},
+            workspace=None if self.workspace == environment_name else self.workspace,
+        )
+
+
+def _workspace(environment_name: str | None) -> Callable[[_Picks], _Picks]:
+    return lambda picks: replace(picks, workspace=environment_name)
+
+
+async def _load_picks(session: AsyncSession, *, tenant_id: uuid.UUID) -> _Picks:
+    tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    return _Picks(
+        channels={row.channel_id: row.environment_name for row in channels if row.environment_name},
+        workspace=tenant.environment_name if tenant is not None else None,
+    )
+
+
+async def _sealed_moves(
+    session: AsyncSession,
+    policy: TenantAccessPolicy,
+    *,
+    tenant_id: uuid.UUID,
+    default: DeploymentDefault,
+    change: Callable[[_Picks], _Picks],
+) -> frozenset[str]:
+    """The environments `change` moves sealed channels onto."""
+    seals = sealed_ids(policy)
+    if not seals:
+        return frozenset()
+    before = await _load_picks(session, tenant_id=tenant_id)
+    after = change(before)
+    return frozenset(
+        after.runs(seal, default)
+        for seal in seals
+        if after.runs(seal, default) != before.runs(seal, default)
+    )
+
+
+async def _any_open(client: AsyncAnthropic, *, tenant_id: uuid.UUID, names: Iterable[str]) -> bool:
+    """Whether any of `names` has an open network; a missing one counts as open."""
+    for name in names:
+        environment = await find_environment_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+        if environment is None or has_open_network(environment):
+            return True
+    return False
+
+
+def opens_network(environment: BetaEnvironment, config: BetaCloudConfigParams) -> bool:
+    """Whether patching `environment` with `config` takes it from a closed network
+    to an open one (`has_open_network`). Omitted fields keep their value, as the
+    update does."""
+    if has_open_network(environment):
+        return False
+    networking = config.get("networking")
+    if networking is None:
+        return False
+    if networking["type"] != "limited":
+        return True
+    return bool(networking.get("allowed_hosts"))
+
+
+async def update_needs_confirm(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    environment: BetaEnvironment,
+    config: BetaCloudConfigParams | None,
+    default: DeploymentDefault,
+) -> bool:
+    """Whether patching `environment` with `config` opens its network while a sealed
+    channel runs in it, so a server admin confirms it first."""
+    name = environment.metadata.get(MA_METADATA_KEY_NAME)
+    if config is None or name is None or not opens_network(environment, config):
+        return False
+    seals = sealed_ids(await load_access_policy(session, tenant_id=tenant_id))
+    picks = await _load_picks(session, tenant_id=tenant_id)
+    return any(picks.runs(seal, default) == name for seal in seals)
+
+
+async def archive_needs_confirm(
+    session: AsyncSession,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    environment_name: str,
+    default: DeploymentDefault,
+) -> bool:
+    """Whether archiving `environment_name` drops a sealed channel that runs in it
+    onto an environment with an open network, or none, so a server admin confirms
+    it first."""
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    moves = await _sealed_moves(
+        session,
+        policy,
+        tenant_id=tenant_id,
+        default=default,
+        change=lambda picks: picks.without(environment_name),
+    )
+    return await _any_open(client, tenant_id=tenant_id, names=moves)
 
 
 SEALED_OPEN_NETWORK_WARNING: Final = (
@@ -499,11 +659,13 @@ __all__ = [
     "SEALED_OPEN_NETWORK_WARNING",
     "EnvironmentPick",
     "EnvironmentPicker",
+    "archive_needs_confirm",
     "authorize_environment_pick",
     "build_archive_environment_note",
     "build_clear_environment_note",
     "build_environment_resolution_note",
     "build_missing_environment_note",
+    "build_sealed_channels_confirm",
     "build_sealed_network_confirm",
     "build_sealed_network_refusal",
     "build_set_environment_note",
@@ -515,8 +677,10 @@ __all__ = [
     "load_hidden_environment_names",
     "load_panel_hidden_environment_names",
     "may_pick_environment_in",
+    "opens_network",
     "parse_environment_option",
     "plan_environment_picker",
     "save_scope_environment",
     "sealed_network_warning",
+    "update_needs_confirm",
 ]
