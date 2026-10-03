@@ -76,6 +76,10 @@ _ADMIN_HANDOFF_TOOLS: set[str] = {
     "sync_skills",
     "set_agent_default",
     "clear_agent_default",
+    "set_channel_rule",
+    "set_agent_rule",
+    "set_channel_admins",
+    "set_channel_budget",
 }
 
 
