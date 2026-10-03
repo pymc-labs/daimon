@@ -64,7 +64,7 @@ from daimon.core.channel_admins import fit_lines
 from daimon.core.channel_environments import EnvironmentPicker
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.routing_facts import build_named_request, build_routing_request, precedence_line
 from daimon.core.setup_conversations import setup_thread_name
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -227,11 +227,16 @@ def build_routing_sentence(state: PanelState, answering_map: AnsweringMap) -> st
     the same map and the same rule, and only an admin can act on it alone.
     """
     agent_name = routing_request_agent(state, answering_map)
+    precedence = precedence_line(answering_map.channel_defaults)
     if agent_name is None or state.channel_name is None:
-        return PRECEDENCE_LINE
+        return precedence
+    if answering_map.channel_defaults == "confidential_only":
+        return f"{precedence} " + build_named_request(
+            agent_name=agent_name, channel_label=f"#{state.channel_name}"
+        )
     lead = "Tell Daimon" if state.is_admin else "An admin can tell Daimon"
     request = build_routing_request(agent_name=agent_name, channel_label=f"#{state.channel_name}")
-    return f"{PRECEDENCE_LINE} {lead}: {request}"
+    return f"{precedence} {lead}: {request}"
 
 
 def _channel_block(page: Page[RoutingLine]) -> str:

@@ -481,3 +481,53 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
     assert "belongs to another" in await run("propagate", "channel:elsewhere", "channel:room")
     row = await get_scope(db_session, scope=room)
     assert row is not None and row.agent_name == "local", "every refusal writes nothing"
+
+
+@pytest.mark.asyncio
+async def test_confidential_only_refuses_channel_default_and_lists_ignored_rows(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.adapters.cli.commands.config import _config_set_entry
+    from daimon.core.stores.scoped_config_read import get_scope
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="shared")
+    await set_fields(db_session, scope=scope, tenant_id=tenant.id, agent_name="old")
+    console = Console(file=StringIO(), force_terminal=False, highlight=False)
+    with pytest.raises(typer.Exit):
+        await _config_set_entry(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            console=console,
+            key="agent_name",
+            value="new",
+            scope_str="channel:shared",
+            channel_defaults="confidential_only",
+        )
+    assert "only in confidential channels" in cast(StringIO, console.file).getvalue()
+    row = await get_scope(db_session, scope=scope)
+    assert row is not None and row.agent_name == "old"
+
+
+def test_ignored_defaults_read_shows_only_inactive_channel_rows() -> None:
+    from daimon.adapters.cli.commands.config import _ignored_default_rows
+    from daimon.core.scope import ChannelConfigRow
+
+    tenant_id = uuid.uuid4()
+    channels = [
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="shared", agent_name="old"),
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="private", agent_name="own"),
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="empty"),
+    ]
+    ignored = _ignored_default_rows(
+        channels, isolated_channel_ids=("private",), channel_defaults="confidential_only"
+    )
+    assert [(row.channel_id, row.agent_name) for row in ignored] == [("shared", "old")]
+    assert (
+        _ignored_default_rows(
+            channels, isolated_channel_ids=("private",), channel_defaults="legacy"
+        )
+        == []
+    )

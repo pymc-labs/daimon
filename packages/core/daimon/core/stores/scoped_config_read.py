@@ -16,6 +16,7 @@ from daimon.core._models import (
     UserConfig,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import confidential_channel_of, confidential_channels
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -26,9 +27,11 @@ from daimon.core.scope import (
     TenantConfigRow,
     UserConfigRow,
     UserScopeRef,
+    active_agent_channels,
     is_agent_reachable,
     merge,
 )
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +52,18 @@ async def resolve(
         )
 
     tenant_row = await _fetch_tenant(session, tenant_id=context.tenant_id)
-    config = merge(channel=channel_row, tenant=tenant_row, default=default)
+    channel_isolated = False
+    if context.channel_id is not None and default.channel_defaults == "confidential_only":
+        policy = await load_access_policy(session, tenant_id=context.tenant_id)
+        channel_isolated = (
+            confidential_channel_of(policy, context.thread_id, context.channel_id) is not None
+        )
+    config = merge(
+        channel=channel_row,
+        tenant=tenant_row,
+        default=default,
+        channel_isolated=channel_isolated,
+    )
     if (
         context.platform is not None
         and context.channel_id is not None
@@ -150,6 +164,8 @@ async def is_agent_reachable_in_tenant(
     should call the pure predicate directly instead of paying for this read.
     """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    channel_rows = active_agent_channels(channel_rows, default, confidential_channels(policy))
     return is_agent_reachable(agent_name, tenant=tenant_row, channels=channel_rows, default=default)
 
 
@@ -285,6 +301,8 @@ async def is_agent_shared_for_key_changes(
     if not names:
         return True
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    channel_rows = active_agent_channels(channel_rows, default, confidential_channels(policy))
     if any(
         is_agent_reachable(name, tenant=tenant_row, channels=channel_rows, default=default)
         for name in names

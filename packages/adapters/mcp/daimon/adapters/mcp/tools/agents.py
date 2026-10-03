@@ -202,7 +202,10 @@ async def _with_answering_note(
     return info.model_copy(
         update={
             "answering": build_unrouted_note(
-                agent_name=info.name, channel_label=None, is_admin=auth.is_admin
+                agent_name=info.name,
+                channel_label=None,
+                is_admin=auth.is_admin,
+                channel_defaults=runtime.deployment_default.channel_defaults,
             )
         }
     )
