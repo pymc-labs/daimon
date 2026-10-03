@@ -2423,10 +2423,10 @@
         Who answers in this channel, for example #growth? Report who answers, the
         environment it runs in, and which routing tier decided each.
         
-        Supply thread_id to include its setup binding. Thread responder wins, else
-        the channel's own default, else the workspace default, else the deployment
-        default. This reports the winner
-        AND every tier's setting, so "why that agent" is answerable without
+        Supply thread_id to include its binding. Thread responder wins, else
+        a confidential channel's own default, else the workspace default, else
+        the deployment default. Legacy mode also honors shared channel defaults.
+        This reports the winner AND every tier's setting, so "why that agent" is answerable without
         starting a turn and reading its footer.
         
         Use it when someone asks which agent is configured here, when an agent
@@ -4833,12 +4833,14 @@
     }),
     'set_agent_default': dict({
       'description': '''
-        Make an agent answer in a channel or become the whole server/workspace default.
-        For example, make churn-explorer answer in #growth. Changes the agent that answers;
-        use ``clear_agent_default`` to stop that routing.
+        Make an agent answer in a confidential channel or become the workspace default.
+        For example, make churn-explorer answer in #growth when #growth is
+        confidential. Shared channels use the workspace default; name an agent
+        in a mention to call it there. Use ``clear_agent_default`` to stop that routing.
         
         When ``channel_id`` is provided the default is scoped to that channel;
-        omit it to set the workspace-wide default.  Any existing default at the
+        under confidential-only routing, the channel must be isolated.
+        Omit it to set the workspace-wide default. Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin); an admin of the channel may set
         that channel's default to a built-in agent, the workspace default, an
