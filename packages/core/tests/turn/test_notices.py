@@ -223,6 +223,10 @@ def test_every_admission_refusal_is_a_sentence_not_a_code(
             "A server admin must set the channel's agent.",
         ),
         ("channel_protected", "This channel is protected, so the agent can't answer in it."),
+        (
+            "external_participant",
+            "People from another organisation can use this agent only in its isolated channel.",
+        ),
     ],
 )
 def test_admission_refusal_words_each_reason_in_the_platform_nouns(
@@ -249,6 +253,7 @@ def test_admission_refusal_without_a_bot_name_reads_naturally() -> None:
         ("agent_pinned_elsewhere", "pinned"),
         ("channel_isolated", "isolated"),
         ("channel_protected", "protected"),
+        ("external_participant", "organisation"),
     ],
 )
 def test_a_place_bound_refusal_in_a_dm_says_why_it_cannot_move(

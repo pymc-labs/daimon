@@ -13,10 +13,13 @@ from daimon.core.stores.accounts import (
     delete_user_config_for_account,
     get_account,
     get_account_with_tenant,
+    get_external,
     list_platform_user_ids,
+    set_external,
     set_platform_role_ids,
+    set_role,
 )
-from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Platform
+from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Platform, Role
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -258,3 +261,21 @@ async def test_list_platform_user_ids_keeps_only_among_and_folds_case_on_request
         "case folded, and members who left do not fill the limit"
     )
     assert await listed(set(), fold_case=True, limit=None) == [], "no live member, nobody"
+
+
+async def test_an_external_account_is_demoted_and_never_promoted(db_session: AsyncSession) -> None:
+    account = await make_account(db_session)
+    await set_role(db_session, account.id, Role.ADMIN)
+    assert await get_external(db_session, account.id) is False, "ours by default"
+
+    await set_external(db_session, account.id, True)
+    await set_role(db_session, account.id, Role.ADMIN)
+    row = await get_account(db_session, account.id)
+    assert row is not None and row.role is Role.USER, "marking demotes; promotion is clamped"
+    assert row.is_external and await get_external(db_session, account.id)
+
+    await set_external(db_session, account.id, False)
+    await set_role(db_session, account.id, Role.ADMIN)
+    row = await get_account(db_session, account.id)
+    assert row is not None and row.role is Role.ADMIN, "unmarked, an admin again"
+    assert await get_external(db_session, uuid.uuid4()) is False, "a missing account"

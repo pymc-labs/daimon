@@ -25,6 +25,7 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     MISSING_ACCESS,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import AgentRef
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
@@ -304,6 +305,45 @@ async def test_list_channels_omits_private_channels_user_is_not_in(
         "C_PUB": "public_channel",
         "C_PRIV_IN": "private_channel",
     }, "bot-path rows carry the conversation type as well"
+
+
+@pytest.mark.asyncio
+async def test_list_channels_held_to_an_isolated_channel_lists_only_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An isolated channel's own agent names no other channel."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    held = ChannelReadPolicy(
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("C_PRIV_IN",),
+            isolated_channel_ids=("C_PRIV_IN",),
+            agent_channel_pins={"own": ("C_PRIV_IN",)},
+        ),
+        agent=AgentRef.of("own"),
+    )
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_CONVERSATIONS,
+            payload={
+                "ok": True,
+                "channels": [
+                    {"id": "C_PUB", "name": "general", "is_private": False},
+                    {"id": "C_PRIV_IN", "name": "sekret", "is_private": True},
+                ],
+                "response_metadata": {"next_cursor": ""},
+            },
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_CONVERSATIONS,
+            payload={
+                "ok": True,
+                "channels": [{"id": "C_PRIV_IN", "name": "sekret", "is_private": True}],
+                "response_metadata": {"next_cursor": ""},
+            },
+        )
+        rows = await _slack_list_channels_impl(runtime, _auth(), held)
+    assert [r.id for r in rows] == ["C_PRIV_IN"], "only its own channel is listed"
 
 
 @pytest.mark.asyncio

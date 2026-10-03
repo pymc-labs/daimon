@@ -15,13 +15,15 @@ from daimon.adapters.teams.identity import (
     TEXT_ONLY,
     Refusal,
     TeamsInbound,
+    foreign_tenant,
     live_tenant_id,
     parse_inbound,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import set_provision_status
-from microsoft_teams.api import MessageActivity
+from microsoft_teams.api import Account, MessageActivity
+from microsoft_teams.api.models.channel_data import ChannelData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -267,3 +269,63 @@ async def test_live_tenant_id_denies_a_tenant_that_is_not_live(
         inbound = _parse(payload)
         assert isinstance(inbound, TeamsInbound)
         assert await live_tenant_id(db_session_factory, inbound.entra_tenant_id) is None
+
+
+OTHER_TENANT = str(uuid.UUID(int=99))
+
+
+@pytest.mark.parametrize(
+    ("sender", "channel_data"),
+    [
+        ({"id": "29:x"}, {"tenant": {"id": OTHER_TENANT}}),
+        ({"id": "29:x", "tenantId": OTHER_TENANT.upper()}, {"tenant": {"id": ENTRA_TENANT_ID}}),
+        ({"id": "29:x", "properties": {"tenantId": OTHER_TENANT}}, None),
+    ],
+    ids=["channel-data", "from-tenant", "from-properties"],
+)
+def test_each_place_a_sender_tenant_appears_marks_a_foreign_one(
+    sender: dict[str, object], channel_data: dict[str, object] | None
+) -> None:
+    data = ChannelData.model_validate(channel_data) if channel_data is not None else None
+    found = foreign_tenant(Account.model_validate(sender), data, ours=ENTRA_TENANT_ID)
+    assert found == OTHER_TENANT, "canonical form of the first foreign tenant"
+
+
+def test_our_own_tenant_everywhere_is_not_foreign_and_garbage_is() -> None:
+    ours = Account.model_validate({"id": "29:x", "tenantId": ENTRA_TENANT_ID.upper()})
+    data = ChannelData.model_validate({"tenant": {"id": ENTRA_TENANT_ID}})
+    assert foreign_tenant(ours, data, ours=ENTRA_TENANT_ID) is None, "ours, case-blind"
+    odd = Account.model_validate({"id": "29:x", "tenantId": " contoso "})
+    assert foreign_tenant(odd, None, ours=ENTRA_TENANT_ID) == "contoso", "not ours: foreign"
+
+
+def test_a_channel_sender_from_another_tenant_is_accepted_as_external() -> None:
+    inbound = _parse(make_channel_activity(channel_tenant_id=OTHER_TENANT))
+    assert isinstance(inbound, TeamsInbound), "a shared channel may hold them"
+    assert (inbound.is_external, inbound.is_external_known, inbound.home_tenant_id) == (
+        True,
+        True,
+        OTHER_TENANT,
+    )
+
+
+def test_a_channel_without_a_channel_data_tenant_is_accepted_as_ours() -> None:
+    inbound = _parse(make_channel_activity(channel_tenant_id=None))
+    assert isinstance(inbound, TeamsInbound), "the conversation tenant is the check"
+    assert inbound.is_external is False, "nothing names another tenant"
+
+
+def test_a_channel_in_another_tenant_is_still_denied() -> None:
+    assert _parse(make_channel_activity(tenant_id=OTHER_TENANT)) == Refusal(DENIED)
+
+
+def test_a_personal_chat_whose_sender_names_another_tenant_is_denied() -> None:
+    payload = make_message_activity()
+    cast(dict[str, object], payload["from"])["tenantId"] = OTHER_TENANT
+    assert _parse(payload) == Refusal(DENIED), "1:1 stays strict"
+
+
+def test_an_internal_channel_sender_is_not_external() -> None:
+    inbound = _parse(make_channel_activity())
+    assert isinstance(inbound, TeamsInbound)
+    assert (inbound.is_external, inbound.home_tenant_id) == (False, None)

@@ -65,6 +65,9 @@ class AuthIdentity:
     # The channel the agent key was minted in, from its mcp_tokens row; read
     # through `token_channel_id`.
     bound_channel_id: str | None = None
+    # The account is from another organisation (`accounts.is_external`, read by
+    # the verifier): never an admin, and refused the tools in `external_refusal`.
+    is_external: bool = False
 
     @property
     def is_operator(self) -> bool:

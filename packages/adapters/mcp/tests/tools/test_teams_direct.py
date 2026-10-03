@@ -25,8 +25,10 @@ _TEAM = "19:team@thread.tacv2"
 
 
 class _Fake:
-    def __init__(self, roster: set[str], *, chat_status: int = 201) -> None:
-        self.roster, self.chat_status = roster, chat_status
+    def __init__(
+        self, roster: set[str], *, chat_status: int = 201, tenant: str | None = None
+    ) -> None:
+        self.roster, self.chat_status, self.tenant = roster, chat_status, tenant
         self.posts: list[tuple[str, dict[str, object]]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -36,7 +38,10 @@ class _Fake:
         if "/members/" in path:
             aad = path.rsplit("/", 1)[1]
             if aad in self.roster:
-                return httpx.Response(200, json={"id": f"29:{aad}", "aadObjectId": aad})
+                member = {"id": f"29:{aad}", "aadObjectId": aad}
+                if self.tenant is not None:
+                    member["tenantId"] = self.tenant
+                return httpx.Response(200, json=member)
             return httpx.Response(404)
         if request.method == "POST":
             body = json.loads(request.content)
@@ -116,3 +121,19 @@ async def test_a_teams_recipient_must_be_an_entra_id(
 ) -> None:
     with pytest.raises(ToolError, match="user ID"):
         await _call(_Fake(set()), db_session, sessionmaker, recipient_id="29:abc")
+
+
+async def test_a_recipient_from_another_organisation_gets_no_dm_attempt(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    fake = _Fake({_CALLER, _RECIPIENT}, tenant="other")
+    with pytest.raises(ToolError, match="another organisation"):
+        await _call(fake, db_session, sessionmaker)
+    assert fake.posts == [], "no 1:1 chat is opened"
+
+
+async def test_a_roster_entry_naming_our_own_tenant_is_reached_as_before(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    fake = _Fake({_CALLER, _RECIPIENT}, tenant="T")
+    assert (await _call(fake, db_session, sessionmaker)).channel_id == "a:dm-1"

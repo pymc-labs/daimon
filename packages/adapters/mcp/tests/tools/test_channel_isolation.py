@@ -19,8 +19,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _channel_target as channel_target
+from daimon.adapters.mcp.tools import thread_participation as participation_mod
 from daimon.adapters.mcp.tools._channel_policy import (
+    load_read_policy,
     require_channel_writable,
+    require_dm_recipient_allowed,
     require_identity_changeable,
     require_publishable,
     require_reader_source_publishable,
@@ -32,6 +36,9 @@ from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.channel_budgets import (
+    _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_environments import (
     _clear_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
@@ -61,6 +68,9 @@ from daimon.adapters.mcp.tools.skills import (
 )
 from daimon.adapters.mcp.tools.tenant_summary import (
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.thread_participation import (
+    _get_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
@@ -575,18 +585,20 @@ async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession], origin_id: str | None
 ) -> None:
     """Left out or made up, the origin could hide C's setup thread: refuse. A run with no
-    origin, such as a routine, has nothing to retry with, so the refusal says not to."""
+    origin, such as a routine, has nothing to retry with, so the refusal says not to.
+    Once a turn of the agent runs in C, the call is held there whatever it names."""
     world, runtime = await _world(committing_sessionmaker)
-    await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=True, executing="agent_shared")
     spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="what C's room said")
 
     with pytest.raises(ToolError, match="origin_context_id") as refused:
         await _create_agent_impl(runtime, builtin, spec, origin_id)
-
     assert str(refused.value).endswith(
         "Tell the caller to create the agent from a chat conversation. Do not retry."
     ), "nothing to retry with, so the model must not loop"
+    await _setup_thread_origin(committing_sessionmaker, world)
+    with pytest.raises(ToolError, match="held to an isolated channel"):
+        await _create_agent_impl(runtime, builtin, spec, origin_id)
 
     names = {str(agent["name"]) for agent in world.state.agents.values()}
     assert "notes-bot" not in names, "nothing was created"
@@ -701,16 +713,18 @@ async def test_publishing_is_held_by_the_turns_origin(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """A shared agent publishes from outside C, not from C's setup thread, and not with no
-    origin while C is isolated. A call with no executing agent is held nowhere."""
+    origin while C is isolated. Once a turn of it runs in C, a call naming the outside
+    origin is held too. A call with no executing agent is held nowhere."""
     world, runtime = await _world(committing_sessionmaker)
     builtin = world.auth(executing="agent_shared")
-    inside = await _setup_thread_origin(committing_sessionmaker, world)
-    with pytest.raises(ToolError, match="isolated channel"):
-        await require_publishable(runtime, builtin, origin_context_id=inside)
     with pytest.raises(ToolError, match="origin_context_id"):
         await require_publishable(runtime, builtin, origin_context_id=None)
     outside = await _setup_thread_origin(committing_sessionmaker, world, channel=OTHER)
     await require_publishable(runtime, builtin, origin_context_id=outside)
+    inside = await _setup_thread_origin(committing_sessionmaker, world)
+    for named in (inside, outside):
+        with pytest.raises(ToolError, match="isolated channel"):
+            await require_publishable(runtime, builtin, origin_context_id=named)
     await require_publishable(runtime, world.auth(), origin_context_id=None)
 
 
@@ -898,3 +912,88 @@ async def test_a_timer_set_in_an_isolated_channel_lists_only_inside_it(
     assert [t.note for t in outside] == ["check on shared"], "C's timer stays inside C"
     inside = await _list_timers_impl(runtime, world.auth(executing="agent_local"))
     assert [t.note for t in inside] == ["check on local"], "and only C's shows there"
+
+
+async def test_a_running_held_turn_holds_calls_that_name_no_origin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat token names no turn: while one of its turns runs in C, a call that
+    leaves out the origin is held to C anyway, for reads, posts and lookups."""
+    world, runtime = await _world(committing_sessionmaker)
+    builtin = world.auth(admin=False, executing="agent_shared")
+    free = await load_read_policy(runtime, builtin, origin_context_id=None)
+    free.require(OTHER)  # no turn running: as before
+    await require_channel_writable(runtime, builtin, channel_id=OTHER)
+    await require_dm_recipient_allowed(runtime, builtin, recipient_id="U_SOMEONE")
+
+    origin_id = await _setup_thread_origin(committing_sessionmaker, world)
+    held = await load_read_policy(runtime, builtin, origin_context_id=None)
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        held.require(OTHER)
+    with pytest.raises(ToolError, match="only its own agents read it"):
+        held.require(ROOM)
+    with pytest.raises(ToolError, match="nothing said here is posted"):
+        await require_channel_writable(runtime, builtin, channel_id=OTHER)
+    with pytest.raises(ToolError, match="nothing said here is posted"):
+        await require_channel_writable(runtime, builtin, channel_id="a:own-dm")
+    with pytest.raises(ToolError, match="only its own agents post"):
+        await require_channel_writable(runtime, builtin, channel_id=ROOM)  # nothing granted
+    with pytest.raises(ToolError, match="sends no direct messages"):
+        await require_dm_recipient_allowed(runtime, builtin, recipient_id="U_SOMEONE")
+
+    async def visible(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+        return channel_id
+
+    async def verified(*args: object) -> None:
+        return None
+
+    monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
+    monkeypatch.setattr(participation_mod, "verify_participation_scope", verified)
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        await _get_channel_budget_impl(runtime, builtin, OTHER)
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        await _get_thread_participation_impl(runtime, builtin, None, OTHER)
+    await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
+    other_account = replace(builtin, account_id=uuid.uuid4())
+    (await load_read_policy(runtime, other_account, origin_context_id=None)).require(OTHER)
+
+
+async def test_turns_running_in_two_isolated_channels_refuse_an_unnamed_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(ROOM, NEW_ROOM),
+                isolated_channel_ids=(ROOM, NEW_ROOM),
+                agent_channel_pins={"local": (ROOM,)},
+            ),
+        )
+        now = dt.datetime.now(dt.UTC)
+        await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=NEW_ROOM,
+            thread_id=NEW_ROOM,
+            responder_ma_agent_id="agent_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + dt.timedelta(minutes=10),
+            now=now,
+        )
+    origin_id = await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(admin=False, executing="agent_shared")
+    with pytest.raises(ToolError, match="more than one isolated channel"):
+        await load_read_policy(runtime, builtin, origin_context_id=None)
+    named = await load_read_policy(runtime, builtin, origin_context_id=origin_id)
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        named.require(NEW_ROOM)
+    local = world.auth(admin=False, executing="agent_local")
+    await load_read_policy(runtime, local, origin_context_id=None)  # its own channel holds it

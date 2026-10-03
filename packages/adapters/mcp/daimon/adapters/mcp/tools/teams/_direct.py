@@ -9,6 +9,11 @@ from daimon.adapters.mcp.tools.teams._client import TeamsBotClient, TeamsMember
 from daimon.adapters.mcp.tools.teams._directory import installed_teams, require_client
 from fastmcp.exceptions import ToolError
 
+_OTHER_ORGANISATION = (
+    "the recipient is from another organisation, and Teams can't open a 1:1 chat across "
+    "organisations, so nothing was sent; reach them in a channel you share instead"
+)
+
 
 async def _shared_member(
     runtime: McpRuntime, auth: AuthIdentity, client: TeamsBotClient, caller: str, recipient: str
@@ -19,6 +24,8 @@ async def _shared_member(
             member = await client.get_member(team.team_id, recipient)
             if member is None or not member.id or member.user_role == "anonymous":
                 continue
+            if (member.tenant_id or client.tenant_id).lower() != client.tenant_id.lower():
+                raise ToolError(_OTHER_ORGANISATION)
             if await client.get_member(team.team_id, caller) is not None:
                 return member
         except (httpx.HTTPError, ValueError):

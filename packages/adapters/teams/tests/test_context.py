@@ -245,6 +245,14 @@ def test_an_unprompted_turn_is_marked_on_the_user_query() -> None:
     assert 'is_admin="false" unprompted="true">any update?</user_query>' in message
 
 
+def test_a_sender_from_another_organisation_is_marked_on_the_user_query() -> None:
+    inbound = dataclasses.replace(make_inbound("hi", kind="channel"), is_external=True)
+    message = render_user_message(
+        "<controls/>", inbound, is_admin=False, keys="", prefix="", history=None
+    )
+    assert 'is_admin="false" external="true">hi</user_query>' in message
+
+
 def test_classifier_window_is_the_newest_readable_messages_before_the_burst() -> None:
     messages = [
         _msg("105", "<p>burst</p>"),

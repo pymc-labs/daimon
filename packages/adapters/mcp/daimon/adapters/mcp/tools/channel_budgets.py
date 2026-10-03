@@ -19,6 +19,7 @@ from typing import Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_policy import require_within_hold
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -221,6 +222,7 @@ async def _get_channel_budget_impl(
         target = await _budget_channel(runtime, auth, channel_id.strip())
     else:
         target = await _origin_channel(runtime, auth, origin_context_id)
+    await require_within_hold(runtime, auth, target, origin_context_id=origin_context_id)
     async with runtime.session_factory() as session:
         status = await get_channel_budget_status(
             session,

@@ -196,8 +196,9 @@ async def _all_conversations(
 
 
 async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity
+    runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy = OPEN_READ_POLICY
 ) -> list[SlackChannelRow]:
+    """The caller's visible channels; held to an isolated channel, only that one."""
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
@@ -216,7 +217,8 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
             # their contents: only surfaced when the destination is a DM.
             if _is_im(ch) and not is_dm_destination(destination):
                 continue
-            rows.append(_to_channel_row(ch))
+            if read_policy.lists(str(ch["id"])):
+                rows.append(_to_channel_row(ch))
         return rows
 
     # Bot path: unchanged shipped behavior (bot's channels ∩ caller visibility).
@@ -240,7 +242,7 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
             is_private=bool(ch.get("is_private")),
             is_guest=guest,
             is_member=str(ch["id"]) in user_channel_ids,
-        ):
+        ) or not read_policy.lists(str(ch["id"])):
             continue
         rows.append(_to_channel_row(ch))
     return rows

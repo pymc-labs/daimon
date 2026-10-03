@@ -410,6 +410,7 @@ def _print_policy(
         ("isolated_channel_ids", policy.isolated_channel_ids),
     ):
         console.print(f"  {field}: {', '.join(ids) or '-'}")
+    console.print(f"  member_guest_ids: {', '.join(policy.member_guest_ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     pins = policy.agent_channel_pins
     console.print(
@@ -624,6 +625,20 @@ def tenants_access_policy_set_command(
             )
         ),
     ] = None,
+    add_member_guest: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Teams guest's Entra object id to treat as a member of the organisation "
+                "(repeatable). Other guests are answered as from another organisation. "
+                "Only used while DAIMON_TEAMS__RESTRICT_GUESTS is on."
+            )
+        ),
+    ] = None,
+    remove_member_guest: Annotated[
+        list[str] | None,
+        typer.Option(help="Teams guest's Entra object id to drop from the members (repeatable)."),
+    ] = None,
     replace_pins: Annotated[
         bool,
         typer.Option(
@@ -642,9 +657,10 @@ def tenants_access_policy_set_command(
 
     Each flag given replaces that whole field; fields not given keep their
     stored value. To empty one field, --clear and set the rest again. Pins
-    are the exception: --add-pin-agent and --remove-pin-agent edit the stored
-    pins in place, and --pin-agent refuses to drop another agent's pin
-    without --replace-pins. An unpinned agent runs anywhere, so every way of
+    and member guests are the exception: --add-pin-agent, --remove-pin-agent,
+    --add-member-guest and --remove-member-guest edit the stored ones in
+    place, and --pin-agent refuses to drop another agent's pin without
+    --replace-pins. An unpinned agent runs anywhere, so every way of
     dropping a pin is explicit: a bare --remove-pin-agent AGENT, or
     --replace-pins with --pin-agent or --clear. Pin names must be agents of
     the tenant. The resulting policy is printed, with a line for every agent
@@ -669,6 +685,8 @@ def tenants_access_policy_set_command(
                 pin_agent=pin_agent,
                 add_pin_agent=add_pin_agent,
                 remove_pin_agent=remove_pin_agent,
+                add_member_guest=add_member_guest,
+                remove_member_guest=remove_member_guest,
                 replace_pins=replace_pins,
                 clear=clear,
                 as_json=as_json,
@@ -719,6 +737,21 @@ def _parse_agent_pins(
             "channel; pass one form per agent"
         )
     return {name: tuple(ids) for name, ids in parsed.items()}
+
+
+def _parse_member_guests(values: list[str] | None, *, platform: str) -> tuple[str, ...]:
+    """Repeated guest flags as lower-case Entra object ids; Teams only."""
+    if values is None:
+        return ()
+    if platform != "teams":
+        raise typer.BadParameter("member_guest_ids: only Teams has guests")
+    ids = tuple(dict.fromkeys(value.strip().lower() for value in values))
+    for value in ids:
+        if re.fullmatch(_ENTRA_OBJECT_ID, value) is None:
+            raise typer.BadParameter(f"member_guest_ids: invalid Entra object id {value!r}")
+    if not ids:
+        raise typer.BadParameter("member_guest_ids: pass at least one id")
+    return ids
 
 
 def _pin_name_key(name: str) -> str:
@@ -809,11 +842,19 @@ async def tenants_access_policy_set(
     pin_agent: list[str] | None = None,
     add_pin_agent: list[str] | None = None,
     remove_pin_agent: list[str] | None = None,
+    add_member_guest: list[str] | None = None,
+    remove_member_guest: list[str] | None = None,
     replace_pins: bool = False,
     clear: bool = False,
     as_json: bool = False,
 ) -> None:
     validated_platform = _validate_platform(platform)
+    guests_to_add = _parse_member_guests(add_member_guest, platform=validated_platform)
+    guests_to_remove = _parse_member_guests(remove_member_guest, platform=validated_platform)
+    if set(guests_to_add) & set(guests_to_remove):
+        raise typer.BadParameter(
+            "member_guest_ids: an id named in both --add-member-guest and --remove-member-guest"
+        )
     changes: dict[str, object] = {}
     for field, ids in (
         ("invoker_user_ids", invoker),
@@ -876,9 +917,10 @@ async def tenants_access_policy_set(
         else {}
     )
     edits_pins = bool(pins_to_add or pins_to_remove)
-    if clear and (changes or edits_pins):
+    edits_guests = bool(guests_to_add or guests_to_remove)
+    if clear and (changes or edits_pins or edits_guests):
         raise typer.BadParameter("--clear can't be combined with other policy flags")
-    if not clear and not changes and not edits_pins:
+    if not clear and not changes and not edits_pins and not edits_guests:
         raise typer.BadParameter("nothing to set: pass a policy flag or --clear")
 
     label = f"{platform}:{external_id}"
@@ -944,6 +986,15 @@ async def tenants_access_policy_set(
                         f"{', '.join(dropped)}. Use --add-pin-agent to keep them, or "
                         "--replace-pins to drop them. Nothing was changed."
                     )
+            if edits_guests:
+                missing = sorted(set(guests_to_remove) - set(current.member_guest_ids))
+                if missing:
+                    raise typer.BadParameter(
+                        f"member_guest_ids: {', '.join(missing)} is not listed. Nothing was "
+                        "changed."
+                    )
+                kept = (g for g in current.member_guest_ids if g not in guests_to_remove)
+                changes["member_guest_ids"] = tuple(dict.fromkeys((*kept, *guests_to_add)))
             try:
                 policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
             except ValidationError as exc:

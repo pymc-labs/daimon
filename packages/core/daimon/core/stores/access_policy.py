@@ -164,6 +164,8 @@ async def set_access_policy(
     if not payload.get("isolated_channel_ids"):
         # Same for isolation, so a rollback to a build without it reads the row.
         payload.pop("isolated_channel_ids", None)
+    if not payload.get("member_guest_ids"):
+        payload.pop("member_guest_ids", None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
         .values(tenant_id=tenant_id, policy=payload)

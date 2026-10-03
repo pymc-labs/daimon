@@ -1,4 +1,4 @@
-"""The registration template validates against the published Teams v1.16 schema."""
+"""The registration template validates against the published Teams v1.25 schema."""
 
 import json
 from pathlib import Path
@@ -10,8 +10,8 @@ from jsonschema import Draft4Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 # Vendored for an offline test from
-# https://developer.microsoft.com/json-schemas/teams/v1.16/MicrosoftTeams.schema.json
-SCHEMA = Path(__file__).parent / "data/teams-manifest-v1.16.schema.json"
+# https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json
+SCHEMA = Path(__file__).parent / "data/teams-manifest-v1.25.schema.json"
 # What an operator substitutes before zipping the package.
 PLACEHOLDERS = {
     "${DAIMON_TEAMS__CLIENT_ID}": "00000000-0000-4000-8000-000000000001",
@@ -26,7 +26,7 @@ def _manifest() -> Any:
     return yaml.safe_load(text)
 
 
-def test_manifest_validates_against_the_v116_schema() -> None:
+def test_manifest_validates_against_the_v125_schema() -> None:
     manifest = _manifest()
     validator = Draft4Validator(
         json.loads(SCHEMA.read_text()), format_checker=Draft4Validator.FORMAT_CHECKER
@@ -35,8 +35,15 @@ def test_manifest_validates_against_the_v116_schema() -> None:
         f"{'/'.join(map(str, e.absolute_path))}: {e.message}"
         for e in validator.iter_errors(manifest)
     ]
-    assert errors == []
-    assert manifest["manifestVersion"] == "1.16"
+    assert errors == [], "the template must upload as is"
+    assert manifest["manifestVersion"] == "1.25"
+
+
+def test_manifest_can_be_added_to_private_and_shared_channels() -> None:
+    """`supportedChannelTypes` blocks the upload from 1.25 on; the tier flag replaces it."""
+    manifest = _manifest()
+    assert manifest["supportsChannelFeatures"] == "tier1", "private and shared channels"
+    assert "supportedChannelTypes" not in manifest, "rejected by Teams in manifest 1.25+"
 
 
 def test_manifest_offers_what_the_adapter_answers() -> None:
@@ -55,7 +62,8 @@ def test_manifest_requests_channel_message_consent_for_the_bot_app() -> None:
     assert manifest["authorization"]["permissions"]["resourceSpecific"] == [
         {"name": "ChannelMessage.Read.Group", "type": "Application"},
         {"name": "TeamMember.Read.Group", "type": "Application"},
+        {"name": "ChannelMember.Read.Group", "type": "Application"},
     ], (
-        "channel messages and the team's owners only; files need tenant-wide consent, "
-        "which daimon does not ask"
+        "channel messages, the team's owners and a channel's members only; files need "
+        "tenant-wide consent, which daimon does not ask"
     )

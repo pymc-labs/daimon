@@ -38,6 +38,10 @@ class TenantAccessPolicy(BaseModel):
     # Agent name -> the only channels (and threads under them) it may run in.
     # An agent not named here runs wherever the cascade sends it.
     agent_channel_pins: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    # Teams guests (Entra object ids, lower case) treated as members of the
+    # organisation; any other guest is answered as from another organisation.
+    # Only read while `teams.restrict_guests` is on.
+    member_guest_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _isolated_channels_are_sealed(self) -> TenantAccessPolicy:

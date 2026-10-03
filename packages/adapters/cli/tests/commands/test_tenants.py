@@ -662,6 +662,8 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--isolated-channel",
         "--dm-memory-read-only",
         "--pin-agent",
+        "--add-member-guest",
+        "--remove-member-guest",
         "--clear",
     ):
         assert flag in flags, f"{flag} missing from registered options"
@@ -881,6 +883,44 @@ async def test_access_policy_accepts_platform_ids(
     assert policy.protected_channel_ids == tuple(channels)
     assert policy.protected_category_ids == (() if platform == "teams" else tuple(channels))
     assert policy.sealed_channel_ids == tuple(channels)
+
+
+async def test_access_policy_adds_and_removes_teams_member_guests_in_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="teams", workspace_id="guests")
+    first, second = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))
+
+    async def edit(**flags: list[str]) -> TenantAccessPolicy:
+        await tenants_access_policy_set(
+            rt=rt, console=_make_console(), platform="teams", external_id="guests", **flags
+        )
+        async with db_session_factory() as session:
+            return await load_access_policy(session, tenant_id=tenant.id)
+
+    added = await edit(add_member_guest=[first.upper(), second], invoker=[first])
+    assert added.member_guest_ids == (first, second), "lower-cased, in order"
+    removed = await edit(remove_member_guest=[first])
+    assert removed.member_guest_ids == (second,) and removed.invoker_user_ids == (first,)
+    for flags in ({"remove_member_guest": [first]}, {"add_member_guest": ["not-an-id"]}):
+        with pytest.raises(typer.BadParameter, match="member_guest_ids"):
+            await edit(**flags)
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="teams", external_id="guests", as_json=False
+    )
+    assert f"member_guest_ids: {second}" in _output(console), "shown with the policy"
+    with pytest.raises(typer.BadParameter, match="only Teams"):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="slack",
+            external_id="guests",
+            add_member_guest=[first],
+        )
 
 
 async def test_access_policy_isolates_a_teams_channel_with_its_own_agent(

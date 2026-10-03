@@ -14,15 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An isolated channel's content no longer leaves through new agents or
-  timers.** An isolated channel's own agent, wherever it runs and through any
-  of its coding-tool tokens, could call `create_agent`, and the new agent
+- **An isolated channel's content no longer leaves through new agents, timers
+  or reads.** An isolated channel's own agent, wherever it runs and through
+  any of its coding-tool tokens, could call `create_agent`, and the new agent
   answered outside the channel with whatever prompt was written into it. Such
   calls, and `create_agent` from the channel's setup thread, are now refused
   (`channel_isolated`), admins included, as is a chat turn's `create_agent`
   naming no `origin_context_id` while a channel in its workspace is isolated.
   `list_timers` also showed the notes of timers set in an isolated channel
-  from anywhere; they now list only inside that channel, as its routines do.
+  from anywhere; they now list only inside that channel, as its routines do. A
+  call held to an isolated channel, by its own agent or by a turn inside it,
+  now also reads only that channel and the conversations that ran there:
+  `read_channel`, `read_thread`, `get_message`, `list_threads`, the session
+  tools and searches refuse or withhold everything else, and `list_channels`
+  lists only that channel, so a prompt planted in the channel can no longer
+  have its agent read another channel and repost it there. Admins' hub reads
+  of conversations are unchanged. A chat turn inside an isolated channel that
+  leaves out its `origin_context_id` is held there too, and
+  `get_channel_budget` and `get_thread_participation` look only inside it.
 - **Publishing and daimon's server name stay inside isolated channels.** A
   pinned agent, an isolated channel's own agent, or a turn in an isolated
   channel can no longer publish a report, notebook or attachment link, or
@@ -235,6 +244,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
+- Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
+- Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.
+- Teams: rebuild the app package (version 0.4.1) and upload it again for the new `ChannelMember.Read.Group` permission, which tells guests and external participants apart in channels; a team owner accepts it. Until then, a sender the roster can't place in a shared channel is held as external.
 - Deployments that set `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS=false`: each caller in an existing thread starts a fresh session of their own at their next message; the shared session is not carried over.
 - Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` refuses every upload until `DAIMON_NOTEBOOK__TENANTS` lists the tenant UUIDs it may serve (comma-separated or a JSON array; `daimon tenants list --json` shows them, and each refusal names the id), and refuses tokens that name no tenant, so upgrade the bot with it. Set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve any tenant in isolation. A `tenant.json` left in the data directory by a pre-release build is ignored and can be deleted.
 - Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). `DAIMON_CRYPTO__KEYS` now also accepts the raw `Fernet.generate_key()` output or a comma-separated list; before this, only a JSON list parsed and a bare key stopped every service at boot. After setting keys and restarting **every** process with them, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
@@ -248,6 +261,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Teams app can be added to private and shared channels.** The
+  manifest template moves to version 1.25 with `supportsChannelFeatures:
+  tier1` (package version 0.4.0). Adding the app to a team does not add it to
+  these channels: each one's owner adds it from the channel. Rebuild the
+  package and upload it again to use them.
+- **People from another organisation in Teams.** A shared channel's external
+  participants (B2B direct connect) and guests (Entra B2B guest accounts, in
+  any channel or 1:1 chat) are answered only inside an isolated channel, and
+  never in its setup thread. They run as members, never admins or channel
+  admins (whatever `DAIMON_TEAMS__ADMIN_USER_IDS` or a grant says), commands
+  reach the agent as plain text, and their tool calls get only the
+  conversation's tools; any other tool, including ones added later, returns
+  an error the agent relays. A sender is placed by the activity's tenant,
+  their roster entry and the channel's Graph member list; one nothing places
+  is held as external for that turn in a channel not known to be standard or
+  private, and nothing is stored. `daimon tenants access-policy
+  --add-member-guest` lists guests to treat as members.
+  `DAIMON_TEAMS__RESTRICT_GUESTS` and
+  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` (both on) switch the rules
+  off per kind. Setup is in `docs/self-hosting.md`, behaviour in
+  `docs/teams.md`.
 - **Operator tokens from the setup panels.** Server admins on Discord, Slack
   and Teams mint, list and revoke operator tokens from Who answers where:
   `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only

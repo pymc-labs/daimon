@@ -11,7 +11,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1030,3 +1030,30 @@ async def test_a_failed_bind_spends_the_request_and_says_so_without_the_token(
     sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
     assert "ghp_leak" not in sent, "no token in Teams or logs"
     dispatch.assert_not_awaited()
+
+
+def _from_another_organisation(
+    payload: dict[str, object], tenant: str = str(uuid.UUID(int=99))
+) -> dict[str, object]:
+    cast(dict[str, object], payload["conversation"])["conversationType"] = "channel"
+    payload["channelData"] = {"tenant": {"id": tenant}}
+    return payload
+
+
+async def test_an_external_participant_may_only_open_a_sign_in(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    env = await _request(db_session_factory, account_id)
+    oauth = await _request(db_session_factory, account_id, kind="mcp_oauth")
+    async with _running(TeamsApiFake(), _runtime(db_session_factory, mcp=True)) as (service, _):
+        refused = await post_activity(service, _from_another_organisation(_open(env.token)))
+        ours = await post_activity(
+            service, _from_another_organisation(_open(env.token), ENTRA_TENANT_ID)
+        )
+        link = await post_activity(service, _from_another_organisation(_open(oauth.token)))
+        await service.turns.drain(5)
+
+    assert refused["task"]["value"] == NO_LONGER_VALID_MESSAGE, "no key or token form"
+    assert "value" not in _field(ours), "the same click from our own tenant gets the form"
+    (button,) = link["task"]["value"]["card"]["content"]["actions"]
+    assert button["type"] == "Action.OpenUrl", "their own sign-in"

@@ -29,7 +29,11 @@ from typing import Final
 import structlog
 from daimon.core.authz import Subject, build_subject
 from daimon.core.errors import DaimonError
-from daimon.core.stores.accounts import get_account, list_platform_user_ids
+from daimon.core.stores.accounts import (
+    get_account,
+    list_external_platform_user_ids,
+    list_platform_user_ids,
+)
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
 from pydantic import BaseModel, ConfigDict
@@ -370,9 +374,12 @@ async def read_stored_admin(
     A server admin's grants are not read; they need none.
     """
     account = await get_account(session, account_id)
-    if account is None or account.role is Role.ADMIN:
+    # One held as from another organisation administers nothing.
+    if account is None or account.role is Role.ADMIN or account.is_external:
         return StoredAdmin(
-            is_admin=account is not None, platform=platform, platform_user_id=platform_user_id
+            is_admin=account is not None and account.role is Role.ADMIN and not account.is_external,
+            platform=platform,
+            platform_user_id=platform_user_id,
         )
     grants = (
         await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
@@ -492,8 +499,12 @@ async def channel_admin_user_ids(
             among=among,
             fold_case=platform == "teams",
         )
+        # One held as from another organisation administers nothing, so hears nothing.
+        externals = await list_external_platform_user_ids(
+            session, tenant_id=tenant_id, platform=platform, user_ids=grant.user_ids
+        )
     # A granted user who never spoke to the bot has no account yet.
-    return sorted({*found, *grant.user_ids})[:limit]
+    return sorted({*found, *grant.user_ids} - externals)[:limit]
 
 
 __all__ = [

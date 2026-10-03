@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import httpx
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams.externals import ExternalParticipants
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembers, GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
@@ -43,6 +44,8 @@ class TeamsRuntime:
     # Graph) admits nobody by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # Finds a channel's senders from another organisation; None trusts the activity alone.
+    externals: ExternalParticipants | None = None
 
 
 @asynccontextmanager

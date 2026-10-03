@@ -30,7 +30,13 @@ from typing import TypedDict, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
-from daimon.adapters.mcp.auth.verifier import SCOPES_CLAIM, TOKEN_JTI_CLAIM, TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.auth.verifier import (
+    EXTERNAL_CLAIM,
+    SCOPES_CLAIM,
+    TOKEN_JTI_CLAIM,
+    TOKEN_KIND_CLAIM,
+)
+from daimon.adapters.mcp.middleware.external_participants import external_refusal
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -317,7 +323,9 @@ class IdentityMiddleware(Middleware):
         # trusted internal tokens (CLI/scheduler/headless, minted by mint_internal_mcp_token)
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
-        is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        # An account from another organisation is never an admin, by any claim.
+        is_external = (_token.claims.get(EXTERNAL_CLAIM) if _token else None) is True
+        is_admin = not is_external and ((role == Role.ADMIN) or (is_admin_claim and internal_claim))
         slack_turn_context_id: uuid.UUID | None = None
         raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
         if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
@@ -335,7 +343,10 @@ class IdentityMiddleware(Middleware):
         raw_administered = _token.claims.get("administered_channel_ids") if _token else None
         administered_channel_ids = (
             frozenset(str(value) for value in cast(list[object], raw_administered))
-            if isinstance(raw_administered, list) and not is_admin and agent_id is None
+            if isinstance(raw_administered, list)
+            and not is_admin
+            and not is_external
+            and agent_id is None
             else frozenset[str]()
         )
         raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
@@ -358,9 +369,15 @@ class IdentityMiddleware(Middleware):
                 if isinstance(raw_bound_channel, str) and agent_id is not None
                 else None
             ),
+            is_external=is_external,
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
+        if is_external and context.method == "tools/call":
+            refusal = external_refusal(str(getattr(context.message, "name", "")))
+            if refusal is not None:
+                record_denial("external_participant")
+                raise ToolError(refusal)
         # Each enable appends a rule to session state, which must be this
         # request's alone: StripSessionIdMiddleware (server.py) sees to it.
         if identity.is_operator:
