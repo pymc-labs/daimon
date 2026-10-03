@@ -14,12 +14,11 @@ import httpx
 import pytest
 from daimon.adapters.discord import continuation_dispatch as discord_dispatch
 from daimon.adapters.slack import continuation_dispatch as slack_dispatch
-from daimon.core._models import TaskContinuation
 from daimon.core.continuity import dispatch as core_dispatch
 from daimon.core.continuity import wakes
 from daimon.core.continuity.continuation import ContinuationDecision, ResponderChanged
 from daimon.core.errors import DaimonError
-from daimon.core.stores.task_continuations import get_continuation, record_continuation
+from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.testing.db import (  # noqa: F401
     db_clean,
@@ -28,9 +27,8 @@ from daimon.testing.db import (  # noqa: F401
     db_session,
     db_session_factory,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import clear_task_continuations, make_task_continuation, make_tenant
 from slack_sdk.errors import SlackApiError
-from sqlalchemy import delete, update
 
 _NOW = datetime(2026, 10, 3, tzinfo=UTC)
 _BASE = Path(__file__).with_name("continuation_base")
@@ -88,9 +86,9 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
 
     async def seed():
         async with db_session_factory.begin() as session:
-            await session.execute(delete(TaskContinuation))
+            await clear_task_continuations(session, tenant_id=tenant.id)
             for index, key in enumerate(keys):
-                await record_continuation(
+                await make_task_continuation(
                     session,
                     tenant_id=tenant.id,
                     platform=chat_platform,
@@ -106,11 +104,7 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
                     available_at=(_NOW + timedelta(days=1) if index == 2 else _NOW)
                     if wake
                     else None,
-                )
-                await session.execute(
-                    update(TaskContinuation)
-                    .where(TaskContinuation.idempotency_key == key)
-                    .values(created_at=_NOW - timedelta(minutes=3 - index))
+                    created_at=_NOW - timedelta(minutes=3 - index),
                 )
 
     async def exercise(module):
@@ -255,7 +249,8 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
             patch.setattr(module, "protection_state", protection, raising=False)
             patch.setattr(ladder, "protection_state", protection, raising=False)
             patch.setattr(module, "datetime", DateTime)
-            thread = MagicMock(spec=discord.Thread, id=42)
+            thread = MagicMock(spec=discord.Thread)
+            thread.id = 42
             thread.send = post
             web = SimpleNamespace(chat_postMessage=post)
             kwargs = dict(tenant_id=tenant.id, run_follow_up=run)

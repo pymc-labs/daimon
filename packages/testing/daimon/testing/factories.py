@@ -26,6 +26,7 @@ from daimon.core._models import (
     PlatformPrincipal,
     PrincipalLink,
     SecurityAuditEvent,
+    TaskContinuation,
     Tenant,
     TenantLedger,
     UsageEvent,
@@ -62,6 +63,7 @@ from daimon.core.stores.domain import (
     BudgetWindow,
     ChannelBudgetRow,
     CliPrincipalRow,
+    ContinuationReason,
     McpTokenRow,
     Platform,
     PlatformPrincipalRow,
@@ -69,6 +71,7 @@ from daimon.core.stores.domain import (
     RepoAccessProof,
     RoutineRow,
     SlackUserTokenRow,
+    TaskContinuationRow,
     TenantLedgerRow,
     TenantRow,
     TenantUserCapRow,
@@ -80,8 +83,54 @@ from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import new_short_id
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def clear_task_continuations(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Remove a tenant's queued continuations so a test can replay the same requests."""
+    await session.execute(delete(TaskContinuation).where(TaskContinuation.tenant_id == tenant_id))
+    await session.flush()
+
+
+async def make_task_continuation(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    requester_account_id: uuid.UUID,
+    requester_external_user_id: str,
+    target_ma_agent_id: str,
+    target_name: str,
+    reason: ContinuationReason,
+    idempotency_key: uuid.UUID,
+    requested_work: str | None = None,
+    available_at: datetime | None = None,
+    created_at: datetime | None = None,
+) -> TaskContinuationRow:
+    """Insert a pending continuation, optionally with a fixed creation time."""
+    orm = TaskContinuation(
+        tenant_id=tenant_id,
+        platform=platform,
+        parent_channel_id=parent_channel_id,
+        thread_id=thread_id,
+        requester_account_id=requester_account_id,
+        requester_external_user_id=requester_external_user_id,
+        target_ma_agent_id=target_ma_agent_id,
+        target_name=target_name,
+        requested_work=requested_work,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        available_at=available_at,
+    )
+    if created_at is not None:
+        orm.created_at = created_at
+    session.add(orm)
+    await session.flush()
+    await session.refresh(orm)
+    return TaskContinuationRow.model_validate(orm)
 
 
 async def make_tenant(
