@@ -11,8 +11,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from time import monotonic
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import anthropic as _anthropic
 import sentry_sdk
@@ -493,7 +492,6 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
-        self._agent_role_sync_at: dict[int, float] = {}
         self._agent_role_sync_locks: dict[int, asyncio.Lock] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
@@ -828,7 +826,6 @@ class DaimonBot(commands.Bot):
                     status="ready",
                     clear_reason=True,
                 )
-                self._spawn(self._sync_agent_roles(guild, tenant_id))
                 if not was_ready:
                     try:
                         async with self.runtime.sessionmaker() as session:
@@ -1479,7 +1476,10 @@ class DaimonBot(commands.Bot):
         directly_mentioned = self.user is not None and any(
             user.id == self.user.id for user in message.mentions
         )
-        bot_mentioned = directly_mentioned or bool(message.role_mentions)
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
+        bot_mentioned = directly_mentioned or bool(role_mentions)
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
@@ -1553,21 +1553,18 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(_setting_up_message(bot_display_name))
                 return
             # Only 'ready' proceeds.
-            if message.role_mentions:
+            if role_mentions:
                 async with self.runtime.sessionmaker() as session:
                     managed_roles = await roles_mentioned(
                         session,
                         tenant_id=tenant_id,
-                        role_ids=[str(item.id) for item in message.role_mentions],
+                        role_ids=[str(item.id) for item in role_mentions],
                     )
                 if len(managed_roles) > 1:
                     await message.channel.send("Name one agent at a time.")
                     return
                 if not managed_roles and not directly_mentioned:
                     return
-            if monotonic() - self._agent_role_sync_at.get(guild.id, 0.0) > 60:
-                self._agent_role_sync_at[guild.id] = monotonic()
-                self._spawn(self._sync_agent_roles(guild, tenant_id))
 
             log.info(
                 "mention_received",
@@ -2436,13 +2433,19 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
         try:
-            async with self.runtime.sessionmaker() as session:
-                selected_roles = await roles_mentioned(
-                    session,
-                    tenant_id=tenant_id,
-                    role_ids=[str(item.id) for item in message.role_mentions],
-                )
+            if role_mentions:
+                async with self.runtime.sessionmaker() as session:
+                    selected_roles = await roles_mentioned(
+                        session,
+                        tenant_id=tenant_id,
+                        role_ids=[str(item.id) for item in role_mentions],
+                    )
+            else:
+                selected_roles = []
             direct_mention = re.search(rf"<@!?{self.user.id}>", message.content)
             admission = await admit(
                 self.runtime.turn_deps,
