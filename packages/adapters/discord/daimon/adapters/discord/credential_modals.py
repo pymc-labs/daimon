@@ -109,10 +109,9 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import FormPinRefused, agent_pin_names, consume_form_unless_pinned
+from daimon.core.agent_pins import FormPinRefused, agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
-from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
     ConfigurationChange,
     render_env_import_rejected,
@@ -125,7 +124,13 @@ from daimon.core.credential_requests import (
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
+    consume_credential_submit,
     prepare_env_submit,
+    prepare_mcp_submit,
+    settle_credential_submit,
+    write_mcp_submit,
+    write_repo_submit,
+    write_skill_repo_submit,
 )
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
@@ -172,9 +177,7 @@ from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
 
 import discord
 
@@ -272,13 +275,13 @@ async def _settle_spent_request(
     that can hold both facts. The two env forms write theirs inside the
     transaction that already carries their value write.
     """
-    async with runtime.sessionmaker.begin() as session:
-        await credential_requests.set_credential_request_outcome(
-            session, token=row.token, outcome=outcome
-        )
-        return await record_input_continuation(
-            session, row, platform="discord", carries_work=carries_work
-        )
+    return await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="discord",
+        outcome=outcome,
+        carries_work=carries_work,
+    )
 
 
 async def _record_refused_outcome(runtime: DiscordRuntime, row: CredentialRequestRow) -> None:
@@ -823,15 +826,16 @@ class McpCredentialModal(discord.ui.Modal):
         agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
         if agent is None:
             return
-        connect = await _decide_mcp_connect_at_submit(
-            interaction, runtime=self._runtime, row=self._row
+        connect, now = await prepare_mcp_submit(
+            decide=lambda: _decide_mcp_connect_at_submit(
+                interaction, runtime=self._runtime, row=self._row
+            ),
+            clock=lambda: datetime.now(UTC),
         )
-        now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -870,24 +874,18 @@ class McpCredentialModal(discord.ui.Modal):
             await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
             await interaction.followup.send(rejected_token_message(mcp_server_url), ephemeral=True)
             return
-        # Attach first, publish the agent-wide token only after that authorized
-        # attach, then the submitter's own vault copy: no other session may
-        # ever mirror a token this submission is refused for.
         try:
-            await connect_mcp_server_with_token(
+            await write_mcp_submit(
                 self._runtime.anthropic,
-                sessionmaker=self._runtime.sessionmaker,
+                session_factory=self._runtime.sessionmaker,
+                row=consumed_row,
                 fernet=self._runtime.turn_deps.fernet,
-                tenant_id=consumed_row.tenant_id,
-                agent_id=consumed_row.agent_id,
-                account_id=consumed_row.account_id,
-                server_name=consumed_row.target,
-                mcp_server_url=mcp_server_url,
-                token=token_value,
+                value=token_value,
                 replace_allowed=connect.replace_allowed,
                 jwt_secret=jwt_secret_setting.get_secret_value().encode(),
                 public_url=str(public_url_setting),
                 now=now,
+                connect=connect_mcp_server_with_token,
             )
         except McpServerReplaceRefusedError:
             # A server or token for this URL appeared after the pre-consume check.
@@ -1034,10 +1032,9 @@ class SkillRepoModal(discord.ui.Modal):
             return
         now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -1095,18 +1092,8 @@ class SkillRepoModal(discord.ui.Modal):
                 # every sync falls back to an anonymous 404 that asks for the
                 # credential again.
                 async with self._runtime.sessionmaker.begin() as session:
-                    await set_skill_repo_credential(
-                        session,
-                        tenant_id=consumed_row.tenant_id,
-                        agent_id=consumed_row.agent_id,
-                        repo_url=url,
-                        default_branch=branch,
-                        path=path,
-                        ma_secret_ref=ma_secret_ref,
-                        proof=proof,
-                    )
-                    seeded_skill_names = await list_seeded_skill_names(
-                        session, tenant_id=consumed_row.tenant_id
+                    seeded_skill_names = await write_skill_repo_submit(
+                        session, row=consumed_row, ma_secret_ref=ma_secret_ref, proof=proof
                     )
                 outcomes = await run_skill_sync(
                     self._runtime.anthropic,
@@ -1388,10 +1375,9 @@ class RepoBindModal(discord.ui.Modal):
             return
         now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await consume_form_unless_pinned(
-                    session, row=self._row, agent=agent, now=now
-                )
+            consumed_row = await consume_credential_submit(
+                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+            )
         except FormPinRefused as refused:
             await interaction.followup.send(refused.refusal, ephemeral=True)
             return
@@ -1428,14 +1414,12 @@ class RepoBindModal(discord.ui.Modal):
                     now=now,
                 )
             async with self._runtime.sessionmaker.begin() as session:
-                await set_binding(
+                await write_repo_submit(
                     session,
-                    tenant_id=consumed_row.tenant_id,
-                    agent_id=consumed_row.agent_id,
-                    repo_url=repo_url,
-                    default_branch=branch,
+                    row=consumed_row,
                     ma_secret_ref=ma_secret_ref,
                     proof=proof,
+                    write=set_binding,
                 )
         except DaimonError as err:
             # This copy is written for the user -- surface it verbatim, plus

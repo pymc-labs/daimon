@@ -51,8 +51,13 @@ from daimon.core.credential_requests import availability_for_request, split_skil
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
+    begin_oauth_submit,
+    consume_credential_submit,
     env_name_refusal,
     prepare_env_submit,
+    settle_credential_submit,
+    write_repo_submit,
+    write_skill_repo_submit,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -73,7 +78,7 @@ from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
     decide_mcp_connect,
 )
-from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
+from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, invite_copy, start_url
 from daimon.core.mcp_token_check import is_token_rejected
 from daimon.core.mcp_token_connect import (
     McpAgentGoneError,
@@ -109,10 +114,8 @@ from daimon.core.stores.agent_files import (
     agent_env_writes_allowed,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
     Attachment,
@@ -360,15 +363,9 @@ class TeamsCredentialRequests:
             return dialog_message(pin_refusal)
         now = datetime.now(UTC)
         try:
-            async with self._runtime.sessionmaker.begin() as session:
-                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
-                flow = (
-                    await begin_mcp_oauth_flow(
-                        session, request=consumed, app_root_url=root, now=now
-                    )
-                    if consumed is not None
-                    else None
-                )
+            consumed, flow = await begin_oauth_submit(
+                self._runtime.sessionmaker, row=row, agent=agent, app_root_url=root, now=now
+            )
         except FormPinRefused as refused:
             return dialog_message(refused.refusal)
         if consumed is None or flow is None:
@@ -714,10 +711,9 @@ class TeamsCredentialRequests:
     ) -> CredentialRequestRow | None:
         """Spend the form, the pin decided in the same transaction. None when it is not spent."""
         try:
-            async with self._runtime.sessionmaker.begin() as session:
-                consumed = await consume_form_unless_pinned(
-                    session, row=row, agent=agent, now=datetime.now(UTC)
-                )
+            consumed = await consume_credential_submit(
+                self._runtime.sessionmaker, row=row, agent=agent, now=datetime.now(UTC)
+            )
         except FormPinRefused:
             log.info("teams.credential.pin_refused", kind=row.kind)
             return None
@@ -748,14 +744,8 @@ class TeamsCredentialRequests:
                 kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
             )
             async with self._runtime.sessionmaker.begin() as session:
-                await set_binding(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    repo_url=repo_url,
-                    default_branch=branch,
-                    ma_secret_ref=ref,
-                    proof=proof,
+                await write_repo_submit(
+                    session, row=consumed, ma_secret_ref=ref, proof=proof, write=set_binding
                 )
                 await store.set_credential_request_outcome(
                     session, token=row.token, outcome="applied"
@@ -805,17 +795,9 @@ class TeamsCredentialRequests:
                 kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
             )
             async with self._runtime.sessionmaker.begin() as session:
-                await set_skill_repo_credential(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    repo_url=url,
-                    default_branch=branch,
-                    path=path,
-                    ma_secret_ref=ref,
-                    proof=proof,
+                seeded = await write_skill_repo_submit(
+                    session, row=consumed, ma_secret_ref=ref, proof=proof
                 )
-                seeded = await list_seeded_skill_names(session, tenant_id=consumed.tenant_id)
             outcomes = await run_skill_sync(
                 self._runtime.anthropic,
                 self._runtime.http_client,
@@ -850,12 +832,13 @@ class TeamsCredentialRequests:
             attached=attach.attached,
             note=attach.note,
         )
-        async with self._runtime.sessionmaker.begin() as session:
-            outcome = "applied" if attach.attached else "write_failed"
-            await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
-            queued = await record_input_continuation(
-                session, consumed, platform="teams", carries_work=attach.attached
-            )
+        queued = await settle_credential_submit(
+            self._runtime.sessionmaker,
+            row=consumed,
+            platform="teams",
+            outcome="applied" if attach.attached else "write_failed",
+            carries_work=attach.attached,
+        )
         detail = [failure_detail] if attach.attached else [attach.note, failure_detail]
         change = ConfigurationChange(
             target_name=consumed.target_name or attach.agent_name or "the agent",
@@ -878,11 +861,13 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """The token is stored but no skill reached the agent: audited, no turn promised."""
-        async with self._runtime.sessionmaker.begin() as session:
-            await store.set_credential_request_outcome(
-                session, token=row.token, outcome="write_failed"
-            )
-            await record_input_continuation(session, row, platform="teams", carries_work=False)
+        await settle_credential_submit(
+            self._runtime.sessionmaker,
+            row=row,
+            platform="teams",
+            outcome="write_failed",
+            carries_work=False,
+        )
         # `preparation_failed` names no count, but the change model requires one.
         change = ConfigurationChange(
             target_name=row.target_name or "the agent",
