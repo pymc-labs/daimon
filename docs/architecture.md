@@ -630,7 +630,12 @@ server admin, and so does clearing a pick onto a default that has one. Even a
 server admin's such pick waits for a confirmation (`EnvironmentPick.needs_confirm`):
 `set_channel_environment` and `clear_channel_environment` take
 `confirm_open_network`, which the model passes only once the caller confirms,
-and the panels write nothing and point to chat. A pick
+and the panels write nothing and point to chat. Changes beyond one channel ask
+the same when they move a sealed channel onto such a network: a workspace
+default that sealed channels without a pick of their own follow, an
+`update_environment` that opens the network of an environment a sealed channel
+runs in, and an `archive_environment` whose cleared picks fall through onto
+one; both tools take `confirm_open_network` too. A pick
 made before the seal never met that rule, so sealing a channel or marking it confidential
 whose own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's

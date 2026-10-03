@@ -50,7 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment pick or clear that leaves a sealed channel on unrestricted
   networking now waits for `confirm_open_network` on
   `set_channel_environment` and `clear_channel_environment`; the panels write
-  nothing and point to chat.
+  nothing and point to chat. The same holds for a workspace default that
+  sealed channels without their own pick follow, for `update_environment`
+  opening the network of an environment a sealed channel runs in, and for
+  `archive_environment` dropping one onto an open fallback; both tools take
+  `confirm_open_network`.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to
