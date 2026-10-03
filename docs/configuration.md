@@ -195,6 +195,13 @@ organization share that limit.
 
 Read from `daimon.core.config.CLISettings`. Prefix `DAIMON_CLI__`.
 
+### `DAIMON_CLI__WORKSPACE_ID`
+
+`str` · optional · default `local`
+
+CLI tenant identifier. Use a distinct value for an isolated local deployment that shares
+an Anthropic workspace with another deployment.
+
 ### `DAIMON_CLI__LOCAL_USER`
 
 `str` · optional · default read from the process environment

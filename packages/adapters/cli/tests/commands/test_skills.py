@@ -51,6 +51,7 @@ def _make_rt(
 
     class _Cli:
         local_user = "testuser"
+        workspace_id = "local"
 
     class _Settings:
         cli = _Cli()
@@ -725,6 +726,7 @@ def _install_skills_runtime(
 ) -> None:
     class _Cli:
         local_user = "testuser"
+        workspace_id = "local"
 
     class _FakeSettings:
         cli = _Cli()

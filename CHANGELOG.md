@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- New self-hosted installs now get a stable, unique CLI workspace identifier. Previously, two installs sharing one Anthropic workspace both used `cli:local` and could select the same Managed Agents resources. Configured existing installs keep their current CLI identity, including installs with partial `.env` files or secrets supplied through the process environment.
 - **An isolated channel's content no longer leaves through new agents, timers
   or reads.** An isolated channel's own agent, wherever it runs and through
   any of its coding-tool tokens, could call `create_agent`, and the new agent
@@ -65,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Compose `init` now calls the installed `alembic` command directly. The local CLI-only path no longer requires `DAIMON_MCP__PUBLIC_URL`; set it before starting MCP or scheduler services.
 - **Turn outcomes tell protection, pin and isolation refusals apart.** A turn
   refused because its channel is protected, its agent is pinned to other
   channels, or the channel is isolated and the agent is not one of its own was
@@ -261,6 +263,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `daimon setup` and `scripts/setup.py` prepare local secrets and report the next step as JSON. `daimon setup verify discord` checks the bot token, intent, membership and permissions without changing Discord resources.
 - **The Teams app can be added to private and shared channels.** The
   manifest template moves to version 1.25 with `supportsChannelFeatures:
   tier1` (package version 0.4.1). Adding the app to a team does not add it to

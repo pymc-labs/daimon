@@ -69,6 +69,7 @@ pytestmark = pytest.mark.no_cli_local_seed
 
 class _FakeCli:
     local_user = "testuser"
+    workspace_id = "local"
 
 
 class _FakeMcp:

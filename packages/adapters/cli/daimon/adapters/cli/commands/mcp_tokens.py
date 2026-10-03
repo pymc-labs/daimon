@@ -136,7 +136,9 @@ async def mint_operator_token(
     now = dt.datetime.now(dt.UTC)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, TenantSelector(tenant_id=tenant))
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         identity = await _resolve_admin_account(session, tenant_id=tenant_id, account=account)
         token = await mint_operator_mcp_token(
             session,
@@ -177,7 +179,9 @@ async def list_tokens(
         tenant_id = None
         if tenant is not None:
             override = await resolve_tenant_override(session, TenantSelector(tenant_id=tenant))
-            tenant_id = await discover_tenant(session, override=override)
+            tenant_id = await discover_tenant(
+                session, override=override, workspace_id=rt.settings.cli.workspace_id
+            )
         rows = await list_mcp_tokens(
             session,
             now=dt.datetime.now(dt.UTC),

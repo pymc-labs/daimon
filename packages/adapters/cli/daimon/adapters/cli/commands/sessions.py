@@ -64,7 +64,7 @@ async def sessions_create(
 ) -> None:
     configure_admin_logging()
     async with rt.sessionmaker() as db:
-        tenant_id = await discover_tenant(db)
+        tenant_id = await discover_tenant(db, workspace_id=rt.settings.cli.workspace_id)
         await db.commit()
     await check_preconditions(rt.sessionmaker, tenant_id=tenant_id, default=rt.deployment_default)
     async with rt.sessionmaker() as db:

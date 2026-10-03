@@ -95,7 +95,9 @@ async def agents_list(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -151,7 +153,9 @@ async def agents_get(
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -222,7 +226,9 @@ async def agents_bind_google(
 
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -272,7 +278,9 @@ async def agents_create(
     spec = load_agent_spec(path)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -336,7 +344,9 @@ async def agents_update(
         )
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
@@ -400,7 +410,9 @@ async def agents_archive(
     """
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         tenant_label = await resolve_tenant_display(session, tenant_id)
         # Confirmation fires AFTER the tenant resolves and BEFORE any write (the
         # principal bootstrap below), so an operator who mistyped --guild sees
@@ -469,7 +481,9 @@ async def agents_fork(
         )
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
-        tenant_id = await discover_tenant(session, override=override)
+        tenant_id = await discover_tenant(
+            session, override=override, workspace_id=rt.settings.cli.workspace_id
+        )
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )

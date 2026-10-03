@@ -365,6 +365,7 @@ def _install_config_runtime(
 ) -> None:
     class _Cli:
         local_user = "testuser"
+        workspace_id = "local"
 
     class _FakeSettings:
         cli = _Cli()

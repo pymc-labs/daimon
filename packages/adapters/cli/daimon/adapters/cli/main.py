@@ -25,6 +25,7 @@ from daimon.adapters.cli.commands.promo import promo_app
 from daimon.adapters.cli.commands.repo_bindings import repo_bindings_app
 from daimon.adapters.cli.commands.routines import routines_app
 from daimon.adapters.cli.commands.sessions import sessions_app
+from daimon.adapters.cli.commands.setup import setup_app
 from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
 from daimon.adapters.cli.commands.tenants import tenants_app
@@ -55,6 +56,7 @@ app.add_typer(notebook_app, name="notebook")
 app.add_typer(promo_app, name="promo")
 app.add_typer(repo_bindings_app, name="repo-bindings")
 app.add_typer(routines_app, name="routines")
+app.add_typer(setup_app, name="setup")
 app.command("run")(run_command)
 app.command("smoke")(smoke_command)
 

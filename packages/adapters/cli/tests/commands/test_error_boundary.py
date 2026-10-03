@@ -41,6 +41,7 @@ from typer.testing import CliRunner
 def _settings() -> Settings:
     class _Cli:
         local_user = "testuser"
+        workspace_id = "local"
 
     class _Settings:
         cli = _Cli()
