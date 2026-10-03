@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     CHANNEL_ID,
+    CONVERSATION_ID,
     ENTRA_TENANT_ID,
     THREAD_ID,
     FakeSender,
@@ -64,12 +65,15 @@ async def _hand_over(
     fake: TeamsApiFake,
     *,
     policy: TenantAccessPolicy | None = None,
+    click: dict[str, object] | None = None,
+    channel_id: str = CHANNEL_ID,
+    thread_id: str = THREAD_ID,
 ) -> tuple[Any, str | None]:
     """Click Hand over; the invoke's answer and the thread's responder afterwards."""
     async with db_factory.begin() as session:
         await set_fields(
             session,
-            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CHANNEL_ID),
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel_id),
             tenant_id=TENANT,
             agent_name="research-bot",
         )
@@ -81,12 +85,12 @@ async def _hand_over(
         db_factory, anthropic=build_fake_anthropic(router.dispatch), deployment_default=_DEFAULT
     )
     async with running_service(runtime, fake) as service:
-        answer = await post_activity(service, _click())
+        answer = await post_activity(service, click or _click())
     async with db_factory() as session:
         routed = await resolve(
             session,
             context=ScopeContext(
-                tenant_id=TENANT, channel_id=CHANNEL_ID, thread_id=THREAD_ID, platform="teams"
+                tenant_id=TENANT, channel_id=channel_id, thread_id=thread_id, platform="teams"
             ),
             default=_DEFAULT,
         )
@@ -141,4 +145,29 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
     )
 
     assert "Nothing was changed" in json.dumps(answer), "only the clicker is told why"
+    assert responder is None, "no binding was written"
+
+
+async def test_a_click_in_a_1_1_chat_hands_over_the_chat(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    _, responder = await _hand_over(
+        db_session_factory,
+        teams_api_fake,
+        click=make_card_action(VERB, "hand_over", agent="ag_research"),
+        channel_id=CONVERSATION_ID,
+        thread_id=CONVERSATION_ID,
+    )
+
+    assert responder == "ag_research", "the chat itself is the conversation handed over"
+
+
+async def test_a_channel_click_without_its_notice_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    click = _click()
+    del click["replyToId"]
+    answer, responder = await _hand_over(db_session_factory, teams_api_fake, click=click)
+
+    assert "something went wrong" in json.dumps(answer), "no thread to name, so it fails"
     assert responder is None, "no binding was written"
