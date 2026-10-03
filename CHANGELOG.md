@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Open conversations keep their first responding agent when a channel default changes. Discord, Slack and Teams now store an `opened` thread binding, and a migration backfills live sessions. An explicit handoff still moves the conversation.
+
 - **An isolated channel's content no longer leaves through new agents, timers
   or reads.** An isolated channel's own agent, wherever it runs and through
   any of its coding-tool tokens, could call `create_agent`, and the new agent

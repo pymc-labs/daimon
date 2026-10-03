@@ -2140,7 +2140,9 @@ class ThreadAgentBinding(Base):
             "thread_id",
             name="uq_thread_agent_bindings_location",
         ),
-        CheckConstraint("kind IN ('setup', 'handoff')", name="ck_thread_agent_bindings_kind"),
+        CheckConstraint(
+            "kind IN ('setup', 'handoff', 'opened')", name="ck_thread_agent_bindings_kind"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

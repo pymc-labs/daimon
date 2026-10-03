@@ -12,6 +12,7 @@ from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import (
+    bind_opened_thread,
     create_binding,
     get_binding,
     list_active_bindings,
@@ -25,6 +26,49 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+
+
+async def test_opened_thread_keeps_first_agent_and_handoff_moves_it(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    location = dict(
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="channel",
+        thread_id="root-ts",
+    )
+    await bind_opened_thread(
+        db_session, **location, responder_ma_agent_id="agent_first", responder_name="first"
+    )
+    await bind_opened_thread(
+        db_session, **location, responder_ma_agent_id="agent_second", responder_name="second"
+    )
+    context = ScopeContext(
+        tenant_id=tenant.id, platform="slack", channel_id="channel", thread_id="root-ts"
+    )
+    default = DeploymentDefault(agent_name="second", environment_name="science")
+    first = await resolve(db_session, context=context, default=default)
+    assert (first.agent_name, first.responder_ma_agent_id, first.thread_binding_kind) == (
+        "first",
+        "agent_first",
+        "opened",
+    )
+    assert first.environment_name == "science"
+    await upsert_responder_binding(
+        db_session,
+        **location,
+        responder_ma_agent_id="agent_second",
+        responder_name="second",
+        created_by_account_id=None,
+        now=_NOW,
+    )
+    handed = await resolve(db_session, context=context, default=default)
+    assert (handed.agent_name, handed.responder_ma_agent_id, handed.thread_binding_kind) == (
+        "second",
+        "agent_second",
+        "handoff",
+    )
 
 
 async def test_thread_wins_without_changing_environment_or_reachability(

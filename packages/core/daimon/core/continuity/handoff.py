@@ -107,7 +107,7 @@ def decide_handoff(
     destination_ma_agent_id: str,
     destination_name: str,
     destination_reachable: bool,
-    existing_binding_kind: Literal["setup", "handoff"] | None,
+    existing_binding_kind: Literal["setup", "handoff", "opened"] | None,
     origin_responder_ma_agent_id: str | None,
     access: Decision,
 ) -> HandoffDecision:
